@@ -8543,7 +8543,12 @@ func (s *SessionService) Revoke(ctx context.Context, token, reason string) error
 }
 
 // RevokeSession 作废一个会话的全部 token，包括轮换过渡期内尚存的旧 token。
-// sessionID 不属于该用户时不做任何事，返回 0。
+//
+// "不能撤销别人的会话"这条性质由**枚举范围**保证，而不是靠一次归属校验：
+// 候选 token 全部来自 store.ListUserTokens(userID) 这个按用户分片的索引，
+// 别人的 token 压根不会进入待匹配集合，match 谓词根本没机会看到它。
+// 这比显式校验更难写错，但也意味着**绝不能**把实现改成"按 sessionID 全局扫描
+// 再校验归属"——那样一来安全性就从结构保证退化成了纪律保证。
 func (s *SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, sessionID, reason string) (int, error) {
 	return s.revokeMatching(ctx, userID, uuid.Nil, reason, func(sess *domain.Session) bool {
 		return sess.ID == sessionID
@@ -8578,34 +8583,42 @@ func (s *SessionService) revokeMatching(
 		return 0, err
 	}
 
+	// 中途出错时，已经删掉的 token 必须照样广播出去。
+	//
+	// 它们在 Redis 里是真的没了（权威撤销已完成），但如果因为报错而跳过
+	// announce，SDK 那边就收不到通知，会继续拿本地缓存放行最长一个 cache_ttl。
+	// 所以这里用 defer 兜住：无论正常返回还是中途返回，只要删过东西就广播，
+	// 并如实返回"已撤销的条数 + 错误"，而不是谎报 0。
 	var revoked []string
+	defer func() {
+		if len(revoked) == 0 {
+			return
+		}
+		s.announce(ctx, domain.RevokeEvent{
+			Tokens: revoked,
+			UserID: userID,
+			AppID:  eventAppID,
+			Reason: reason,
+			At:     s.now(),
+		})
+	}()
+
 	for _, tok := range tokens {
 		sess, err := s.store.Get(ctx, tok)
 		if errors.Is(err, domain.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return 0, err
+			return len(revoked), err
 		}
 		if !match(sess) {
 			continue
 		}
 		if err := s.store.Delete(ctx, tok); err != nil {
-			return 0, err
+			return len(revoked), err
 		}
 		revoked = append(revoked, tok)
 	}
-	if len(revoked) == 0 {
-		return 0, nil
-	}
-
-	s.announce(ctx, domain.RevokeEvent{
-		Tokens: revoked,
-		UserID: userID,
-		AppID:  eventAppID,
-		Reason: reason,
-		At:     s.now(),
-	})
 	return len(revoked), nil
 }
 
