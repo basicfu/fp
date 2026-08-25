@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,18 +19,19 @@ import (
 // 因此不存在「一处延期、另一处按旧 expiry 误判」的竞态。
 type SessionService struct {
 	store *store.SessionStore
+	pub   *store.RevokePublisher
 	// now 返回当前毫秒时间戳。可注入，便于测试过期与轮换边界。
 	now func() int64
 }
 
 // NewSessionService 构造使用真实时钟的 SessionService。
-func NewSessionService(st *store.SessionStore) *SessionService {
-	return NewSessionServiceWithClock(st, func() int64 { return time.Now().UnixMilli() })
+func NewSessionService(st *store.SessionStore, pub *store.RevokePublisher) *SessionService {
+	return NewSessionServiceWithClock(st, pub, func() int64 { return time.Now().UnixMilli() })
 }
 
 // NewSessionServiceWithClock 构造使用自定义时钟的 SessionService。
-func NewSessionServiceWithClock(st *store.SessionStore, now func() int64) *SessionService {
-	return &SessionService{store: st, now: now}
+func NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublisher, now func() int64) *SessionService {
+	return &SessionService{store: st, pub: pub, now: now}
 }
 
 // IssueInput 描述一次签发请求。
@@ -265,6 +267,118 @@ func (s *SessionService) ListByUser(ctx context.Context, userID uuid.UUID) ([]do
 		out = append(out, *sess)
 	}
 	return out, nil
+}
+
+// Revoke 作废单个 token，用于登出。
+func (s *SessionService) Revoke(ctx context.Context, token, reason string) error {
+	sess, err := s.store.Get(ctx, token)
+	if errors.Is(err, domain.ErrNotFound) {
+		// 已经不存在了，登出视为成功。
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.store.Delete(ctx, token); err != nil {
+		return err
+	}
+	s.announce(ctx, domain.RevokeEvent{
+		Tokens: []string{token},
+		UserID: sess.UserID,
+		AppID:  sess.AppID,
+		Reason: reason,
+		At:     s.now(),
+	})
+	return nil
+}
+
+// RevokeSession 作废一个会话的全部 token，包括轮换过渡期内尚存的旧 token。
+// sessionID 不属于该用户时不做任何事，返回 0。
+func (s *SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, sessionID, reason string) (int, error) {
+	return s.revokeMatching(ctx, userID, uuid.Nil, reason, func(sess *domain.Session) bool {
+		return sess.ID == sessionID
+	})
+}
+
+// RevokeUser 作废该用户的全部会话。用于封号、改密。
+//
+// 这里不直接调用 store.DeleteUserTokens 做批量删除：撤销事件必须携带具体的
+// token 列表（SDK 按 token 缓存校验结果，只给 userID 无从得知该清哪些缓存
+// 条目），而 DeleteUserTokens 只返回删除的条数，不返回具体是哪些 token，
+// 所以这里走 revokeMatching 逐个 token 处理。
+//
+// 顺带记一笔 DeleteUserTokens 自身的契约，供以后想换成它做批量优化的人参考：
+// 它分批删除，中途某一批失败时会**同时**返回已经真实删除的条数和一个非
+// nil 错误——那些删除已经在 Redis 里真实发生了，"出错就当 0 个"会让管理员
+// 误以为撤销完全没生效。
+func (s *SessionService) RevokeUser(ctx context.Context, userID uuid.UUID, reason string) (int, error) {
+	return s.revokeMatching(ctx, userID, uuid.Nil, reason, func(*domain.Session) bool { return true })
+}
+
+// RevokeUserInApp 只作废该用户在指定应用下的会话。
+// 多个应用共享同一套用户体系时，封禁某个应用的账号不应波及其他应用。
+func (s *SessionService) RevokeUserInApp(ctx context.Context, userID, appID uuid.UUID, reason string) (int, error) {
+	return s.revokeMatching(ctx, userID, appID, reason, func(sess *domain.Session) bool {
+		return sess.AppID == appID
+	})
+}
+
+// revokeMatching 遍历该用户的会话，删除满足 match 的那些，并广播一次事件。
+//
+// eventAppID 直接写入事件而不从会话推断：会话删除后已无从查证，
+// 而调用方本来就知道这次撤销的作用域（uuid.Nil 表示跨全部应用）。
+func (s *SessionService) revokeMatching(
+	ctx context.Context,
+	userID, eventAppID uuid.UUID,
+	reason string,
+	match func(*domain.Session) bool,
+) (int, error) {
+	tokens, err := s.store.ListUserTokens(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+
+	var revoked []string
+	for _, tok := range tokens {
+		sess, err := s.store.Get(ctx, tok)
+		if errors.Is(err, domain.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if !match(sess) {
+			continue
+		}
+		if err := s.store.Delete(ctx, tok); err != nil {
+			return 0, err
+		}
+		revoked = append(revoked, tok)
+	}
+	if len(revoked) == 0 {
+		return 0, nil
+	}
+
+	s.announce(ctx, domain.RevokeEvent{
+		Tokens: revoked,
+		UserID: userID,
+		AppID:  eventAppID,
+		Reason: reason,
+		At:     s.now(),
+	})
+	return len(revoked), nil
+}
+
+// announce 广播撤销事件。发布失败只记日志不返回错误——
+// 权威撤销（删除会话）已经完成，推送仅是加速手段，
+// 最坏情况下 SDK 在一个 cache_ttl 后回源也会被拒绝。
+func (s *SessionService) announce(ctx context.Context, ev domain.RevokeEvent) {
+	if s.pub == nil {
+		return
+	}
+	if err := s.pub.Publish(ctx, ev); err != nil {
+		slog.Error("service: 广播撤销事件失败", "err", err, "userId", ev.UserID)
+	}
 }
 
 // cacheTTL 计算 SDK 可缓存的时长：不超过应用配置，也不超过 token 剩余有效期。

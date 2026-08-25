@@ -96,8 +96,8 @@ func TestValidateExtendsAfterInterval(t *testing.T) {
 // TryLock 整个删掉，那种写法照样全绿。要真正验证锁，必须先把锁占住，
 // 再让时间窗成立，然后断言延期没有发生。
 func TestValidateExtendIsDeduplicatedByLock(t *testing.T) {
-	st, clk := newSessionParts(t)
-	svc := service.NewSessionServiceWithClock(st, clk.Now)
+	st, pub, clk := newSessionParts(t)
+	svc := service.NewSessionServiceWithClock(st, pub, clk.Now)
 	app := extendApp()
 	ctx := context.Background()
 
@@ -260,7 +260,7 @@ func TestRotationDoesNotResetMaxLifetime(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
 	st := store.NewSessionStore(rdb)
 	clk := newFakeClock(time.Now().UnixMilli())
-	svc := service.NewSessionServiceWithClock(st, clk.Now)
+	svc := service.NewSessionServiceWithClock(st, store.NewRevokePublisher(rdb), clk.Now)
 	app := testApp(func(p *domain.SessionPolicy) {
 		p.IdleTimeoutSeconds = 1000
 		p.IdleTimeoutMobileSeconds = 1000
@@ -405,7 +405,7 @@ func TestRotationResetsIssuedAt(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
 	st := store.NewSessionStore(rdb)
 	clk := newFakeClock(time.Now().UnixMilli())
-	svc := service.NewSessionServiceWithClock(st, clk.Now)
+	svc := service.NewSessionServiceWithClock(st, store.NewRevokePublisher(rdb), clk.Now)
 	app := rotateApp()
 	ctx := context.Background()
 

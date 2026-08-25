@@ -48,3 +48,24 @@ func (s Session) RemainingAt(now int64, p SessionPolicy) time.Duration {
 	}
 	return time.Duration(remain) * time.Millisecond
 }
+
+// 撤销原因。写入撤销事件与登录日志，用于排障与审计。
+const (
+	RevokeReasonLogout          = "logout"
+	RevokeReasonKick            = "kick"
+	RevokeReasonFreeze          = "freeze"
+	RevokeReasonPasswordChanged = "password_changed"
+)
+
+// RevokeEvent 是一次撤销的广播消息。
+//
+// SDK 按 token 缓存校验结果，因此事件必须携带具体的 token 列表，
+// 而不能只给 userID——否则 SDK 无从知道该清哪些缓存条目。
+type RevokeEvent struct {
+	Tokens []string  `json:"tokens"`
+	UserID uuid.UUID `json:"userId"`
+	// AppID 为 uuid.Nil 表示跨全部应用的撤销。
+	AppID  uuid.UUID `json:"appId"`
+	Reason string    `json:"reason"`
+	At     int64     `json:"at"`
+}

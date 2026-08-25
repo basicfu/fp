@@ -26,22 +26,22 @@ func newFakeClock(start int64) *fakeClock {
 func (c *fakeClock) Now() int64              { return c.ms.Load() }
 func (c *fakeClock) Advance(d time.Duration) { c.ms.Add(d.Milliseconds()) }
 
-func newSessionService(t *testing.T) (*service.SessionService, *fakeClock) {
+// newSessionParts 和 newSessionService 一样起一套会话服务用的底层部件，
+// 但把 *store.SessionStore 与 *store.RevokePublisher 本身也交给调用方——
+// 有些测试需要绕过 SessionService 直接摆弄 Redis 状态（比如抢先占住一把锁），
+// 或者直接订阅撤销事件，光拿到 *service.SessionService 做不到这一点。
+func newSessionParts(t *testing.T) (*store.SessionStore, *store.RevokePublisher, *fakeClock) {
 	t.Helper()
-	st := store.NewSessionStore(testsupport.NewTestRedis(t))
-	clk := newFakeClock(time.Now().UnixMilli())
-	return service.NewSessionServiceWithClock(st, clk.Now), clk
+	rdb := testsupport.NewTestRedis(t)
+	return store.NewSessionStore(rdb),
+		store.NewRevokePublisher(rdb),
+		newFakeClock(time.Now().UnixMilli())
 }
 
-// newSessionParts 和 newSessionService 一样起一套会话服务用的底层部件，
-// 但把 *store.SessionStore 本身也交给调用方——有些测试需要绕过
-// SessionService 直接摆弄 Redis 状态（比如抢先占住一把锁），
-// 光拿到 *service.SessionService 做不到这一点。
-func newSessionParts(t *testing.T) (*store.SessionStore, *fakeClock) {
+func newSessionService(t *testing.T) (*service.SessionService, *fakeClock) {
 	t.Helper()
-	st := store.NewSessionStore(testsupport.NewTestRedis(t))
-	clk := newFakeClock(time.Now().UnixMilli())
-	return st, clk
+	st, pub, clk := newSessionParts(t)
+	return service.NewSessionServiceWithClock(st, pub, clk.Now), clk
 }
 
 // testApp 造一个不落库的应用，只用于携带会话策略。
