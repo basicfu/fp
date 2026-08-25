@@ -393,6 +393,57 @@ func TestRotationDoesNotDuplicateDeviceEntry(t *testing.T) {
 	}
 }
 
+// 轮换必须把 IssuedAt 重置为当前时刻。
+//
+// 不重置的话，新 token 一签发就已经"到轮换期"了——之后每一次校验都会
+// 再轮换一次，token 无限翻新，写放大且每次都要把新 token 回传客户端。
+//
+// 这条性质与"FirstAuthAt 不变"是**正交**的：
+// TestRotationDoesNotResetMaxLifetime 只钉住后者，删掉 IssuedAt 的重置
+// 它照样全绿。必须单独立一个用例。
+func TestRotationResetsIssuedAt(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
+	clk := newFakeClock(time.Now().UnixMilli())
+	svc := service.NewSessionServiceWithClock(st, clk.Now)
+	app := rotateApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatal("应当触发轮换")
+	}
+	if res.Session.IssuedAt != clk.Now() {
+		t.Fatalf("轮换后 IssuedAt = %d, want %d", res.Session.IssuedAt, clk.Now())
+	}
+
+	// 清掉轮换锁，排除"锁挡住了第二次轮换"这个混淆因素，
+	// 让断言真正落在 IssuedAt 上而不是落在锁上。
+	if err := rdb.Del(ctx, "fp:lock:rot:"+sess.ID).Err(); err != nil {
+		t.Fatalf("清理轮换锁: %v", err)
+	}
+
+	// 只推进 1 秒，远未到 30 秒的轮换间隔——新 token 不该再次轮换
+	clk.Advance(1 * time.Second)
+	again, err := svc.Validate(ctx, res.NewToken, app)
+	if err != nil {
+		t.Fatalf("二次 Validate: %v", err)
+	}
+	if again.Rotated {
+		t.Fatal("新 token 刚签发 1 秒就又轮换了——IssuedAt 没被重置，" +
+			"结果是每次校验都翻新一次 token")
+	}
+}
+
 // 移动端有独立的空闲超时档位，轮换与延期都必须沿用它。
 //
 // 其余用例里 IdleTimeoutSeconds 与 IdleTimeoutMobileSeconds 取值相同，
