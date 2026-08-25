@@ -238,6 +238,60 @@ func TestSubjectNormalization(t *testing.T) {
 	}
 }
 
+// 空白 subject 必须被拒绝，不能被规整成空串落库。
+//
+// 这是"先规整再校验"的直接后果：顺序反过来的话，"   " 通过 validate、
+// 被 normalize 削成 ""，再叠加 UNIQUE (type, subject)，所有空白 subject
+// 折叠成同一行——第二个调用者会拿到第一个调用者的账号。
+func TestBlankSubjectIsRejectedNotCollapsed(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	for _, blank := range []string{"   ", "\t", " \n "} {
+		_, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+			Type: domain.IdentityTypeUsername, Subject: blank,
+		})
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("EnsureUserWithIdentity(%q) err = %v, want ErrInvalidArgument", blank, err)
+		}
+	}
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	if _, err := svc.AttachIdentity(ctx, u.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "  ",
+	}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("AttachIdentity 空白 subject err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// 读侧也要规整：connector 拿到的是用户原始输入，写侧存的是规整后的值。
+func TestFindByIdentityNormalizesSubject(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeEmail, Subject: "alice@example.com",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	for _, raw := range []string{"Alice@Example.com", "  ALICE@EXAMPLE.COM  ", "alice@example.com"} {
+		found, _, err := svc.FindByIdentity(ctx, domain.IdentityTypeEmail, raw)
+		if err != nil {
+			t.Fatalf("FindByIdentity(%q): %v", raw, err)
+		}
+		if found.ID != u.ID {
+			t.Fatalf("FindByIdentity(%q) 查到了别人: %v vs %v", raw, found.ID, u.ID)
+		}
+	}
+}
+
 // 两条写入路径必须用同一套规整，否则只规整一条等于没规整。
 func TestAttachIdentityNormalizesSubject(t *testing.T) {
 	svc := newUserService(t)
