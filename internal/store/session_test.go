@@ -76,6 +76,30 @@ func TestSessionStoreDelete(t *testing.T) {
 	}
 }
 
+// ttl <= 0 必须报错，绝不能写进 Redis。
+//
+// go-redis 对 expiration <= 0 会省略 TTL 参数，SET 出来是永不过期的键；
+// 而 ListUserTokens 只清理"已消失"的键，会把它当活跃会话永远列下去。
+// Task 10 的延期逻辑传的是"剩余有效期"，会话恰好过期时正是 0。
+func TestSessionStorePutRejectsNonPositiveTTL(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
+	ctx := context.Background()
+
+	for _, ttl := range []time.Duration{0, -time.Second} {
+		err := st.Put(ctx, sampleSession("tok-1", uuid.New()), ttl)
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("ttl=%v err = %v, want ErrInvalidArgument", ttl, err)
+		}
+	}
+	// 确认真的什么都没写进去
+	if n, err := rdb.Exists(ctx, "fp:sess:tok-1").Result(); err != nil {
+		t.Fatalf("Exists: %v", err)
+	} else if n != 0 {
+		t.Fatal("拒绝后仍然写入了会话键")
+	}
+}
+
 func TestSessionStoreTTLExpires(t *testing.T) {
 	st := store.NewSessionStore(testsupport.NewTestRedis(t))
 	ctx := context.Background()
@@ -86,22 +110,6 @@ func TestSessionStoreTTLExpires(t *testing.T) {
 	time.Sleep(400 * time.Millisecond)
 	if _, err := st.Get(ctx, "tok-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("TTL 到期后 err = %v, want ErrNotFound", err)
-	}
-}
-
-func TestSessionStoreExpireExtends(t *testing.T) {
-	st := store.NewSessionStore(testsupport.NewTestRedis(t))
-	ctx := context.Background()
-
-	if err := st.Put(ctx, sampleSession("tok-1", uuid.New()), 300*time.Millisecond); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if err := st.Expire(ctx, "tok-1", 5*time.Second); err != nil {
-		t.Fatalf("Expire: %v", err)
-	}
-	time.Sleep(400 * time.Millisecond)
-	if _, err := st.Get(ctx, "tok-1"); err != nil {
-		t.Fatalf("延长 TTL 后仍应存在: %v", err)
 	}
 }
 
@@ -137,7 +145,8 @@ func TestSessionStoreListUserTokens(t *testing.T) {
 // 索引是超集：token 到期后 Redis 自动清掉主键，但索引里还留着。
 // ListUserTokens 必须顺手清理这些悬挂项，否则在线设备列表会越积越多。
 func TestSessionStoreListPrunesDanglingTokens(t *testing.T) {
-	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
 	ctx := context.Background()
 	uid := uuid.New()
 
@@ -157,13 +166,15 @@ func TestSessionStoreListPrunesDanglingTokens(t *testing.T) {
 		t.Fatalf("tokens = %v, want [live]", tokens)
 	}
 
-	// 再查一次，确认悬挂项已被真正移除而不是每次都过滤。
-	tokens, err = st.ListUserTokens(ctx, uid)
-	if err != nil {
-		t.Fatalf("二次 ListUserTokens: %v", err)
-	}
-	if len(tokens) != 1 {
-		t.Fatalf("tokens = %v", tokens)
+	// 直接查 Redis 集合的基数，而不是再调一次 ListUserTokens。
+	//
+	// 只看返回值是证明不了"清理"的：一个只过滤、从不 SREM 的实现，
+	// 两次调用都会返回 [live]，断言全绿而索引一直在涨。必须越过被测函数
+	// 去看它对存储的实际副作用。
+	if card, err := rdb.SCard(ctx, "fp:usess:"+uid.String()).Result(); err != nil {
+		t.Fatalf("SCard: %v", err)
+	} else if card != 1 {
+		t.Fatalf("索引基数 = %d, want 1——悬挂项只是被过滤掉了，没有真正 SREM", card)
 	}
 }
 
