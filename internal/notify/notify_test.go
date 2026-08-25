@@ -1,0 +1,163 @@
+package notify_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func newSender(t *testing.T, rules []notify.RateRule) (*notify.Sender, *notify.FakeProvider) {
+	t.Helper()
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, rules)
+	p := notify.NewFakeProvider(notify.ChannelSMS, "fake")
+	s.AddProvider(p)
+	return s, p
+}
+
+func msg(to string) notify.Message {
+	return notify.Message{
+		Channel:  notify.ChannelSMS,
+		To:       to,
+		Template: "login_code",
+		Params:   map[string]string{"code": "123456"},
+	}
+}
+
+func TestSenderDelivers(t *testing.T) {
+	s, p := newSender(t, nil)
+
+	if err := s.Send(context.Background(), msg("13800138000")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	sent := p.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("发送数量 = %d, want 1", len(sent))
+	}
+	if sent[0].To != "13800138000" || sent[0].Template != "login_code" {
+		t.Fatalf("sent = %+v", sent[0])
+	}
+	if p.LastParam("code") != "123456" {
+		t.Fatalf("code 参数 = %q", p.LastParam("code"))
+	}
+}
+
+func TestSenderRejectsUnknownChannel(t *testing.T) {
+	s, _ := newSender(t, nil)
+	m := msg("13800138000")
+	m.Channel = notify.ChannelEmail
+
+	if err := s.Send(context.Background(), m); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSenderEnforcesRateRules(t *testing.T) {
+	rules := []notify.RateRule{{Name: "burst", Window: time.Minute, Limit: 2}}
+	s, p := newSender(t, rules)
+	ctx := context.Background()
+
+	for i := 1; i <= 2; i++ {
+		if err := s.Send(ctx, msg("13800138000")); err != nil {
+			t.Fatalf("第 %d 次 Send: %v", i, err)
+		}
+	}
+	if err := s.Send(ctx, msg("13800138000")); !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("第 3 次 err = %v, want ErrRateLimited", err)
+	}
+	if len(p.Sent()) != 2 {
+		t.Fatalf("被限流的请求不应到达 provider, sent = %d", len(p.Sent()))
+	}
+
+	// 限流按号码隔离
+	if err := s.Send(ctx, msg("13900139000")); err != nil {
+		t.Fatalf("另一号码 Send: %v", err)
+	}
+}
+
+// 主供应商失败时自动降级到下一个——对症 3s 靠改注释切供应商的问题。
+func TestSenderFallsBackToNextProvider(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, nil)
+
+	primary := notify.NewFakeProvider(notify.ChannelSMS, "primary")
+	backup := notify.NewFakeProvider(notify.ChannelSMS, "backup")
+	s.AddProvider(primary)
+	s.AddProvider(backup)
+
+	primary.FailNext(errors.New("供应商余额不足"))
+
+	if err := s.Send(context.Background(), msg("13800138000")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(primary.Sent()) != 0 {
+		t.Fatalf("primary 不应成功发出, sent = %d", len(primary.Sent()))
+	}
+	if len(backup.Sent()) != 1 {
+		t.Fatalf("backup 应接手, sent = %d", len(backup.Sent()))
+	}
+}
+
+func TestSenderReturnsErrorWhenAllProvidersFail(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, nil)
+
+	p := notify.NewFakeProvider(notify.ChannelSMS, "only")
+	p.FailNext(errors.New("网络不可达"))
+	s.AddProvider(p)
+
+	if err := s.Send(context.Background(), msg("13800138000")); err == nil {
+		t.Fatal("全部供应商失败时应返回错误")
+	}
+}
+
+// 发送记录必须落库，但绝不能写入验证码本身。
+func TestSenderWritesLogWithoutCode(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, nil)
+	s.AddProvider(notify.NewFakeProvider(notify.ChannelSMS, "fake"))
+	ctx := context.Background()
+
+	if err := s.Send(ctx, msg("13800138000")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var (
+		n        int
+		provider string
+	)
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), coalesce(max(provider), '') FROM notify_log WHERE target = $1`,
+		"13800138000").Scan(&n, &provider); err != nil {
+		t.Fatalf("查询发送记录: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("发送记录数 = %d, want 1", n)
+	}
+	if provider != "fake" {
+		t.Fatalf("provider = %q, want fake", provider)
+	}
+
+	// 全表扫一遍，确认没有任何列泄露了验证码。
+	var leaked int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM notify_log
+		 WHERE channel LIKE '%123456%' OR target LIKE '%123456%'
+		    OR template LIKE '%123456%' OR provider LIKE '%123456%'
+		    OR error LIKE '%123456%'`).Scan(&leaked); err != nil {
+		t.Fatalf("检查验证码泄露: %v", err)
+	}
+	if leaked != 0 {
+		t.Fatal("发送记录中出现了验证码明文")
+	}
+}
