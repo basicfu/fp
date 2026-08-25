@@ -10,6 +10,8 @@ import (
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
 )
 
 // extendApp 造一个便于观察延期行为的应用：空闲 100s，降频窗口 10s，
@@ -87,8 +89,15 @@ func TestValidateExtendsAfterInterval(t *testing.T) {
 }
 
 // 分布式锁保证同一时刻并发校验只产生一次延期写。
+// 分布式锁是降频的第二层，必须单独可测。
+//
+// 不能靠"连着调两次 Validate"来验证：第一次调用已经把 LastExtendedAt 推到 now，
+// 第二次在同一个假时钟时刻上跑，光靠时间窗判断就不会写——把 tryExtend 里的
+// TryLock 整个删掉，那种写法照样全绿。要真正验证锁，必须先把锁占住，
+// 再让时间窗成立，然后断言延期没有发生。
 func TestValidateExtendIsDeduplicatedByLock(t *testing.T) {
-	svc, clk := newSessionService(t)
+	st, clk := newSessionParts(t)
+	svc := service.NewSessionServiceWithClock(st, clk.Now)
 	app := extendApp()
 	ctx := context.Background()
 
@@ -96,22 +105,29 @@ func TestValidateExtendIsDeduplicatedByLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
+	originalIdle := sess.IdleExpiresAt
 
+	// 抢先占住这个 token 的延期锁，模拟"另一个并发请求正在延期"
+	ok, err := st.TryLock(ctx, "ext:"+sess.Token, time.Minute)
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	if !ok {
+		t.Fatal("测试自身应当能拿到锁")
+	}
+
+	// 时间窗已成立，但锁被占着，不该产生延期写
 	clk.Advance(11 * time.Second)
-	first, err := svc.Validate(ctx, sess.Token, app)
+	res, err := svc.Validate(ctx, sess.Token, app)
 	if err != nil {
-		t.Fatalf("首次 Validate: %v", err)
+		t.Fatalf("Validate: %v", err)
 	}
-	extendedAt := first.Session.LastExtendedAt
-
-	// 同一毫秒再来一次：降频窗口已被上一次重置，本次本就不该写；
-	// 即使窗口判断失效，锁也会拦住。
-	second, err := svc.Validate(ctx, sess.Token, app)
-	if err != nil {
-		t.Fatalf("二次 Validate: %v", err)
+	if res.Session.IdleExpiresAt != originalIdle {
+		t.Fatalf("锁被占用时仍然延期了: IdleExpiresAt %d → %d",
+			originalIdle, res.Session.IdleExpiresAt)
 	}
-	if second.Session.LastExtendedAt != extendedAt {
-		t.Fatalf("重复延期写: %d → %d", extendedAt, second.Session.LastExtendedAt)
+	if res.Session.LastExtendedAt != sess.LastExtendedAt {
+		t.Fatal("锁被占用时仍然更新了 LastExtendedAt")
 	}
 }
 
@@ -241,7 +257,10 @@ func TestRotationPreservesSessionIdentity(t *testing.T) {
 // 最关键的一条：轮换不重置绝对上限。
 // 否则只要用户一直活跃，同一个会话可以无限续命，max_lifetime 形同虚设。
 func TestRotationDoesNotResetMaxLifetime(t *testing.T) {
-	svc, clk := newSessionService(t)
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
+	clk := newFakeClock(time.Now().UnixMilli())
+	svc := service.NewSessionServiceWithClock(st, clk.Now)
 	app := testApp(func(p *domain.SessionPolicy) {
 		p.IdleTimeoutSeconds = 1000
 		p.IdleTimeoutMobileSeconds = 1000
@@ -260,8 +279,17 @@ func TestRotationDoesNotResetMaxLifetime(t *testing.T) {
 	firstAuthAt := sess.FirstAuthAt
 
 	token := sess.Token
-	// 连续三次，每次推进 31 秒：31s、62s、93s
+	// 连续三次，每次推进 31 秒：31s、62s、93s。
+	//
+	// 每轮必须手动清掉 rot: 锁。该锁的 TTL 走真实墙钟（Redis SETNX），
+	// 而服务用的是注入的假时钟——测试整体只跑几十毫秒，锁一旦拿走就会
+	// 一直握到测试结束，后两轮的轮换根本不会发生。不清锁的话这个用例
+	// 名义上轮换三次、实际只轮换一次，"多次轮换后 FirstAuthAt 仍不变"
+	// 这个性质就没被验证到。
 	for i := 0; i < 3; i++ {
+		if err := rdb.Del(ctx, "fp:lock:rot:"+sess.ID).Err(); err != nil {
+			t.Fatalf("清理轮换锁: %v", err)
+		}
 		clk.Advance(31 * time.Second)
 		res, err := svc.Validate(ctx, token, app)
 		if err != nil {
@@ -346,12 +374,64 @@ func TestRotationDoesNotDuplicateDeviceEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
 	}
-	// 过渡期内新旧 token 并存，但会话 ID 只有一个
-	ids := map[string]bool{}
-	for _, s := range list {
-		ids[s.ID] = true
+
+	// 如实断言 ListByUser 的行为：过渡期内新旧 token 并存，所以它返回 **2 条**，
+	// 两条共享同一个会话 ID。
+	//
+	// 这里刻意不在测试里先按 ID 去重再断言"只有一个"——那样写的话，
+	// 无论 ListByUser 返回几条都必然通过，是个自我实现的断言。
+	// 面向展示的去重是 HTTP 层的职责（管理端的在线设备列表按 Session.ID 去重），
+	// 不是这一层的。
+	if len(list) != 2 {
+		t.Fatalf("过渡期内 ListByUser 返回 %d 条, want 2（新旧 token 各一条）", len(list))
 	}
-	if len(ids) != 1 {
-		t.Fatalf("会话 ID 数 = %d, want 1（token 有 %d 个）", len(ids), len(list))
+	if list[0].ID != list[1].ID {
+		t.Fatalf("两条应共享同一会话 ID: %q vs %q", list[0].ID, list[1].ID)
+	}
+	if list[0].ID != sess.ID {
+		t.Fatalf("会话 ID 变了: %q → %q", sess.ID, list[0].ID)
+	}
+}
+
+// 移动端有独立的空闲超时档位，轮换与延期都必须沿用它。
+//
+// 其余用例里 IdleTimeoutSeconds 与 IdleTimeoutMobileSeconds 取值相同，
+// 把 IdleTimeoutFor(sess.Mobile) 改成 IdleTimeoutFor(false) 一个都测不出来。
+func TestRotationUsesMobileIdleTimeout(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 100
+		p.IdleTimeoutMobileSeconds = 5000 // 与 web 档位拉开差距
+		p.MaxLifetimeSeconds = 100000
+		p.RotateIntervalSeconds = 30
+		p.ExtendIntervalSeconds = 10
+		p.TokenCacheTTLSeconds = 20
+	})
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{
+		UserID: uuid.New(), App: app, Mobile: true,
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if sess.IdleExpiresAt != clk.Now()+5000*1000 {
+		t.Fatalf("签发时未用移动端档位: IdleExpiresAt = %d", sess.IdleExpiresAt)
+	}
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatal("应当触发轮换")
+	}
+	if !res.Session.Mobile {
+		t.Fatal("轮换后 Mobile 标记丢失")
+	}
+	if want := clk.Now() + 5000*1000; res.Session.IdleExpiresAt != want {
+		t.Fatalf("轮换后 IdleExpiresAt = %d, want %d（应沿用移动端档位，不是 web 的 100s）",
+			res.Session.IdleExpiresAt, want)
 	}
 }

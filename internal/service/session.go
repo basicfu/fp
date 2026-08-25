@@ -79,6 +79,11 @@ type ValidateResult struct {
 	Session *domain.Session
 	// CacheTTL 是 SDK 可以缓存本次判定结果的时长，
 	// 等于 min(应用配置的 token_cache_ttl, token 剩余有效期)。
+	//
+	// 契约：0 表示"不要缓存"，不是"未设置"。会话距 max_lifetime 只剩
+	// 不到一毫秒时，剩余有效期本身就会算出 0——这是合法值，调用方
+	// （计划二的 SDK）不能把 0 当成"没给，套用本地默认值"来处理，
+	// 否则一个即将到期的会话会被缓存本不该有的时长。
 	CacheTTL time.Duration
 	// Rotated 为 true 时 NewToken 非空，调用方须把新 token 下发给客户端。
 	Rotated  bool
@@ -88,7 +93,7 @@ type ValidateResult struct {
 // MinRotateGrace 是 token 轮换后旧 token 的最短过渡期。
 const MinRotateGrace = 15 * time.Second
 
-// extendLockTTL 是延期写与轮换的去重锁时长。
+// extendLockTTL 是**延期写**的去重锁时长。轮换用的是过渡期时长，不是这个值。
 // 它只用于限流，不保护临界区，因此不需要显式释放。
 const extendLockTTL = 10 * time.Second
 
@@ -124,11 +129,14 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 	if err != nil {
 		return nil, err
 	}
+	// token 与应用必须匹配：A 应用签发的 token 不能在 B 应用上使用。
 	if sess.AppID != app.ID {
 		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
 	}
 
 	now := s.now()
+	// 以 IdleExpiresAt / MaxExpiresAt 为准，不看 Redis TTL——TTL 只是兜底清理，
+	// 时钟精度或取整都不该成为放行一个已过期 token 的理由。
 	if sess.RemainingAt(now, app.Session) <= 0 {
 		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
 	}

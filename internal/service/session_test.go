@@ -33,6 +33,17 @@ func newSessionService(t *testing.T) (*service.SessionService, *fakeClock) {
 	return service.NewSessionServiceWithClock(st, clk.Now), clk
 }
 
+// newSessionParts 和 newSessionService 一样起一套会话服务用的底层部件，
+// 但把 *store.SessionStore 本身也交给调用方——有些测试需要绕过
+// SessionService 直接摆弄 Redis 状态（比如抢先占住一把锁），
+// 光拿到 *service.SessionService 做不到这一点。
+func newSessionParts(t *testing.T) (*store.SessionStore, *fakeClock) {
+	t.Helper()
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	clk := newFakeClock(time.Now().UnixMilli())
+	return st, clk
+}
+
 // testApp 造一个不落库的应用，只用于携带会话策略。
 func testApp(mutate ...func(*domain.SessionPolicy)) *domain.Application {
 	p := domain.DefaultSessionPolicy()
