@@ -338,34 +338,42 @@ func (s *SessionService) revokeMatching(
 		return 0, err
 	}
 
+	// 中途出错时，已经删掉的 token 必须照样广播出去。
+	//
+	// 它们在 Redis 里是真的没了（权威撤销已完成），但如果因为报错而跳过
+	// announce，SDK 那边就收不到通知，会继续拿本地缓存放行最长一个 cache_ttl。
+	// 所以这里用 defer 兜住：无论正常返回还是中途返回，只要删过东西就广播，
+	// 并如实返回"已撤销的条数 + 错误"，而不是谎报 0。
 	var revoked []string
+	defer func() {
+		if len(revoked) == 0 {
+			return
+		}
+		s.announce(ctx, domain.RevokeEvent{
+			Tokens: revoked,
+			UserID: userID,
+			AppID:  eventAppID,
+			Reason: reason,
+			At:     s.now(),
+		})
+	}()
+
 	for _, tok := range tokens {
 		sess, err := s.store.Get(ctx, tok)
 		if errors.Is(err, domain.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return 0, err
+			return len(revoked), err
 		}
 		if !match(sess) {
 			continue
 		}
 		if err := s.store.Delete(ctx, tok); err != nil {
-			return 0, err
+			return len(revoked), err
 		}
 		revoked = append(revoked, tok)
 	}
-	if len(revoked) == 0 {
-		return 0, nil
-	}
-
-	s.announce(ctx, domain.RevokeEvent{
-		Tokens: revoked,
-		UserID: userID,
-		AppID:  eventAppID,
-		Reason: reason,
-		At:     s.now(),
-	})
 	return len(revoked), nil
 }
 
