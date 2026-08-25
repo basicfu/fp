@@ -3,13 +3,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/basicfu/fp/internal/config"
+	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/logging"
+	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 )
 
@@ -47,9 +52,30 @@ func run() error {
 	}
 	defer rdb.Close()
 
+	adminSvc := service.NewAdminService(pool, rdb)
+	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdminUser, cfg.BootstrapAdminPassword); err != nil {
+		return err
+	}
+
+	httpSrv := &http.Server{
+		Addr:    cfg.HTTPAddr,
+		Handler: httpapi.NewRouter(adminSvc),
+	}
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("HTTP 服务异常退出", "err", err)
+			stop()
+		}
+	}()
 	log.Info("fp 启动", "env", cfg.Env, "http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr)
 
 	<-ctx.Done()
 	log.Info("fp 收到退出信号，正在关闭")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("HTTP 优雅关闭超时", "err", err)
+	}
 	return nil
 }

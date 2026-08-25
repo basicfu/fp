@@ -1,0 +1,113 @@
+package service_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func newAdminService(t *testing.T) *service.AdminService {
+	t.Helper()
+	return service.NewAdminService(testsupport.NewTestDB(t), testsupport.NewTestRedis(t))
+}
+
+func TestEnsureBootstrapCreatesAdminOnce(t *testing.T) {
+	svc := newAdminService(t)
+	ctx := context.Background()
+
+	if err := svc.EnsureBootstrap(ctx, "admin", "secret123456"); err != nil {
+		t.Fatalf("首次 EnsureBootstrap: %v", err)
+	}
+	// 重复调用不应报错，也不应改写密码。
+	if err := svc.EnsureBootstrap(ctx, "admin", "another-password"); err != nil {
+		t.Fatalf("重复 EnsureBootstrap: %v", err)
+	}
+
+	if _, err := svc.Login(ctx, "admin", "secret123456"); err != nil {
+		t.Fatalf("原密码应仍然有效: %v", err)
+	}
+	if _, err := svc.Login(ctx, "admin", "another-password"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("新密码不应生效, err = %v", err)
+	}
+}
+
+func TestEnsureBootstrapSkipsWhenEmpty(t *testing.T) {
+	svc := newAdminService(t)
+	if err := svc.EnsureBootstrap(context.Background(), "", ""); err != nil {
+		t.Fatalf("未配置引导管理员时应静默跳过: %v", err)
+	}
+}
+
+func TestLoginAndAuthenticate(t *testing.T) {
+	svc := newAdminService(t)
+	ctx := context.Background()
+
+	if err := svc.EnsureBootstrap(ctx, "admin", "secret123456"); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+
+	token, err := svc.Login(ctx, "admin", "secret123456")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if len(token) < 32 {
+		t.Fatalf("token 长度 = %d, 太短", len(token))
+	}
+
+	id, username, err := svc.Authenticate(ctx, token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if username != "admin" {
+		t.Fatalf("username = %q, want admin", username)
+	}
+	if id.String() == "" {
+		t.Fatal("adminID 为空")
+	}
+}
+
+func TestAuthenticateRejectsUnknownToken(t *testing.T) {
+	svc := newAdminService(t)
+	_, _, err := svc.Authenticate(context.Background(), "not-a-real-token")
+	if !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestLogoutInvalidatesToken(t *testing.T) {
+	svc := newAdminService(t)
+	ctx := context.Background()
+
+	if err := svc.EnsureBootstrap(ctx, "admin", "secret123456"); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+	token, err := svc.Login(ctx, "admin", "secret123456")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if err := svc.Logout(ctx, token); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, _, err := svc.Authenticate(ctx, token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("登出后 err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestLoginRejectsWrongPassword(t *testing.T) {
+	svc := newAdminService(t)
+	ctx := context.Background()
+
+	if err := svc.EnsureBootstrap(ctx, "admin", "secret123456"); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+	if _, err := svc.Login(ctx, "admin", "wrong"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+	if _, err := svc.Login(ctx, "nobody", "secret123456"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("未知用户名 err = %v, want ErrInvalidCredential", err)
+	}
+}
