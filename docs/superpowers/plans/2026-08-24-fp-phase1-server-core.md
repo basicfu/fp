@@ -7776,3 +7776,1108 @@ Expected: 全部 PASS（新增撤销测试 6 个）
 git add internal cmd
 git commit -m "feat: 会话撤销与撤销事件广播"
 ```
+
+---
+
+## Task 12: 登录日志与登录编排（AuthService）
+
+把前面所有部件接起来。`AuthService` 是唯一知道「登录该按什么顺序发生」的地方——Connector 只管校验凭据，`UserService` 只管归并，`SessionService` 只管令牌。
+
+**编排顺序（每一步的先后都有理由）：**
+
+```
+1. 查应用                        → 应用不存在直接拒绝，不浪费后续开销
+2. 查该应用是否启用了此登录方式    → 应用级开关先于凭据校验，避免被关掉的方式仍能验证
+3. Connector.Authenticate        → 得到 Result（登录标识 + 是否允许建号）
+4. 按 Result 归并或建号           → 归并规则只在 UserService 里有一处实现
+5. 检查用户状态                   → 冻结/已注销拒绝；注销保护期内放行并撤销注销申请
+6. EnsureRegistration            → 记录"该用户在该应用注册过"
+7. TouchIdentityLogin            → 记录该标识的最后使用时间
+8. SessionService.Issue          → 签发 token
+9. 写 login_log                  → 成功与失败都要写
+```
+
+**Files:**
+- Create: `internal/store/migrations/00006_login_log.sql`
+- Create: `internal/service/loginlog.go`, `internal/service/auth.go`
+- Test: `internal/service/auth_test.go`
+
+**Interfaces:**
+- Consumes: `ApplicationService`、`UserService`、`SessionService`、`connector.Registry`、`notify.Sender`、`notify.CodeService`
+- Produces:
+  - 常量 `domain.LoginEventLogin/Logout/Rotate/Revoke = "login"/"logout"/"rotate"/"revoke"`
+  - `type domain.LoginLog struct{ ID uuid.UUID; UserID, ApplicationID *uuid.UUID; IdentityType, Subject, Event, Reason, IP, UA, SessionID string; Success bool; CreatedAt int64 }`
+  - `func service.NewLoginLogService(pool *pgxpool.Pool) *LoginLogService`
+  - `func (*LoginLogService) Write(ctx context.Context, entry domain.LoginLog) error`
+  - `func (*LoginLogService) ListByUser(ctx context.Context, userID uuid.UUID, limit int) ([]domain.LoginLog, error)`
+  - `func service.MaskSubject(identityType, subject string) string`
+  - `type service.AuthDeps struct{ Apps *ApplicationService; Users *UserService; Sessions *SessionService; Logs *LoginLogService; Registry *connector.Registry; Notifier *notify.Sender; Codes *notify.CodeService }`
+  - `func service.NewAuthService(d AuthDeps) *AuthService`
+  - `type service.LoginInput struct{ AppID, ConnectorType string; Credentials connector.Credentials; IP, UA string; Mobile bool }`
+  - `type service.LoginResult struct{ User *domain.User; Session *domain.Session }`
+  - `func (*AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, error)`
+  - `func (*AuthService) SendLoginCode(ctx context.Context, appID, phone string) error`
+  - `func (*AuthService) Logout(ctx context.Context, token string) error`
+  - `func (*AuthService) ValidateToken(ctx context.Context, appID, token string) (*ValidateResult, error)`
+  - **接口变更**：`connector.Connector` 新增 `SubjectFrom(creds Credentials) (identityType, subject string)`，`PasswordConnector` / `SMSCodeConnector` 各实现一份
+
+- [ ] **Step 1: 写迁移**
+
+`internal/store/migrations/00006_login_log.sql`：
+
+```sql
+-- +goose Up
+-- 登录审计。失败的登录同样要记录，此时 user_id 为空，只留脱敏后的 subject。
+CREATE TABLE login_log (
+    id             uuid PRIMARY KEY DEFAULT uuidv7(),
+    user_id        uuid REFERENCES app_user(id) ON DELETE SET NULL,
+    application_id uuid REFERENCES application(id) ON DELETE SET NULL,
+    identity_type  text NOT NULL DEFAULT '',
+    -- subject 存脱敏值（138****8000），完整标识通过 user_id 关联查询。
+    subject        text NOT NULL DEFAULT '',
+    event          text NOT NULL,
+    success        boolean NOT NULL,
+    reason         text NOT NULL DEFAULT '',
+    ip             text NOT NULL DEFAULT '',
+    ua             text NOT NULL DEFAULT '',
+    session_id     text NOT NULL DEFAULT '',
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX login_log_user_idx ON login_log (user_id, created_at DESC);
+CREATE INDEX login_log_created_idx ON login_log (created_at DESC);
+
+-- +goose Down
+DROP TABLE login_log;
+```
+
+- [ ] **Step 2: 写失败的脱敏与日志测试**
+
+`internal/service/loginlog_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func TestMaskSubject(t *testing.T) {
+	tests := []struct {
+		typ, in, want string
+	}{
+		{domain.IdentityTypePhone, "13800138000", "138****8000"},
+		{domain.IdentityTypeEmail, "alice@example.com", "a****e@example.com"},
+		{domain.IdentityTypeEmail, "a@example.com", "*@example.com"},
+		{domain.IdentityTypeUsername, "alice", "al***"},
+		{domain.IdentityTypeUsername, "ab", "**"},
+		{domain.IdentityTypePhone, "", ""},
+		{domain.IdentityTypeWechatMP, "openid-xyz", "op********"},
+	}
+	for _, tt := range tests {
+		if got := service.MaskSubject(tt.typ, tt.in); got != tt.want {
+			t.Errorf("MaskSubject(%q, %q) = %q, want %q", tt.typ, tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestLoginLogWriteAndList(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	logs := service.NewLoginLogService(pool)
+	users := service.NewUserService(pool)
+	ctx := context.Background()
+
+	u, _, _, err := users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := logs.Write(ctx, domain.LoginLog{
+			UserID:       &u.ID,
+			IdentityType: domain.IdentityTypePhone,
+			Subject:      "138****8000",
+			Event:        domain.LoginEventLogin,
+			Success:      true,
+			IP:           "1.2.3.4",
+			UA:           "go-test",
+		}); err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+	}
+
+	list, err := logs.ListByUser(ctx, u.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("len = %d, want 3", len(list))
+	}
+	if list[0].Subject != "138****8000" || !list[0].Success {
+		t.Fatalf("log = %+v", list[0])
+	}
+}
+
+// 失败的登录没有 user_id，也必须能写进去。
+func TestLoginLogWriteWithoutUser(t *testing.T) {
+	logs := service.NewLoginLogService(testsupport.NewTestDB(t))
+	if err := logs.Write(context.Background(), domain.LoginLog{
+		IdentityType: domain.IdentityTypePhone,
+		Subject:      "138****8000",
+		Event:        domain.LoginEventLogin,
+		Success:      false,
+		Reason:       "账号或密码不正确",
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+}
+```
+
+- [ ] **Step 3: 运行测试确认失败**
+
+Run: `go test ./internal/service/ -run 'MaskSubject|LoginLog' -v`
+Expected: 编译失败，`undefined: service.MaskSubject`
+
+- [ ] **Step 4: 实现 domain.LoginLog 与 LoginLogService**
+
+追加到 `internal/domain/user.go`：
+
+```go
+// 登录日志事件类型。
+const (
+	LoginEventLogin  = "login"
+	LoginEventLogout = "logout"
+	LoginEventRotate = "rotate"
+	LoginEventRevoke = "revoke"
+)
+
+// LoginLog 是一条登录审计记录。
+// UserID / ApplicationID 用指针是因为登录失败时它们可能为空。
+type LoginLog struct {
+	ID            uuid.UUID
+	UserID        *uuid.UUID
+	ApplicationID *uuid.UUID
+	IdentityType  string
+	// Subject 是脱敏后的登录标识。完整值通过 UserID 关联查询。
+	Subject   string
+	Event     string
+	Success   bool
+	Reason    string
+	IP        string
+	UA        string
+	SessionID string
+	CreatedAt int64
+}
+```
+
+`internal/service/loginlog.go`：
+
+```go
+package service
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+const loginLogColumns = `
+	id, user_id, application_id, identity_type, subject,
+	event, success, reason, ip, ua, session_id,
+	(extract(epoch from created_at) * 1000)::bigint`
+
+// LoginLogService 读写登录审计记录。
+type LoginLogService struct {
+	pool *pgxpool.Pool
+}
+
+// NewLoginLogService 构造 LoginLogService。
+func NewLoginLogService(pool *pgxpool.Pool) *LoginLogService {
+	return &LoginLogService{pool: pool}
+}
+
+// Write 写入一条审计记录。
+func (s *LoginLogService) Write(ctx context.Context, e domain.LoginLog) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO login_log
+			(user_id, application_id, identity_type, subject, event, success, reason, ip, ua, session_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		e.UserID, e.ApplicationID, e.IdentityType, e.Subject,
+		e.Event, e.Success, e.Reason, e.IP, e.UA, e.SessionID)
+	if err != nil {
+		return fmt.Errorf("service: 写入登录日志: %w", err)
+	}
+	return nil
+}
+
+// ListByUser 返回该用户最近的审计记录，按时间倒序。
+func (s *LoginLogService) ListByUser(ctx context.Context, userID uuid.UUID, limit int) ([]domain.LoginLog, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+loginLogColumns+` FROM login_log
+		 WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("service: 查询登录日志: %w", err)
+	}
+	defer rows.Close()
+
+	out := []domain.LoginLog{}
+	for rows.Next() {
+		var e domain.LoginLog
+		if err := rows.Scan(&e.ID, &e.UserID, &e.ApplicationID, &e.IdentityType, &e.Subject,
+			&e.Event, &e.Success, &e.Reason, &e.IP, &e.UA, &e.SessionID, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("service: 扫描登录日志: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("service: 遍历登录日志: %w", err)
+	}
+	return out, nil
+}
+
+// MaskSubject 按标识类型脱敏。审计日志里保留可辨识度即可，不需要完整值。
+func MaskSubject(identityType, subject string) string {
+	if subject == "" {
+		return ""
+	}
+	switch identityType {
+	case domain.IdentityTypePhone:
+		if len(subject) != 11 {
+			return maskTail(subject)
+		}
+		return subject[:3] + "****" + subject[7:]
+	case domain.IdentityTypeEmail:
+		at := strings.LastIndex(subject, "@")
+		if at <= 0 {
+			return maskTail(subject)
+		}
+		local, domainPart := subject[:at], subject[at:]
+		if len(local) <= 1 {
+			return "*" + domainPart
+		}
+		return local[:1] + "****" + local[len(local)-1:] + domainPart
+	default:
+		return maskTail(subject)
+	}
+}
+
+// maskTail 保留前两个字符，其余以 * 代替；长度不足 2 时全部替换。
+func maskTail(s string) string {
+	r := []rune(s)
+	if len(r) <= 2 {
+		return strings.Repeat("*", len(r))
+	}
+	return string(r[:2]) + strings.Repeat("*", len(r)-2)
+}
+```
+
+- [ ] **Step 5: 运行测试确认通过**
+
+Run: `go test ./internal/service/ -run 'MaskSubject|LoginLog' -v`
+Expected: 3 个测试 PASS
+
+- [ ] **Step 6: 写失败的 AuthService 测试**
+
+`internal/service/auth_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+// authEnv 是一套完整装配好的登录环境，测试用它跑端到端流程。
+type authEnv struct {
+	auth  *service.AuthService
+	apps  *service.ApplicationService
+	users *service.UserService
+	sess  *service.SessionService
+	logs  *service.LoginLogService
+	sms   *notify.FakeProvider
+	codes *notify.CodeService
+	app   *domain.Application
+}
+
+func newAuthEnv(t *testing.T) *authEnv {
+	t.Helper()
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+
+	apps := service.NewApplicationService(pool)
+	users := service.NewUserService(pool)
+	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb))
+	logs := service.NewLoginLogService(pool)
+	codes := notify.NewCodeService(rdb)
+
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewPassword(users)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
+	}
+
+	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
+	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
+	sender.AddProvider(sms)
+
+	app, _, err := apps.Create(context.Background(), "测试应用", "test-app")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	ctx := context.Background()
+	for _, typ := range []string{connector.TypePassword, connector.TypeSMSCode} {
+		if err := apps.SetConnector(ctx, app.ID, typ, true, nil); err != nil {
+			t.Fatalf("启用 %s: %v", typ, err)
+		}
+	}
+
+	return &authEnv{
+		auth: service.NewAuthService(service.AuthDeps{
+			Apps: apps, Users: users, Sessions: sessions, Logs: logs,
+			Registry: reg, Notifier: sender, Codes: codes,
+		}),
+		apps: apps, users: users, sess: sessions, logs: logs,
+		sms: sms, codes: codes, app: app,
+	}
+}
+
+func (e *authEnv) smsLogin(t *testing.T, phone string) *service.LoginResult {
+	t.Helper()
+	ctx := context.Background()
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, phone); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	code := e.sms.LastParam("code")
+	if code == "" {
+		t.Fatal("未从假供应商取到验证码")
+	}
+	res, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": phone, "code": code},
+		IP:            "1.2.3.4", UA: "go-test",
+	})
+	if err != nil {
+		t.Fatalf("Login(sms_code): %v", err)
+	}
+	return res
+}
+
+func TestSMSCodeLoginCreatesUser(t *testing.T) {
+	e := newAuthEnv(t)
+	res := e.smsLogin(t, "13800138000")
+
+	if res.User == nil || res.Session == nil {
+		t.Fatal("返回结果不完整")
+	}
+	if res.Session.Token == "" {
+		t.Fatal("token 为空")
+	}
+	if res.User.Status != domain.UserStatusActive {
+		t.Fatalf("Status = %q", res.User.Status)
+	}
+
+	// 签发的 token 立刻可用
+	vr, err := e.auth.ValidateToken(context.Background(), e.app.AppID, res.Session.Token)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if vr.Session.UserID != res.User.ID {
+		t.Fatal("token 指向的用户不对")
+	}
+	if vr.CacheTTL <= 0 {
+		t.Fatalf("CacheTTL = %v", vr.CacheTTL)
+	}
+}
+
+// 端到端验证账号归并：短信建的号，设完密码后用手机号+密码登录，必须是同一个人。
+func TestPasswordAndSMSLoginResolveToSameUser(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	first := e.smsLogin(t, "13800138000")
+	if err := e.users.SetPassword(ctx, first.User.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	second, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypePassword,
+		Credentials:   connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
+	})
+	if err != nil {
+		t.Fatalf("Login(password): %v", err)
+	}
+	if second.User.ID != first.User.ID {
+		t.Fatalf("归并失败: %v vs %v", second.User.ID, first.User.ID)
+	}
+	if second.Session.Token == first.Session.Token {
+		t.Fatal("两次登录应签发不同的 token")
+	}
+}
+
+// 密码登录不建号：账号不存在时必须拒绝，而不是悄悄注册一个。
+func TestPasswordLoginDoesNotCreateUser(t *testing.T) {
+	e := newAuthEnv(t)
+	_, err := e.auth.Login(context.Background(), service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypePassword,
+		Credentials:   connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+// 应用没启用的登录方式必须在校验凭据之前就被拒绝。
+func TestLoginRejectsDisabledConnector(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypePassword, false, nil); err != nil {
+		t.Fatalf("停用 password: %v", err)
+	}
+	_, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypePassword,
+		Credentials:   connector.Credentials{"account": "13800138000", "password": "x"},
+	})
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestLoginRejectsUnconfiguredConnector(t *testing.T) {
+	e := newAuthEnv(t)
+	_, err := e.auth.Login(context.Background(), service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: "wechat_mp", // 已注册但该应用未配置
+		Credentials:   connector.Credentials{},
+	})
+	if !errors.Is(err, domain.ErrForbidden) && !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrForbidden 或 ErrNotFound", err)
+	}
+}
+
+func TestLoginRejectsUnknownApplication(t *testing.T) {
+	e := newAuthEnv(t)
+	_, err := e.auth.Login(context.Background(), service.LoginInput{
+		AppID:         "no-such-app",
+		ConnectorType: connector.TypePassword,
+		Credentials:   connector.Credentials{"account": "a", "password": "b"},
+	})
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLoginRejectsFrozenUser(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+	if _, err := e.users.SetStatus(ctx, res.User.ID, domain.UserStatusFrozen); err != nil {
+		t.Fatalf("冻结: %v", err)
+	}
+
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	_, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
+	})
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+// 注销保护期内登录会撤销注销申请——沿用 3s 的行为。
+func TestLoginCancelsPendingDeletion(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	first := e.smsLogin(t, "13800138000")
+	if _, err := e.users.SetStatus(ctx, first.User.ID, domain.UserStatusPendingDelete); err != nil {
+		t.Fatalf("提交注销: %v", err)
+	}
+
+	second := e.smsLogin(t, "13800138000")
+	if second.User.ID != first.User.ID {
+		t.Fatal("不是同一个用户")
+	}
+	if second.User.Status != domain.UserStatusActive {
+		t.Fatalf("Status = %q, want ACTIVE（登录应撤销注销申请）", second.User.Status)
+	}
+	if second.User.DeleteSubmittedAt != 0 {
+		t.Fatalf("DeleteSubmittedAt = %d, 应被清零", second.User.DeleteSubmittedAt)
+	}
+}
+
+// 注册关系必须幂等：同一用户重复登录不能因重复插入而失败。
+func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
+	e := newAuthEnv(t)
+	first := e.smsLogin(t, "13800138000")
+	again := e.smsLogin(t, "13800138000")
+	if again.User.ID != first.User.ID {
+		t.Fatal("两次登录不是同一用户")
+	}
+}
+
+func TestLoginWritesAuditLog(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+	list, err := e.logs.ListByUser(ctx, res.User.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(list) == 0 {
+		t.Fatal("登录成功未写审计日志")
+	}
+	last := list[0]
+	if !last.Success || last.Event != domain.LoginEventLogin {
+		t.Fatalf("log = %+v", last)
+	}
+	if last.IP != "1.2.3.4" || last.UA != "go-test" {
+		t.Fatalf("设备信息未记录: %+v", last)
+	}
+	// 审计日志里必须是脱敏后的手机号
+	if last.Subject != "138****8000" {
+		t.Fatalf("Subject = %q, want 138****8000", last.Subject)
+	}
+	if last.SessionID != res.Session.ID {
+		t.Fatalf("SessionID = %q, want %q", last.SessionID, res.Session.ID)
+	}
+}
+
+// 登录失败也要留痕，否则爆破攻击无从追溯。
+func TestFailedLoginWritesAuditLog(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	// 先建号并设密码，这样失败记录能挂到 user_id 上，便于按用户查询
+	res := e.smsLogin(t, "13800138000")
+	if err := e.users.SetPassword(ctx, res.User.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypePassword,
+		Credentials:   connector.Credentials{"account": "13800138000", "password": "wrong"},
+		IP:            "9.9.9.9",
+	}); err == nil {
+		t.Fatal("应当登录失败")
+	}
+
+	list, err := e.logs.ListByUser(ctx, res.User.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	var found bool
+	for _, l := range list {
+		if !l.Success && l.IP == "9.9.9.9" && l.Reason != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("未找到失败的审计记录: %+v", list)
+	}
+}
+
+func TestSendLoginCodeRequiresEnabledConnector(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, false, nil); err != nil {
+		t.Fatalf("停用 sms_code: %v", err)
+	}
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestSendLoginCodeRejectsMalformedPhone(t *testing.T) {
+	e := newAuthEnv(t)
+	if err := e.auth.SendLoginCode(context.Background(), e.app.AppID, "12345"); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+	if len(e.sms.Sent()) != 0 {
+		t.Fatal("格式非法时不应真的发短信")
+	}
+}
+
+func TestLogoutInvalidatesToken(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, err := e.auth.ValidateToken(ctx, e.app.AppID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestValidateTokenRejectsWrongApp(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	other, _, err := e.apps.Create(ctx, "另一个应用", "other-app")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	res := e.smsLogin(t, "13800138000")
+
+	if _, err := e.auth.ValidateToken(ctx, other.AppID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestSendLoginCodeIsRateLimitedPerPhone(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+
+	apps := service.NewApplicationService(pool)
+	users := service.NewUserService(pool)
+	codes := notify.NewCodeService(rdb)
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册: %v", err)
+	}
+	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
+	// 启用 30 秒一次的限制
+	sender := notify.NewSender(pool, store.NewRateLimiter(rdb),
+		[]notify.RateRule{{Name: "30s", Window: 30 * time.Second, Limit: 1}})
+	sender.AddProvider(sms)
+
+	app, _, err := apps.Create(context.Background(), "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	ctx := context.Background()
+	if err := apps.SetConnector(ctx, app.ID, connector.TypeSMSCode, true, nil); err != nil {
+		t.Fatalf("启用: %v", err)
+	}
+
+	auth := service.NewAuthService(service.AuthDeps{
+		Apps: apps, Users: users,
+		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Logs:     service.NewLoginLogService(pool),
+		Registry: reg, Notifier: sender, Codes: codes,
+	})
+
+	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); err != nil {
+		t.Fatalf("首次: %v", err)
+	}
+	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("二次 err = %v, want ErrRateLimited", err)
+	}
+}
+```
+- [ ] **Step 7: 运行测试确认失败**
+
+Run: `go test ./internal/service/ -run Auth -v`
+Expected: 编译失败，`undefined: service.NewAuthService`
+
+- [ ] **Step 8: 扩展 Connector 接口，让失败登录也能留痕**
+
+凭据校验失败时 `Authenticate` 返回的是错误而非 `Result`，`AuthService` 因此不知道「是谁在尝试登录」，审计日志只能留一条无主记录——爆破攻击无从追溯到具体账号。
+
+给 `Connector` 补一个方法，从凭据里尽力提取登录标识。它**只为记日志服务**，不做任何校验，也不保证该标识真实存在。
+
+`internal/connector/connector.go` 的接口定义改为：
+
+```go
+type Connector interface {
+	// Type 是该登录方式的稳定标识，同时是 application_connector.connector_type 的值。
+	Type() string
+	// ConfigSchema 描述该登录方式的可配置项，供管理 UI 渲染表单。
+	ConfigSchema() []domain.Field
+	// Authenticate 校验凭据。cfg 是该应用为本登录方式保存的配置。
+	// 校验失败必须返回 domain.ErrInvalidCredential 的包装。
+	Authenticate(ctx context.Context, cfg map[string]any, creds Credentials) (*Result, error)
+	// SubjectFrom 尽力从凭据里提取登录标识，仅用于审计日志。
+	// 不做校验、不保证标识存在；凭据里没有可用信息时返回两个空串。
+	SubjectFrom(creds Credentials) (identityType, subject string)
+}
+```
+
+`internal/connector/password.go` 追加：
+
+```go
+// SubjectFrom 实现 Connector。
+func (c *PasswordConnector) SubjectFrom(creds Credentials) (string, string) {
+	account := creds.Get("account")
+	if account == "" {
+		return "", ""
+	}
+	return DetectIdentityType(account), account
+}
+```
+
+`internal/connector/smscode.go` 追加：
+
+```go
+// SubjectFrom 实现 Connector。
+func (c *SMSCodeConnector) SubjectFrom(creds Credentials) (string, string) {
+	phone := creds.Get("phone")
+	if phone == "" {
+		return "", ""
+	}
+	return domain.IdentityTypePhone, phone
+}
+```
+
+`internal/connector/connector_test.go` 里的 `stubConnector` 补上同名方法：
+
+```go
+func (s stubConnector) SubjectFrom(connector.Credentials) (string, string) { return "stub", "s" }
+```
+
+追加到 `internal/connector/password_test.go`：
+
+```go
+func TestPasswordSubjectFrom(t *testing.T) {
+	c := connector.NewPassword(newFakeLookup())
+
+	typ, subj := c.SubjectFrom(connector.Credentials{"account": "13800138000"})
+	if typ != domain.IdentityTypePhone || subj != "13800138000" {
+		t.Fatalf("SubjectFrom = (%q, %q)", typ, subj)
+	}
+	// 凭据里没有 account 时返回空串，而不是 panic 或臆造值
+	if typ, subj := c.SubjectFrom(connector.Credentials{}); typ != "" || subj != "" {
+		t.Fatalf("空凭据 SubjectFrom = (%q, %q), want 两个空串", typ, subj)
+	}
+}
+```
+
+追加到 `internal/connector/smscode_test.go`：
+
+```go
+func TestSMSCodeSubjectFrom(t *testing.T) {
+	c := connector.NewSMSCode(&fakeCodes{})
+
+	typ, subj := c.SubjectFrom(connector.Credentials{"phone": "13800138000"})
+	if typ != domain.IdentityTypePhone || subj != "13800138000" {
+		t.Fatalf("SubjectFrom = (%q, %q)", typ, subj)
+	}
+	if typ, subj := c.SubjectFrom(connector.Credentials{}); typ != "" || subj != "" {
+		t.Fatalf("空凭据 SubjectFrom = (%q, %q), want 两个空串", typ, subj)
+	}
+}
+```
+
+Run: `go test ./internal/connector/ -v`
+Expected: 全部 PASS（新增 2 个）
+
+- [ ] **Step 9: 实现 AuthService**
+
+`internal/service/auth.go`：
+
+```go
+package service
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
+)
+
+// loginCodeTemplate 是登录验证码使用的 fp 内部模板 key。
+// 各供应商把它映射到自己的模板 ID（见 notify.AliyunConfig.Templates）。
+const loginCodeTemplate = "login_code"
+
+// AuthDeps 是 AuthService 的依赖集合。
+type AuthDeps struct {
+	Apps     *ApplicationService
+	Users    *UserService
+	Sessions *SessionService
+	Logs     *LoginLogService
+	Registry *connector.Registry
+	Notifier *notify.Sender
+	Codes    *notify.CodeService
+}
+
+// AuthService 编排登录流程。它是唯一知道"登录该按什么顺序发生"的地方：
+// Connector 只管校验凭据，UserService 只管归并，SessionService 只管令牌。
+type AuthService struct {
+	deps AuthDeps
+}
+
+// NewAuthService 构造 AuthService。
+func NewAuthService(d AuthDeps) *AuthService {
+	return &AuthService{deps: d}
+}
+
+// LoginInput 是一次登录请求。
+type LoginInput struct {
+	// AppID 是对外的 appId 字符串，不是内部 UUID。
+	AppID         string
+	ConnectorType string
+	Credentials   connector.Credentials
+	IP            string
+	UA            string
+	Mobile        bool
+}
+
+// LoginResult 是登录成功的结果。
+type LoginResult struct {
+	User    *domain.User
+	Session *domain.Session
+}
+
+// SendLoginCode 给手机号发送登录验证码。
+//
+// 校验顺序：应用 → 登录方式是否启用 → 手机号格式 → 频率限制 → 发送。
+// 格式校验必须早于验证码生成，否则畸形号码也会消耗一次发送额度。
+func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) error {
+	app, err := s.deps.Apps.GetByAppID(ctx, appID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.enabledConnector(ctx, app, connector.TypeSMSCode); err != nil {
+		return err
+	}
+	if connector.DetectIdentityType(phone) != domain.IdentityTypePhone {
+		return domain.Errorf(domain.ErrInvalidArgument, "手机号格式不正确")
+	}
+
+	code, err := s.deps.Codes.Issue(ctx, notify.PurposeLogin, phone)
+	if err != nil {
+		return err
+	}
+	return s.deps.Notifier.Send(ctx, notify.Message{
+		Channel:  notify.ChannelSMS,
+		To:       phone,
+		Template: loginCodeTemplate,
+		Params:   map[string]string{"code": code},
+	})
+}
+
+// Login 执行一次完整登录。
+func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, error) {
+	app, err := s.deps.Apps.GetByAppID(ctx, in.AppID)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, cfg, err := s.connectorFor(ctx, app, in.ConnectorType)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := conn.Authenticate(ctx, cfg, in.Credentials)
+	if err != nil {
+		// 校验失败时没有 Result，从凭据里尽力还原登录标识，
+		// 否则爆破攻击在审计日志里只是一串无主记录。
+		identityType, subject := conn.SubjectFrom(in.Credentials)
+		s.logFailure(ctx, app, in, identityType, subject, err)
+		return nil, err
+	}
+
+	user, identity, err := s.resolveUser(ctx, result)
+	if err != nil {
+		s.logFailure(ctx, app, in, result.IdentityType, result.Subject, err)
+		return nil, err
+	}
+
+	if !user.CanLogin() {
+		err := domain.Errorf(domain.ErrForbidden, "账号已被冻结或注销")
+		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
+		return nil, err
+	}
+
+	// 注销保护期内的登录撤销注销申请——沿用 3s 的行为。
+	if user.Status == domain.UserStatusPendingDelete {
+		revived, err := s.deps.Users.SetStatus(ctx, user.ID, domain.UserStatusActive)
+		if err != nil {
+			return nil, err
+		}
+		user = revived
+	}
+
+	if err := s.deps.Users.EnsureRegistration(ctx, user.ID, app.ID); err != nil {
+		return nil, err
+	}
+	if identity != nil {
+		if err := s.deps.Users.TouchIdentityLogin(ctx, identity.ID); err != nil {
+			return nil, err
+		}
+	}
+
+	sess, err := s.deps.Sessions.Issue(ctx, IssueInput{
+		UserID: user.ID, App: app, IP: in.IP, UA: in.UA, Mobile: in.Mobile,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s.writeLog(ctx, domain.LoginLog{
+		UserID: &user.ID, ApplicationID: &app.ID,
+		IdentityType: result.IdentityType,
+		Subject:      MaskSubject(result.IdentityType, result.Subject),
+		Event:        domain.LoginEventLogin, Success: true,
+		IP: in.IP, UA: in.UA, SessionID: sess.ID,
+	})
+
+	return &LoginResult{User: user, Session: sess}, nil
+}
+
+// Logout 作废 token。
+func (s *AuthService) Logout(ctx context.Context, token string) error {
+	return s.deps.Sessions.Revoke(ctx, token, domain.RevokeReasonLogout)
+}
+
+// ValidateToken 是 SDK 回源的入口：校验 token 并给出缓存时长。
+func (s *AuthService) ValidateToken(ctx context.Context, appID, token string) (*ValidateResult, error) {
+	app, err := s.deps.Apps.GetByAppID(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	return s.deps.Sessions.Validate(ctx, token, app)
+}
+
+// connectorFor 取出该应用启用的登录方式及其配置。
+func (s *AuthService) connectorFor(ctx context.Context, app *domain.Application, typ string) (connector.Connector, map[string]any, error) {
+	ac, err := s.enabledConnector(ctx, app, typ)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := s.deps.Registry.Get(typ)
+	if err != nil {
+		return nil, nil, err
+	}
+	return conn, ac.Config, nil
+}
+
+// enabledConnector 校验该应用是否启用了指定登录方式。
+// 应用级开关必须在校验凭据之前判断，否则被关掉的方式仍能完成验证。
+func (s *AuthService) enabledConnector(ctx context.Context, app *domain.Application, typ string) (*domain.ApplicationConnector, error) {
+	ac, err := s.deps.Apps.GetConnector(ctx, app.ID, typ)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, domain.Errorf(domain.ErrForbidden, "该应用未开放 %s 登录", typ)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !ac.Enabled {
+		return nil, domain.Errorf(domain.ErrForbidden, "该应用未开放 %s 登录", typ)
+	}
+	return ac, nil
+}
+
+// resolveUser 依据 Connector 给出的结果找到或创建用户。
+// 归并规则完整地封装在 UserService 里，这里只决定"允不允许建号"。
+func (s *AuthService) resolveUser(ctx context.Context, r *connector.Result) (*domain.User, *domain.Identity, error) {
+	if r.AllowCreate {
+		user, identity, _, err := s.deps.Users.EnsureUserWithIdentity(ctx, EnsureIdentityInput{
+			Type:       r.IdentityType,
+			Subject:    r.Subject,
+			UnionKey:   r.UnionKey,
+			Credential: r.Credential,
+			Nickname:   r.Nickname,
+		})
+		return user, identity, err
+	}
+
+	user, identity, err := s.deps.Users.FindByIdentity(ctx, r.IdentityType, r.Subject)
+	if errors.Is(err, domain.ErrNotFound) {
+		// 不允许建号且账号不存在：返回与凭据错误一致的错误，避免账号枚举。
+		return nil, nil, domain.Errorf(domain.ErrInvalidCredential, "账号或凭据不正确")
+	}
+	return user, identity, err
+}
+
+// logFailure 记录一次失败登录。
+//
+// 若该登录标识确实对应一个已有账号，就把 user_id 一并写上——
+// 「某个账号被连续尝试 50 次」这个查询依赖它。标识不存在时留空即可，
+// 这一步的查询失败绝不能影响返回给调用方的错误。
+func (s *AuthService) logFailure(ctx context.Context, app *domain.Application, in LoginInput, identityType, subject string, cause error) {
+	var userID *uuid.UUID
+	if identityType != "" && subject != "" {
+		if u, _, err := s.deps.Users.FindByIdentity(ctx, identityType, subject); err == nil {
+			userID = &u.ID
+		}
+	}
+	s.writeLog(ctx, domain.LoginLog{
+		UserID:        userID,
+		ApplicationID: &app.ID,
+		IdentityType:  identityType,
+		Subject:       MaskSubject(identityType, subject),
+		Event:         domain.LoginEventLogin,
+		Success:       false,
+		Reason:        cause.Error(),
+		IP:            in.IP, UA: in.UA,
+	})
+}
+
+func (s *AuthService) logFailureWithUser(ctx context.Context, app *domain.Application, in LoginInput, r *connector.Result, userID uuid.UUID, cause error) {
+	s.writeLog(ctx, domain.LoginLog{
+		UserID:        &userID,
+		ApplicationID: &app.ID,
+		IdentityType:  r.IdentityType,
+		Subject:       MaskSubject(r.IdentityType, r.Subject),
+		Event:         domain.LoginEventLogin,
+		Success:       false,
+		Reason:        cause.Error(),
+		IP:            in.IP, UA: in.UA,
+	})
+}
+
+// writeLog 写审计记录。写失败只记日志——审计不能反过来阻断登录。
+func (s *AuthService) writeLog(ctx context.Context, e domain.LoginLog) {
+	if err := s.deps.Logs.Write(ctx, e); err != nil {
+		slog.Error("service: 写入登录日志失败", "err", err)
+	}
+}
+```
+
+- [ ] **Step 10: 运行全部测试**
+
+Run: `make test`
+Expected: 全部 PASS
+
+- [ ] **Step 11: 提交**
+
+```bash
+git add internal
+git commit -m "feat: 登录编排与登录审计日志"
+```
