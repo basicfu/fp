@@ -142,6 +142,23 @@ func (s *UserService) AttachIdentity(ctx context.Context, userID uuid.UUID, in E
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	// union_key 的不变式是"同一 union_key 下的所有 identity 指向同一个 user"。
+	// 单列唯一索引表达不了它——同一 union_key 本来就允许多行（一个微信用户的
+	// 公众号 openid 与小程序 openid 共享 unionId）——所以只能在这里守住。
+	// EnsureUserWithIdentity 天然满足该不变式（它就是按 union_key 找用户），
+	// AttachIdentity 是唯一能把它打破的入口。
+	if in.UnionKey != "" {
+		var owner uuid.UUID
+		err := tx.QueryRow(ctx,
+			`SELECT user_id FROM identity WHERE union_key = $1 LIMIT 1`, in.UnionKey).Scan(&owner)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("service: 按 unionKey 查询归属: %w", err)
+		}
+		if err == nil && owner != userID {
+			return nil, domain.Errorf(domain.ErrConflict, "该 unionKey 已归属其他账号")
+		}
+	}
+
 	id, err := insertIdentityTx(ctx, tx, userID, in)
 	if err != nil {
 		return nil, err

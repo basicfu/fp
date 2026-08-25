@@ -173,6 +173,40 @@ func TestAttachIdentityRejectsSubjectOwnedByAnotherUser(t *testing.T) {
 	_ = u1
 }
 
+// union_key 的不变式：同一个 union_key 不能横跨两个用户。
+// 数据库层表达不了（同 union_key 本来就允许多行），只能靠 AttachIdentity 守。
+func TestAttachIdentityRejectsUnionKeyOwnedByAnotherUser(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeWechatMP, Subject: "openid-a", UnionKey: "union-1",
+	})
+	if err != nil {
+		t.Fatalf("u1: %v", err)
+	}
+	u2, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("u2: %v", err)
+	}
+
+	// 把 u1 名下的 unionKey 挂到 u2 上必须失败
+	if _, err := svc.AttachIdentity(ctx, u2.ID, service.EnsureIdentityInput{
+		Type: "wechat_mini", Subject: "openid-b", UnionKey: "union-1",
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+
+	// 挂到本人名下则应成功（这正是"一个人多个 openid"的正常场景）
+	if _, err := svc.AttachIdentity(ctx, u1.ID, service.EnsureIdentityInput{
+		Type: "wechat_mini", Subject: "openid-b", UnionKey: "union-1",
+	}); err != nil {
+		t.Fatalf("同一用户追加同 unionKey 的 identity 应成功: %v", err)
+	}
+}
+
 func TestFindByIdentityNotFound(t *testing.T) {
 	svc := newUserService(t)
 	_, _, err := svc.FindByIdentity(context.Background(), domain.IdentityTypePhone, "13800138000")
