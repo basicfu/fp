@@ -1082,8 +1082,8 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	if username != "admin" {
 		t.Fatalf("username = %q, want admin", username)
 	}
-	if id.String() == "" {
-		t.Fatal("adminID 为空")
+	if id == uuid.Nil {
+		t.Fatal("adminID 为零值")
 	}
 }
 
