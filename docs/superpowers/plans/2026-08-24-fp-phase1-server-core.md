@@ -5056,3 +5056,1556 @@ Expected: `internal/notify` 12 个测试 PASS（验证码 6 + Sender 6），其�
 git add internal
 git commit -m "feat: 通知中心 Provider 抽象、供应商降级、频率限制与验证码收发"
 ```
+
+---
+
+## Task 8: 阿里云短信 Provider 与 sms_code 登录方式
+
+两件事放一起：`sms_code` 是第二个 Connector 实现，**它的存在才真正验证了 Connector 抽象成立**（一个实现的抽象是假抽象）；而它需要一个真实可用的短信通道。
+
+阿里云 SDK 的网络调用无法单测，因此把**请求参数构造**（模板映射、参数序列化）抽成纯函数单独测试，SDK 调用只是薄壳，用手工步骤验证。
+
+**Files:**
+- Create: `internal/notify/aliyun.go`
+- Create: `internal/connector/smscode.go`
+- Test: `internal/notify/aliyun_test.go`, `internal/connector/smscode_test.go`
+
+**Interfaces:**
+- Consumes: `notify.Provider`、`notify.Message`、`domain.Field`、`connector.Connector`
+- Produces:
+  - `func notify.NewAliyunSMS(cfg notify.AliyunConfig) (*AliyunSMS, error)`
+  - `type notify.AliyunConfig struct{ AccessKeyID, AccessKeySecret, Endpoint, SignName string; Templates map[string]string }`
+  - `func notify.BuildAliyunRequest(cfg AliyunConfig, msg Message) (phone, signName, templateCode, templateParam string, err error)` — 纯函数，可单测
+  - `type connector.CodeVerifier interface{ Verify(ctx context.Context, purpose, target, code string) error }`
+  - `func connector.NewSMSCode(codes CodeVerifier) *SMSCodeConnector`
+  - 常量 `connector.TypeSMSCode = "sms_code"`
+
+- [ ] **Step 1: 写失败的请求构造测试**
+
+`internal/notify/aliyun_test.go`：
+
+```go
+package notify_test
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
+)
+
+func aliyunCfg() notify.AliyunConfig {
+	return notify.AliyunConfig{
+		AccessKeyID:     "ak",
+		AccessKeySecret: "sk",
+		SignName:        "示例签名",
+		Templates: map[string]string{
+			"login_code": "SMS_123456",
+		},
+	}
+}
+
+func TestBuildAliyunRequest(t *testing.T) {
+	phone, sign, tmpl, param, err := notify.BuildAliyunRequest(aliyunCfg(), notify.Message{
+		Channel:  notify.ChannelSMS,
+		To:       "13800138000",
+		Template: "login_code",
+		Params:   map[string]string{"code": "123456"},
+	})
+	if err != nil {
+		t.Fatalf("BuildAliyunRequest: %v", err)
+	}
+	if phone != "13800138000" {
+		t.Errorf("phone = %q", phone)
+	}
+	if sign != "示例签名" {
+		t.Errorf("sign = %q", sign)
+	}
+	if tmpl != "SMS_123456" {
+		t.Errorf("templateCode = %q, want SMS_123456", tmpl)
+	}
+	if param != `{"code":"123456"}` {
+		t.Errorf("templateParam = %q", param)
+	}
+}
+
+// fp 内部模板 key 没有映射到阿里云模板 ID 时必须显式报错，
+// 而不是发出一条模板为空的短信——这正是 3s 里模板 ID 硬编码要解决的问题。
+func TestBuildAliyunRequestUnmappedTemplate(t *testing.T) {
+	_, _, _, _, err := notify.BuildAliyunRequest(aliyunCfg(), notify.Message{
+		Channel: notify.ChannelSMS, To: "13800138000", Template: "unknown_key",
+	})
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestBuildAliyunRequestEmptyParams(t *testing.T) {
+	_, _, _, param, err := notify.BuildAliyunRequest(aliyunCfg(), notify.Message{
+		Channel: notify.ChannelSMS, To: "13800138000", Template: "login_code",
+	})
+	if err != nil {
+		t.Fatalf("BuildAliyunRequest: %v", err)
+	}
+	if param != `{}` {
+		t.Errorf("空参数应序列化为 {}, got %q", param)
+	}
+}
+
+// 模板参数的键顺序必须稳定，否则同一条消息每次生成的请求体都不同，无法排障。
+func TestBuildAliyunRequestParamOrderIsStable(t *testing.T) {
+	msg := notify.Message{
+		Channel: notify.ChannelSMS, To: "13800138000", Template: "login_code",
+		Params: map[string]string{"z": "1", "a": "2", "m": "3"},
+	}
+	_, _, _, first, err := notify.BuildAliyunRequest(aliyunCfg(), msg)
+	if err != nil {
+		t.Fatalf("BuildAliyunRequest: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		_, _, _, again, err := notify.BuildAliyunRequest(aliyunCfg(), msg)
+		if err != nil {
+			t.Fatalf("BuildAliyunRequest: %v", err)
+		}
+		if again != first {
+			t.Fatalf("参数序列化不稳定: %q vs %q", first, again)
+		}
+	}
+	if first != `{"a":"2","m":"3","z":"1"}` {
+		t.Fatalf("应按键名排序, got %q", first)
+	}
+}
+
+func TestNewAliyunSMSRequiresCredentials(t *testing.T) {
+	cfg := aliyunCfg()
+	cfg.AccessKeyID = ""
+	if _, err := notify.NewAliyunSMS(cfg); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestAliyunConfigSchemaCoversCredentials(t *testing.T) {
+	p, err := notify.NewAliyunSMS(aliyunCfg())
+	if err != nil {
+		t.Fatalf("NewAliyunSMS: %v", err)
+	}
+	if p.Channel() != notify.ChannelSMS {
+		t.Fatalf("Channel = %q", p.Channel())
+	}
+
+	byKey := map[string]domain.Field{}
+	for _, f := range p.ConfigSchema() {
+		byKey[f.Key] = f
+	}
+	for _, key := range []string{"accessKeyId", "accessKeySecret", "signName"} {
+		f, ok := byKey[key]
+		if !ok {
+			t.Fatalf("ConfigSchema 缺少 %q", key)
+		}
+		if !f.Required {
+			t.Errorf("%q 应为必填", key)
+		}
+	}
+	// 密钥必须标为 secret，管理 UI 才会脱敏显示、落库才会加密。
+	if byKey["accessKeySecret"].Type != domain.FieldTypeSecret {
+		t.Errorf("accessKeySecret 类型 = %q, want secret", byKey["accessKeySecret"].Type)
+	}
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `go test ./internal/notify/ -run Aliyun -v`
+Expected: 编译失败，`undefined: notify.AliyunConfig`
+
+- [ ] **Step 3: 装 SDK**
+
+```bash
+go get github.com/alibabacloud-go/dysmsapi-20170525/v2/client@v2.0.16
+go get github.com/alibabacloud-go/darabonba-openapi/client@v0.1.18
+go get github.com/alibabacloud-go/tea/tea@v1.1.19
+```
+
+版本与 3s 现有依赖对齐（`3s/core/go.mod`），这是已在生产验证过的组合。
+
+- [ ] **Step 4: 实现阿里云 Provider**
+
+`internal/notify/aliyun.go`：
+
+```go
+package notify
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+
+	openapi "github.com/alibabacloud-go/darabonba-openapi/client"
+	dysmsapi "github.com/alibabacloud-go/dysmsapi-20170525/v2/client"
+	"github.com/alibabacloud-go/tea/tea"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// defaultAliyunEndpoint 是阿里云短信服务的默认接入点。
+const defaultAliyunEndpoint = "dysmsapi.aliyuncs.com"
+
+// AliyunConfig 是阿里云短信供应商的配置。
+type AliyunConfig struct {
+	AccessKeyID     string
+	AccessKeySecret string
+	Endpoint        string
+	SignName        string
+	// Templates 把 fp 内部模板 key 映射到阿里云模板 ID。
+	// 这层映射让业务代码只认 "login_code"，换供应商时只改配置不改代码。
+	Templates map[string]string
+}
+
+// AliyunSMS 是阿里云短信 Provider。
+type AliyunSMS struct {
+	cfg    AliyunConfig
+	client *dysmsapi.Client
+}
+
+// NewAliyunSMS 构造阿里云短信 Provider。
+func NewAliyunSMS(cfg AliyunConfig) (*AliyunSMS, error) {
+	if cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "阿里云短信缺少 accessKeyId 或 accessKeySecret")
+	}
+	if cfg.SignName == "" {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "阿里云短信缺少 signName")
+	}
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = defaultAliyunEndpoint
+	}
+
+	client, err := dysmsapi.NewClient(&openapi.Config{
+		AccessKeyId:     tea.String(cfg.AccessKeyID),
+		AccessKeySecret: tea.String(cfg.AccessKeySecret),
+		Endpoint:        tea.String(cfg.Endpoint),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("notify: 创建阿里云短信客户端: %w", err)
+	}
+	return &AliyunSMS{cfg: cfg, client: client}, nil
+}
+
+// Name 实现 Provider。
+func (p *AliyunSMS) Name() string { return "aliyun" }
+
+// Channel 实现 Provider。
+func (p *AliyunSMS) Channel() Channel { return ChannelSMS }
+
+// ConfigSchema 实现 Provider。
+func (p *AliyunSMS) ConfigSchema() []domain.Field {
+	return []domain.Field{
+		{Key: "accessKeyId", Label: "AccessKey ID", Type: domain.FieldTypeString, Required: true},
+		{Key: "accessKeySecret", Label: "AccessKey Secret", Type: domain.FieldTypeSecret, Required: true},
+		{Key: "signName", Label: "短信签名", Type: domain.FieldTypeString, Required: true},
+		{Key: "endpoint", Label: "接入点", Type: domain.FieldTypeString, Default: defaultAliyunEndpoint},
+	}
+}
+
+// Send 实现 Provider。
+func (p *AliyunSMS) Send(_ context.Context, msg Message) error {
+	phone, signName, templateCode, templateParam, err := BuildAliyunRequest(p.cfg, msg)
+	if err != nil {
+		return err
+	}
+
+	resp, err := p.client.SendSms(&dysmsapi.SendSmsRequest{
+		PhoneNumbers:  tea.String(phone),
+		SignName:      tea.String(signName),
+		TemplateCode:  tea.String(templateCode),
+		TemplateParam: tea.String(templateParam),
+	})
+	if err != nil {
+		return fmt.Errorf("notify: 调用阿里云短信接口: %w", err)
+	}
+	if resp.Body == nil || resp.Body.Code == nil {
+		return fmt.Errorf("notify: 阿里云短信返回体为空")
+	}
+	if code := tea.StringValue(resp.Body.Code); code != "OK" {
+		return fmt.Errorf("notify: 阿里云短信失败 code=%s msg=%s",
+			code, tea.StringValue(resp.Body.Message))
+	}
+	return nil
+}
+
+// BuildAliyunRequest 把一条 Message 翻译成阿里云 SendSms 的四个参数。
+//
+// 抽成纯函数是为了让模板映射与参数序列化可以单测——SDK 的网络调用测不了，
+// 但这段翻译逻辑恰恰是最容易出错、也最需要锁死的部分。
+func BuildAliyunRequest(cfg AliyunConfig, msg Message) (phone, signName, templateCode, templateParam string, err error) {
+	templateCode, ok := cfg.Templates[msg.Template]
+	if !ok || templateCode == "" {
+		return "", "", "", "", domain.Errorf(domain.ErrNotFound,
+			"模板 %q 未映射到阿里云模板 ID", msg.Template)
+	}
+
+	// 按键名排序后序列化，保证同一条消息每次生成的请求体完全一致，便于排障与比对。
+	keys := make([]string, 0, len(msg.Params))
+	for k := range msg.Params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	buf := make([]byte, 0, 64)
+	buf = append(buf, '{')
+	for i, k := range keys {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		kb, _ := json.Marshal(k)
+		vb, _ := json.Marshal(msg.Params[k])
+		buf = append(buf, kb...)
+		buf = append(buf, ':')
+		buf = append(buf, vb...)
+	}
+	buf = append(buf, '}')
+
+	return msg.To, cfg.SignName, templateCode, string(buf), nil
+}
+```
+
+- [ ] **Step 5: 运行测试确认通过**
+
+Run: `go test ./internal/notify/ -v`
+Expected: 全部 PASS（验证码 6 + Sender 6 + 阿里云 6）
+
+- [ ] **Step 6: 写失败的 sms_code 测试**
+
+`internal/connector/smscode_test.go`：
+
+```go
+package connector_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// fakeCodes 记录最后一次校验请求，并按预置结果返回。
+type fakeCodes struct {
+	err             error
+	purpose, target string
+	code            string
+	calls           int
+}
+
+func (f *fakeCodes) Verify(_ context.Context, purpose, target, code string) error {
+	f.calls++
+	f.purpose, f.target, f.code = purpose, target, code
+	return f.err
+}
+
+func TestSMSCodeType(t *testing.T) {
+	c := connector.NewSMSCode(&fakeCodes{})
+	if c.Type() != connector.TypeSMSCode {
+		t.Fatalf("Type = %q, want %q", c.Type(), connector.TypeSMSCode)
+	}
+	if len(c.ConfigSchema()) == 0 {
+		t.Fatal("ConfigSchema 不应为空")
+	}
+}
+
+func TestSMSCodeAuthenticateSuccess(t *testing.T) {
+	codes := &fakeCodes{}
+	c := connector.NewSMSCode(codes)
+
+	res, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"phone": "13800138000",
+		"code":  "123456",
+	})
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if res.IdentityType != domain.IdentityTypePhone {
+		t.Errorf("IdentityType = %q", res.IdentityType)
+	}
+	if res.Subject != "13800138000" {
+		t.Errorf("Subject = %q", res.Subject)
+	}
+	// 短信验证码本身证明了手机号归属，允许首次登录即建号。
+	if !res.AllowCreate {
+		t.Error("AllowCreate = false, want true")
+	}
+
+	if codes.calls != 1 {
+		t.Fatalf("Verify 调用次数 = %d, want 1", codes.calls)
+	}
+	if codes.target != "13800138000" || codes.code != "123456" {
+		t.Fatalf("传给 Verify 的参数不对: %+v", codes)
+	}
+}
+
+func TestSMSCodeAuthenticateWrongCode(t *testing.T) {
+	codes := &fakeCodes{err: domain.Errorf(domain.ErrInvalidCredential, "验证码不正确")}
+	c := connector.NewSMSCode(codes)
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"phone": "13800138000", "code": "000000",
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestSMSCodeRejectsMalformedPhone(t *testing.T) {
+	codes := &fakeCodes{}
+	c := connector.NewSMSCode(codes)
+	ctx := context.Background()
+
+	for _, phone := range []string{"", "1380013800", "23800138000", "abcdefghijk"} {
+		_, err := c.Authenticate(ctx, nil, connector.Credentials{"phone": phone, "code": "123456"})
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("phone %q err = %v, want ErrInvalidArgument", phone, err)
+		}
+	}
+	// 格式不合法时不应浪费一次验证码校验（那会消耗尝试次数）。
+	if codes.calls != 0 {
+		t.Fatalf("Verify 调用次数 = %d, want 0", codes.calls)
+	}
+}
+
+func TestSMSCodeRejectsEmptyCode(t *testing.T) {
+	c := connector.NewSMSCode(&fakeCodes{})
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{"phone": "13800138000"})
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// 配置可以关掉「首次登录自动注册」，此时 AllowCreate 为 false，
+// 未注册的手机号会在 AuthService 那一层被拒绝。
+func TestSMSCodeAutoRegisterConfigurable(t *testing.T) {
+	c := connector.NewSMSCode(&fakeCodes{})
+	res, err := c.Authenticate(context.Background(), map[string]any{"autoRegister": false},
+		connector.Credentials{"phone": "13800138000", "code": "123456"})
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if res.AllowCreate {
+		t.Fatal("autoRegister=false 时 AllowCreate 应为 false")
+	}
+}
+```
+
+- [ ] **Step 7: 运行测试确认失败**
+
+Run: `go test ./internal/connector/ -run SMSCode -v`
+Expected: 编译失败，`undefined: connector.NewSMSCode`
+
+- [ ] **Step 8: 实现 sms_code connector**
+
+`internal/connector/smscode.go`：
+
+```go
+package connector
+
+import (
+	"context"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// TypeSMSCode 是短信验证码登录方式的类型标识。
+const TypeSMSCode = "sms_code"
+
+// smsCodePurpose 是验证码的用途标识，与 notify.PurposeLogin 保持一致。
+// 这里写字面量而非 import notify，避免 connector 依赖 notify 包。
+const smsCodePurpose = "login"
+
+// CodeVerifier 是 sms_code connector 需要的最小验证码校验能力。
+type CodeVerifier interface {
+	Verify(ctx context.Context, purpose, target, code string) error
+}
+
+// SMSCodeConnector 用「手机号 + 短信验证码」校验身份。
+type SMSCodeConnector struct {
+	codes CodeVerifier
+}
+
+// NewSMSCode 构造短信验证码登录方式。
+func NewSMSCode(codes CodeVerifier) *SMSCodeConnector {
+	return &SMSCodeConnector{codes: codes}
+}
+
+// Type 实现 Connector。
+func (c *SMSCodeConnector) Type() string { return TypeSMSCode }
+
+// ConfigSchema 实现 Connector。
+func (c *SMSCodeConnector) ConfigSchema() []domain.Field {
+	return []domain.Field{
+		{
+			Key: "autoRegister", Label: "首次登录自动注册",
+			Type: domain.FieldTypeBool, Default: true,
+			Help: "关闭后，未注册的手机号即使验证码正确也无法登录",
+		},
+	}
+}
+
+// Authenticate 实现 Connector。
+//
+// 凭据键：phone、code。
+//
+// 手机号格式在调用验证码校验**之前**检查：格式不合法就去校验，
+// 会白白消耗掉该号码的验证尝试次数（见 notify.MaxVerifyAttempts）。
+func (c *SMSCodeConnector) Authenticate(ctx context.Context, cfg map[string]any, creds Credentials) (*Result, error) {
+	phone := creds.Get("phone")
+	code := creds.Get("code")
+
+	if !isChineseMobile(phone) {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "手机号格式不正确")
+	}
+	if code == "" {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "验证码不能为空")
+	}
+
+	if err := c.codes.Verify(ctx, smsCodePurpose, phone, code); err != nil {
+		return nil, err
+	}
+
+	return &Result{
+		IdentityType: domain.IdentityTypePhone,
+		Subject:      phone,
+		// 验证码校验通过即证明该手机号归申请人所有，可以据此建号。
+		AllowCreate: ConfigBool(cfg, "autoRegister", true),
+	}, nil
+}
+```
+
+- [ ] **Step 9: 确认 CodeService 满足 CodeVerifier**
+
+追加到 `internal/connector/interface_assert_test.go`：
+
+```go
+// TestCodeServiceSatisfiesCodeVerifier 保证 notify.CodeService 的签名
+// 与 connector.CodeVerifier 一致。
+func TestCodeServiceSatisfiesCodeVerifier(t *testing.T) {
+	var _ connector.CodeVerifier = (*notify.CodeService)(nil)
+}
+```
+
+同时把 `"github.com/basicfu/fp/internal/notify"` 加进该文件的 import。
+
+- [ ] **Step 10: 运行全部测试**
+
+Run: `make test`
+Expected: 全部 PASS（connector 包 13 个：注册表 7 + password 7 + sms_code 6 + 两个接口断言）
+
+- [ ] **Step 11: 手工验证阿里云通道（可选，需要真实账号）**
+
+写一个临时程序 `tmp/smstest/main.go`（`tmp/` 已在 `.gitignore` 中）：
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/basicfu/fp/internal/notify"
+)
+
+func main() {
+	p, err := notify.NewAliyunSMS(notify.AliyunConfig{
+		AccessKeyID:     os.Getenv("ALIYUN_AK"),
+		AccessKeySecret: os.Getenv("ALIYUN_SK"),
+		SignName:        os.Getenv("ALIYUN_SIGN"),
+		Templates:       map[string]string{"login_code": os.Getenv("ALIYUN_TEMPLATE")},
+	})
+	if err != nil {
+		panic(err)
+	}
+	err = p.Send(context.Background(), notify.Message{
+		Channel:  notify.ChannelSMS,
+		To:       os.Getenv("TEST_PHONE"),
+		Template: "login_code",
+		Params:   map[string]string{"code": "123456"},
+	})
+	fmt.Println("err =", err)
+}
+```
+
+Run: 设好五个环境变量后 `go run ./tmp/smstest`
+Expected: 打印 `err = <nil>`，手机收到验证码短信。没有阿里云账号时跳过本步，`FakeProvider` 已覆盖全部编排逻辑。
+
+- [ ] **Step 12: 提交**
+
+```bash
+git add internal go.mod go.sum
+git commit -m "feat: 阿里云短信 Provider 与 sms_code 登录方式"
+```
+
+---
+
+## Task 9: 会话存储、令牌签发与校验（cache_ttl）
+
+设计文档 4.5 的核心。**最关键的一条不变式：fp 返回 `cache_ttl` 而不是 `expiry`，且 `cache_ttl = min(应用配置, token 剩余有效期)`。** SDK 因此永远不需要、也不允许自己判断 token 是否过期——这条规则消除了「一处延期、另一处按旧 expiry 误判过期」的竞态。
+
+本任务只做签发与校验。延期降频、轮换在 Task 10，撤销在 Task 11。
+
+**Files:**
+- Create: `internal/domain/session.go`
+- Create: `internal/store/session.go`
+- Create: `internal/service/session.go`
+- Test: `internal/store/session_test.go`, `internal/service/session_test.go`
+
+**Interfaces:**
+- Consumes: `domain.Application`、`domain.SessionPolicy`、`store.OpenRedis` 的 `*redis.Client`
+- Produces:
+  - `type domain.Session struct{ ID, Token string; UserID, AppID uuid.UUID; FirstAuthAt, IssuedAt, LastExtendedAt, IdleExpiresAt int64; IP, UA string; Mobile bool }`
+  - `func (Session) MaxExpiresAt(p SessionPolicy) int64`
+  - `func (Session) RemainingAt(now int64, p SessionPolicy) time.Duration`
+  - `func store.NewSessionStore(rdb *redis.Client) *SessionStore`
+  - `func (*SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.Duration) error`
+  - `func (*SessionStore) Get(ctx context.Context, token string) (*domain.Session, error)`
+  - `func (*SessionStore) Delete(ctx context.Context, token string) error`
+  - `func (*SessionStore) Expire(ctx context.Context, token string, ttl time.Duration) error`
+  - `func (*SessionStore) ListUserTokens(ctx context.Context, userID uuid.UUID) ([]string, error)`
+  - `func (*SessionStore) DeleteUserTokens(ctx context.Context, userID uuid.UUID) (int, error)`
+  - `func (*SessionStore) TryLock(ctx context.Context, key string, ttl time.Duration) (bool, error)`
+  - `func service.NewSessionService(st *store.SessionStore) *SessionService`
+  - `func service.NewSessionServiceWithClock(st *store.SessionStore, now func() int64) *SessionService`
+  - `type service.IssueInput struct{ UserID uuid.UUID; App *domain.Application; IP, UA string; Mobile bool }`
+  - `func (*SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Session, error)`
+  - `type service.ValidateResult struct{ Session *domain.Session; CacheTTL time.Duration; Rotated bool; NewToken string }`
+  - `func (*SessionService) Validate(ctx context.Context, token string, app *domain.Application) (*ValidateResult, error)`
+  - `func (*SessionService) ListByUser(ctx context.Context, userID uuid.UUID) ([]domain.Session, error)`
+
+- [ ] **Step 1: 实现 domain/session.go**
+
+```go
+package domain
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Session 是一次登录产生的会话。
+//
+// 时间字段分工（三者不可互相替代）：
+//   - FirstAuthAt    首次认证时刻，token 轮换时**不变**，是 max_lifetime 的基准
+//   - IssuedAt       当前 token 的签发时刻，轮换时更新，是 rotate_interval 的基准
+//   - LastExtendedAt 上次延期写的时刻，是 extend_interval 降频的基准
+type Session struct {
+	// ID 是会话标识，token 轮换时不变。撤销以它为单位。
+	ID string
+	// Token 是当前有效的 opaque token。
+	Token          string
+	UserID         uuid.UUID
+	AppID          uuid.UUID
+	FirstAuthAt    int64
+	IssuedAt       int64
+	LastExtendedAt int64
+	// IdleExpiresAt 是空闲超时的绝对时刻。Redis key 的 TTL 与它保持一致，
+	// 但校验以本字段为准——TTL 只是兜底清理，不承担判定职责。
+	IdleExpiresAt int64
+	IP            string
+	UA            string
+	// Mobile 决定适用哪一档空闲超时。
+	Mobile bool
+}
+
+// MaxExpiresAt 返回绝对上限到期时刻（毫秒）。到达后必须重新认证，轮换无法延长它。
+func (s Session) MaxExpiresAt(p SessionPolicy) int64 {
+	return s.FirstAuthAt + int64(p.MaxLifetimeSeconds)*1000
+}
+
+// RemainingAt 返回在 now 时刻该会话还能存活多久。
+// 取空闲超时与绝对上限中较早的一个；已过期时返回 0。
+func (s Session) RemainingAt(now int64, p SessionPolicy) time.Duration {
+	remain := s.IdleExpiresAt - now
+	if maxRemain := s.MaxExpiresAt(p) - now; maxRemain < remain {
+		remain = maxRemain
+	}
+	if remain <= 0 {
+		return 0
+	}
+	return time.Duration(remain) * time.Millisecond
+}
+```
+
+- [ ] **Step 2: 写失败的 SessionStore 测试**
+
+`internal/store/session_test.go`：
+
+```go
+package store_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func sampleSession(token string, userID uuid.UUID) *domain.Session {
+	now := time.Now().UnixMilli()
+	return &domain.Session{
+		ID:             uuid.NewString(),
+		Token:          token,
+		UserID:         userID,
+		AppID:          uuid.New(),
+		FirstAuthAt:    now,
+		IssuedAt:       now,
+		LastExtendedAt: now,
+		IdleExpiresAt:  now + 60_000,
+		IP:             "127.0.0.1",
+		UA:             "go-test",
+	}
+}
+
+func TestSessionStorePutGet(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+	uid := uuid.New()
+	want := sampleSession("tok-1", uid)
+
+	if err := st.Put(ctx, want, time.Minute); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := st.Get(ctx, "tok-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ID != want.ID || got.UserID != want.UserID || got.AppID != want.AppID {
+		t.Fatalf("got = %+v, want = %+v", got, want)
+	}
+	if got.IdleExpiresAt != want.IdleExpiresAt || got.FirstAuthAt != want.FirstAuthAt {
+		t.Fatalf("时间字段未正确往返: %+v", got)
+	}
+}
+
+func TestSessionStoreGetMissing(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	if _, err := st.Get(context.Background(), "nope"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSessionStoreDelete(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	if err := st.Put(ctx, sampleSession("tok-1", uuid.New()), time.Minute); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := st.Delete(ctx, "tok-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := st.Get(ctx, "tok-1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	// 删除不存在的 token 不应报错
+	if err := st.Delete(ctx, "tok-1"); err != nil {
+		t.Fatalf("重复 Delete: %v", err)
+	}
+}
+
+func TestSessionStoreTTLExpires(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	if err := st.Put(ctx, sampleSession("tok-1", uuid.New()), 300*time.Millisecond); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if _, err := st.Get(ctx, "tok-1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("TTL 到期后 err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSessionStoreExpireExtends(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	if err := st.Put(ctx, sampleSession("tok-1", uuid.New()), 300*time.Millisecond); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := st.Expire(ctx, "tok-1", 5*time.Second); err != nil {
+		t.Fatalf("Expire: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if _, err := st.Get(ctx, "tok-1"); err != nil {
+		t.Fatalf("延长 TTL 后仍应存在: %v", err)
+	}
+}
+
+// 用户 token 索引用于在线设备列表与批量撤销。
+func TestSessionStoreListUserTokens(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+	uid := uuid.New()
+
+	for _, tok := range []string{"a", "b", "c"} {
+		if err := st.Put(ctx, sampleSession(tok, uid), time.Minute); err != nil {
+			t.Fatalf("Put %s: %v", tok, err)
+		}
+	}
+	tokens, err := st.ListUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListUserTokens: %v", err)
+	}
+	if len(tokens) != 3 {
+		t.Fatalf("len = %d, want 3", len(tokens))
+	}
+
+	// 另一个用户互不干扰
+	other, err := st.ListUserTokens(ctx, uuid.New())
+	if err != nil {
+		t.Fatalf("ListUserTokens(other): %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("其他用户 len = %d, want 0", len(other))
+	}
+}
+
+// 索引是超集：token 到期后 Redis 自动清掉主键，但索引里还留着。
+// ListUserTokens 必须顺手清理这些悬挂项，否则在线设备列表会越积越多。
+func TestSessionStoreListPrunesDanglingTokens(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+	uid := uuid.New()
+
+	if err := st.Put(ctx, sampleSession("live", uid), time.Minute); err != nil {
+		t.Fatalf("Put live: %v", err)
+	}
+	if err := st.Put(ctx, sampleSession("dying", uid), 200*time.Millisecond); err != nil {
+		t.Fatalf("Put dying: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	tokens, err := st.ListUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListUserTokens: %v", err)
+	}
+	if len(tokens) != 1 || tokens[0] != "live" {
+		t.Fatalf("tokens = %v, want [live]", tokens)
+	}
+
+	// 再查一次，确认悬挂项已被真正移除而不是每次都过滤。
+	tokens, err = st.ListUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("二次 ListUserTokens: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("tokens = %v", tokens)
+	}
+}
+
+func TestSessionStoreDeleteUserTokens(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+	uid := uuid.New()
+
+	for _, tok := range []string{"a", "b"} {
+		if err := st.Put(ctx, sampleSession(tok, uid), time.Minute); err != nil {
+			t.Fatalf("Put %s: %v", tok, err)
+		}
+	}
+	n, err := st.DeleteUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("DeleteUserTokens: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("删除数 = %d, want 2", n)
+	}
+	for _, tok := range []string{"a", "b"} {
+		if _, err := st.Get(ctx, tok); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("%s 仍存在", tok)
+		}
+	}
+	tokens, err := st.ListUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListUserTokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("索引未清空: %v", tokens)
+	}
+}
+
+func TestSessionStoreTryLock(t *testing.T) {
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	ok, err := st.TryLock(ctx, "k", time.Second)
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	if !ok {
+		t.Fatal("首次加锁应成功")
+	}
+	ok, err = st.TryLock(ctx, "k", time.Second)
+	if err != nil {
+		t.Fatalf("二次 TryLock: %v", err)
+	}
+	if ok {
+		t.Fatal("锁未释放时不应重复获得")
+	}
+}
+```
+
+- [ ] **Step 3: 运行测试确认失败**
+
+Run: `go test ./internal/store/ -run Session -v`
+Expected: 编译失败，`undefined: store.NewSessionStore`
+
+- [ ] **Step 4: 实现 SessionStore**
+
+`internal/store/session.go`：
+
+```go
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// Redis 键前缀。
+//
+//	fp:sess:{token}   → 会话 JSON，TTL 与 IdleExpiresAt 保持一致（权威数据）
+//	fp:usess:{userID} → 该用户的 token 集合（超集，用于在线设备与批量撤销）
+const (
+	sessionKeyPrefix   = "fp:sess:"
+	userSessionsPrefix = "fp:usess:"
+	sessionLockPrefix  = "fp:lock:"
+)
+
+// SessionStore 用 Redis 存放会话。
+//
+// 会话只存 Redis、不落 PostgreSQL：这沿用了 3s 的成熟做法，
+// 代价是 Redis 数据丢失等同全体重新登录——这是 3s 现在就接受的风险。
+type SessionStore struct {
+	rdb *redis.Client
+}
+
+// NewSessionStore 构造 SessionStore。
+func NewSessionStore(rdb *redis.Client) *SessionStore {
+	return &SessionStore{rdb: rdb}
+}
+
+// Put 写入会话，并把 token 记进该用户的索引。
+//
+// 索引的 TTL 取会话 TTL 与 7 天中较大者：索引是超集，允许含已过期的 token，
+// ListUserTokens 会在读取时清理，因此索引过期得晚一些是安全的。
+func (s *SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.Duration) error {
+	raw, err := json.Marshal(sess)
+	if err != nil {
+		return fmt.Errorf("store: 序列化会话: %w", err)
+	}
+
+	indexTTL := ttl
+	if indexTTL < 7*24*time.Hour {
+		indexTTL = 7 * 24 * time.Hour
+	}
+
+	pipe := s.rdb.TxPipeline()
+	pipe.Set(ctx, sessionKeyPrefix+sess.Token, raw, ttl)
+	pipe.SAdd(ctx, userSessionsPrefix+sess.UserID.String(), sess.Token)
+	pipe.Expire(ctx, userSessionsPrefix+sess.UserID.String(), indexTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("store: 写入会话: %w", err)
+	}
+	return nil
+}
+
+// Get 按 token 读会话。不存在或已过期返回 domain.ErrNotFound。
+func (s *SessionStore) Get(ctx context.Context, token string) (*domain.Session, error) {
+	raw, err := s.rdb.Get(ctx, sessionKeyPrefix+token).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, domain.Errorf(domain.ErrNotFound, "会话不存在或已过期")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: 读取会话: %w", err)
+	}
+	var sess domain.Session
+	if err := json.Unmarshal(raw, &sess); err != nil {
+		return nil, fmt.Errorf("store: 解析会话: %w", err)
+	}
+	return &sess, nil
+}
+
+// Delete 删除一个会话。token 不存在时返回 nil。
+func (s *SessionStore) Delete(ctx context.Context, token string) error {
+	// 先读出会话拿到 userID，才能同步清理索引。读不到就只删主键。
+	sess, err := s.Get(ctx, token)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+
+	pipe := s.rdb.TxPipeline()
+	pipe.Del(ctx, sessionKeyPrefix+token)
+	if sess != nil {
+		pipe.SRem(ctx, userSessionsPrefix+sess.UserID.String(), token)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("store: 删除会话: %w", err)
+	}
+	return nil
+}
+
+// Expire 重设会话主键的 TTL。用于延期。
+func (s *SessionStore) Expire(ctx context.Context, token string, ttl time.Duration) error {
+	if err := s.rdb.Expire(ctx, sessionKeyPrefix+token, ttl).Err(); err != nil {
+		return fmt.Errorf("store: 延长会话 TTL: %w", err)
+	}
+	return nil
+}
+
+// ListUserTokens 返回该用户当前仍然存活的 token，并顺手把索引里的悬挂项移除。
+func (s *SessionStore) ListUserTokens(ctx context.Context, userID uuid.UUID) ([]string, error) {
+	indexKey := userSessionsPrefix + userID.String()
+	tokens, err := s.rdb.SMembers(ctx, indexKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("store: 读取用户会话索引: %w", err)
+	}
+	if len(tokens) == 0 {
+		return []string{}, nil
+	}
+
+	keys := make([]string, len(tokens))
+	for i, tok := range tokens {
+		keys[i] = sessionKeyPrefix + tok
+	}
+	values, err := s.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("store: 批量读取会话: %w", err)
+	}
+
+	alive := make([]string, 0, len(tokens))
+	var dangling []any
+	for i, v := range values {
+		if v == nil {
+			dangling = append(dangling, tokens[i])
+			continue
+		}
+		alive = append(alive, tokens[i])
+	}
+	if len(dangling) > 0 {
+		if err := s.rdb.SRem(ctx, indexKey, dangling...).Err(); err != nil {
+			return nil, fmt.Errorf("store: 清理悬挂 token: %w", err)
+		}
+	}
+	return alive, nil
+}
+
+// DeleteUserTokens 撤销该用户的全部会话，返回实际删除的数量。
+func (s *SessionStore) DeleteUserTokens(ctx context.Context, userID uuid.UUID) (int, error) {
+	tokens, err := s.ListUserTokens(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	if len(tokens) == 0 {
+		return 0, nil
+	}
+
+	keys := make([]string, len(tokens))
+	members := make([]any, len(tokens))
+	for i, tok := range tokens {
+		keys[i] = sessionKeyPrefix + tok
+		members[i] = tok
+	}
+
+	pipe := s.rdb.TxPipeline()
+	pipe.Del(ctx, keys...)
+	pipe.SRem(ctx, userSessionsPrefix+userID.String(), members...)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, fmt.Errorf("store: 批量删除会话: %w", err)
+	}
+	return len(tokens), nil
+}
+
+// TryLock 尝试获取一把带 TTL 的互斥锁，用于给延期写与轮换去重。
+// 锁不需要显式释放，靠 TTL 自然过期即可——它的作用是限流而非临界区保护。
+func (s *SessionStore) TryLock(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	ok, err := s.rdb.SetNX(ctx, sessionLockPrefix+key, 1, ttl).Result()
+	if err != nil {
+		return false, fmt.Errorf("store: 获取锁: %w", err)
+	}
+	return ok, nil
+}
+```
+
+- [ ] **Step 5: 运行测试确认通过**
+
+Run: `go test ./internal/store/ -run Session -v`
+Expected: 8 个测试 PASS
+
+- [ ] **Step 6: 写失败的 SessionService 测试**
+
+`internal/service/session_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+// fakeClock 让测试可以精确控制"现在几点"，从而验证过期、降频与轮换的边界。
+type fakeClock struct{ ms atomic.Int64 }
+
+func newFakeClock(start int64) *fakeClock {
+	c := &fakeClock{}
+	c.ms.Store(start)
+	return c
+}
+func (c *fakeClock) Now() int64             { return c.ms.Load() }
+func (c *fakeClock) Advance(d time.Duration) { c.ms.Add(d.Milliseconds()) }
+
+func newSessionService(t *testing.T) (*service.SessionService, *fakeClock) {
+	t.Helper()
+	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	clk := newFakeClock(time.Now().UnixMilli())
+	return service.NewSessionServiceWithClock(st, clk.Now), clk
+}
+
+// testApp 造一个不落库的应用，只用于携带会话策略。
+func testApp(mutate ...func(*domain.SessionPolicy)) *domain.Application {
+	p := domain.DefaultSessionPolicy()
+	for _, m := range mutate {
+		m(&p)
+	}
+	return &domain.Application{
+		ID:      uuid.New(),
+		Name:    "test",
+		Status:  domain.ApplicationStatusActive,
+		Session: p,
+	}
+}
+
+func TestIssueCreatesSession(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := testApp()
+	uid := uuid.New()
+
+	sess, err := svc.Issue(context.Background(), service.IssueInput{
+		UserID: uid, App: app, IP: "1.2.3.4", UA: "go-test",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if len(sess.Token) < 32 {
+		t.Fatalf("token 长度 = %d, 太短", len(sess.Token))
+	}
+	if sess.UserID != uid || sess.AppID != app.ID {
+		t.Fatalf("sess = %+v", sess)
+	}
+	if sess.FirstAuthAt != clk.Now() || sess.IssuedAt != clk.Now() {
+		t.Fatalf("时间字段 = %d/%d, want %d", sess.FirstAuthAt, sess.IssuedAt, clk.Now())
+	}
+	wantIdle := clk.Now() + int64(app.Session.IdleTimeoutSeconds)*1000
+	if sess.IdleExpiresAt != wantIdle {
+		t.Fatalf("IdleExpiresAt = %d, want %d", sess.IdleExpiresAt, wantIdle)
+	}
+}
+
+func TestIssueUsesMobileTimeoutForMobileClients(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := testApp()
+
+	sess, err := svc.Issue(context.Background(), service.IssueInput{
+		UserID: uuid.New(), App: app, Mobile: true,
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	wantIdle := clk.Now() + int64(app.Session.IdleTimeoutMobileSeconds)*1000
+	if sess.IdleExpiresAt != wantIdle {
+		t.Fatalf("移动端 IdleExpiresAt = %d, want %d", sess.IdleExpiresAt, wantIdle)
+	}
+}
+
+// 最核心的一条：cache_ttl 取应用配置与剩余有效期的较小者。
+func TestValidateReturnsConfiguredCacheTTL(t *testing.T) {
+	svc, _ := newSessionService(t)
+	app := testApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	want := time.Duration(app.Session.TokenCacheTTLSeconds) * time.Second
+	if res.CacheTTL != want {
+		t.Fatalf("CacheTTL = %v, want %v", res.CacheTTL, want)
+	}
+	if res.Session.UserID != sess.UserID {
+		t.Fatalf("Session.UserID 不匹配")
+	}
+}
+
+// token 快到期时，cache_ttl 必须收缩到剩余有效期，否则 SDK 会在 token 过期后
+// 继续放行最多一个完整的缓存窗口。
+func TestCacheTTLNeverExceedsRemainingLifetime(t *testing.T) {
+	svc, clk := newSessionService(t)
+	// 空闲超时 60 秒，缓存窗口 30 秒
+	app := testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 60
+		p.IdleTimeoutMobileSeconds = 60
+		p.ExtendIntervalSeconds = 50 // 大于推进量，避免触发延期干扰本用例
+		p.TokenCacheTTLSeconds = 30
+	})
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// 推进 48 秒，只剩 12 秒
+	clk.Advance(48 * time.Second)
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.CacheTTL != 12*time.Second {
+		t.Fatalf("CacheTTL = %v, want 12s", res.CacheTTL)
+	}
+
+	// 再推进 10 秒，只剩 2 秒
+	clk.Advance(10 * time.Second)
+	res, err = svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.CacheTTL != 2*time.Second {
+		t.Fatalf("CacheTTL = %v, want 2s", res.CacheTTL)
+	}
+}
+
+// 绝对上限也参与 cache_ttl 的约束，不只是空闲超时。
+func TestCacheTTLBoundedByMaxLifetime(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 3600
+		p.IdleTimeoutMobileSeconds = 3600
+		p.MaxLifetimeSeconds = 100 // 绝对上限比空闲超时短得多
+		p.RotateIntervalSeconds = 100
+		p.ExtendIntervalSeconds = 3000
+		p.TokenCacheTTLSeconds = 30
+	})
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	clk.Advance(95 * time.Second) // 距绝对上限只剩 5 秒
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.CacheTTL != 5*time.Second {
+		t.Fatalf("CacheTTL = %v, want 5s（应受 max_lifetime 约束）", res.CacheTTL)
+	}
+}
+
+func TestValidateRejectsUnknownToken(t *testing.T) {
+	svc, _ := newSessionService(t)
+	_, err := svc.Validate(context.Background(), "no-such-token", testApp())
+	if !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestValidateRejectsEmptyToken(t *testing.T) {
+	svc, _ := newSessionService(t)
+	_, err := svc.Validate(context.Background(), "", testApp())
+	if !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestValidateRejectsIdleExpired(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 10
+		p.IdleTimeoutMobileSeconds = 10
+		p.ExtendIntervalSeconds = 5
+		p.TokenCacheTTLSeconds = 5
+	})
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	clk.Advance(11 * time.Second)
+
+	if _, err := svc.Validate(ctx, sess.Token, app); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+// 一个应用签发的 token 绝不能在另一个应用上通过校验。
+func TestValidateRejectsTokenFromAnotherApplication(t *testing.T) {
+	svc, _ := newSessionService(t)
+	appA := testApp()
+	appB := testApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: appA})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := svc.Validate(ctx, sess.Token, appB); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("跨应用校验 err = %v, want ErrUnauthorized", err)
+	}
+	// 原应用仍然有效
+	if _, err := svc.Validate(ctx, sess.Token, appA); err != nil {
+		t.Fatalf("原应用校验失败: %v", err)
+	}
+}
+
+func TestListByUser(t *testing.T) {
+	svc, _ := newSessionService(t)
+	app := testApp()
+	uid := uuid.New()
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := svc.Issue(ctx, service.IssueInput{UserID: uid, App: app, UA: "ua"}); err != nil {
+			t.Fatalf("Issue %d: %v", i, err)
+		}
+	}
+	list, err := svc.ListByUser(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("len = %d, want 3", len(list))
+	}
+	for _, s := range list {
+		if s.UserID != uid {
+			t.Fatalf("混入了其他用户的会话: %+v", s)
+		}
+	}
+}
+```
+
+- [ ] **Step 7: 运行测试确认失败**
+
+Run: `go test ./internal/service/ -run Session -v`
+Expected: 编译失败，`undefined: service.NewSessionServiceWithClock`
+
+- [ ] **Step 8: 实现 SessionService**
+
+`internal/service/session.go`：
+
+```go
+package service
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/store"
+)
+
+// SessionService 负责令牌的签发与校验。
+//
+// 设计文档 4.5.1 的核心约束在 Validate 里：**返回 cache_ttl 而非 expiry**。
+// SDK 只按 cache_ttl 缓存判定结果，永远不自己推断 token 是否过期，
+// 因此不存在「一处延期、另一处按旧 expiry 误判」的竞态。
+type SessionService struct {
+	store *store.SessionStore
+	// now 返回当前毫秒时间戳。可注入，便于测试过期与轮换边界。
+	now func() int64
+}
+
+// NewSessionService 构造使用真实时钟的 SessionService。
+func NewSessionService(st *store.SessionStore) *SessionService {
+	return NewSessionServiceWithClock(st, func() int64 { return time.Now().UnixMilli() })
+}
+
+// NewSessionServiceWithClock 构造使用自定义时钟的 SessionService。
+func NewSessionServiceWithClock(st *store.SessionStore, now func() int64) *SessionService {
+	return &SessionService{store: st, now: now}
+}
+
+// IssueInput 描述一次签发请求。
+type IssueInput struct {
+	UserID uuid.UUID
+	App    *domain.Application
+	IP     string
+	UA     string
+	// Mobile 决定适用哪一档空闲超时。
+	Mobile bool
+}
+
+// Issue 为一次成功的认证签发新会话。
+func (s *SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Session, error) {
+	if in.App == nil {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "签发会话缺少应用信息")
+	}
+	token, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+
+	now := s.now()
+	idle := in.App.Session.IdleTimeoutFor(in.Mobile)
+
+	sess := &domain.Session{
+		ID:             uuid.NewString(),
+		Token:          token,
+		UserID:         in.UserID,
+		AppID:          in.App.ID,
+		FirstAuthAt:    now,
+		IssuedAt:       now,
+		LastExtendedAt: now,
+		IdleExpiresAt:  now + idle.Milliseconds(),
+		IP:             in.IP,
+		UA:             in.UA,
+		Mobile:         in.Mobile,
+	}
+	if err := s.store.Put(ctx, sess, idle); err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
+// ValidateResult 是一次校验的结果。
+type ValidateResult struct {
+	Session *domain.Session
+	// CacheTTL 是 SDK 可以缓存本次判定结果的时长，
+	// 等于 min(应用配置的 token_cache_ttl, token 剩余有效期)。
+	CacheTTL time.Duration
+	// Rotated 为 true 时 NewToken 非空，调用方须把新 token 下发给客户端。
+	// 轮换逻辑在 Task 10 接入，本任务恒为 false。
+	Rotated  bool
+	NewToken string
+}
+
+// Validate 校验 token 并给出缓存时长。
+//
+// 校验失败一律返回 domain.ErrUnauthorized 的包装，不区分「不存在」「已过期」
+// 「不属于本应用」——这些差异对调用方没有意义，却会给攻击者提供信息。
+func (s *SessionService) Validate(ctx context.Context, token string, app *domain.Application) (*ValidateResult, error) {
+	if app == nil {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "校验 token 缺少应用信息")
+	}
+	if token == "" {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "缺少 token")
+	}
+
+	sess, err := s.store.Get(ctx, token)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// token 与应用必须匹配：A 应用签发的 token 不能在 B 应用上使用。
+	if sess.AppID != app.ID {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
+
+	now := s.now()
+	remaining := sess.RemainingAt(now, app.Session)
+	if remaining <= 0 {
+		// Redis TTL 是兜底清理，这里以 IdleExpiresAt / MaxExpiresAt 为准，
+		// 避免时钟精度或 TTL 取整导致的放行。
+		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
+
+	return &ValidateResult{
+		Session:  sess,
+		CacheTTL: cacheTTL(remaining, app.Session),
+	}, nil
+}
+
+// ListByUser 返回该用户当前存活的全部会话，用于在线设备列表。
+func (s *SessionService) ListByUser(ctx context.Context, userID uuid.UUID) ([]domain.Session, error) {
+	tokens, err := s.store.ListUserTokens(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Session, 0, len(tokens))
+	for _, tok := range tokens {
+		sess, err := s.store.Get(ctx, tok)
+		if errors.Is(err, domain.ErrNotFound) {
+			// 读取与索引清理之间存在窗口，跳过即可。
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *sess)
+	}
+	return out, nil
+}
+
+// cacheTTL 计算 SDK 可缓存的时长：不超过应用配置，也不超过 token 剩余有效期。
+//
+// 后半条是整个方案的安全底线——它保证「token 越接近过期，SDK 回源越频繁」，
+// 从而杜绝过期 token 被本地缓存继续放行。
+func cacheTTL(remaining time.Duration, p domain.SessionPolicy) time.Duration {
+	configured := time.Duration(p.TokenCacheTTLSeconds) * time.Second
+	if remaining < configured {
+		return remaining
+	}
+	return configured
+}
+```
+
+- [ ] **Step 9: 运行测试确认通过**
+
+Run: `make test`
+Expected: `internal/service` 全部 PASS（新增 10 个会话测试）
+
+- [ ] **Step 10: 提交**
+
+```bash
+git add internal
+git commit -m "feat: 会话存储、令牌签发与校验，cache_ttl 受剩余有效期约束"
+```
