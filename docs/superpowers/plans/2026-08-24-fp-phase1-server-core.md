@@ -37,7 +37,16 @@
 - 所有时间戳在 Go 侧统一用 **毫秒 int64**（`time.Now().UnixMilli()`），PG 侧用 `timestamptz`
 - 所有对外 ID 用 `uuid.UUID`（`github.com/google/uuid`）
 - 每个任务结束必须 `git commit`
-- 测试依赖通过 `docker-compose.yml` 提供；测试从 `FP_TEST_POSTGRES_URL` / `FP_TEST_REDIS_URL` 读取连接串，**未设置时测试直接失败并打印指引**，不得静默跳过
+- 测试从 `FP_TEST_POSTGRES_URL` / `FP_TEST_REDIS_URL` 读取连接串，**未设置时测试直接失败并打印指引**，不得静默跳过
+- **开发与测试依赖是局域网上已就绪的实例**（不使用 Docker，本机也没有 Docker）：
+
+  | | 地址 | 版本 | 备注 |
+  |---|---|---|---|
+  | PostgreSQL | `10.9.1.2:15432` | 18.6 | 用户 `postgres`，`uuidv7()` 已验证可用 |
+  | Redis | `10.9.1.2:4379` | 8.2.1 | 默认用户 + 密码 |
+
+  数据库 `fp`（开发）与 `fp_test`（测试）已创建。**凭据放在 git-ignored 的 `.env.local`，不得提交进仓库。**
+- 本机**没有 `make`**。构建与测试入口是 `scripts/test.sh` 与 `scripts/run.sh`（bash，Git Bash 下运行）
 
 ---
 
@@ -62,9 +71,11 @@
 ```
 fp/
 ├── go.mod
-├── docker-compose.yml               PG 18 + Redis（开发与测试依赖）
+├── .env.example                     连接串变量名示例（提交）
+├── .env.local                       实际凭据（git-ignored，不提交）
+├── scripts/test.sh                  跑全部测试
+├── scripts/run.sh                   起本地 fp
 ├── sqlc.yaml
-├── Makefile
 ├── cmd/
 │   └── fp/main.go                   入口：配置→连接→迁移→起 HTTP→优雅关闭
 └── internal/
@@ -117,7 +128,7 @@ fp/
 ## Task 1: 项目骨架与配置加载
 
 **Files:**
-- Create: `go.mod`, `docker-compose.yml`, `Makefile`, `.gitignore`
+- Create: `go.mod`, `.gitignore`, `.env.example`, `.env.local`, `scripts/test.sh`, `scripts/run.sh`
 - Create: `cmd/fp/main.go`
 - Create: `internal/config/config.go`
 - Create: `internal/logging/logging.go`
@@ -144,7 +155,7 @@ go get golang.org/x/crypto/bcrypt@latest
 go get golang.org/x/sync/singleflight@latest
 ```
 
-- [ ] **Step 2: 写 `.gitignore` 与 `docker-compose.yml`**
+- [ ] **Step 2: 写 `.gitignore`、连接配置与脚本**
 
 `.gitignore`：
 
@@ -153,62 +164,98 @@ go get golang.org/x/sync/singleflight@latest
 /fp.exe
 /tmp/
 .env
+.env.local
 ```
 
-`docker-compose.yml`：
+`.env.example`（提交进仓库，只写变量名与示例，**不写真实凭据**）：
 
-```yaml
-services:
-  postgres:
-    image: postgres:18-alpine
-    environment:
-      POSTGRES_USER: fp
-      POSTGRES_PASSWORD: fp
-      POSTGRES_DB: fp
-    ports:
-      - "5433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fp"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6380:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
+```sh
+# 复制成 .env.local 后填入真实值。.env.local 不会被提交。
+FP_PG_HOST=10.9.1.2
+FP_PG_PORT=15432
+FP_PG_USER=postgres
+FP_PG_PASSWORD=
+FP_REDIS_HOST=10.9.1.2
+FP_REDIS_PORT=4379
+FP_REDIS_PASSWORD=
 ```
 
-> 端口用 5433 / 6380 避开本机可能已有的 PG / Redis。
+`.env.local`（**不提交**，本机已验证可用的值）：
 
-`Makefile`：
-
-```makefile
-.PHONY: up down test run
-
-up:
-	docker compose up -d --wait
-
-down:
-	docker compose down -v
-
-test: up
-	FP_TEST_POSTGRES_URL=postgres://fp:fp@localhost:5433/fp?sslmode=disable \
-	FP_TEST_REDIS_URL=redis://localhost:6380/1 \
-	go test ./... -count=1
-
-run: up
-	FP_POSTGRES_URL=postgres://fp:fp@localhost:5433/fp?sslmode=disable \
-	FP_REDIS_URL=redis://localhost:6380/0 \
-	FP_BOOTSTRAP_ADMIN_USER=admin \
-	FP_BOOTSTRAP_ADMIN_PASSWORD=admin123456 \
-	go run ./cmd/fp
+```sh
+FP_PG_HOST=10.9.1.2
+FP_PG_PORT=15432
+FP_PG_USER=postgres
+FP_PG_PASSWORD=develop1234
+FP_REDIS_HOST=10.9.1.2
+FP_REDIS_PORT=4379
+FP_REDIS_PASSWORD=Develop1234
 ```
+
+`scripts/env.sh`（被另外两个脚本 source，负责拼连接串）：
+
+```sh
+#!/usr/bin/env bash
+# 载入本机凭据并拼出连接串。被 test.sh 与 run.sh 复用。
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ ! -f "$ROOT/.env.local" ]; then
+  echo "缺少 $ROOT/.env.local。请从 .env.example 复制一份并填入凭据。" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1091
+. "$ROOT/.env.local"
+set +a
+
+PG_BASE="postgres://${FP_PG_USER}:${FP_PG_PASSWORD}@${FP_PG_HOST}:${FP_PG_PORT}"
+RD_BASE="redis://:${FP_REDIS_PASSWORD}@${FP_REDIS_HOST}:${FP_REDIS_PORT}"
+
+# 开发库与测试库分开：测试会 TRUNCATE 全部业务表，绝不能跑在开发库上。
+export FP_POSTGRES_URL="${PG_BASE}/fp?sslmode=disable"
+export FP_REDIS_URL="${RD_BASE}/0"
+export FP_TEST_POSTGRES_URL="${PG_BASE}/fp_test?sslmode=disable"
+export FP_TEST_REDIS_URL="${RD_BASE}/1"
+```
+
+`scripts/test.sh`：
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$ROOT/scripts/env.sh"
+cd "$ROOT"
+go test ./... -count=1 "$@"
+```
+
+`scripts/run.sh`：
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$ROOT/scripts/env.sh"
+cd "$ROOT"
+export FP_BOOTSTRAP_ADMIN_USER="${FP_BOOTSTRAP_ADMIN_USER:-admin}"
+export FP_BOOTSTRAP_ADMIN_PASSWORD="${FP_BOOTSTRAP_ADMIN_PASSWORD:-admin123456}"
+go run ./cmd/fp
+```
+
+三个脚本都要可执行：
+
+```bash
+chmod +x scripts/env.sh scripts/test.sh scripts/run.sh
+```
+
+> **测试库与开发库必须分开。** `testsupport.NewTestDB` 每次调用都会 TRUNCATE 全部业务表；
+> 测试若指向开发库，本地调试数据会在每轮测试中被清空。数据库 `fp` 与 `fp_test` 已在
+> `10.9.1.2:15432` 上创建完毕。
 
 - [ ] **Step 3: 写失败的测试**
 
@@ -432,7 +479,7 @@ Expected: 打印一行 JSON 启动日志后挂起；`Ctrl+C` 后打印退出日�
 - [ ] **Step 10: 提交**
 
 ```bash
-git add go.mod go.sum .gitignore docker-compose.yml Makefile cmd internal
+git add go.mod go.sum .gitignore .env.example scripts cmd internal
 git commit -m "feat: 项目骨架、配置加载与结构化日志"
 ```
 
@@ -678,14 +725,13 @@ import (
 )
 
 const missingPGHint = `
-未设置 FP_TEST_POSTGRES_URL。fp 的测试需要真实的 PostgreSQL 18。
+未设置 FP_TEST_POSTGRES_URL。fp 的测试需要真实的 PostgreSQL 18（uuidv7() 是 18 引入的）。
 
-  make up
-  FP_TEST_POSTGRES_URL=postgres://fp:fp@localhost:5433/fp?sslmode=disable \
-  FP_TEST_REDIS_URL=redis://localhost:6380/1 \
-  go test ./...
+用仓库根目录的脚本跑测试，它会从 .env.local 载入连接串：
 
-或直接执行 make test。
+  ./scripts/test.sh
+
+首次使用需要先从 .env.example 复制出 .env.local 并填入凭据。
 `
 
 var (
@@ -783,10 +829,11 @@ import (
 const missingRedisHint = `
 未设置 FP_TEST_REDIS_URL。fp 的测试需要真实的 Redis。
 
-  make up
-  FP_TEST_REDIS_URL=redis://localhost:6380/1 go test ./...
+用仓库根目录的脚本跑测试，它会从 .env.local 载入连接串：
 
-注意：测试会对该 Redis DB 执行 FLUSHDB，务必使用独立的 DB index。
+  ./scripts/test.sh
+
+注意：测试会对该 Redis DB 执行 FLUSHDB，务必使用独立的 DB index（脚本已指定 /1）。
 `
 
 var (
@@ -821,7 +868,7 @@ func NewTestRedis(t *testing.T) *redis.Client {
 - [ ] **Step 7: 运行测试确认通过**
 
 ```bash
-make test
+./scripts/test.sh
 ```
 
 Expected: `internal/store` 4 个测试全部 PASS。若 `TestUUIDv7Available` 失败，说明 compose 拉起的不是 PostgreSQL 18。
@@ -870,7 +917,7 @@ func run() error {
 
 - [ ] **Step 9: 验证端到端启动**
 
-Run: `make run`
+Run: `./scripts/run.sh`
 Expected: 依次打印「数据库迁移完成」「fp 启动」两行 JSON 日志。
 
 - [ ] **Step 10: 提交**
@@ -1077,7 +1124,7 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 
 - [ ] **Step 4: 运行测试确认失败**
 
-Run: `make test` 或 `go test ./internal/service/ -v`
+Run: `./scripts/test.sh` 或 `go test ./internal/service/ -v`
 Expected: 编译失败，`undefined: service.NewAdminService`
 
 - [ ] **Step 5: 实现 AdminService**
@@ -1584,7 +1631,7 @@ func TestAdminLoginWrongPassword(t *testing.T) {
 
 - [ ] **Step 10: 运行测试确认通过**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: `internal/httpapi` 4 个测试 PASS，`internal/service` 6 个 PASS
 
 - [ ] **Step 11: 接入 main**
@@ -1626,7 +1673,7 @@ Expected: `internal/httpapi` 4 个测试 PASS，`internal/service` 6 个 PASS
 - [ ] **Step 12: 手工验证**
 
 ```bash
-make run
+./scripts/run.sh
 ```
 
 另开一个终端：
@@ -2436,7 +2483,7 @@ func scanApplication(r rowScanner) (*domain.Application, error) {
 
 - [ ] **Step 9: 运行测试确认通过**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: `internal/domain` 3 个 PASS、`internal/service` 15 个 PASS（管理员 6 + 应用 9）
 
 - [ ] **Step 10: 提交**
@@ -3451,7 +3498,7 @@ func scanIdentity(r rowScanner) (*domain.Identity, error) {
 
 - [ ] **Step 9: 运行测试确认通过**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: `internal/service` 全部 PASS（管理员 6 + 应用 9 + 用户 12）
 
 - [ ] **Step 10: 提交**
@@ -4173,7 +4220,7 @@ func TestUserServiceSatisfiesUserLookup(t *testing.T) {
 
 - [ ] **Step 11: 运行全部测试**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: 全部 PASS
 
 - [ ] **Step 12: 提交**
@@ -5049,7 +5096,7 @@ func (p *FakeProvider) LastParam(key string) string {
 
 - [ ] **Step 14: 运行测试确认通过**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: `internal/notify` 12 个测试 PASS（验证码 6 + Sender 6），其余包保持 PASS
 
 - [ ] **Step 15: 提交**
@@ -5599,7 +5646,7 @@ func TestCodeServiceSatisfiesCodeVerifier(t *testing.T) {
 
 - [ ] **Step 10: 运行全部测试**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: 全部 PASS（connector 包 13 个：注册表 7 + password 7 + sms_code 6 + 两个接口断言）
 
 - [ ] **Step 11: 手工验证阿里云通道（可选，需要真实账号）**
@@ -6602,7 +6649,7 @@ func cacheTTL(remaining time.Duration, p domain.SessionPolicy) time.Duration {
 
 - [ ] **Step 9: 运行测试确认通过**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: `internal/service` 全部 PASS（新增 10 个会话测试）
 
 - [ ] **Step 10: 提交**
@@ -7161,7 +7208,7 @@ Expected: Task 9 的 10 个 + 本任务的 9 个全部 PASS
 
 - [ ] **Step 5: 运行全部测试**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: 全部 PASS
 
 - [ ] **Step 6: 提交**
@@ -7769,7 +7816,7 @@ func (s *SessionService) announce(ctx context.Context, ev domain.RevokeEvent) {
 
 - [ ] **Step 10: 运行全部测试**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: 全部 PASS（新增撤销测试 6 个）
 
 - [ ] **Step 11: 提交**
@@ -8874,7 +8921,7 @@ func (s *AuthService) writeLog(ctx context.Context, e domain.LoginLog) {
 
 - [ ] **Step 10: 运行全部测试**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: 全部 PASS
 
 - [ ] **Step 11: 提交**
@@ -10331,13 +10378,13 @@ func TestUserNotFound(t *testing.T) {
 
 - [ ] **Step 10: 运行全部测试**
 
-Run: `make test`
+Run: `./scripts/test.sh`
 Expected: 全部 PASS
 
 - [ ] **Step 11: 手工验证**
 
 ```bash
-make run
+./scripts/run.sh
 ```
 
 另开终端：
@@ -11021,11 +11068,11 @@ Expected: 10 个测试全部 PASS
 - [ ] **Step 4: 运行全部测试并检查覆盖**
 
 ```bash
-make test
+./scripts/test.sh
 ```
 
 ```bash
-FP_TEST_POSTGRES_URL=postgres://fp:fp@localhost:5433/fp?sslmode=disable FP_TEST_REDIS_URL=redis://localhost:6380/1 go test ./... -cover
+./scripts/test.sh -cover
 ```
 
 Expected: 全部 PASS。`internal/service`、`internal/connector`、`internal/notify` 三个包的覆盖率应在 70% 以上；低于此说明有分支没被测到，补测试而不是调低预期。
@@ -11033,7 +11080,7 @@ Expected: 全部 PASS。`internal/service`、`internal/connector`、`internal/no
 - [ ] **Step 5: 手工跑一遍完整流程**
 
 ```bash
-make run
+./scripts/run.sh
 ```
 
 另开终端，依次执行（每步都应成功）：
