@@ -4798,21 +4798,34 @@ func TestRateLimiterKeysAreIndependent(t *testing.T) {
 	}
 }
 
-func TestRateLimiterWindowExpires(t *testing.T) {
+// 固定窗口：TTL 只在第一次计数时设置，后续请求不得延长它。
+//
+// 时间点刻意错开，否则测不出区别：如果三次调用都挤在 t≈0 附近，
+// 那么"正确的固定窗口"和"被错误延长的滑动窗口"到期时刻几乎重合，
+// 删掉 allowScript 里的 `if c == 1` 守卫测试照样通过——那就不是测试了。
+//
+//	窗口 600ms，limit 1
+//	t=0     放行，窗口到 600
+//	t=500   拒绝。若实现错成滑动窗口，此刻会把窗口续到 1100
+//	t=700   固定窗口应放行；滑动窗口仍在封锁期内 → 能区分两者
+func TestRateLimiterWindowIsFixedNotSliding(t *testing.T) {
 	rl := store.NewRateLimiter(testsupport.NewTestRedis(t))
 	ctx := context.Background()
+	const window = 600 * time.Millisecond
 
-	if allowed, _, _ := rl.Allow(ctx, "k", 300*time.Millisecond, 1); !allowed {
-		t.Fatal("首次应放行")
-	}
-	if allowed, _, _ := rl.Allow(ctx, "k", 300*time.Millisecond, 1); allowed {
-		t.Fatal("窗口内第二次应拒绝")
+	if allowed, _, _ := rl.Allow(ctx, "k", window, 1); !allowed {
+		t.Fatal("t=0 首次应放行")
 	}
 
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
+	if allowed, _, _ := rl.Allow(ctx, "k", window, 1); allowed {
+		t.Fatal("t=500 窗口内应拒绝")
+	}
 
-	if allowed, _, _ := rl.Allow(ctx, "k", 300*time.Millisecond, 1); !allowed {
-		t.Fatal("窗口过期后应重新放行")
+	time.Sleep(200 * time.Millisecond) // t=700，已过原窗口
+	if allowed, _, _ := rl.Allow(ctx, "k", window, 1); !allowed {
+		t.Fatal("t=700 原窗口已到期应放行；仍被拒说明 TTL 被第二次请求延长了，" +
+			"固定窗口退化成了滑动窗口——持续打压下用户会被无限锁死")
 	}
 }
 ```
@@ -5264,7 +5277,8 @@ func TestSenderFallsBackToNextProvider(t *testing.T) {
 
 	primary.FailNext(errors.New("供应商余额不足"))
 
-	if err := s.Send(context.Background(), msg("13800138000")); err != nil {
+	ctx := context.Background()
+	if err := s.Send(ctx, msg("13800138000")); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if len(primary.Sent()) != 0 {
@@ -5272,6 +5286,51 @@ func TestSenderFallsBackToNextProvider(t *testing.T) {
 	}
 	if len(backup.Sent()) != 1 {
 		t.Fatalf("backup 应接手, sent = %d", len(backup.Sent()))
+	}
+
+	// 降级必须在发送记录里留下痕迹：失败一条 + 成功一条。
+	// 只看"消息最终送达"是不够的，排障时要能看出主供应商挂过。
+	var total, failed int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), count(*) FILTER (WHERE NOT success) FROM notify_log WHERE target = $1`,
+		"13800138000").Scan(&total, &failed); err != nil {
+		t.Fatalf("查询发送记录: %v", err)
+	}
+	if total != 2 || failed != 1 {
+		t.Fatalf("发送记录 total=%d failed=%d, want 2/1（每次尝试一条）", total, failed)
+	}
+}
+
+// 只有"主挂了备接手"是测不出顺序的：反序尝试、或者无脑广播给所有供应商，
+// 观察到的结果完全一样。用两个都健康的供应商才能钉住"按顺序、命中即停"。
+func TestSenderUsesFirstProviderAndStops(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, nil)
+
+	primary := notify.NewFakeProvider(notify.ChannelSMS, "primary")
+	backup := notify.NewFakeProvider(notify.ChannelSMS, "backup")
+	s.AddProvider(primary)
+	s.AddProvider(backup)
+
+	ctx := context.Background()
+	if err := s.Send(ctx, msg("13800138000")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(primary.Sent()) != 1 {
+		t.Fatalf("primary 应收到, sent = %d（先加入者即主供应商）", len(primary.Sent()))
+	}
+	if len(backup.Sent()) != 0 {
+		t.Fatalf("primary 成功后不应再试 backup, sent = %d", len(backup.Sent()))
+	}
+
+	var total int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM notify_log WHERE target = $1`, "13800138000").Scan(&total); err != nil {
+		t.Fatalf("查询发送记录: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("发送记录数 = %d, want 1（命中即停，不应给每个供应商都记一条）", total)
 	}
 }
 
@@ -5281,11 +5340,17 @@ func TestSenderReturnsErrorWhenAllProvidersFail(t *testing.T) {
 	s := notify.NewSender(pool, limiter, nil)
 
 	p := notify.NewFakeProvider(notify.ChannelSMS, "only")
-	p.FailNext(errors.New("网络不可达"))
+	cause := errors.New("网络不可达")
+	p.FailNext(cause)
 	s.AddProvider(p)
 
-	if err := s.Send(context.Background(), msg("13800138000")); err == nil {
+	err := s.Send(context.Background(), msg("13800138000"))
+	if err == nil {
 		t.Fatal("全部供应商失败时应返回错误")
+	}
+	// 必须把底层原因包在错误链里，否则排障时只能看到"全部失败"这种废话
+	if !errors.Is(err, cause) {
+		t.Fatalf("err = %v, 未包住底层原因 %v", err, cause)
 	}
 }
 
@@ -5317,13 +5382,14 @@ func TestSenderWritesLogWithoutCode(t *testing.T) {
 		t.Fatalf("provider = %q, want fake", provider)
 	}
 
-	// 全表扫一遍，确认没有任何列泄露了验证码。
+	// 整行转成文本再查，而不是逐列列举。
+	//
+	// 逐列写法有个隐蔽的失效模式：将来有人给 notify_log 加了 params 列并把
+	// msg.Params 写进去，行数断言照样是 1，而 LIKE 子句压根不会看那个新列——
+	// 测试通过，验证码却泄露了。整行匹配天然覆盖未来新增的任何列。
 	var leaked int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM notify_log
-		 WHERE channel LIKE '%123456%' OR target LIKE '%123456%'
-		    OR template LIKE '%123456%' OR provider LIKE '%123456%'
-		    OR error LIKE '%123456%'`).Scan(&leaked); err != nil {
+		`SELECT count(*) FROM notify_log WHERE notify_log::text LIKE '%123456%'`).Scan(&leaked); err != nil {
 		t.Fatalf("检查验证码泄露: %v", err)
 	}
 	if leaked != 0 {
