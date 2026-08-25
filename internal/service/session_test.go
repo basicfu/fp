@@ -121,7 +121,10 @@ func TestCacheTTLNeverExceedsRemainingLifetime(t *testing.T) {
 	app := testApp(func(p *domain.SessionPolicy) {
 		p.IdleTimeoutSeconds = 60
 		p.IdleTimeoutMobileSeconds = 60
-		p.ExtendIntervalSeconds = 50 // 大于推进量，避免触发延期干扰本用例
+		// 必须大于本用例的累计推进量（48s+10s=58s），而非单步推进量——
+		// 延期窗口判定用的是 now-LastExtendedAt，从未延期过时就是累计耗时。
+		// Task 9 写下这个值时 Validate 还没有真正的延期逻辑，50s 恰好不够。
+		p.ExtendIntervalSeconds = 1000
 		p.TokenCacheTTLSeconds = 30
 	})
 	ctx := context.Background()

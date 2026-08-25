@@ -81,12 +81,31 @@ type ValidateResult struct {
 	// 等于 min(应用配置的 token_cache_ttl, token 剩余有效期)。
 	CacheTTL time.Duration
 	// Rotated 为 true 时 NewToken 非空，调用方须把新 token 下发给客户端。
-	// 轮换逻辑在 Task 10 接入，本任务恒为 false。
 	Rotated  bool
 	NewToken string
 }
 
-// Validate 校验 token 并给出缓存时长。
+// MinRotateGrace 是 token 轮换后旧 token 的最短过渡期。
+const MinRotateGrace = 15 * time.Second
+
+// extendLockTTL 是延期写与轮换的去重锁时长。
+// 它只用于限流，不保护临界区，因此不需要显式释放。
+const extendLockTTL = 10 * time.Second
+
+// GraceDuration 返回 token 轮换后旧 token 的过渡期。
+//
+// 取 max(15s, token_cache_ttl)：过渡期短于缓存窗口的话，
+// SDK 本地缓存里的旧 token 会在过渡期结束后仍被放行——
+// 请求打到 fp 时旧 token 已经不存在，用户被无谓地踢掉。
+func GraceDuration(p domain.SessionPolicy) time.Duration {
+	g := MinRotateGrace
+	if c := time.Duration(p.TokenCacheTTLSeconds) * time.Second; c > g {
+		g = c
+	}
+	return g
+}
+
+// Validate 校验 token，必要时顺带轮换或延期。
 //
 // 校验失败一律返回 domain.ErrUnauthorized 的包装，不区分「不存在」「已过期」
 // 「不属于本应用」——这些差异对调用方没有意义，却会给攻击者提供信息。
@@ -105,24 +124,118 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 	if err != nil {
 		return nil, err
 	}
-
-	// token 与应用必须匹配：A 应用签发的 token 不能在 B 应用上使用。
 	if sess.AppID != app.ID {
 		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
 	}
 
 	now := s.now()
-	remaining := sess.RemainingAt(now, app.Session)
-	if remaining <= 0 {
-		// Redis TTL 是兜底清理，这里以 IdleExpiresAt / MaxExpiresAt 为准，
-		// 避免时钟精度或 TTL 取整导致的放行。
+	if sess.RemainingAt(now, app.Session) <= 0 {
 		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
 	}
 
-	return &ValidateResult{
-		Session:  sess,
-		CacheTTL: cacheTTL(remaining, app.Session),
-	}, nil
+	res := &ValidateResult{Session: sess}
+
+	// 轮换优先于延期：轮换本身就会给新会话一个完整的空闲窗口。
+	if now-sess.IssuedAt >= app.Session.RotateInterval().Milliseconds() {
+		rotated, newSess, err := s.tryRotate(ctx, sess, app, now)
+		if err != nil {
+			return nil, err
+		}
+		if rotated {
+			res.Session = newSess
+			res.Rotated = true
+			res.NewToken = newSess.Token
+		}
+	} else if now-sess.LastExtendedAt >= app.Session.ExtendInterval().Milliseconds() {
+		extended, err := s.tryExtend(ctx, sess, app, now)
+		if err != nil {
+			return nil, err
+		}
+		if extended != nil {
+			res.Session = extended
+		}
+	}
+
+	res.CacheTTL = cacheTTL(res.Session.RemainingAt(s.now(), app.Session), app.Session)
+	return res, nil
+}
+
+// tryExtend 在拿到去重锁时刷新空闲超时，否则原样返回 nil。
+//
+// 两层降频（设计文档 4.5.2）：调用方已按 extend_interval 做了时间窗判断，
+// 这里的锁负责挡住同一瞬间的并发请求，避免同一行被反复 UPDATE。
+func (s *SessionService) tryExtend(ctx context.Context, sess *domain.Session, app *domain.Application, now int64) (*domain.Session, error) {
+	ok, err := s.store.TryLock(ctx, "ext:"+sess.Token, extendLockTTL)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	idle := app.Session.IdleTimeoutFor(sess.Mobile)
+	updated := *sess
+	updated.LastExtendedAt = now
+	updated.IdleExpiresAt = now + idle.Milliseconds()
+
+	// Redis TTL 取剩余有效期而非空闲超时：绝对上限更近时，
+	// 让 Redis 在上限时刻自动清理，避免留下必然会被拒绝的僵尸会话。
+	if err := s.store.Put(ctx, &updated, updated.RemainingAt(now, app.Session)); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// tryRotate 在拿到去重锁时换发新 token，并把旧 token 缩短到过渡期。
+//
+// 新会话继承 ID 与 FirstAuthAt：轮换只换 token 的值，会话本身没有变。
+// 特别是 FirstAuthAt 绝不能重置，否则 max_lifetime 会被活跃用户无限续命。
+func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, app *domain.Application, now int64) (bool, *domain.Session, error) {
+	grace := GraceDuration(app.Session)
+
+	// 锁的 TTL 取过渡期：过渡期内旧 token 仍可用，但不应再次触发轮换。
+	ok, err := s.store.TryLock(ctx, "rot:"+sess.ID, grace)
+	if err != nil {
+		return false, nil, err
+	}
+	if !ok {
+		return false, nil, nil
+	}
+
+	newToken, err := randomToken()
+	if err != nil {
+		return false, nil, err
+	}
+	idle := app.Session.IdleTimeoutFor(sess.Mobile)
+
+	newSess := *sess
+	newSess.Token = newToken
+	newSess.IssuedAt = now
+	newSess.LastExtendedAt = now
+	newSess.IdleExpiresAt = now + idle.Milliseconds()
+	if err := s.store.Put(ctx, &newSess, newSess.RemainingAt(now, app.Session)); err != nil {
+		return false, nil, err
+	}
+
+	// 旧 token 缩短到过渡期。
+	// 同时把 IdleExpiresAt 一起改小——只改 Redis TTL 的话，会话 JSON 里
+	// 仍是很远的过期时间，cache_ttl 会按完整窗口下发，而 Redis key 在过渡期
+	// 结束就没了，SDK 会拿着一个已被删除的 token 继续放行。
+	//
+	// 特意不改 IssuedAt：过渡期内旧 token 再次被校验时，(now-IssuedAt) 依旧
+	// 越过 rotate_interval，会继续走 Validate 的 if 分支进入 tryRotate——
+	// 但 "rot:"+sess.ID 锁此时仍握着（TTL 正是 grace），会直接把它拦下，
+	// 函数原样返回。这一步真正的作用是把控制流留在 if 分支，不落到
+	// else if 的延期分支：一旦落到延期分支，LastExtendedAt 早已陈旧，会被
+	// 判定为"该延期"，从而把刚缩短的 IdleExpiresAt 重新拉回一整个空闲窗口，
+	// 过渡期形同虚设。
+	oldSess := *sess
+	oldSess.IdleExpiresAt = now + grace.Milliseconds()
+	if err := s.store.Put(ctx, &oldSess, grace); err != nil {
+		return false, nil, err
+	}
+
+	return true, &newSess, nil
 }
 
 // ListByUser 返回该用户当前存活的全部会话，用于在线设备列表。
