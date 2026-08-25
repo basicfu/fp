@@ -3047,6 +3047,49 @@ func TestSubjectNormalization(t *testing.T) {
 	}
 }
 
+// 两条写入路径必须用同一套规整，否则只规整一条等于没规整。
+func TestAttachIdentityNormalizesSubject(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	// 用非规整形式挂一个邮箱标识
+	if _, err := svc.AttachIdentity(ctx, u.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeEmail, Subject: "  Alice@Example.COM ",
+	}); err != nil {
+		t.Fatalf("AttachIdentity: %v", err)
+	}
+
+	// 规整形式必须能查到同一个人，而不是被当成新用户
+	found, _, err := svc.FindByIdentity(ctx, domain.IdentityTypeEmail, "alice@example.com")
+	if err != nil {
+		t.Fatalf("规整形式查不到，说明 AttachIdentity 未规整: %v", err)
+	}
+	if found.ID != u.ID {
+		t.Fatalf("查到了别的用户: %v vs %v", found.ID, u.ID)
+	}
+
+	// 再走 EnsureUserWithIdentity 也必须归并到同一个人，不能新建
+	same, _, created, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeEmail, Subject: "ALICE@EXAMPLE.COM",
+	})
+	if err != nil {
+		t.Fatalf("EnsureUserWithIdentity: %v", err)
+	}
+	if created {
+		t.Fatal("两条写入路径规整不一致，产生了重复用户")
+	}
+	if same.ID != u.ID {
+		t.Fatalf("归并到了别的用户: %v vs %v", same.ID, u.ID)
+	}
+}
+
 // bcrypt 超过 72 字节会直接报错；必须在调用它之前拦成 400，而不是漏成 500。
 func TestSetPasswordRejectsTooLong(t *testing.T) {
 	svc := newUserService(t)
@@ -3467,6 +3510,11 @@ func (s *UserService) AttachIdentity(ctx context.Context, userID uuid.UUID, in E
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	// 必须和 EnsureUserWithIdentity 用同一套规整。写入路径有两条，
+	// 只规整其中一条等于没规整：通过这里存进去的 Alice@X.com，
+	// 之后用 alice@x.com 查就找不到，照样裂成两个账号。
+	in = in.normalize()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("service: 开启事务: %w", err)
