@@ -269,27 +269,25 @@ func (s *SessionService) ListByUser(ctx context.Context, userID uuid.UUID) ([]do
 	return out, nil
 }
 
-// Revoke 作废单个 token，用于登出。
+// Revoke 作废单个 token 所属的**整个会话**，用于登出。
+//
+// 注意它撤销的是会话而不只是这一个 token：轮换过渡期内同一个会话有新旧
+// 两个 token 同时有效，只删调用方递上来的那个，另一个会继续有效最多
+// GraceDuration（默认 30 秒），而且不会出现在撤销事件里——SDK 那边的缓存
+// 也照样放行。用户点了"退出登录"却还能被另一个 token 访问，这不可接受。
 func (s *SessionService) Revoke(ctx context.Context, token, reason string) error {
 	sess, err := s.store.Get(ctx, token)
 	if errors.Is(err, domain.ErrNotFound) {
-		// 已经不存在了，登出视为成功。
+		// 已经不存在了，登出视为成功。重复登出、并发登出都会走到这里。
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if err := s.store.Delete(ctx, token); err != nil {
-		return err
-	}
-	s.announce(ctx, domain.RevokeEvent{
-		Tokens: []string{token},
-		UserID: sess.UserID,
-		AppID:  sess.AppID,
-		Reason: reason,
-		At:     s.now(),
+	_, err = s.revokeMatching(ctx, sess.UserID, sess.AppID, reason, func(x *domain.Session) bool {
+		return x.ID == sess.ID
 	})
-	return nil
+	return err
 }
 
 // RevokeSession 作废一个会话的全部 token，包括轮换过渡期内尚存的旧 token。
@@ -349,7 +347,15 @@ func (s *SessionService) revokeMatching(
 		if len(revoked) == 0 {
 			return
 		}
-		s.announce(ctx, domain.RevokeEvent{
+		// 用 WithoutCancel 剥掉取消信号。
+		//
+		// 触发这个 defer 的失败里，最常见的一种恰恰就是 ctx 被取消——
+		// 管理员对上千个会话执行 RevokeUser 撞上 handler 超时、或客户端断开。
+		// 那时 store.Delete 因 ctx 报错退出，而 deferred 的 announce 若沿用
+		// 同一个已死的 ctx，go-redis 会在取连接阶段直接拒掉 PUBLISH——
+		// token 已经从 Redis 删了，事件却发不出去，SDK 继续用缓存放行
+		// 一整个 cache_ttl。这正是 defer 要堵的洞，不剥掉取消信号就等于没堵。
+		s.announce(context.WithoutCancel(ctx), domain.RevokeEvent{
 			Tokens: revoked,
 			UserID: userID,
 			AppID:  eventAppID,

@@ -65,3 +65,34 @@ func TestRevokePublishNoSubscriberIsNotAnError(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 }
+
+// ctx 取消必须真正关掉底层订阅，而不是只在有消息流入时才顺带生效。
+//
+// Subscribe 返回的 out channel 由内部 reader goroutine 在
+// `for msg := range sub.Channel()` 上驱动；这个 range 只在 sub.Channel()
+// 关闭（即 sub.Close() 被调用）时才退出。之前的实现只在 select 里放了一个
+// <-ctx.Done() 分支去争抢一次发送，完全没有消息流入时 goroutine 根本走不到
+// 那个 select——必须有一个专门等 ctx.Done() 再调用 sub.Close() 的 goroutine，
+// 这才是让订阅连接真正释放的唯一途径。这里刻意不发布任何消息，只验证
+// "no message traffic" 这条最容易被忽略的路径：cancel 之后 out 必须关闭。
+func TestSubscribeClosesOnContextCancellation(t *testing.T) {
+	pub := store.NewRevokePublisher(testsupport.NewTestRedis(t))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	events, _, err := pub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("cancel 之后收到了一个值，预期 channel 应该关闭且为空")
+		}
+		// ok == false：channel 已关闭，符合预期。
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 取消后 2 秒内 channel 仍未关闭——订阅连接被泄漏了")
+	}
+}

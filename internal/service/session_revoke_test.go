@@ -296,3 +296,109 @@ func TestRevokeAnnouncesPartialProgressOnError(t *testing.T) {
 		t.Fatal("3 秒内未收到撤销事件——中途出错时，已删除的部分也应该照样广播")
 	}
 }
+
+// 登出必须连带作废轮换过渡期里的兄弟 token。
+//
+// 过渡期内同一会话有新旧两个 token 都有效。只删调用方递上来的那个，
+// 另一个还能再用最多 GraceDuration，而且不在撤销事件里——SDK 缓存也照样放行。
+// 用户点了"退出登录"却还能被另一个 token 访问。
+func TestRevokeCoversRotationGraceSibling(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := rotateApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	oldToken := sess.Token
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, oldToken, app)
+	if err != nil {
+		t.Fatalf("触发轮换: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatal("应当触发轮换")
+	}
+	newToken := res.NewToken
+
+	// 用新 token 登出
+	if err := svc.Revoke(ctx, newToken, domain.RevokeReasonLogout); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	for name, tok := range map[string]string{"新": newToken, "过渡期内的旧": oldToken} {
+		if _, err := svc.Validate(ctx, tok, app); !errors.Is(err, domain.ErrUnauthorized) {
+			t.Fatalf("%s token 登出后仍有效, err = %v", name, err)
+		}
+	}
+}
+
+// revokeMatching 的 defer 必须用 context.WithoutCancel 剥掉调用方 ctx 的取消信号，
+// 否则触发 defer 的最常见原因——ctx 被取消（管理员批量撤销撞上 handler 超时、
+// 或客户端断开）——会连累 announce 本身：go-redis 在取连接阶段就会拒掉一个
+// 已取消 ctx 上的 PUBLISH，token 已经从 Redis 删了，事件却发不出去。
+//
+// 用真实的 goroutine 竞态去触发"循环中途 ctx 被取消"是不确定的：Redis 往返
+// 耗时不可控，没有办法可靠地卡在"删完第 N 个、还没删第 N+1 个"这个时间点上，
+// 勉强用轮询去猜会得到一个偶发失败的测试，不符合这个代码库里其它用例
+// （假时钟、显式占锁）一直坚持的确定性要求。
+//
+// 这里换一个完全确定、不依赖真实并发的构造：把"当前时间"这个已经是测试可控
+// 依赖的东西，变成第二个同步点。revokeMatching 的 defer 里 s.now() 只会被
+// 调用一次——用来给即将广播的事件盖时间戳——而且严格发生在整个循环（所有
+// Get/Delete）已经跑完之后、announce 的 Publish 真正执行之前。把这次 s.now()
+// 调用本身接上 cancel()，就能不多不少地精确复现"ctx 在 announce 即将发布时
+// 已经被取消"，而不必依赖任何真实的时间竞赛。
+func TestRevokeAnnounceSurvivesCtxCancellation(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
+	pub := store.NewRevokePublisher(rdb)
+	app := testApp()
+	uid := uuid.New()
+
+	// 订阅方用独立、不会被取消的 ctx——我们要验证的是 Publish 这一端能不能
+	// 扛住 ctx 取消，不希望订阅连接自己也被牵连着关掉。
+	subCtx, subCancel := context.WithCancel(context.Background())
+	defer subCancel()
+	events, closeFn, err := pub.Subscribe(subCtx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer closeFn()
+
+	// 签发用普通时钟，不触发取消。
+	issueSvc := service.NewSessionServiceWithClock(st, pub, func() int64 { return time.Now().UnixMilli() })
+	sess, err := issueSvc.Issue(context.Background(), service.IssueInput{UserID: uid, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	revokeCtx, cancel := context.WithCancel(context.Background())
+	// 这个时钟只会在 revokeMatching 的 defer 里被调用那一次用到——
+	// 此时 Delete 已经成功、循环已经跑完，cancel() 在这里触发不会打断
+	// 任何一次 Redis 操作，只会让随后的 announce 拿到一个已取消的 ctx。
+	revokeSvc := service.NewSessionServiceWithClock(st, pub, func() int64 {
+		cancel()
+		return time.Now().UnixMilli()
+	})
+
+	if err := revokeSvc.Revoke(revokeCtx, sess.Token, domain.RevokeReasonLogout); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	// 撤销本身（删 Redis 会话）必须已经生效，不受 ctx 后来被取消影响。
+	if _, err := issueSvc.Validate(context.Background(), sess.Token, app); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("token 撤销后仍有效, err = %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	select {
+	case ev := <-events:
+		if len(ev.Tokens) != 1 || ev.Tokens[0] != sess.Token {
+			t.Fatalf("事件 Tokens = %v, want [%s]", ev.Tokens, sess.Token)
+		}
+	case <-deadline:
+		t.Fatal("3 秒内未收到撤销事件——ctx 在 announce 前被取消时，事件不该丢")
+	}
+}
