@@ -50,6 +50,11 @@
 
   数据库 `fp`（开发）与 `fp_test`（测试）已创建。**凭据放在 git-ignored 的 `.env.local`，不得提交进仓库。**
 - 本机**没有 `make`**。构建与测试入口是 `scripts/test.sh` 与 `scripts/run.sh`（bash，Git Bash 下运行）
+- **测试必须串行执行**：`scripts/test.sh` 带 `-p 1`，且任何测试都**不得**调用 `t.Parallel()`。
+  原因：`testsupport.NewTestDB` 每次调用都 TRUNCATE 全部业务表，而所有包共用同一个 LAN 上的
+  `fp_test` 库。`go test ./...` 默认并行跑各包，两个包同时清表必然互相打断——Task 3 引入
+  第二个访问同一张表的包时，这个竞争 100% 复现。这是共享库 + 清表隔离模型的固有代价，
+  不是可以靠"小心一点"绕开的
 
 ---
 
