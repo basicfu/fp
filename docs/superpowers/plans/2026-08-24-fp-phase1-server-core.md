@@ -7005,7 +7005,10 @@ func TestCacheTTLNeverExceedsRemainingLifetime(t *testing.T) {
 	app := testApp(func(p *domain.SessionPolicy) {
 		p.IdleTimeoutSeconds = 60
 		p.IdleTimeoutMobileSeconds = 60
-		p.ExtendIntervalSeconds = 50 // 大于推进量，避免触发延期干扰本用例
+		// 设得足够大以确保本用例期间延期逻辑不会触发。Task 9 时延期尚未实现，
+		// 50 就够了；Task 10 让它真正生效后，累计推进 58 秒会跨过 50 秒窗口，
+		// 延期一触发 token 就不再"逼近过期"，本用例要验证的性质也就没了。
+		p.ExtendIntervalSeconds = 1000
 		p.TokenCacheTTLSeconds = 30
 	})
 	ctx := context.Background()
@@ -7860,7 +7863,15 @@ func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, ap
 	// 仍是很远的过期时间，cache_ttl 会按完整窗口下发，而 Redis key 在过渡期
 	// 结束就没了，SDK 会拿着一个已被删除的 token 继续放行。
 	oldSess := *sess
-	oldSess.IssuedAt = now // 防止过渡期内旧 token 再次触发轮换
+	// 刻意**不**动 IssuedAt。
+	//
+	// 把它设成 now 看似能防止旧 token 再次轮换，实际适得其反：旧 token 于是
+	// 显得"刚签发"，下一次校验掉出轮换分支、落进 else-if 的延期分支，
+	// 而它的 LastExtendedAt 还是轮换前的旧值，延期条件成立——刚缩短的
+	// IdleExpiresAt 被重新撑回一个完整的空闲窗口，过渡期就被静默摧毁了。
+	//
+	// 保持 IssuedAt 不变，旧 token 仍会进轮换分支，但 "rot:"+sess.ID 这把
+	// TTL 等于过渡期的锁会挡住它，也就不会落到延期分支上。
 	oldSess.IdleExpiresAt = now + grace.Milliseconds()
 	if err := s.store.Put(ctx, &oldSess, grace); err != nil {
 		return false, nil, err
