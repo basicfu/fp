@@ -46,6 +46,12 @@ func (s *AdminService) EnsureBootstrap(ctx context.Context, username, password s
 	if username == "" || password == "" {
 		return nil
 	}
+	// 同 UserService.SetPassword 的理由：bcrypt 超过 72 字节直接报错，
+	// 不拦住就会在启动时炸出一个不知所云的 bcrypt 错误。
+	if len(password) > maxPasswordBytes {
+		return domain.Errorf(domain.ErrInvalidArgument,
+			"引导管理员密码过长（超过 %d 字节，约 %d 个汉字）", maxPasswordBytes, maxPasswordBytes/3)
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
 		return fmt.Errorf("service: 计算管理员密码哈希: %w", err)

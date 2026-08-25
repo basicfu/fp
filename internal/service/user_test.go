@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -143,6 +144,125 @@ func TestWechatMergesByUnionKey(t *testing.T) {
 	}
 	if len(ids) != 2 {
 		t.Fatalf("identity 数量 = %d, want 2", len(ids))
+	}
+
+	// 规则 1 必须优先于规则 2。重复微信登录就是"(type,subject) 已存在 **且**
+	// unionKey 也已存在"，是本任务里流量最高的一条路径：若两条规则顺序调换，
+	// 每一次回头客登录都会变成 409。
+	u3, id3, created, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeWechatMP, Subject: "openid-mp", UnionKey: "union-1",
+	})
+	if err != nil {
+		t.Fatalf("重复微信登录: %v", err)
+	}
+	if created {
+		t.Fatal("重复登录不应创建用户")
+	}
+	if u3.ID != u1.ID {
+		t.Fatalf("重复登录落到了别的用户: %v vs %v", u3.ID, u1.ID)
+	}
+	if id3.ID != id1ID(t, svc, ctx) {
+		t.Fatal("重复登录应复用原 identity 行，而不是新插一条")
+	}
+	after, err := svc.ListIdentities(ctx, u1.ID)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("重复登录后 identity 数量 = %d, want 仍为 2", len(after))
+	}
+}
+
+// id1ID 取回 (wechat_mp, openid-mp) 那条 identity 的 ID，供上面的复用断言使用。
+func id1ID(t *testing.T, svc *service.UserService, ctx context.Context) uuid.UUID {
+	t.Helper()
+	_, id, err := svc.FindByIdentity(ctx, domain.IdentityTypeWechatMP, "openid-mp")
+	if err != nil {
+		t.Fatalf("FindByIdentity: %v", err)
+	}
+	return id.ID
+}
+
+// 归并靠字面相等，所以同一个人的不同写法必须先收敛。
+func TestSubjectNormalization(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u1, _, created, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeEmail, Subject: "Alice@Example.COM",
+	})
+	if err != nil {
+		t.Fatalf("首次: %v", err)
+	}
+	if !created {
+		t.Fatal("首次应创建用户")
+	}
+
+	u2, _, created, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeEmail, Subject: "  alice@example.com  ",
+	})
+	if err != nil {
+		t.Fatalf("第二次: %v", err)
+	}
+	if created {
+		t.Fatal("大小写与空白差异不应产生新用户")
+	}
+	if u2.ID != u1.ID {
+		t.Fatalf("邮箱未规整: %v vs %v", u2.ID, u1.ID)
+	}
+
+	// 用户名同样规整
+	un1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "Alice",
+	})
+	if err != nil {
+		t.Fatalf("username 首次: %v", err)
+	}
+	un2, _, created, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "alice",
+	})
+	if err != nil {
+		t.Fatalf("username 第二次: %v", err)
+	}
+	if created || un2.ID != un1.ID {
+		t.Fatal("用户名未规整")
+	}
+
+	// 落库的是规整后的值
+	ids, err := svc.ListIdentities(ctx, u1.ID)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	if ids[0].Subject != "alice@example.com" {
+		t.Fatalf("落库 subject = %q, want alice@example.com", ids[0].Subject)
+	}
+}
+
+// bcrypt 超过 72 字节会直接报错；必须在调用它之前拦成 400，而不是漏成 500。
+func TestSetPasswordRejectsTooLong(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	// 73 个 ASCII 字符——密码管理器生成的长口令就是这个量级
+	long := strings.Repeat("a", 73)
+	if err := svc.SetPassword(ctx, u.ID, long); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("73 字节 err = %v, want ErrInvalidArgument", err)
+	}
+	// 25 个汉字 = 75 字节，rune 数看着不多，字节数已超限
+	cjk := strings.Repeat("密", 25)
+	if err := svc.SetPassword(ctx, u.ID, cjk); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("25 个汉字 err = %v, want ErrInvalidArgument", err)
+	}
+	// 边界内应当成功
+	if err := svc.SetPassword(ctx, u.ID, strings.Repeat("a", 72)); err != nil {
+		t.Fatalf("72 字节应当成功: %v", err)
 	}
 }
 

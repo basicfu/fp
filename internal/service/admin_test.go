@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/basicfu/fp/internal/domain"
@@ -39,6 +40,16 @@ func TestEnsureBootstrapSkipsWhenEmpty(t *testing.T) {
 	svc := newAdminService(t)
 	if err := svc.EnsureBootstrap(context.Background(), "", ""); err != nil {
 		t.Fatalf("未配置引导管理员时应静默跳过: %v", err)
+	}
+}
+
+// bcrypt 的 72 字节上限对引导管理员密码同样适用；必须在启动路径上给出
+// 清晰的 400，而不是把 bcrypt 的原始报错一路捅到进程退出。
+func TestEnsureBootstrapRejectsTooLongPassword(t *testing.T) {
+	svc := newAdminService(t)
+	long := strings.Repeat("a", 73)
+	if err := svc.EnsureBootstrap(context.Background(), "admin", long); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("73 字节 err = %v, want ErrInvalidArgument", err)
 	}
 }
 
