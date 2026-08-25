@@ -3047,6 +3047,60 @@ func TestSubjectNormalization(t *testing.T) {
 	}
 }
 
+// 空白 subject 必须被拒绝，不能被规整成空串落库。
+//
+// 这是"先规整再校验"的直接后果：顺序反过来的话，"   " 通过 validate、
+// 被 normalize 削成 ""，再叠加 UNIQUE (type, subject)，所有空白 subject
+// 折叠成同一行——第二个调用者会拿到第一个调用者的账号。
+func TestBlankSubjectIsRejectedNotCollapsed(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	for _, blank := range []string{"   ", "\t", " \n "} {
+		_, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+			Type: domain.IdentityTypeUsername, Subject: blank,
+		})
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("EnsureUserWithIdentity(%q) err = %v, want ErrInvalidArgument", blank, err)
+		}
+	}
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	if _, err := svc.AttachIdentity(ctx, u.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "  ",
+	}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("AttachIdentity 空白 subject err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// 读侧也要规整：connector 拿到的是用户原始输入，写侧存的是规整后的值。
+func TestFindByIdentityNormalizesSubject(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeEmail, Subject: "alice@example.com",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	for _, raw := range []string{"Alice@Example.com", "  ALICE@EXAMPLE.COM  ", "alice@example.com"} {
+		found, _, err := svc.FindByIdentity(ctx, domain.IdentityTypeEmail, raw)
+		if err != nil {
+			t.Fatalf("FindByIdentity(%q): %v", raw, err)
+		}
+		if found.ID != u.ID {
+			t.Fatalf("FindByIdentity(%q) 查到了别人: %v vs %v", raw, found.ID, u.ID)
+		}
+	}
+}
+
 // 两条写入路径必须用同一套规整，否则只规整一条等于没规整。
 func TestAttachIdentityNormalizesSubject(t *testing.T) {
 	svc := newUserService(t)
@@ -3407,15 +3461,19 @@ func (in EnsureIdentityInput) validate() error {
 // 规整只能有一处实现：放在各 connector 里的话，两个 connector 规整方式不一致就会
 // 破坏归并不变式。
 //
-// 手机号刻意不做规整：DetectIdentityType 只认光秃秃的 11 位号码，"+86..." 根本
+// 手机号刻意不做规整：登录方式那层只认光秃秃的 11 位号码，"+86..." 根本
 // 不会被判成 phone。完整的 E.164 处理需要国际号码策略，属于后续阶段。
-func (in EnsureIdentityInput) normalize() EnsureIdentityInput {
-	switch in.Type {
+func normalizeSubject(identityType, subject string) string {
+	switch identityType {
 	case domain.IdentityTypeEmail, domain.IdentityTypeUsername:
-		in.Subject = strings.ToLower(strings.TrimSpace(in.Subject))
+		return strings.ToLower(strings.TrimSpace(subject))
 	default:
-		in.Subject = strings.TrimSpace(in.Subject)
+		return strings.TrimSpace(subject)
 	}
+}
+
+func (in EnsureIdentityInput) normalize() EnsureIdentityInput {
+	in.Subject = normalizeSubject(in.Type, in.Subject)
 	in.UnionKey = strings.TrimSpace(in.UnionKey)
 	return in
 }
@@ -3429,10 +3487,13 @@ func (in EnsureIdentityInput) normalize() EnsureIdentityInput {
 //
 // 返回的 created 表示是否新建了用户。
 func (s *UserService) EnsureUserWithIdentity(ctx context.Context, in EnsureIdentityInput) (*domain.User, *domain.Identity, bool, error) {
+	// 先规整再校验，顺序不能反。validate 只拦空串，而 "   " 能通过 validate、
+	// 却会被 normalize 削成空串落库；再叠加 UNIQUE (type, subject)，
+	// 所有空白 subject 会折叠成同一行——两个毫不相干的人共用一个账号。
+	in = in.normalize()
 	if err := in.validate(); err != nil {
 		return nil, nil, false, err
 	}
-	in = in.normalize()
 
 	user, identity, created, err := s.ensureOnce(ctx, in)
 	// 并发的"首次登录"会双双走到规则 3，其中一个撞上 UNIQUE (type, subject)。
@@ -3507,13 +3568,13 @@ func (s *UserService) ensureOnce(ctx context.Context, in EnsureIdentityInput) (*
 // AttachIdentity 给已存在的用户挂上一个新的登录标识。
 // 该标识已被别的用户占用时返回 domain.ErrConflict。
 func (s *UserService) AttachIdentity(ctx context.Context, userID uuid.UUID, in EnsureIdentityInput) (*domain.Identity, error) {
+	// 必须和 EnsureUserWithIdentity 用同一套规整，且同样是先规整再校验。
+	// 写入路径有两条，只规整其中一条等于没规整：通过这里存进去的 Alice@X.com，
+	// 之后用 alice@x.com 查就找不到，照样裂成两个账号。
+	in = in.normalize()
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
-	// 必须和 EnsureUserWithIdentity 用同一套规整。写入路径有两条，
-	// 只规整其中一条等于没规整：通过这里存进去的 Alice@X.com，
-	// 之后用 alice@x.com 查就找不到，照样裂成两个账号。
-	in = in.normalize()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -3552,12 +3613,16 @@ func (s *UserService) AttachIdentity(ctx context.Context, userID uuid.UUID, in E
 }
 
 // FindByIdentity 按 (type, subject) 查用户与该标识。
+//
+// 读侧必须和写侧用同一套规整，否则写入时被规整成 alice@example.com 的行，
+// 用原始输入 Alice@Example.com 就查不到——connector 拿到的正是用户原始输入。
 func (s *UserService) FindByIdentity(ctx context.Context, identityType, subject string) (*domain.User, *domain.Identity, error) {
-	return findByIdentityTx(ctx, s.pool, identityType, subject)
+	return findByIdentityTx(ctx, s.pool, identityType, normalizeSubject(identityType, subject))
 }
 
 // FindByUnionKey 按 union_key 查用户。
 func (s *UserService) FindByUnionKey(ctx context.Context, unionKey string) (*domain.User, error) {
+	unionKey = strings.TrimSpace(unionKey)
 	if unionKey == "" {
 		return nil, domain.Errorf(domain.ErrInvalidArgument, "unionKey 不能为空")
 	}
