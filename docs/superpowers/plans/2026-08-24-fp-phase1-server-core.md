@@ -2576,8 +2576,13 @@ CREATE TABLE identity (
     UNIQUE (type, subject)
 );
 CREATE INDEX identity_user_id_idx ON identity (user_id);
--- 部分索引：只对非空 union_key 建唯一约束，本地标识的空串不参与。
-CREATE UNIQUE INDEX identity_union_key_idx ON identity (union_key) WHERE union_key <> '';
+-- 部分索引：只覆盖非空 union_key，本地标识的空串（数量巨大且天然重复）不进索引。
+-- 注意：这里**不能**是 UNIQUE。union_key 的语义就是"同一个 union_key 允许挂多条
+-- identity"（一个微信用户的公众号 openid、小程序 openid 共享同一个 unionId），
+-- 加 UNIQUE 会让归并规则 2 结构上不可能——第一条插入就永久堵死后续所有插入。
+-- 真正要保证的是"同一 union_key 下的所有 identity 必须指向同一个 user_id"，
+-- 这不是单列唯一索引能表达的约束，由 EnsureUserWithIdentity 与 AttachIdentity 在应用层维持。
+CREATE INDEX identity_union_key_idx ON identity (union_key) WHERE union_key <> '';
 
 -- 用户在某个应用下的注册关系。
 -- 严禁添加 role 列（设计文档 5.5）：角色由 casbin 的 grouping policy 承载，
@@ -2972,6 +2977,40 @@ func TestAttachIdentityRejectsSubjectOwnedByAnotherUser(t *testing.T) {
 	_ = u1
 }
 
+// union_key 的不变式：同一个 union_key 不能横跨两个用户。
+// 数据库层表达不了（同 union_key 本来就允许多行），只能靠 AttachIdentity 守。
+func TestAttachIdentityRejectsUnionKeyOwnedByAnotherUser(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeWechatMP, Subject: "openid-a", UnionKey: "union-1",
+	})
+	if err != nil {
+		t.Fatalf("u1: %v", err)
+	}
+	u2, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("u2: %v", err)
+	}
+
+	// 把 u1 名下的 unionKey 挂到 u2 上必须失败
+	if _, err := svc.AttachIdentity(ctx, u2.ID, service.EnsureIdentityInput{
+		Type: "wechat_mini", Subject: "openid-b", UnionKey: "union-1",
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+
+	// 挂到本人名下则应成功（这正是"一个人多个 openid"的正常场景）
+	if _, err := svc.AttachIdentity(ctx, u1.ID, service.EnsureIdentityInput{
+		Type: "wechat_mini", Subject: "openid-b", UnionKey: "union-1",
+	}); err != nil {
+		t.Fatalf("同一用户追加同 unionKey 的 identity 应成功: %v", err)
+	}
+}
+
 func TestFindByIdentityNotFound(t *testing.T) {
 	svc := newUserService(t)
 	_, _, err := svc.FindByIdentity(context.Background(), domain.IdentityTypePhone, "13800138000")
@@ -3268,6 +3307,23 @@ func (s *UserService) AttachIdentity(ctx context.Context, userID uuid.UUID, in E
 		return nil, fmt.Errorf("service: 开启事务: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// union_key 的不变式是"同一 union_key 下的所有 identity 指向同一个 user"。
+	// 单列唯一索引表达不了它——同一 union_key 本来就允许多行（一个微信用户的
+	// 公众号 openid 与小程序 openid 共享 unionId）——所以只能在这里守住。
+	// EnsureUserWithIdentity 天然满足该不变式（它就是按 union_key 找用户），
+	// AttachIdentity 是唯一能把它打破的入口。
+	if in.UnionKey != "" {
+		var owner uuid.UUID
+		err := tx.QueryRow(ctx,
+			`SELECT user_id FROM identity WHERE union_key = $1 LIMIT 1`, in.UnionKey).Scan(&owner)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("service: 按 unionKey 查询归属: %w", err)
+		}
+		if err == nil && owner != userID {
+			return nil, domain.Errorf(domain.ErrConflict, "该 unionKey 已归属其他账号")
+		}
+	}
 
 	id, err := insertIdentityTx(ctx, tx, userID, in)
 	if err != nil {
