@@ -6413,6 +6413,77 @@ func TestSessionStoreDelete(t *testing.T) {
 	}
 }
 
+// 分批逻辑必须跨过真实的批次边界。
+//
+// 现有用例都只有 1-3 个 token，永远走单批路径——chunkStrings 里
+// 一个 off-by-one 会静默丢 token 或重复 token，而这类错误只在
+// 规模上来之后才显形，是最不该留白的地方。
+//
+// 这里越过 redisBatchSize 建 1200 个会话（跨 3 批），验证读、清理、
+// 批量删除三条路径在多批下都完整。
+func TestSessionStoreBatchesAcrossChunkBoundary(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
+	ctx := context.Background()
+	uid := uuid.New()
+
+	const total = 1200 // > 2 * redisBatchSize
+	for i := 0; i < total; i++ {
+		tok := fmt.Sprintf("tok-%04d", i)
+		if err := st.Put(ctx, sampleSession(tok, uid), time.Minute); err != nil {
+			t.Fatalf("Put %s: %v", tok, err)
+		}
+	}
+
+	alive, err := st.ListUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListUserTokens: %v", err)
+	}
+	if len(alive) != total {
+		t.Fatalf("存活 token 数 = %d, want %d——分批读取丢了数据", len(alive), total)
+	}
+	// 不能有重复
+	seen := make(map[string]bool, len(alive))
+	for _, tok := range alive {
+		if seen[tok] {
+			t.Fatalf("token %s 出现两次——分批切片有重叠", tok)
+		}
+		seen[tok] = true
+	}
+
+	// 制造跨批的悬挂项：删掉一半会话的主键，索引仍留着
+	for i := 0; i < total; i += 2 {
+		if err := rdb.Del(ctx, "fp:sess:"+fmt.Sprintf("tok-%04d", i)).Err(); err != nil {
+			t.Fatalf("Del: %v", err)
+		}
+	}
+	alive, err = st.ListUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("二次 ListUserTokens: %v", err)
+	}
+	if len(alive) != total/2 {
+		t.Fatalf("存活 token 数 = %d, want %d", len(alive), total/2)
+	}
+	if card, err := rdb.SCard(ctx, "fp:usess:"+uid.String()).Result(); err != nil {
+		t.Fatalf("SCard: %v", err)
+	} else if card != int64(total/2) {
+		t.Fatalf("索引基数 = %d, want %d——跨批清理不完整", card, total/2)
+	}
+
+	n, err := st.DeleteUserTokens(ctx, uid)
+	if err != nil {
+		t.Fatalf("DeleteUserTokens: %v", err)
+	}
+	if n != total/2 {
+		t.Fatalf("删除数 = %d, want %d", n, total/2)
+	}
+	if card, err := rdb.SCard(ctx, "fp:usess:"+uid.String()).Result(); err != nil {
+		t.Fatalf("SCard: %v", err)
+	} else if card != 0 {
+		t.Fatalf("删除后索引基数 = %d, want 0", card)
+	}
+}
+
 // ttl <= 0 必须报错，绝不能写进 Redis。
 //
 // go-redis 对 expiration <= 0 会省略 TTL 参数，SET 出来是永不过期的键；
