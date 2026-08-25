@@ -29,7 +29,10 @@
 
 ## Global Constraints
 
-- Go 版本 **1.24**，module path `github.com/basicfu/fp`
+- module path 是 `github.com/basicfu/fp`
+- Go **≥ 1.24**。`go.mod` 的 `go` 指令取决于依赖的最低要求，不是硬编码值：Task 1 按计划执行
+  `go get ...@latest` 后落到 **1.25.7**（`goose/v3` 要求最高）。已安装工具链为 1.26.0。
+  **不要为了凑某个具体数字去降级依赖**——这条约束的本意是版本下限，不是上限
 - 数据库 **PostgreSQL 18**，主键统一 `uuid PRIMARY KEY DEFAULT uuidv7()`（PG 18 内置函数）
 - **禁止引入** `iris`、`github.com/basicfu/gf`、MongoDB
 - **禁止**在 `app_user` 或 `user_application` 上添加任何 `role` 字段（设计文档 5.5 硬约束）
