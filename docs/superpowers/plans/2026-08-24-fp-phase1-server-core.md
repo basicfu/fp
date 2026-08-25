@@ -6609,3 +6609,1170 @@ Expected: `internal/service` 全部 PASS（新增 10 个会话测试）
 git add internal
 git commit -m "feat: 会话存储、令牌签发与校验，cache_ttl 受剩余有效期约束"
 ```
+
+---
+
+## Task 10: 延期降频与令牌轮换
+
+设计文档 4.5.2。两件事都发生在 `Validate` 内部，对调用方透明：
+
+- **延期**：滑动过期，但**必须降频**。fp 是所有接入方共享的单点，若每次回源都写一次延期，读压力会原样变成写压力，而这些写在业务上毫无价值（把过期时间从 t+3600 改成 t+3630）。降频用「时间窗 + 分布式锁」两层，沿用 3s 的成熟做法。
+- **轮换**：到 `rotate_interval` 换一个新 token 值。旧 token 保留 `max(15s, cache_ttl)` 的过渡期，因为并发请求可能还带着旧 token 在路上，而 SDK 本地缓存里也可能还有旧条目——所以过渡期不能短于缓存窗口。
+
+**关键不变式：轮换不重置 `FirstAuthAt`。** 轮换只换 token 的值，会话仍是同一个；能重置绝对上限的只有重新认证。
+
+**Files:**
+- Modify: `internal/service/session.go`
+- Test: `internal/service/session_rotate_test.go`
+
+**Interfaces:**
+- Consumes: Task 9 的 `SessionService`、`store.SessionStore.TryLock`
+- Produces（新增/变更）：
+  - `func (*SessionService) Validate(...)` 现在会在必要时延期或轮换；轮换时 `ValidateResult.Rotated = true` 且 `NewToken` 非空
+  - `func service.GraceDuration(p domain.SessionPolicy) time.Duration` — 轮换过渡期 = `max(15s, token_cache_ttl)`
+  - 常量 `service.MinRotateGrace = 15 * time.Second`
+
+- [ ] **Step 1: 写失败的延期测试**
+
+`internal/service/session_rotate_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+)
+
+// extendApp 造一个便于观察延期行为的应用：空闲 100s，降频窗口 10s，
+// 轮换间隔设得很大以免干扰。
+func extendApp() *domain.Application {
+	return testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 100
+		p.IdleTimeoutMobileSeconds = 100
+		p.MaxLifetimeSeconds = 100000
+		p.RotateIntervalSeconds = 100000
+		p.ExtendIntervalSeconds = 10
+		p.TokenCacheTTLSeconds = 5
+	})
+}
+
+// 降频窗口内的重复校验不应产生任何写入。
+func TestValidateDoesNotExtendWithinInterval(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := extendApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	originalIdle := sess.IdleExpiresAt
+
+	// 推进 9 秒，未达 10 秒的降频窗口
+	clk.Advance(9 * time.Second)
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Session.IdleExpiresAt != originalIdle {
+		t.Fatalf("窗口内不应延期: IdleExpiresAt %d → %d", originalIdle, res.Session.IdleExpiresAt)
+	}
+	if res.Session.LastExtendedAt != sess.LastExtendedAt {
+		t.Fatal("窗口内不应更新 LastExtendedAt")
+	}
+}
+
+func TestValidateExtendsAfterInterval(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := extendApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	originalIdle := sess.IdleExpiresAt
+
+	clk.Advance(11 * time.Second)
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	wantIdle := clk.Now() + 100*1000
+	if res.Session.IdleExpiresAt != wantIdle {
+		t.Fatalf("IdleExpiresAt = %d, want %d（原值 %d）",
+			res.Session.IdleExpiresAt, wantIdle, originalIdle)
+	}
+	if res.Session.LastExtendedAt != clk.Now() {
+		t.Fatalf("LastExtendedAt = %d, want %d", res.Session.LastExtendedAt, clk.Now())
+	}
+
+	// 延期必须真的落到存储里，而不只是返回值上改了改
+	again, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("再次 Validate: %v", err)
+	}
+	if again.Session.IdleExpiresAt != wantIdle {
+		t.Fatalf("延期未持久化: %d", again.Session.IdleExpiresAt)
+	}
+}
+
+// 分布式锁保证同一时刻并发校验只产生一次延期写。
+func TestValidateExtendIsDeduplicatedByLock(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := extendApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	clk.Advance(11 * time.Second)
+	first, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("首次 Validate: %v", err)
+	}
+	extendedAt := first.Session.LastExtendedAt
+
+	// 同一毫秒再来一次：降频窗口已被上一次重置，本次本就不该写；
+	// 即使窗口判断失效，锁也会拦住。
+	second, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("二次 Validate: %v", err)
+	}
+	if second.Session.LastExtendedAt != extendedAt {
+		t.Fatalf("重复延期写: %d → %d", extendedAt, second.Session.LastExtendedAt)
+	}
+}
+
+// 延期不能把会话推过绝对上限。
+func TestValidateExtendCappedByMaxLifetime(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 1000
+		p.IdleTimeoutMobileSeconds = 1000
+		p.MaxLifetimeSeconds = 60 // 绝对上限远小于空闲超时
+		p.RotateIntervalSeconds = 60
+		p.ExtendIntervalSeconds = 10
+		p.TokenCacheTTLSeconds = 5
+	})
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	clk.Advance(50 * time.Second) // 距绝对上限只剩 10 秒
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	// 延期把 IdleExpiresAt 推到了 now+1000s，但剩余有效期仍由绝对上限决定
+	if got := res.Session.RemainingAt(clk.Now(), app.Session); got != 10*time.Second {
+		t.Fatalf("剩余有效期 = %v, want 10s（应受 max_lifetime 约束）", got)
+	}
+	if res.CacheTTL != 5*time.Second {
+		t.Fatalf("CacheTTL = %v, want 5s", res.CacheTTL)
+	}
+}
+
+// rotateApp 造一个便于观察轮换的应用：轮换间隔 30s，缓存窗口 20s
+// （因此过渡期 = max(15s, 20s) = 20s）。
+func rotateApp() *domain.Application {
+	return testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 1000
+		p.IdleTimeoutMobileSeconds = 1000
+		p.MaxLifetimeSeconds = 100000
+		p.RotateIntervalSeconds = 30
+		p.ExtendIntervalSeconds = 10
+		p.TokenCacheTTLSeconds = 20
+	})
+}
+
+func TestGraceDuration(t *testing.T) {
+	// cache_ttl 小于 15s 时取 15s 下限
+	small := domain.DefaultSessionPolicy()
+	small.TokenCacheTTLSeconds = 5
+	if got := service.GraceDuration(small); got != service.MinRotateGrace {
+		t.Errorf("GraceDuration(5s) = %v, want %v", got, service.MinRotateGrace)
+	}
+	// cache_ttl 大于 15s 时取 cache_ttl，否则 SDK 缓存里的旧 token 会先于过渡期失效
+	big := domain.DefaultSessionPolicy()
+	big.TokenCacheTTLSeconds = 60
+	if got := service.GraceDuration(big); got != 60*time.Second {
+		t.Errorf("GraceDuration(60s) = %v, want 60s", got)
+	}
+}
+
+func TestValidateRotatesAfterInterval(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := rotateApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatal("Rotated = false, want true")
+	}
+	if res.NewToken == "" {
+		t.Fatal("NewToken 为空")
+	}
+	if res.NewToken == sess.Token {
+		t.Fatal("NewToken 与旧 token 相同")
+	}
+	if res.Session.Token != res.NewToken {
+		t.Fatalf("返回的 Session.Token = %q, want %q", res.Session.Token, res.NewToken)
+	}
+
+	// 新 token 立即可用
+	if _, err := svc.Validate(ctx, res.NewToken, app); err != nil {
+		t.Fatalf("新 token 校验失败: %v", err)
+	}
+}
+
+// 会话身份在轮换后保持不变——撤销以 session ID 为单位，它不能变。
+func TestRotationPreservesSessionIdentity(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := rotateApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{
+		UserID: uuid.New(), App: app, IP: "1.2.3.4", UA: "go-test",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Session.ID != sess.ID {
+		t.Fatalf("会话 ID 变了: %q → %q", sess.ID, res.Session.ID)
+	}
+	if res.Session.UserID != sess.UserID || res.Session.AppID != sess.AppID {
+		t.Fatal("用户或应用归属变了")
+	}
+	if res.Session.IP != "1.2.3.4" || res.Session.UA != "go-test" {
+		t.Fatalf("设备信息丢失: %+v", res.Session)
+	}
+}
+
+// 最关键的一条：轮换不重置绝对上限。
+// 否则只要用户一直活跃，同一个会话可以无限续命，max_lifetime 形同虚设。
+func TestRotationDoesNotResetMaxLifetime(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := testApp(func(p *domain.SessionPolicy) {
+		p.IdleTimeoutSeconds = 1000
+		p.IdleTimeoutMobileSeconds = 1000
+		// 绝对上限 90s，轮换间隔 31s：第三次校验时累计 93s > 90s，必被拒绝
+		p.MaxLifetimeSeconds = 90
+		p.RotateIntervalSeconds = 30
+		p.ExtendIntervalSeconds = 10
+		p.TokenCacheTTLSeconds = 5
+	})
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	firstAuthAt := sess.FirstAuthAt
+
+	token := sess.Token
+	// 连续三次，每次推进 31 秒：31s、62s、93s
+	for i := 0; i < 3; i++ {
+		clk.Advance(31 * time.Second)
+		res, err := svc.Validate(ctx, token, app)
+		if err != nil {
+			// 第三次时已超过 100 秒的绝对上限，应被拒绝
+			if i == 2 && errors.Is(err, domain.ErrUnauthorized) {
+				return
+			}
+			t.Fatalf("第 %d 次 Validate: %v", i+1, err)
+		}
+		if res.Session.FirstAuthAt != firstAuthAt {
+			t.Fatalf("第 %d 次轮换后 FirstAuthAt 被重置: %d → %d",
+				i+1, firstAuthAt, res.Session.FirstAuthAt)
+		}
+		if res.Rotated {
+			token = res.NewToken
+		}
+	}
+	t.Fatal("超过 max_lifetime 后仍未被拒绝")
+}
+
+// 过渡期内旧 token 必须继续有效：并发请求与 SDK 本地缓存里都可能还有它。
+func TestOldTokenValidDuringGrace(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := rotateApp() // 过渡期 = max(15s, 20s) = 20s
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	oldToken := sess.Token
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, oldToken, app)
+	if err != nil {
+		t.Fatalf("触发轮换: %v", err)
+	}
+	newToken := res.NewToken
+
+	// 过渡期内旧 token 仍可用，但不应再次触发轮换
+	clk.Advance(10 * time.Second)
+	oldRes, err := svc.Validate(ctx, oldToken, app)
+	if err != nil {
+		t.Fatalf("过渡期内旧 token 校验失败: %v", err)
+	}
+	if oldRes.Rotated {
+		t.Fatal("旧 token 不应再次触发轮换")
+	}
+	// 旧 token 的缓存时长必须被过渡期约束，不能按完整窗口下发
+	if oldRes.CacheTTL > 10*time.Second {
+		t.Fatalf("旧 token CacheTTL = %v, 应不超过过渡期剩余 10s", oldRes.CacheTTL)
+	}
+
+	// 过渡期结束后旧 token 失效，新 token 仍有效
+	clk.Advance(11 * time.Second)
+	if _, err := svc.Validate(ctx, oldToken, app); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("过渡期后旧 token err = %v, want ErrUnauthorized", err)
+	}
+	if _, err := svc.Validate(ctx, newToken, app); err != nil {
+		t.Fatalf("新 token 应仍有效: %v", err)
+	}
+}
+
+// 轮换后新旧 token 都挂在同一用户名下，在线设备列表不应把它们算成两台设备。
+func TestRotationDoesNotDuplicateDeviceEntry(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := rotateApp()
+	uid := uuid.New()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uid, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	clk.Advance(31 * time.Second)
+	if _, err := svc.Validate(ctx, sess.Token, app); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	list, err := svc.ListByUser(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	// 过渡期内新旧 token 并存，但会话 ID 只有一个
+	ids := map[string]bool{}
+	for _, s := range list {
+		ids[s.ID] = true
+	}
+	if len(ids) != 1 {
+		t.Fatalf("会话 ID 数 = %d, want 1（token 有 %d 个）", len(ids), len(list))
+	}
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `go test ./internal/service/ -run 'Extend|Rotat|Grace|OldToken' -v`
+Expected: 编译失败，`undefined: service.GraceDuration`；已有测试仍 PASS
+
+- [ ] **Step 3: 在 SessionService 中实现延期与轮换**
+
+替换 `internal/service/session.go` 的 `Validate`，并追加下方三个辅助方法。
+
+```go
+// MinRotateGrace 是 token 轮换后旧 token 的最短过渡期。
+const MinRotateGrace = 15 * time.Second
+
+// extendLockTTL 是延期写与轮换的去重锁时长。
+// 它只用于限流，不保护临界区，因此不需要显式释放。
+const extendLockTTL = 10 * time.Second
+
+// GraceDuration 返回 token 轮换后旧 token 的过渡期。
+//
+// 取 max(15s, token_cache_ttl)：过渡期短于缓存窗口的话，
+// SDK 本地缓存里的旧 token 会在过渡期结束后仍被放行——
+// 请求打到 fp 时旧 token 已经不存在，用户被无谓地踢掉。
+func GraceDuration(p domain.SessionPolicy) time.Duration {
+	g := MinRotateGrace
+	if c := time.Duration(p.TokenCacheTTLSeconds) * time.Second; c > g {
+		g = c
+	}
+	return g
+}
+
+// Validate 校验 token，必要时顺带轮换或延期。
+func (s *SessionService) Validate(ctx context.Context, token string, app *domain.Application) (*ValidateResult, error) {
+	if app == nil {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "校验 token 缺少应用信息")
+	}
+	if token == "" {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "缺少 token")
+	}
+
+	sess, err := s.store.Get(ctx, token)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if sess.AppID != app.ID {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
+
+	now := s.now()
+	if sess.RemainingAt(now, app.Session) <= 0 {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
+
+	res := &ValidateResult{Session: sess}
+
+	// 轮换优先于延期：轮换本身就会给新会话一个完整的空闲窗口。
+	if now-sess.IssuedAt >= app.Session.RotateInterval().Milliseconds() {
+		rotated, newSess, err := s.tryRotate(ctx, sess, app, now)
+		if err != nil {
+			return nil, err
+		}
+		if rotated {
+			res.Session = newSess
+			res.Rotated = true
+			res.NewToken = newSess.Token
+		}
+	} else if now-sess.LastExtendedAt >= app.Session.ExtendInterval().Milliseconds() {
+		extended, err := s.tryExtend(ctx, sess, app, now)
+		if err != nil {
+			return nil, err
+		}
+		if extended != nil {
+			res.Session = extended
+		}
+	}
+
+	res.CacheTTL = cacheTTL(res.Session.RemainingAt(s.now(), app.Session), app.Session)
+	return res, nil
+}
+
+// tryExtend 在拿到去重锁时刷新空闲超时，否则原样返回 nil。
+//
+// 两层降频（设计文档 4.5.2）：调用方已按 extend_interval 做了时间窗判断，
+// 这里的锁负责挡住同一瞬间的并发请求，避免同一行被反复 UPDATE。
+func (s *SessionService) tryExtend(ctx context.Context, sess *domain.Session, app *domain.Application, now int64) (*domain.Session, error) {
+	ok, err := s.store.TryLock(ctx, "ext:"+sess.Token, extendLockTTL)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	idle := app.Session.IdleTimeoutFor(sess.Mobile)
+	updated := *sess
+	updated.LastExtendedAt = now
+	updated.IdleExpiresAt = now + idle.Milliseconds()
+
+	// Redis TTL 取剩余有效期而非空闲超时：绝对上限更近时，
+	// 让 Redis 在上限时刻自动清理，避免留下必然会被拒绝的僵尸会话。
+	if err := s.store.Put(ctx, &updated, updated.RemainingAt(now, app.Session)); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// tryRotate 在拿到去重锁时换发新 token，并把旧 token 缩短到过渡期。
+//
+// 新会话继承 ID 与 FirstAuthAt：轮换只换 token 的值，会话本身没有变。
+// 特别是 FirstAuthAt 绝不能重置，否则 max_lifetime 会被活跃用户无限续命。
+func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, app *domain.Application, now int64) (bool, *domain.Session, error) {
+	grace := GraceDuration(app.Session)
+
+	// 锁的 TTL 取过渡期：过渡期内旧 token 仍可用，但不应再次触发轮换。
+	ok, err := s.store.TryLock(ctx, "rot:"+sess.ID, grace)
+	if err != nil {
+		return false, nil, err
+	}
+	if !ok {
+		return false, nil, nil
+	}
+
+	newToken, err := randomToken()
+	if err != nil {
+		return false, nil, err
+	}
+	idle := app.Session.IdleTimeoutFor(sess.Mobile)
+
+	newSess := *sess
+	newSess.Token = newToken
+	newSess.IssuedAt = now
+	newSess.LastExtendedAt = now
+	newSess.IdleExpiresAt = now + idle.Milliseconds()
+	if err := s.store.Put(ctx, &newSess, newSess.RemainingAt(now, app.Session)); err != nil {
+		return false, nil, err
+	}
+
+	// 旧 token 缩短到过渡期。
+	// 同时把 IdleExpiresAt 一起改小——只改 Redis TTL 的话，会话 JSON 里
+	// 仍是很远的过期时间，cache_ttl 会按完整窗口下发，而 Redis key 在过渡期
+	// 结束就没了，SDK 会拿着一个已被删除的 token 继续放行。
+	oldSess := *sess
+	oldSess.IssuedAt = now // 防止过渡期内旧 token 再次触发轮换
+	oldSess.IdleExpiresAt = now + grace.Milliseconds()
+	if err := s.store.Put(ctx, &oldSess, grace); err != nil {
+		return false, nil, err
+	}
+
+	return true, &newSess, nil
+}
+```
+
+同时删除文件中旧版 `Validate` 的实现，保留 `Issue`、`ListByUser`、`cacheTTL` 与 `ValidateResult` 定义（`ValidateResult` 的 `Rotated`/`NewToken` 注释里「本任务恒为 false」一句要去掉）。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `go test ./internal/service/ -run 'Session|Extend|Rotat|Grace|OldToken|CacheTTL|Validate|Issue|ListByUser' -v`
+Expected: Task 9 的 10 个 + 本任务的 9 个全部 PASS
+
+- [ ] **Step 5: 运行全部测试**
+
+Run: `make test`
+Expected: 全部 PASS
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add internal
+git commit -m "feat: 延期写降频与令牌轮换，轮换保留过渡期且不重置绝对上限"
+```
+
+---
+
+## Task 11: 撤销与撤销事件发布
+
+撤销是 opaque token 方案相对纯 JWT 的核心优势所在，但它有两个层次，两个都要做：
+
+1. **权威撤销**：删掉 Redis 里的会话。哪怕推送全部丢失，SDK 最长一个 `cache_ttl` 后回源就会被拒——这是 JWT 方案没有的兜底。
+2. **推送加速**：把撤销事件发到 Redis 频道，计划二的 gRPC 双向流订阅它并推给各 SDK，把撤销延迟从 `cache_ttl` 压到近乎实时。
+
+**Files:**
+- Create: `internal/store/revoke.go`
+- Modify: `internal/service/session.go`
+- Test: `internal/store/revoke_test.go`, `internal/service/session_revoke_test.go`
+
+**Interfaces:**
+- Consumes: `store.SessionStore`、`domain.Session`
+- Produces:
+  - `type domain.RevokeEvent struct{ Tokens []string; UserID uuid.UUID; AppID uuid.UUID; Reason string; At int64 }`
+  - 常量 `domain.RevokeReasonLogout/Kick/Freeze/PasswordChanged = "logout"/"kick"/"freeze"/"password_changed"`
+  - `func store.NewRevokePublisher(rdb *redis.Client) *RevokePublisher`
+  - `func (*RevokePublisher) Publish(ctx context.Context, ev domain.RevokeEvent) error`
+  - `func (*RevokePublisher) Subscribe(ctx context.Context) (<-chan domain.RevokeEvent, func(), error)`
+  - `func service.NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublisher, now func() int64) *SessionService`（签名变更，新增 pub 参数）
+  - `func service.NewSessionService(st *store.SessionStore, pub *store.RevokePublisher) *SessionService`（签名变更）
+  - `func (*SessionService) Revoke(ctx context.Context, token, reason string) error`
+  - `func (*SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, sessionID, reason string) (int, error)`
+  - `func (*SessionService) RevokeUser(ctx context.Context, userID uuid.UUID, reason string) (int, error)`
+  - `func (*SessionService) RevokeUserInApp(ctx context.Context, userID, appID uuid.UUID, reason string) (int, error)`
+
+- [ ] **Step 1: 写失败的发布订阅测试**
+
+`internal/store/revoke_test.go`：
+
+```go
+package store_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func TestRevokePublishSubscribe(t *testing.T) {
+	pub := store.NewRevokePublisher(testsupport.NewTestRedis(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, closeFn, err := pub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer closeFn()
+
+	uid := uuid.New()
+	want := domain.RevokeEvent{
+		Tokens: []string{"tok-a", "tok-b"},
+		UserID: uid,
+		Reason: domain.RevokeReasonKick,
+		At:     time.Now().UnixMilli(),
+	}
+
+	// 订阅建立需要一个往返，重试几次直到收到。
+	deadline := time.After(3 * time.Second)
+	for {
+		if err := pub.Publish(ctx, want); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		select {
+		case got := <-events:
+			if got.UserID != uid {
+				t.Fatalf("UserID = %v, want %v", got.UserID, uid)
+			}
+			if len(got.Tokens) != 2 || got.Tokens[0] != "tok-a" {
+				t.Fatalf("Tokens = %v", got.Tokens)
+			}
+			if got.Reason != domain.RevokeReasonKick {
+				t.Fatalf("Reason = %q", got.Reason)
+			}
+			return
+		case <-time.After(100 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("3 秒内未收到撤销事件")
+		}
+	}
+}
+
+func TestRevokePublishNoSubscriberIsNotAnError(t *testing.T) {
+	pub := store.NewRevokePublisher(testsupport.NewTestRedis(t))
+	// 没有订阅者时发布不应报错——推送只是加速手段，不能因此拖垮撤销本身。
+	if err := pub.Publish(context.Background(), domain.RevokeEvent{
+		Tokens: []string{"tok"}, UserID: uuid.New(), Reason: domain.RevokeReasonLogout,
+	}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `go test ./internal/store/ -run Revoke -v`
+Expected: 编译失败，`undefined: store.NewRevokePublisher`
+
+- [ ] **Step 3: 实现 domain.RevokeEvent**
+
+追加到 `internal/domain/session.go`：
+
+```go
+// 撤销原因。写入撤销事件与登录日志，用于排障与审计。
+const (
+	RevokeReasonLogout          = "logout"
+	RevokeReasonKick            = "kick"
+	RevokeReasonFreeze          = "freeze"
+	RevokeReasonPasswordChanged = "password_changed"
+)
+
+// RevokeEvent 是一次撤销的广播消息。
+//
+// SDK 按 token 缓存校验结果，因此事件必须携带具体的 token 列表，
+// 而不能只给 userID——否则 SDK 无从知道该清哪些缓存条目。
+type RevokeEvent struct {
+	Tokens []string  `json:"tokens"`
+	UserID uuid.UUID `json:"userId"`
+	// AppID 为 uuid.Nil 表示跨全部应用的撤销。
+	AppID  uuid.UUID `json:"appId"`
+	Reason string    `json:"reason"`
+	At     int64     `json:"at"`
+}
+```
+
+- [ ] **Step 4: 实现 RevokePublisher**
+
+`internal/store/revoke.go`：
+
+```go
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// revokeChannel 是撤销事件的 Redis 广播频道。
+// fp 的每个实例都订阅它，再通过各自持有的 gRPC 双向流推给 SDK（计划二）。
+const revokeChannel = "fp:revoke"
+
+// RevokePublisher 广播撤销事件。
+type RevokePublisher struct {
+	rdb *redis.Client
+}
+
+// NewRevokePublisher 构造 RevokePublisher。
+func NewRevokePublisher(rdb *redis.Client) *RevokePublisher {
+	return &RevokePublisher{rdb: rdb}
+}
+
+// Publish 广播一次撤销。
+//
+// 没有订阅者时不算错误：推送只是把撤销延迟从 cache_ttl 压到近乎实时的**加速手段**，
+// 权威撤销已经通过删除 Redis 会话完成了。
+func (p *RevokePublisher) Publish(ctx context.Context, ev domain.RevokeEvent) error {
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("store: 序列化撤销事件: %w", err)
+	}
+	if err := p.rdb.Publish(ctx, revokeChannel, raw).Err(); err != nil {
+		return fmt.Errorf("store: 广播撤销事件: %w", err)
+	}
+	return nil
+}
+
+// Subscribe 订阅撤销事件。
+// 返回的 channel 在 ctx 取消或调用 close 时关闭。
+func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan domain.RevokeEvent, func(), error) {
+	sub := p.rdb.Subscribe(ctx, revokeChannel)
+	if _, err := sub.Receive(ctx); err != nil {
+		_ = sub.Close()
+		return nil, nil, fmt.Errorf("store: 订阅撤销频道: %w", err)
+	}
+
+	out := make(chan domain.RevokeEvent, 64)
+	go func() {
+		defer close(out)
+		for msg := range sub.Channel() {
+			var ev domain.RevokeEvent
+			if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {
+				slog.Error("store: 解析撤销事件失败", "err", err)
+				continue
+			}
+			select {
+			case out <- ev:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return out, func() { _ = sub.Close() }, nil
+}
+```
+
+- [ ] **Step 5: 运行测试确认通过**
+
+Run: `go test ./internal/store/ -run Revoke -v`
+Expected: 2 个测试 PASS
+
+- [ ] **Step 6: 写失败的撤销测试**
+
+`internal/service/session_revoke_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+)
+
+func TestRevokeSingleToken(t *testing.T) {
+	svc, _ := newSessionService(t)
+	app := testApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.Revoke(ctx, sess.Token, domain.RevokeReasonLogout); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := svc.Validate(ctx, sess.Token, app); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+	// 撤销不存在的 token 不应报错（重复登出、并发登出都会走到这里）
+	if err := svc.Revoke(ctx, sess.Token, domain.RevokeReasonLogout); err != nil {
+		t.Fatalf("重复 Revoke: %v", err)
+	}
+}
+
+func TestRevokeUserRevokesAllSessions(t *testing.T) {
+	svc, _ := newSessionService(t)
+	app := testApp()
+	uid := uuid.New()
+	ctx := context.Background()
+
+	var tokens []string
+	for i := 0; i < 3; i++ {
+		sess, err := svc.Issue(ctx, service.IssueInput{UserID: uid, App: app})
+		if err != nil {
+			t.Fatalf("Issue %d: %v", i, err)
+		}
+		tokens = append(tokens, sess.Token)
+	}
+	// 另一个用户不受影响
+	otherUID := uuid.New()
+	other, err := svc.Issue(ctx, service.IssueInput{UserID: otherUID, App: app})
+	if err != nil {
+		t.Fatalf("Issue other: %v", err)
+	}
+
+	n, err := svc.RevokeUser(ctx, uid, domain.RevokeReasonFreeze)
+	if err != nil {
+		t.Fatalf("RevokeUser: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("撤销数 = %d, want 3", n)
+	}
+	for i, tok := range tokens {
+		if _, err := svc.Validate(ctx, tok, app); !errors.Is(err, domain.ErrUnauthorized) {
+			t.Fatalf("第 %d 个 token 仍有效", i)
+		}
+	}
+	if _, err := svc.Validate(ctx, other.Token, app); err != nil {
+		t.Fatalf("其他用户的会话被误伤: %v", err)
+	}
+}
+
+// 撤销一个会话必须把它在轮换过渡期里的旧 token 一并作废，
+// 否则「踢下线」之后旧 token 还能再用一个过渡期。
+func TestRevokeSessionCoversTokensFromRotation(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := rotateApp()
+	uid := uuid.New()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uid, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	oldToken := sess.Token
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, oldToken, app)
+	if err != nil {
+		t.Fatalf("触发轮换: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatal("未触发轮换")
+	}
+	newToken := res.NewToken
+
+	n, err := svc.RevokeSession(ctx, uid, sess.ID, domain.RevokeReasonKick)
+	if err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("撤销数 = %d, want 2（新旧 token 都要作废）", n)
+	}
+	for name, tok := range map[string]string{"旧": oldToken, "新": newToken} {
+		if _, err := svc.Validate(ctx, tok, app); !errors.Is(err, domain.ErrUnauthorized) {
+			t.Fatalf("%s token 仍有效", name)
+		}
+	}
+}
+
+// 多应用共享用户体系时，只撤销某一个应用的会话不能影响其他应用。
+func TestRevokeUserInApp(t *testing.T) {
+	svc, _ := newSessionService(t)
+	appA := testApp()
+	appB := testApp()
+	uid := uuid.New()
+	ctx := context.Background()
+
+	sessA, err := svc.Issue(ctx, service.IssueInput{UserID: uid, App: appA})
+	if err != nil {
+		t.Fatalf("Issue A: %v", err)
+	}
+	sessB, err := svc.Issue(ctx, service.IssueInput{UserID: uid, App: appB})
+	if err != nil {
+		t.Fatalf("Issue B: %v", err)
+	}
+
+	n, err := svc.RevokeUserInApp(ctx, uid, appA.ID, domain.RevokeReasonKick)
+	if err != nil {
+		t.Fatalf("RevokeUserInApp: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("撤销数 = %d, want 1", n)
+	}
+	if _, err := svc.Validate(ctx, sessA.Token, appA); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatal("应用 A 的会话应已撤销")
+	}
+	if _, err := svc.Validate(ctx, sessB.Token, appB); err != nil {
+		t.Fatalf("应用 B 的会话被误伤: %v", err)
+	}
+}
+
+func TestRevokeSessionOfAnotherUserDoesNothing(t *testing.T) {
+	svc, _ := newSessionService(t)
+	app := testApp()
+	ctx := context.Background()
+
+	victim, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	// 用别人的 userID 去撤销该会话，必须无效
+	n, err := svc.RevokeSession(ctx, uuid.New(), victim.ID, domain.RevokeReasonKick)
+	if err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("撤销数 = %d, want 0", n)
+	}
+	if _, err := svc.Validate(ctx, victim.Token, app); err != nil {
+		t.Fatalf("会话被越权撤销: %v", err)
+	}
+}
+
+// 撤销必须广播事件，计划二的 gRPC 流靠它把撤销推给 SDK。
+func TestRevokePublishesEvent(t *testing.T) {
+	st, pub, clk := newSessionParts(t)
+	svc := service.NewSessionServiceWithClock(st, pub, clk.Now)
+	app := testApp()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, closeFn, err := pub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer closeFn()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if err := svc.Revoke(ctx, sess.Token, domain.RevokeReasonKick); err != nil {
+			t.Fatalf("Revoke: %v", err)
+		}
+		select {
+		case ev := <-events:
+			if len(ev.Tokens) == 0 || ev.Tokens[0] != sess.Token {
+				t.Fatalf("事件 Tokens = %v, want [%s]", ev.Tokens, sess.Token)
+			}
+			if ev.Reason != domain.RevokeReasonKick {
+				t.Fatalf("Reason = %q", ev.Reason)
+			}
+			return
+		case <-time.After(100 * time.Millisecond):
+			// 第一次 Revoke 已把 token 删掉，后续 Revoke 不会再发事件，
+			// 因此这里重新签发一个再试。
+			s2, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+			if err != nil {
+				t.Fatalf("重新 Issue: %v", err)
+			}
+			sess = s2
+		case <-deadline:
+			t.Fatal("3 秒内未收到撤销事件")
+		}
+	}
+}
+```
+
+同时把 `newSessionService` 改造为复用新的辅助函数——替换 `internal/service/session_test.go` 里的定义：
+
+```go
+func newSessionParts(t *testing.T) (*store.SessionStore, *store.RevokePublisher, *fakeClock) {
+	t.Helper()
+	rdb := testsupport.NewTestRedis(t)
+	return store.NewSessionStore(rdb),
+		store.NewRevokePublisher(rdb),
+		newFakeClock(time.Now().UnixMilli())
+}
+
+func newSessionService(t *testing.T) (*service.SessionService, *fakeClock) {
+	t.Helper()
+	st, pub, clk := newSessionParts(t)
+	return service.NewSessionServiceWithClock(st, pub, clk.Now), clk
+}
+```
+
+`session_revoke_test.go` 需要 `import "time"`。
+
+- [ ] **Step 7: 运行测试确认失败**
+
+Run: `go test ./internal/service/ -run Revoke -v`
+Expected: 编译失败，`too many arguments in call to service.NewSessionServiceWithClock`
+
+- [ ] **Step 8: 实现撤销**
+
+修改 `internal/service/session.go`：结构体加 `pub` 字段，两个构造函数加参数，并追加四个撤销方法。
+
+```go
+// SessionService 结构体改为：
+type SessionService struct {
+	store *store.SessionStore
+	pub   *store.RevokePublisher
+	now   func() int64
+}
+
+// NewSessionService 构造使用真实时钟的 SessionService。
+func NewSessionService(st *store.SessionStore, pub *store.RevokePublisher) *SessionService {
+	return NewSessionServiceWithClock(st, pub, func() int64 { return time.Now().UnixMilli() })
+}
+
+// NewSessionServiceWithClock 构造使用自定义时钟的 SessionService。
+func NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublisher, now func() int64) *SessionService {
+	return &SessionService{store: st, pub: pub, now: now}
+}
+
+// Revoke 作废单个 token，用于登出。
+func (s *SessionService) Revoke(ctx context.Context, token, reason string) error {
+	sess, err := s.store.Get(ctx, token)
+	if errors.Is(err, domain.ErrNotFound) {
+		// 已经不存在了，登出视为成功。
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.store.Delete(ctx, token); err != nil {
+		return err
+	}
+	s.announce(ctx, domain.RevokeEvent{
+		Tokens: []string{token},
+		UserID: sess.UserID,
+		AppID:  sess.AppID,
+		Reason: reason,
+		At:     s.now(),
+	})
+	return nil
+}
+
+// RevokeSession 作废一个会话的全部 token，包括轮换过渡期内尚存的旧 token。
+// sessionID 不属于该用户时不做任何事，返回 0。
+func (s *SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, sessionID, reason string) (int, error) {
+	return s.revokeMatching(ctx, userID, uuid.Nil, reason, func(sess *domain.Session) bool {
+		return sess.ID == sessionID
+	})
+}
+
+// RevokeUser 作废该用户的全部会话。用于封号、改密。
+func (s *SessionService) RevokeUser(ctx context.Context, userID uuid.UUID, reason string) (int, error) {
+	return s.revokeMatching(ctx, userID, uuid.Nil, reason, func(*domain.Session) bool { return true })
+}
+
+// RevokeUserInApp 只作废该用户在指定应用下的会话。
+// 多个应用共享同一套用户体系时，封禁某个应用的账号不应波及其他应用。
+func (s *SessionService) RevokeUserInApp(ctx context.Context, userID, appID uuid.UUID, reason string) (int, error) {
+	return s.revokeMatching(ctx, userID, appID, reason, func(sess *domain.Session) bool {
+		return sess.AppID == appID
+	})
+}
+
+// revokeMatching 遍历该用户的会话，删除满足 match 的那些，并广播一次事件。
+//
+// eventAppID 直接写入事件而不从会话推断：会话删除后已无从查证，
+// 而调用方本来就知道这次撤销的作用域（uuid.Nil 表示跨全部应用）。
+func (s *SessionService) revokeMatching(
+	ctx context.Context,
+	userID, eventAppID uuid.UUID,
+	reason string,
+	match func(*domain.Session) bool,
+) (int, error) {
+	tokens, err := s.store.ListUserTokens(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+
+	var revoked []string
+	for _, tok := range tokens {
+		sess, err := s.store.Get(ctx, tok)
+		if errors.Is(err, domain.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if !match(sess) {
+			continue
+		}
+		if err := s.store.Delete(ctx, tok); err != nil {
+			return 0, err
+		}
+		revoked = append(revoked, tok)
+	}
+	if len(revoked) == 0 {
+		return 0, nil
+	}
+
+	s.announce(ctx, domain.RevokeEvent{
+		Tokens: revoked,
+		UserID: userID,
+		AppID:  eventAppID,
+		Reason: reason,
+		At:     s.now(),
+	})
+	return len(revoked), nil
+}
+
+// announce 广播撤销事件。发布失败只记日志不返回错误——
+// 权威撤销（删除会话）已经完成，推送仅是加速手段，
+// 最坏情况下 SDK 在一个 cache_ttl 后回源也会被拒绝。
+func (s *SessionService) announce(ctx context.Context, ev domain.RevokeEvent) {
+	if s.pub == nil {
+		return
+	}
+	if err := s.pub.Publish(ctx, ev); err != nil {
+		slog.Error("service: 广播撤销事件失败", "err", err, "userId", ev.UserID)
+	}
+}
+```
+
+`internal/service/session.go` 需要补 import `"log/slog"`。
+
+- [ ] **Step 9: 更新调用方**
+
+`cmd/fp/main.go` 里若已构造 `SessionService`，补上 publisher 参数：
+
+```go
+	sessionStore := store.NewSessionStore(rdb)
+	revokePub := store.NewRevokePublisher(rdb)
+	sessionSvc := service.NewSessionService(sessionStore, revokePub)
+```
+
+- [ ] **Step 10: 运行全部测试**
+
+Run: `make test`
+Expected: 全部 PASS（新增撤销测试 6 个）
+
+- [ ] **Step 11: 提交**
+
+```bash
+git add internal cmd
+git commit -m "feat: 会话撤销与撤销事件广播"
+```
