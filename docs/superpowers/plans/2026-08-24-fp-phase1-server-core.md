@@ -3458,3 +3458,1601 @@ Expected: `internal/service` 全部 PASS（管理员 6 + 应用 9 + 用户 12）
 git add internal
 git commit -m "feat: 用户与登录标识模型、账号归并规则与状态机"
 ```
+
+---
+
+## Task 6: Connector 接口、注册表与 password 登录方式
+
+「新增一种登录方式 = 新增一个实现 + 注册一行，不改编排逻辑」是设计文档的核心要求。本任务把这个契约立起来，并用 password 作为第一个实现验证它。
+
+**关键约定：Connector 只负责「校验凭据并给出登录标识」，不负责建号。** 建号与归并由 `AuthService`（Task 16）依据 `Result.AllowCreate` 统一处理，这样归并规则只有一处实现。
+
+**Files:**
+- Create: `internal/domain/field.go`
+- Create: `internal/connector/connector.go`, `internal/connector/password.go`
+- Test: `internal/connector/connector_test.go`, `internal/connector/password_test.go`
+
+**Interfaces:**
+- Consumes: `domain` 哨兵错误、`domain.IdentityType*`、`service.UserService`（通过窄接口注入）
+- Produces:
+  - `type domain.FieldType string`；常量 `domain.FieldTypeString/FieldTypeInt/FieldTypeBool/FieldTypeSecret = "string"/"int"/"bool"/"secret"`
+  - `type domain.Field struct{ Key, Label string; Type FieldType; Required bool; Default any; Help string }`
+  - `type connector.Credentials map[string]string`；`func (Credentials) Get(key string) string`
+  - `type connector.Result struct{ IdentityType, Subject, UnionKey, Credential, Nickname string; AllowCreate bool }`
+  - `type connector.Connector interface{ Type() string; ConfigSchema() []domain.Field; Authenticate(ctx context.Context, cfg map[string]any, creds Credentials) (*Result, error) }`
+  - `type connector.Registry struct{}`；`func connector.NewRegistry() *Registry`
+  - `func (*Registry) Register(c Connector) error`
+  - `func (*Registry) Get(typ string) (Connector, error)`
+  - `func (*Registry) Types() []string`
+  - `func (*Registry) Schemas() map[string][]domain.Field`
+  - `type connector.UserLookup interface{ FindByIdentity(ctx context.Context, identityType, subject string) (*domain.User, *domain.Identity, error); VerifyPassword(ctx context.Context, userID uuid.UUID, plain string) error }`
+  - `func connector.NewPassword(lookup UserLookup) *PasswordConnector`
+  - `func connector.DetectIdentityType(account string) string`
+  - 常量 `connector.TypePassword = "password"`
+  - 配置读取助手：`func connector.ConfigBool(cfg map[string]any, key string, def bool) bool`、`func connector.ConfigInt(cfg map[string]any, key string, def int) int`、`func connector.ConfigString(cfg map[string]any, key, def string) string`
+
+- [ ] **Step 1: 实现共享的表单 schema 类型**
+
+`Field` 放在 `domain` 而非 `connector`，因为通知中心的 Provider 配置（Task 7）与后续的配置中心都要用同一套元数据驱动管理 UI 的动态表单。
+
+`internal/domain/field.go`：
+
+```go
+package domain
+
+// FieldType 决定管理 UI 用什么控件渲染该配置项。
+type FieldType string
+
+const (
+	FieldTypeString FieldType = "string"
+	FieldTypeInt    FieldType = "int"
+	FieldTypeBool   FieldType = "bool"
+	// FieldTypeSecret 与 string 相同，但 UI 上脱敏显示、落库加密。
+	FieldTypeSecret FieldType = "secret"
+)
+
+// Field 是一个配置项的元数据。管理 UI 靠它自动生成表单，
+// 因此新增登录方式或通知供应商都不需要改动前端代码。
+type Field struct {
+	Key      string    `json:"key"`
+	Label    string    `json:"label"`
+	Type     FieldType `json:"type"`
+	Required bool      `json:"required"`
+	Default  any       `json:"default,omitempty"`
+	Help     string    `json:"help,omitempty"`
+}
+```
+
+- [ ] **Step 2: 写失败的 registry 测试**
+
+`internal/connector/connector_test.go`：
+
+```go
+package connector_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// stubConnector 是只为测试注册表而存在的最小实现。
+type stubConnector struct{ typ string }
+
+func (s stubConnector) Type() string { return s.typ }
+func (s stubConnector) ConfigSchema() []domain.Field {
+	return []domain.Field{{Key: "k", Label: "K", Type: domain.FieldTypeString}}
+}
+func (s stubConnector) Authenticate(context.Context, map[string]any, connector.Credentials) (*connector.Result, error) {
+	return &connector.Result{IdentityType: "stub", Subject: "s"}, nil
+}
+
+func TestRegistryRegisterAndGet(t *testing.T) {
+	r := connector.NewRegistry()
+
+	if err := r.Register(stubConnector{typ: "a"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	got, err := r.Get("a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Type() != "a" {
+		t.Fatalf("Type = %q, want a", got.Type())
+	}
+}
+
+func TestRegistryRejectsDuplicate(t *testing.T) {
+	r := connector.NewRegistry()
+	if err := r.Register(stubConnector{typ: "a"}); err != nil {
+		t.Fatalf("首次 Register: %v", err)
+	}
+	if err := r.Register(stubConnector{typ: "a"}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+}
+
+func TestRegistryRejectsEmptyType(t *testing.T) {
+	r := connector.NewRegistry()
+	if err := r.Register(stubConnector{typ: ""}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestRegistryGetUnknown(t *testing.T) {
+	r := connector.NewRegistry()
+	if _, err := r.Get("nope"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRegistryTypesIsSorted(t *testing.T) {
+	r := connector.NewRegistry()
+	for _, typ := range []string{"c", "a", "b"} {
+		if err := r.Register(stubConnector{typ: typ}); err != nil {
+			t.Fatalf("Register %s: %v", typ, err)
+		}
+	}
+	got := r.Types()
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("Types() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Types() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestRegistrySchemas(t *testing.T) {
+	r := connector.NewRegistry()
+	if err := r.Register(stubConnector{typ: "a"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	schemas := r.Schemas()
+	if len(schemas["a"]) != 1 || schemas["a"][0].Key != "k" {
+		t.Fatalf("Schemas() = %+v", schemas)
+	}
+}
+
+func TestCredentialsGet(t *testing.T) {
+	c := connector.Credentials{"a": " x "}
+	if got := c.Get("a"); got != "x" {
+		t.Fatalf("Get 应当去除首尾空白, got %q", got)
+	}
+	if got := c.Get("missing"); got != "" {
+		t.Fatalf("缺失键应返回空串, got %q", got)
+	}
+}
+
+func TestConfigHelpers(t *testing.T) {
+	// 从 JSONB 读出的数字是 float64，助手必须能处理。
+	cfg := map[string]any{
+		"n":    float64(10),
+		"nInt": 7,
+		"b":    true,
+		"s":    "hello",
+	}
+	if got := connector.ConfigInt(cfg, "n", 1); got != 10 {
+		t.Errorf("ConfigInt(float64) = %d, want 10", got)
+	}
+	if got := connector.ConfigInt(cfg, "nInt", 1); got != 7 {
+		t.Errorf("ConfigInt(int) = %d, want 7", got)
+	}
+	if got := connector.ConfigInt(cfg, "absent", 3); got != 3 {
+		t.Errorf("ConfigInt(缺省) = %d, want 3", got)
+	}
+	if got := connector.ConfigInt(cfg, "s", 3); got != 3 {
+		t.Errorf("ConfigInt(类型不符) = %d, want 3", got)
+	}
+	if got := connector.ConfigBool(cfg, "b", false); !got {
+		t.Error("ConfigBool = false, want true")
+	}
+	if got := connector.ConfigBool(cfg, "absent", true); !got {
+		t.Error("ConfigBool(缺省) = false, want true")
+	}
+	if got := connector.ConfigString(cfg, "s", "x"); got != "hello" {
+		t.Errorf("ConfigString = %q, want hello", got)
+	}
+	if got := connector.ConfigString(nil, "s", "x"); got != "x" {
+		t.Errorf("ConfigString(nil cfg) = %q, want x", got)
+	}
+}
+```
+
+- [ ] **Step 3: 运行测试确认失败**
+
+Run: `go test ./internal/connector/ -v`
+Expected: 编译失败，`undefined: connector.NewRegistry`
+
+- [ ] **Step 4: 实现 connector.go**
+
+`internal/connector/connector.go`：
+
+```go
+// Package connector 定义登录方式的统一契约。
+//
+// 新增一种登录方式只需要：实现 Connector 接口，然后在启动时 Register 一行。
+// 管理 UI 的配置表单由 ConfigSchema() 自动渲染，无需改动前端。
+//
+// Connector 只负责「校验凭据并给出登录标识」。建号与账号归并由 AuthService
+// 依据 Result.AllowCreate 统一处理，保证归并规则只有一处实现。
+package connector
+
+import (
+	"context"
+	"sort"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// Credentials 是一次登录请求携带的凭据，键名由各 Connector 自行定义。
+type Credentials map[string]string
+
+// Get 返回去除首尾空白后的值，键不存在时返回空串。
+func (c Credentials) Get(key string) string {
+	return strings.TrimSpace(c[key])
+}
+
+// Result 是校验成功后 Connector 给出的登录标识。
+type Result struct {
+	// IdentityType / Subject 唯一确定一个 identity 行。
+	IdentityType string
+	Subject      string
+	// UnionKey 非空时参与跨类型归并（微信 unionId）。
+	UnionKey string
+	// Credential 存第三方 token 等，密码类不使用。
+	Credential string
+	// Nickname 仅在需要新建用户时用作初始昵称。
+	Nickname string
+	// AllowCreate 表示标识不存在时是否允许自动建号。
+	// 短信验证码登录为 true（验证码本身证明了手机号归属）；
+	// 密码登录为 false（连账号都不存在，谈不上密码正确）。
+	AllowCreate bool
+}
+
+// Connector 是一种登录方式。
+type Connector interface {
+	// Type 是该登录方式的稳定标识，同时是 application_connector.connector_type 的值。
+	Type() string
+	// ConfigSchema 描述该登录方式的可配置项，供管理 UI 渲染表单。
+	ConfigSchema() []domain.Field
+	// Authenticate 校验凭据。cfg 是该应用为本登录方式保存的配置。
+	// 校验失败必须返回 domain.ErrInvalidCredential 的包装。
+	Authenticate(ctx context.Context, cfg map[string]any, creds Credentials) (*Result, error)
+}
+
+// Registry 是进程内的登录方式注册表。构造后即只读，无需加锁。
+type Registry struct {
+	m map[string]Connector
+}
+
+// NewRegistry 返回空注册表。
+func NewRegistry() *Registry {
+	return &Registry{m: make(map[string]Connector)}
+}
+
+// Register 登记一个登录方式。类型重复或为空时报错。
+func (r *Registry) Register(c Connector) error {
+	typ := c.Type()
+	if typ == "" {
+		return domain.Errorf(domain.ErrInvalidArgument, "connector 类型不能为空")
+	}
+	if _, ok := r.m[typ]; ok {
+		return domain.Errorf(domain.ErrConflict, "connector %q 已注册", typ)
+	}
+	r.m[typ] = c
+	return nil
+}
+
+// Get 按类型取登录方式。
+func (r *Registry) Get(typ string) (Connector, error) {
+	c, ok := r.m[typ]
+	if !ok {
+		return nil, domain.Errorf(domain.ErrNotFound, "未知的登录方式 %q", typ)
+	}
+	return c, nil
+}
+
+// Types 返回已注册的全部类型，按字典序排列。
+func (r *Registry) Types() []string {
+	out := make([]string, 0, len(r.m))
+	for typ := range r.m {
+		out = append(out, typ)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Schemas 返回全部登录方式的配置元数据，供管理 UI 一次性拉取。
+func (r *Registry) Schemas() map[string][]domain.Field {
+	out := make(map[string][]domain.Field, len(r.m))
+	for typ, c := range r.m {
+		out[typ] = c.ConfigSchema()
+	}
+	return out
+}
+
+// UserLookup 是 password connector 需要的最小用户查询能力。
+// 用窄接口而非直接依赖 *service.UserService，避免 connector 包反向依赖 service 包。
+type UserLookup interface {
+	FindByIdentity(ctx context.Context, identityType, subject string) (*domain.User, *domain.Identity, error)
+	VerifyPassword(ctx context.Context, userID uuid.UUID, plain string) error
+}
+
+// ConfigInt 从配置里读整数。JSONB 反序列化出的数字是 float64，两种都要接受。
+func ConfigInt(cfg map[string]any, key string, def int) int {
+	switch v := cfg[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	default:
+		return def
+	}
+}
+
+// ConfigBool 从配置里读布尔值。
+func ConfigBool(cfg map[string]any, key string, def bool) bool {
+	if v, ok := cfg[key].(bool); ok {
+		return v
+	}
+	return def
+}
+
+// ConfigString 从配置里读字符串。
+func ConfigString(cfg map[string]any, key, def string) string {
+	if v, ok := cfg[key].(string); ok && v != "" {
+		return v
+	}
+	return def
+}
+```
+
+- [ ] **Step 5: 运行测试确认通过**
+
+Run: `go test ./internal/connector/ -v`
+Expected: 7 个测试 PASS
+
+- [ ] **Step 6: 写失败的 password 测试**
+
+`internal/connector/password_test.go`：
+
+```go
+package connector_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// fakeLookup 用内存数据模拟 UserService 的两个查询方法。
+type fakeLookup struct {
+	// byIdentity 的键是 type + "|" + subject
+	byIdentity map[string]uuid.UUID
+	passwords  map[uuid.UUID]string
+	statuses   map[uuid.UUID]string
+}
+
+func newFakeLookup() *fakeLookup {
+	return &fakeLookup{
+		byIdentity: map[string]uuid.UUID{},
+		passwords:  map[uuid.UUID]string{},
+		statuses:   map[uuid.UUID]string{},
+	}
+}
+
+func (f *fakeLookup) add(identityType, subject, password, status string) uuid.UUID {
+	id := uuid.New()
+	f.byIdentity[identityType+"|"+subject] = id
+	f.passwords[id] = password
+	f.statuses[id] = status
+	return id
+}
+
+func (f *fakeLookup) FindByIdentity(_ context.Context, identityType, subject string) (*domain.User, *domain.Identity, error) {
+	id, ok := f.byIdentity[identityType+"|"+subject]
+	if !ok {
+		return nil, nil, domain.Errorf(domain.ErrNotFound, "登录标识不存在")
+	}
+	return &domain.User{ID: id, Status: f.statuses[id]},
+		&domain.Identity{UserID: id, Type: identityType, Subject: subject}, nil
+}
+
+func (f *fakeLookup) VerifyPassword(_ context.Context, userID uuid.UUID, plain string) error {
+	want, ok := f.passwords[userID]
+	if !ok || want == "" || want != plain {
+		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
+	}
+	return nil
+}
+
+func TestDetectIdentityType(t *testing.T) {
+	tests := []struct {
+		account string
+		want    string
+	}{
+		{"13800138000", domain.IdentityTypePhone},
+		{"18612345678", domain.IdentityTypePhone},
+		{"a@b.com", domain.IdentityTypeEmail},
+		{"alice", domain.IdentityTypeUsername},
+		{"alice123", domain.IdentityTypeUsername},
+		// 11 位但不以 1 开头，不是手机号
+		{"23800138000", domain.IdentityTypeUsername},
+		// 10 位数字不是手机号
+		{"1380013800", domain.IdentityTypeUsername},
+	}
+	for _, tt := range tests {
+		if got := connector.DetectIdentityType(tt.account); got != tt.want {
+			t.Errorf("DetectIdentityType(%q) = %q, want %q", tt.account, got, tt.want)
+		}
+	}
+}
+
+func TestPasswordType(t *testing.T) {
+	c := connector.NewPassword(newFakeLookup())
+	if c.Type() != connector.TypePassword {
+		t.Fatalf("Type = %q, want %q", c.Type(), connector.TypePassword)
+	}
+	if len(c.ConfigSchema()) == 0 {
+		t.Fatal("ConfigSchema 不应为空")
+	}
+}
+
+func TestPasswordAuthenticateSuccess(t *testing.T) {
+	lookup := newFakeLookup()
+	lookup.add(domain.IdentityTypePhone, "13800138000", "hunter2hunter2", domain.UserStatusActive)
+	c := connector.NewPassword(lookup)
+
+	res, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account":  "13800138000",
+		"password": "hunter2hunter2",
+	})
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if res.IdentityType != domain.IdentityTypePhone || res.Subject != "13800138000" {
+		t.Fatalf("res = %+v", res)
+	}
+	if res.AllowCreate {
+		t.Fatal("密码登录不应允许自动建号")
+	}
+}
+
+func TestPasswordAuthenticateWrongPassword(t *testing.T) {
+	lookup := newFakeLookup()
+	lookup.add(domain.IdentityTypePhone, "13800138000", "hunter2hunter2", domain.UserStatusActive)
+	c := connector.NewPassword(lookup)
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "wrong",
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+// 账号不存在必须返回与密码错误相同的错误，避免账号枚举。
+func TestPasswordAuthenticateUnknownAccountLooksLikeWrongPassword(t *testing.T) {
+	c := connector.NewPassword(newFakeLookup())
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "whatever",
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestPasswordAuthenticateRequiresBothFields(t *testing.T) {
+	c := connector.NewPassword(newFakeLookup())
+	ctx := context.Background()
+
+	if _, err := c.Authenticate(ctx, nil, connector.Credentials{"password": "x"}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("缺 account err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := c.Authenticate(ctx, nil, connector.Credentials{"account": "a"}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("缺 password err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// 配置里关掉某种标识类型后，该类型的账号不能用密码登录。
+func TestPasswordAuthenticateRespectsAllowedIdentityTypes(t *testing.T) {
+	lookup := newFakeLookup()
+	lookup.add(domain.IdentityTypeUsername, "alice", "hunter2hunter2", domain.UserStatusActive)
+	c := connector.NewPassword(lookup)
+	ctx := context.Background()
+
+	cfg := map[string]any{"allowUsername": false}
+	_, err := c.Authenticate(ctx, cfg, connector.Credentials{
+		"account": "alice", "password": "hunter2hunter2",
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+
+	// 打开后可以登录
+	cfg["allowUsername"] = true
+	if _, err := c.Authenticate(ctx, cfg, connector.Credentials{
+		"account": "alice", "password": "hunter2hunter2",
+	}); err != nil {
+		t.Fatalf("允许后仍失败: %v", err)
+	}
+}
+
+// 邮箱默认关闭，需要显式打开。
+func TestPasswordEmailDisabledByDefault(t *testing.T) {
+	lookup := newFakeLookup()
+	lookup.add(domain.IdentityTypeEmail, "a@b.com", "hunter2hunter2", domain.UserStatusActive)
+	c := connector.NewPassword(lookup)
+	ctx := context.Background()
+
+	if _, err := c.Authenticate(ctx, nil, connector.Credentials{
+		"account": "a@b.com", "password": "hunter2hunter2",
+	}); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("默认应关闭邮箱登录, err = %v", err)
+	}
+	if _, err := c.Authenticate(ctx, map[string]any{"allowEmail": true}, connector.Credentials{
+		"account": "a@b.com", "password": "hunter2hunter2",
+	}); err != nil {
+		t.Fatalf("打开后仍失败: %v", err)
+	}
+}
+```
+
+- [ ] **Step 7: 运行测试确认失败**
+
+Run: `go test ./internal/connector/ -run Password -v`
+Expected: 编译失败，`undefined: connector.NewPassword`
+
+- [ ] **Step 8: 实现 password.go**
+
+`internal/connector/password.go`：
+
+```go
+package connector
+
+import (
+	"context"
+	"strings"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// TypePassword 是密码登录方式的类型标识。
+const TypePassword = "password"
+
+// PasswordConnector 用「账号 + 密码」校验身份。
+// 账号可以是手机号、用户名或邮箱，具体开放哪几种由应用配置决定。
+type PasswordConnector struct {
+	lookup UserLookup
+}
+
+// NewPassword 构造密码登录方式。
+func NewPassword(lookup UserLookup) *PasswordConnector {
+	return &PasswordConnector{lookup: lookup}
+}
+
+// Type 实现 Connector。
+func (c *PasswordConnector) Type() string { return TypePassword }
+
+// ConfigSchema 实现 Connector。
+func (c *PasswordConnector) ConfigSchema() []domain.Field {
+	return []domain.Field{
+		{Key: "allowPhone", Label: "允许手机号登录", Type: domain.FieldTypeBool, Default: true},
+		{Key: "allowUsername", Label: "允许用户名登录", Type: domain.FieldTypeBool, Default: true},
+		{Key: "allowEmail", Label: "允许邮箱登录", Type: domain.FieldTypeBool, Default: false},
+	}
+}
+
+// Authenticate 实现 Connector。
+//
+// 凭据键：account（手机号/用户名/邮箱）、password。
+//
+// 账号不存在、账号类型未开放、密码错误三种情况**返回同一个错误**，
+// 避免攻击者据此枚举已注册账号。
+func (c *PasswordConnector) Authenticate(ctx context.Context, cfg map[string]any, creds Credentials) (*Result, error) {
+	account := creds.Get("account")
+	password := creds.Get("password")
+	if account == "" {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "account 不能为空")
+	}
+	if password == "" {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "password 不能为空")
+	}
+
+	// 统一的失败错误，三种失败原因共用，防止账号枚举。
+	invalid := domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
+
+	identityType := DetectIdentityType(account)
+	if !identityTypeAllowed(cfg, identityType) {
+		return nil, invalid
+	}
+
+	user, _, err := c.lookup.FindByIdentity(ctx, identityType, account)
+	if err != nil {
+		return nil, invalid
+	}
+	if err := c.lookup.VerifyPassword(ctx, user.ID, password); err != nil {
+		return nil, invalid
+	}
+
+	return &Result{
+		IdentityType: identityType,
+		Subject:      account,
+		// 密码登录不建号：账号都不存在，谈不上密码正确。
+		AllowCreate: false,
+	}, nil
+}
+
+func identityTypeAllowed(cfg map[string]any, identityType string) bool {
+	switch identityType {
+	case domain.IdentityTypePhone:
+		return ConfigBool(cfg, "allowPhone", true)
+	case domain.IdentityTypeUsername:
+		return ConfigBool(cfg, "allowUsername", true)
+	case domain.IdentityTypeEmail:
+		return ConfigBool(cfg, "allowEmail", false)
+	default:
+		return false
+	}
+}
+
+// DetectIdentityType 从账号字符串推断标识类型。
+//
+//	11 位、以 1 开头的纯数字 → phone
+//	含 @                    → email
+//	其余                    → username
+func DetectIdentityType(account string) string {
+	if strings.Contains(account, "@") {
+		return domain.IdentityTypeEmail
+	}
+	if isChineseMobile(account) {
+		return domain.IdentityTypePhone
+	}
+	return domain.IdentityTypeUsername
+}
+
+func isChineseMobile(s string) bool {
+	if len(s) != 11 || s[0] != '1' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+```
+
+- [ ] **Step 9: 运行测试确认通过**
+
+Run: `go test ./internal/connector/ -v`
+Expected: 全部 PASS（注册表 7 + password 7）
+
+- [ ] **Step 10: 验证 UserService 满足 UserLookup**
+
+在 `internal/service/user.go` 末尾加一行编译期断言。因为 `service` 不能 import `connector`（会形成循环），断言反向写在 `connector` 包的测试里：
+
+`internal/connector/interface_assert_test.go`：
+
+```go
+package connector_test
+
+import (
+	"testing"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/service"
+)
+
+// TestUserServiceSatisfiesUserLookup 保证 service.UserService 的方法签名
+// 与 connector.UserLookup 保持一致。签名漂移会在这里编译失败。
+func TestUserServiceSatisfiesUserLookup(t *testing.T) {
+	var _ connector.UserLookup = (*service.UserService)(nil)
+}
+```
+
+- [ ] **Step 11: 运行全部测试**
+
+Run: `make test`
+Expected: 全部 PASS
+
+- [ ] **Step 12: 提交**
+
+```bash
+git add internal
+git commit -m "feat: Connector 契约与注册表、password 登录方式"
+```
+
+---
+
+## Task 7: 通知中心（Provider 抽象、频率限制、验证码收发）
+
+第一阶段只要求「能发验证码」，但**多供应商顺序降级**只需十几行，且正是设计文档点名的痛点（3s 切供应商靠改 `SendSms` 里注释哪一行），因此一并做掉。不做的是：模板管理 UI、邮件与站内信通道、发送记录查询界面。
+
+**Files:**
+- Create: `internal/store/ratelimit.go`
+- Create: `internal/store/migrations/00005_notify.sql`
+- Create: `internal/notify/notify.go`, `internal/notify/code.go`, `internal/notify/fake.go`
+- Test: `internal/store/ratelimit_test.go`, `internal/notify/notify_test.go`, `internal/notify/code_test.go`
+
+**Interfaces:**
+- Consumes: `store.OpenRedis` 产出的 `*redis.Client`、`domain.Field`、`domain` 哨兵错误
+- Produces:
+  - `func store.NewRateLimiter(rdb *redis.Client) *RateLimiter`
+  - `func (*RateLimiter) Allow(ctx context.Context, key string, window time.Duration, limit int) (allowed bool, retryAfter time.Duration, err error)`
+  - `type notify.Channel string`；常量 `notify.ChannelSMS = "sms"`、`notify.ChannelEmail = "email"`
+  - `type notify.Message struct{ Channel Channel; To, Template string; Params map[string]string }`
+  - `type notify.Provider interface{ Name() string; Channel() Channel; ConfigSchema() []domain.Field; Send(ctx context.Context, msg Message) error }`
+  - `type notify.RateRule struct{ Name string; Window time.Duration; Limit int }`
+  - `func notify.DefaultSMSRateRules() []RateRule`
+  - `func notify.NewSender(pool *pgxpool.Pool, limiter *store.RateLimiter, rules []RateRule) *Sender`
+  - `func (*Sender) AddProvider(p Provider)`
+  - `func (*Sender) Send(ctx context.Context, msg Message) error`
+  - `func notify.NewCodeService(rdb *redis.Client) *CodeService`
+  - `func (*CodeService) Issue(ctx context.Context, purpose, target string) (string, error)`
+  - `func (*CodeService) Verify(ctx context.Context, purpose, target, code string) error`
+  - 常量 `notify.PurposeLogin = "login"`
+  - `func notify.NewFakeProvider(ch Channel, name string) *FakeProvider`
+  - `func (*FakeProvider) Sent() []Message`、`func (*FakeProvider) FailNext(err error)`、`func (*FakeProvider) LastParam(key string) string`
+
+- [ ] **Step 1: 写失败的限流测试**
+
+`internal/store/ratelimit_test.go`：
+
+```go
+package store_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func TestRateLimiterAllowsUpToLimit(t *testing.T) {
+	rl := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		allowed, _, err := rl.Allow(ctx, "k", time.Minute, 3)
+		if err != nil {
+			t.Fatalf("第 %d 次 Allow: %v", i, err)
+		}
+		if !allowed {
+			t.Fatalf("第 %d 次应当放行", i)
+		}
+	}
+
+	allowed, retryAfter, err := rl.Allow(ctx, "k", time.Minute, 3)
+	if err != nil {
+		t.Fatalf("第 4 次 Allow: %v", err)
+	}
+	if allowed {
+		t.Fatal("第 4 次应当拒绝")
+	}
+	if retryAfter <= 0 || retryAfter > time.Minute {
+		t.Fatalf("retryAfter = %v, 应在 (0, 1m] 内", retryAfter)
+	}
+}
+
+func TestRateLimiterKeysAreIndependent(t *testing.T) {
+	rl := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	if allowed, _, _ := rl.Allow(ctx, "a", time.Minute, 1); !allowed {
+		t.Fatal("a 首次应放行")
+	}
+	if allowed, _, _ := rl.Allow(ctx, "b", time.Minute, 1); !allowed {
+		t.Fatal("b 首次应放行")
+	}
+	if allowed, _, _ := rl.Allow(ctx, "a", time.Minute, 1); allowed {
+		t.Fatal("a 第二次应拒绝")
+	}
+}
+
+func TestRateLimiterWindowExpires(t *testing.T) {
+	rl := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	if allowed, _, _ := rl.Allow(ctx, "k", 300*time.Millisecond, 1); !allowed {
+		t.Fatal("首次应放行")
+	}
+	if allowed, _, _ := rl.Allow(ctx, "k", 300*time.Millisecond, 1); allowed {
+		t.Fatal("窗口内第二次应拒绝")
+	}
+
+	time.Sleep(400 * time.Millisecond)
+
+	if allowed, _, _ := rl.Allow(ctx, "k", 300*time.Millisecond, 1); !allowed {
+		t.Fatal("窗口过期后应重新放行")
+	}
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `go test ./internal/store/ -run RateLimiter -v`
+Expected: 编译失败，`undefined: store.NewRateLimiter`
+
+- [ ] **Step 3: 实现限流器**
+
+`internal/store/ratelimit.go`：
+
+```go
+package store
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// allowScript 是固定窗口计数器。
+// 第一次计数时设置窗口 TTL，之后只累加，因此窗口不会被后续请求延长。
+// 返回 {当前计数, 剩余毫秒}。
+var allowScript = redis.NewScript(`
+local c = redis.call('INCR', KEYS[1])
+if c == 1 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+return {c, redis.call('PTTL', KEYS[1])}
+`)
+
+// RateLimiter 是基于 Redis 的固定窗口频率限制。
+type RateLimiter struct {
+	rdb *redis.Client
+}
+
+// NewRateLimiter 构造 RateLimiter。
+func NewRateLimiter(rdb *redis.Client) *RateLimiter {
+	return &RateLimiter{rdb: rdb}
+}
+
+// Allow 在 window 内最多放行 limit 次。
+// 被拒绝时 retryAfter 是当前窗口的剩余时间。
+func (rl *RateLimiter) Allow(ctx context.Context, key string, window time.Duration, limit int) (bool, time.Duration, error) {
+	res, err := allowScript.Run(ctx, rl.rdb, []string{"fp:rl:" + key}, window.Milliseconds()).Slice()
+	if err != nil {
+		return false, 0, fmt.Errorf("store: 执行限流脚本: %w", err)
+	}
+	if len(res) != 2 {
+		return false, 0, fmt.Errorf("store: 限流脚本返回 %d 个值, want 2", len(res))
+	}
+	count, _ := res[0].(int64)
+	pttl, _ := res[1].(int64)
+
+	if count > int64(limit) {
+		retryAfter := time.Duration(pttl) * time.Millisecond
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		return false, retryAfter, nil
+	}
+	return true, 0, nil
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `go test ./internal/store/ -run RateLimiter -v`
+Expected: 3 个测试 PASS
+
+- [ ] **Step 5: 写迁移**
+
+`internal/store/migrations/00005_notify.sql`：
+
+```sql
+-- +goose Up
+-- 发送记录。注意：绝不写入验证码本身，params 只留非敏感的模板变量名。
+CREATE TABLE notify_log (
+    id         uuid PRIMARY KEY DEFAULT uuidv7(),
+    channel    text NOT NULL,
+    target     text NOT NULL,
+    template   text NOT NULL,
+    provider   text NOT NULL DEFAULT '',
+    success    boolean NOT NULL,
+    error      text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX notify_log_target_idx ON notify_log (target, created_at DESC);
+
+-- +goose Down
+DROP TABLE notify_log;
+```
+
+- [ ] **Step 6: 写失败的验证码测试**
+
+`internal/notify/code_test.go`：
+
+```go
+package notify_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func TestIssueAndVerify(t *testing.T) {
+	svc := notify.NewCodeService(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	code, err := svc.Issue(ctx, notify.PurposeLogin, "13800138000")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if len(code) != 6 {
+		t.Fatalf("code = %q, 长度 want 6", code)
+	}
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			t.Fatalf("code = %q, 应为纯数字", code)
+		}
+	}
+
+	if err := svc.Verify(ctx, notify.PurposeLogin, "13800138000", code); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
+// 验证码必须是一次性的。
+func TestVerifyIsOneShot(t *testing.T) {
+	svc := notify.NewCodeService(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	code, err := svc.Issue(ctx, notify.PurposeLogin, "13800138000")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.Verify(ctx, notify.PurposeLogin, "13800138000", code); err != nil {
+		t.Fatalf("首次 Verify: %v", err)
+	}
+	if err := svc.Verify(ctx, notify.PurposeLogin, "13800138000", code); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("二次 Verify err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestVerifyWrongCode(t *testing.T) {
+	svc := notify.NewCodeService(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	if _, err := svc.Issue(ctx, notify.PurposeLogin, "13800138000"); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.Verify(ctx, notify.PurposeLogin, "13800138000", "000000"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestVerifyWithoutIssue(t *testing.T) {
+	svc := notify.NewCodeService(testsupport.NewTestRedis(t))
+	if err := svc.Verify(context.Background(), notify.PurposeLogin, "13800138000", "123456"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+// 连续猜错达到上限后，验证码立即作废，正确的码也不再有效——防爆破。
+func TestVerifyAttemptLimit(t *testing.T) {
+	svc := notify.NewCodeService(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	code, err := svc.Issue(ctx, notify.PurposeLogin, "13800138000")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	for i := 0; i < notify.MaxVerifyAttempts; i++ {
+		err := svc.Verify(ctx, notify.PurposeLogin, "13800138000", "000000")
+		if !errors.Is(err, domain.ErrInvalidCredential) {
+			t.Fatalf("第 %d 次猜错 err = %v", i+1, err)
+		}
+	}
+	if err := svc.Verify(ctx, notify.PurposeLogin, "13800138000", code); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("超限后正确的码也应无效, err = %v", err)
+	}
+}
+
+// 不同用途 / 不同号码之间互不干扰。
+func TestCodeScopedByPurposeAndTarget(t *testing.T) {
+	svc := notify.NewCodeService(testsupport.NewTestRedis(t))
+	ctx := context.Background()
+
+	codeA, err := svc.Issue(ctx, notify.PurposeLogin, "13800138000")
+	if err != nil {
+		t.Fatalf("Issue A: %v", err)
+	}
+	if _, err := svc.Issue(ctx, notify.PurposeLogin, "13900139000"); err != nil {
+		t.Fatalf("Issue B: %v", err)
+	}
+
+	if err := svc.Verify(ctx, notify.PurposeLogin, "13900139000", codeA); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("A 的码不应能验 B, err = %v", err)
+	}
+	if err := svc.Verify(ctx, "other", "13800138000", codeA); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("换用途不应通过, err = %v", err)
+	}
+	if err := svc.Verify(ctx, notify.PurposeLogin, "13800138000", codeA); err != nil {
+		t.Fatalf("原用途原号码应通过: %v", err)
+	}
+}
+```
+
+- [ ] **Step 7: 运行测试确认失败**
+
+Run: `go test ./internal/notify/ -v`
+Expected: 编译失败，`no required module provides package .../internal/notify`
+
+- [ ] **Step 8: 实现验证码服务**
+
+`internal/notify/code.go`：
+
+```go
+package notify
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"math/big"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// 验证码用途。同一号码在不同用途下的验证码互相独立。
+const (
+	PurposeLogin = "login"
+)
+
+const (
+	// codeTTL 是验证码有效期。
+	codeTTL = 5 * time.Minute
+	// MaxVerifyAttempts 是同一个验证码允许的最大校验次数，超过即作废。
+	MaxVerifyAttempts = 5
+	// codeLength 是验证码位数。
+	codeLength = 6
+)
+
+// verifyScript 原子地完成「比对 + 计次 + 消费」。
+// 拆成多条命令会在并发下产生「同一个码被用两次」的窗口。
+//
+// 返回值：1 成功；0 码不匹配；-1 码不存在或已过期；-2 尝试次数超限（码已作废）。
+var verifyScript = redis.NewScript(`
+local stored = redis.call('GET', KEYS[1])
+if not stored then
+  return -1
+end
+local tries = redis.call('INCR', KEYS[2])
+if tries == 1 then
+  redis.call('PEXPIRE', KEYS[2], ARGV[2])
+end
+if tries > tonumber(ARGV[3]) then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return -2
+end
+if stored == ARGV[1] then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return 1
+end
+return 0
+`)
+
+// CodeService 负责验证码的签发与一次性校验。
+type CodeService struct {
+	rdb *redis.Client
+}
+
+// NewCodeService 构造 CodeService。
+func NewCodeService(rdb *redis.Client) *CodeService {
+	return &CodeService{rdb: rdb}
+}
+
+// Issue 生成并存储一个验证码，覆盖该 (purpose, target) 下已有的验证码。
+func (s *CodeService) Issue(ctx context.Context, purpose, target string) (string, error) {
+	if purpose == "" || target == "" {
+		return "", domain.Errorf(domain.ErrInvalidArgument, "purpose 与 target 不能为空")
+	}
+	code, err := randomDigits(codeLength)
+	if err != nil {
+		return "", err
+	}
+	// 重新签发时一并清掉旧的尝试计数，否则上一轮的失败次数会拖累新码。
+	if err := s.rdb.Del(ctx, tryKey(purpose, target)).Err(); err != nil {
+		return "", fmt.Errorf("notify: 清理验证码尝试计数: %w", err)
+	}
+	if err := s.rdb.Set(ctx, codeKey(purpose, target), code, codeTTL).Err(); err != nil {
+		return "", fmt.Errorf("notify: 写入验证码: %w", err)
+	}
+	return code, nil
+}
+
+// Verify 校验验证码。成功后该验证码立即作废。
+// 码错误、码不存在、尝试超限一律返回 domain.ErrInvalidCredential，不向调用方区分。
+func (s *CodeService) Verify(ctx context.Context, purpose, target, code string) error {
+	if code == "" {
+		return domain.Errorf(domain.ErrInvalidCredential, "验证码不正确")
+	}
+	res, err := verifyScript.Run(ctx, s.rdb,
+		[]string{codeKey(purpose, target), tryKey(purpose, target)},
+		code, codeTTL.Milliseconds(), MaxVerifyAttempts).Int64()
+	if err != nil {
+		return fmt.Errorf("notify: 执行验证码校验脚本: %w", err)
+	}
+	if res == 1 {
+		return nil
+	}
+	return domain.Errorf(domain.ErrInvalidCredential, "验证码不正确或已过期")
+}
+
+func codeKey(purpose, target string) string { return "fp:code:" + purpose + ":" + target }
+func tryKey(purpose, target string) string  { return "fp:code:try:" + purpose + ":" + target }
+
+// randomDigits 生成 n 位密码学随机数字串。
+func randomDigits(n int) (string, error) {
+	const digits = "0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
+		if err != nil {
+			return "", fmt.Errorf("notify: 生成随机验证码: %w", err)
+		}
+		b[i] = digits[idx.Int64()]
+	}
+	return string(b), nil
+}
+```
+
+- [ ] **Step 9: 运行测试确认通过**
+
+Run: `go test ./internal/notify/ -v`
+Expected: 6 个测试 PASS
+
+- [ ] **Step 10: 写失败的 Sender 测试**
+
+`internal/notify/notify_test.go`：
+
+```go
+package notify_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func newSender(t *testing.T, rules []notify.RateRule) (*notify.Sender, *notify.FakeProvider) {
+	t.Helper()
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, rules)
+	p := notify.NewFakeProvider(notify.ChannelSMS, "fake")
+	s.AddProvider(p)
+	return s, p
+}
+
+func msg(to string) notify.Message {
+	return notify.Message{
+		Channel:  notify.ChannelSMS,
+		To:       to,
+		Template: "login_code",
+		Params:   map[string]string{"code": "123456"},
+	}
+}
+
+func TestSenderDelivers(t *testing.T) {
+	s, p := newSender(t, nil)
+
+	if err := s.Send(context.Background(), msg("13800138000")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	sent := p.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("发送数量 = %d, want 1", len(sent))
+	}
+	if sent[0].To != "13800138000" || sent[0].Template != "login_code" {
+		t.Fatalf("sent = %+v", sent[0])
+	}
+	if p.LastParam("code") != "123456" {
+		t.Fatalf("code 参数 = %q", p.LastParam("code"))
+	}
+}
+
+func TestSenderRejectsUnknownChannel(t *testing.T) {
+	s, _ := newSender(t, nil)
+	m := msg("13800138000")
+	m.Channel = notify.ChannelEmail
+
+	if err := s.Send(context.Background(), m); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSenderEnforcesRateRules(t *testing.T) {
+	rules := []notify.RateRule{{Name: "burst", Window: time.Minute, Limit: 2}}
+	s, p := newSender(t, rules)
+	ctx := context.Background()
+
+	for i := 1; i <= 2; i++ {
+		if err := s.Send(ctx, msg("13800138000")); err != nil {
+			t.Fatalf("第 %d 次 Send: %v", i, err)
+		}
+	}
+	if err := s.Send(ctx, msg("13800138000")); !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("第 3 次 err = %v, want ErrRateLimited", err)
+	}
+	if len(p.Sent()) != 2 {
+		t.Fatalf("被限流的请求不应到达 provider, sent = %d", len(p.Sent()))
+	}
+
+	// 限流按号码隔离
+	if err := s.Send(ctx, msg("13900139000")); err != nil {
+		t.Fatalf("另一号码 Send: %v", err)
+	}
+}
+
+// 主供应商失败时自动降级到下一个——对症 3s 靠改注释切供应商的问题。
+func TestSenderFallsBackToNextProvider(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, nil)
+
+	primary := notify.NewFakeProvider(notify.ChannelSMS, "primary")
+	backup := notify.NewFakeProvider(notify.ChannelSMS, "backup")
+	s.AddProvider(primary)
+	s.AddProvider(backup)
+
+	primary.FailNext(errors.New("供应商余额不足"))
+
+	if err := s.Send(context.Background(), msg("13800138000")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(primary.Sent()) != 0 {
+		t.Fatalf("primary 不应成功发出, sent = %d", len(primary.Sent()))
+	}
+	if len(backup.Sent()) != 1 {
+		t.Fatalf("backup 应接手, sent = %d", len(backup.Sent()))
+	}
+}
+
+func TestSenderReturnsErrorWhenAllProvidersFail(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, nil)
+
+	p := notify.NewFakeProvider(notify.ChannelSMS, "only")
+	p.FailNext(errors.New("网络不可达"))
+	s.AddProvider(p)
+
+	if err := s.Send(context.Background(), msg("13800138000")); err == nil {
+		t.Fatal("全部供应商失败时应返回错误")
+	}
+}
+
+// 发送记录必须落库，但绝不能写入验证码本身。
+func TestSenderWritesLogWithoutCode(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	limiter := store.NewRateLimiter(testsupport.NewTestRedis(t))
+	s := notify.NewSender(pool, limiter, nil)
+	s.AddProvider(notify.NewFakeProvider(notify.ChannelSMS, "fake"))
+	ctx := context.Background()
+
+	if err := s.Send(ctx, msg("13800138000")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var (
+		n        int
+		provider string
+	)
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), coalesce(max(provider), '') FROM notify_log WHERE target = $1`,
+		"13800138000").Scan(&n, &provider); err != nil {
+		t.Fatalf("查询发送记录: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("发送记录数 = %d, want 1", n)
+	}
+	if provider != "fake" {
+		t.Fatalf("provider = %q, want fake", provider)
+	}
+
+	// 全表扫一遍，确认没有任何列泄露了验证码。
+	var leaked int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM notify_log
+		 WHERE channel LIKE '%123456%' OR target LIKE '%123456%'
+		    OR template LIKE '%123456%' OR provider LIKE '%123456%'
+		    OR error LIKE '%123456%'`).Scan(&leaked); err != nil {
+		t.Fatalf("检查验证码泄露: %v", err)
+	}
+	if leaked != 0 {
+		t.Fatal("发送记录中出现了验证码明文")
+	}
+}
+```
+
+测试文件需要 `import "time"`（`RateRule.Window` 用到）。
+
+- [ ] **Step 11: 运行测试确认失败**
+
+Run: `go test ./internal/notify/ -v`
+Expected: 编译失败，`undefined: notify.NewSender`
+
+- [ ] **Step 12: 实现 Sender 与 Provider 契约**
+
+`internal/notify/notify.go`：
+
+```go
+// Package notify 是 fp 的通知中心。
+//
+// 它把「发什么」（Message）与「谁来发」（Provider）分开：
+// 业务只声明模板与参数，具体走哪家供应商由配置决定，主供应商失败自动降级到下一家。
+// 这是对 3s 中切换供应商靠改代码注释、模板 ID 硬编码在 if-else 里的直接修正。
+package notify
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/store"
+)
+
+// Channel 是通知通道。
+type Channel string
+
+const (
+	ChannelSMS   Channel = "sms"
+	ChannelEmail Channel = "email"
+)
+
+// Message 是一条待发送的通知。Template 是 fp 内部的模板 key，
+// 由各 Provider 映射到自己那边的模板 ID。
+type Message struct {
+	Channel  Channel
+	To       string
+	Template string
+	Params   map[string]string
+}
+
+// Provider 是一家通知供应商。
+type Provider interface {
+	// Name 是供应商标识，写入发送记录用于排障。
+	Name() string
+	// Channel 是该供应商负责的通道。
+	Channel() Channel
+	// ConfigSchema 描述该供应商的可配置项，供管理 UI 渲染表单。
+	ConfigSchema() []domain.Field
+	// Send 发送一条通知。失败时 Sender 会降级到下一家。
+	Send(ctx context.Context, msg Message) error
+}
+
+// RateRule 是一条频率限制规则，按接收方（手机号 / 邮箱）计数。
+type RateRule struct {
+	Name   string
+	Window time.Duration
+	Limit  int
+}
+
+// DefaultSMSRateRules 是短信的默认频率限制，取自 3s 的 risk:smssend 策略。
+func DefaultSMSRateRules() []RateRule {
+	return []RateRule{
+		{Name: "30s", Window: 30 * time.Second, Limit: 1},
+		{Name: "1h", Window: time.Hour, Limit: 5},
+		{Name: "1d", Window: 24 * time.Hour, Limit: 10},
+	}
+}
+
+// Sender 编排一次发送：频率限制 → 按顺序尝试供应商 → 落发送记录。
+type Sender struct {
+	pool      *pgxpool.Pool
+	limiter   *store.RateLimiter
+	rules     []RateRule
+	providers map[Channel][]Provider
+}
+
+// NewSender 构造 Sender。rules 为 nil 表示不做频率限制。
+func NewSender(pool *pgxpool.Pool, limiter *store.RateLimiter, rules []RateRule) *Sender {
+	return &Sender{
+		pool:      pool,
+		limiter:   limiter,
+		rules:     rules,
+		providers: make(map[Channel][]Provider),
+	}
+}
+
+// AddProvider 追加一家供应商。同通道内按加入顺序尝试，先加入的是主供应商。
+func (s *Sender) AddProvider(p Provider) {
+	ch := p.Channel()
+	s.providers[ch] = append(s.providers[ch], p)
+}
+
+// Send 发送一条通知。
+//
+// 频率超限返回 domain.ErrRateLimited；该通道没有可用供应商返回 domain.ErrNotFound；
+// 全部供应商都失败时返回最后一次的错误。
+func (s *Sender) Send(ctx context.Context, msg Message) error {
+	if msg.To == "" {
+		return domain.Errorf(domain.ErrInvalidArgument, "接收方不能为空")
+	}
+	providers := s.providers[msg.Channel]
+	if len(providers) == 0 {
+		return domain.Errorf(domain.ErrNotFound, "通道 %s 没有配置供应商", msg.Channel)
+	}
+
+	// 频率限制先于供应商调用，避免被限流的请求也消耗供应商额度。
+	for _, rule := range s.rules {
+		key := fmt.Sprintf("notify:%s:%s:%s", msg.Channel, rule.Name, msg.To)
+		allowed, retryAfter, err := s.limiter.Allow(ctx, key, rule.Window, rule.Limit)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return domain.Errorf(domain.ErrRateLimited,
+				"发送过于频繁，请 %d 秒后重试", int(retryAfter.Seconds())+1)
+		}
+	}
+
+	var lastErr error
+	for _, p := range providers {
+		err := p.Send(ctx, msg)
+		s.writeLog(ctx, msg, p.Name(), err)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		slog.Warn("notify: 供应商发送失败，尝试降级",
+			"provider", p.Name(), "channel", msg.Channel, "err", err)
+	}
+	return fmt.Errorf("notify: 全部供应商发送失败: %w", lastErr)
+}
+
+// writeLog 写发送记录。
+//
+// 只记录通道、接收方、模板 key、供应商与结果——**绝不写入 Params**，
+// 因为验证码就在里面。记录失败不影响发送结果，只打日志。
+func (s *Sender) writeLog(ctx context.Context, msg Message, provider string, sendErr error) {
+	errText := ""
+	if sendErr != nil {
+		errText = sendErr.Error()
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO notify_log (channel, target, template, provider, success, error)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		string(msg.Channel), msg.To, msg.Template, provider, sendErr == nil, errText)
+	if err != nil {
+		slog.Error("notify: 写入发送记录失败", "err", err)
+	}
+}
+```
+
+- [ ] **Step 13: 实现测试用 FakeProvider**
+
+`internal/notify/fake.go`：
+
+```go
+package notify
+
+import (
+	"context"
+	"sync"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// FakeProvider 是内存中的假供应商，用于测试与本地开发。
+// 它把发出的消息留在内存里，测试可以直接读出验证码，无需真实短信通道。
+//
+// 生产部署绝不应注册它。
+type FakeProvider struct {
+	name string
+	ch   Channel
+
+	mu       sync.Mutex
+	sent     []Message
+	failNext error
+}
+
+// NewFakeProvider 构造一个假供应商。
+func NewFakeProvider(ch Channel, name string) *FakeProvider {
+	return &FakeProvider{name: name, ch: ch}
+}
+
+// Name 实现 Provider。
+func (p *FakeProvider) Name() string { return p.name }
+
+// Channel 实现 Provider。
+func (p *FakeProvider) Channel() Channel { return p.ch }
+
+// ConfigSchema 实现 Provider。假供应商没有可配置项。
+func (p *FakeProvider) ConfigSchema() []domain.Field { return nil }
+
+// Send 实现 Provider。若已通过 FailNext 预置错误，则消费掉该错误并返回。
+func (p *FakeProvider) Send(_ context.Context, msg Message) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.failNext != nil {
+		err := p.failNext
+		p.failNext = nil
+		return err
+	}
+	p.sent = append(p.sent, msg)
+	return nil
+}
+
+// FailNext 让下一次 Send 返回 err。
+func (p *FakeProvider) FailNext(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failNext = err
+}
+
+// Sent 返回已成功发出的全部消息的副本。
+func (p *FakeProvider) Sent() []Message {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]Message, len(p.sent))
+	copy(out, p.sent)
+	return out
+}
+
+// LastParam 返回最后一条消息里指定参数的值，没有消息时返回空串。
+func (p *FakeProvider) LastParam(key string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.sent) == 0 {
+		return ""
+	}
+	return p.sent[len(p.sent)-1].Params[key]
+}
+```
+
+- [ ] **Step 14: 运行测试确认通过**
+
+Run: `make test`
+Expected: `internal/notify` 12 个测试 PASS（验证码 6 + Sender 6），其余包保持 PASS
+
+- [ ] **Step 15: 提交**
+
+```bash
+git add internal
+git commit -m "feat: 通知中心 Provider 抽象、供应商降级、频率限制与验证码收发"
+```
