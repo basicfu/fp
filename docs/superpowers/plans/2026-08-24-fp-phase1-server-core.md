@@ -8624,7 +8624,27 @@ func (s *SessionService) announce(ctx context.Context, ev domain.RevokeEvent) {
 
 `internal/service/session.go` 需要补 import `"log/slog"`。
 
-- [ ] **Step 9: 更新调用方**
+- [ ] **Step 9: 更新所有直接构造 SessionService 的测试**
+
+`NewSessionServiceWithClock` 从 2 参数变成 3 参数，**Task 10 有三个测试是绕过 helper 直接构造的**，会编译失败。逐个补上 publisher 参数：
+
+`internal/service/session_rotate_test.go` 里的 `TestValidateExtendIsDeduplicatedByLock`、`TestRotationDoesNotResetMaxLifetime`、`TestRotationResetsIssuedAt`，都把
+
+```go
+	svc := service.NewSessionServiceWithClock(st, clk.Now)
+```
+
+改成
+
+```go
+	svc := service.NewSessionServiceWithClock(st, store.NewRevokePublisher(rdb), clk.Now)
+```
+
+这三个用例之所以直接构造而不用 `newSessionService`，是因为它们需要拿到 `rdb` 手动操作锁——保持这个结构，只加参数。
+
+另外 `DeleteUserTokens` 的返回值语义要在 `RevokeUser` 的文档里写明：**中途批次失败时它会同时返回"已删除的条数"和一个非 nil 错误**，这个数字会经撤销事件报给管理员，不能当成"失败即 0"。
+
+- [ ] **Step 10: 更新调用方**
 
 `cmd/fp/main.go` 里若已构造 `SessionService`，补上 publisher 参数：
 
@@ -8634,12 +8654,12 @@ func (s *SessionService) announce(ctx context.Context, ev domain.RevokeEvent) {
 	sessionSvc := service.NewSessionService(sessionStore, revokePub)
 ```
 
-- [ ] **Step 10: 运行全部测试**
+- [ ] **Step 11: 运行全部测试**
 
 Run: `./scripts/test.sh`
 Expected: 全部 PASS（新增撤销测试 6 个）
 
-- [ ] **Step 11: 提交**
+- [ ] **Step 12: 提交**
 
 ```bash
 git add internal cmd
