@@ -1195,8 +1195,8 @@ func (s *AdminService) Authenticate(ctx context.Context, token string) (uuid.UUI
 		return uuid.Nil, "", fmt.Errorf("service: 读取管理端会话: %w", err)
 	}
 
-	var idStr, username string
-	if n, _ := fmt.Sscanf(payload, "%36s|%s", &idStr, &username); n != 2 {
+	idStr, username, ok := strings.Cut(payload, "|")
+	if !ok {
 		return uuid.Nil, "", domain.Errorf(domain.ErrUnauthorized, "管理端凭据损坏")
 	}
 	id, err := uuid.Parse(idStr)
@@ -1232,14 +1232,7 @@ func randomToken() (string, error) {
 }
 ```
 
-> `fmt.Sscanf` 的 `%36s` 会连同 `|` 一起吞掉，改用手工分割更稳妥。实现时把解析部分替换为：
-> ```go
-> idStr, username, ok := strings.Cut(payload, "|")
-> if !ok {
-> 	return uuid.Nil, "", domain.Errorf(domain.ErrUnauthorized, "管理端凭据损坏")
-> }
-> ```
-> 并把 import 里的 `fmt.Sscanf` 用法删掉、补上 `"strings"`。
+import 需要包含 `"strings"`。
 
 - [ ] **Step 6: 运行测试确认通过**
 
@@ -3335,13 +3328,10 @@ func (s *UserService) SetStatus(ctx context.Context, userID uuid.UUID, status st
 			"不允许的状态迁移 %s → %s", current.Status, status)
 	}
 
-	// 进入注销保护期时记录提交时间；离开时清空。
-	var deleteSubmitted any
-	if status == domain.UserStatusPendingDelete {
-		deleteSubmitted = "now()"
-	}
+	// 进入注销保护期时记录提交时间；迁移到其他状态时清空，
+	// 这样"保护期内登录撤销注销"之后不会残留一个误导性的时间戳。
 	var row pgx.Row
-	if deleteSubmitted != nil {
+	if status == domain.UserStatusPendingDelete {
 		row = s.pool.QueryRow(ctx,
 			`UPDATE app_user SET status = $2, delete_submitted_at = now(), updated_at = now()
 			 WHERE id = $1 RETURNING `+userColumns, userID, status)
@@ -3458,7 +3448,6 @@ func scanIdentity(r rowScanner) (*domain.Identity, error) {
 }
 ```
 
-> `SetStatus` 里 `deleteSubmitted` 那段用 `any` 只是为了走两条分支，实现时直接写成两个 `if` 分支即可，不需要该变量。
 
 - [ ] **Step 9: 运行测试确认通过**
 
