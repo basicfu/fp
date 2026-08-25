@@ -177,6 +177,11 @@ func (s *UserService) AttachIdentity(ctx context.Context, userID uuid.UUID, in E
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	// 必须和 EnsureUserWithIdentity 用同一套规整。写入路径有两条，
+	// 只规整其中一条等于没规整：通过这里存进去的 Alice@X.com，
+	// 之后用 alice@x.com 查就找不到，照样裂成两个账号。
+	in = in.normalize()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("service: 开启事务: %w", err)
