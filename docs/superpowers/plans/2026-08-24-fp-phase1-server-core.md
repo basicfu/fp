@@ -8220,14 +8220,28 @@ func (p *RevokePublisher) Publish(ctx context.Context, ev domain.RevokeEvent) er
 	return nil
 }
 
-// Subscribe 订阅撤销事件。
-// 返回的 channel 在 ctx 取消或调用 close 时关闭。
+// Subscribe 订阅撤销事件。返回的 channel 在 ctx 取消或调用 close 时关闭。
+//
+// ctx 取消必须显式转成 sub.Close()：go-redis 的 PubSub.Channel() 内部
+// reader goroutine 跑在 context.TODO() 上，它的 msgCh 只在 PubSub.Close()
+// 时才关。光靠下面 select 里的 <-ctx.Done() 是不够的——out 有 64 的缓冲，
+// 两个 case 常常同时就绪，Go 会随机选一个；而在完全没有消息流入时，
+// goroutine 会一直阻塞在 range sub.Channel() 上，out 永不关闭，
+// Redis 那条订阅连接也一直挂着。计划二的 gRPC 中继正是这里的调用方，
+// 每条中继泄漏一个连接是实打实的泄漏。
 func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan domain.RevokeEvent, func(), error) {
 	sub := p.rdb.Subscribe(ctx, revokeChannel)
+	// Receive 会阻塞到订阅确认返回，确保这之后发布的消息不会丢。
 	if _, err := sub.Receive(ctx); err != nil {
 		_ = sub.Close()
 		return nil, nil, fmt.Errorf("store: 订阅撤销频道: %w", err)
 	}
+
+	// ctx 取消时主动关掉底层订阅，这才是让 reader goroutine 退出的唯一途径。
+	go func() {
+		<-ctx.Done()
+		_ = sub.Close()
+	}()
 
 	out := make(chan domain.RevokeEvent, 64)
 	go func() {
@@ -8272,6 +8286,44 @@ import (
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 )
+
+// 登出必须连带作废轮换过渡期里的兄弟 token。
+//
+// 过渡期内同一会话有新旧两个 token 都有效。只删调用方递上来的那个，
+// 另一个还能再用最多 GraceDuration，而且不在撤销事件里——SDK 缓存也照样放行。
+// 用户点了"退出登录"却还能被另一个 token 访问。
+func TestRevokeCoversRotationGraceSibling(t *testing.T) {
+	svc, clk := newSessionService(t)
+	app := rotateApp()
+	ctx := context.Background()
+
+	sess, err := svc.Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	oldToken := sess.Token
+
+	clk.Advance(31 * time.Second)
+	res, err := svc.Validate(ctx, oldToken, app)
+	if err != nil {
+		t.Fatalf("触发轮换: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatal("应当触发轮换")
+	}
+	newToken := res.NewToken
+
+	// 用新 token 登出
+	if err := svc.Revoke(ctx, newToken, domain.RevokeReasonLogout); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	for name, tok := range map[string]string{"新": newToken, "过渡期内的旧": oldToken} {
+		if _, err := svc.Validate(ctx, tok, app); !errors.Is(err, domain.ErrUnauthorized) {
+			t.Fatalf("%s token 登出后仍有效, err = %v", name, err)
+		}
+	}
+}
 
 func TestRevokeSingleToken(t *testing.T) {
 	svc, _ := newSessionService(t)
@@ -8519,27 +8571,25 @@ func NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublish
 	return &SessionService{store: st, pub: pub, now: now}
 }
 
-// Revoke 作废单个 token，用于登出。
+// Revoke 作废单个 token 所属的**整个会话**，用于登出。
+//
+// 注意它撤销的是会话而不只是这一个 token：轮换过渡期内同一个会话有新旧
+// 两个 token 同时有效，只删调用方递上来的那个，另一个会继续有效最多
+// GraceDuration（默认 30 秒），而且不会出现在撤销事件里——SDK 那边的缓存
+// 也照样放行。用户点了"退出登录"却还能被另一个 token 访问，这不可接受。
 func (s *SessionService) Revoke(ctx context.Context, token, reason string) error {
 	sess, err := s.store.Get(ctx, token)
 	if errors.Is(err, domain.ErrNotFound) {
-		// 已经不存在了，登出视为成功。
+		// 已经不存在了，登出视为成功。重复登出、并发登出都会走到这里。
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if err := s.store.Delete(ctx, token); err != nil {
-		return err
-	}
-	s.announce(ctx, domain.RevokeEvent{
-		Tokens: []string{token},
-		UserID: sess.UserID,
-		AppID:  sess.AppID,
-		Reason: reason,
-		At:     s.now(),
+	_, err = s.revokeMatching(ctx, sess.UserID, sess.AppID, reason, func(x *domain.Session) bool {
+		return x.ID == sess.ID
 	})
-	return nil
+	return err
 }
 
 // RevokeSession 作废一个会话的全部 token，包括轮换过渡期内尚存的旧 token。
@@ -8594,7 +8644,15 @@ func (s *SessionService) revokeMatching(
 		if len(revoked) == 0 {
 			return
 		}
-		s.announce(ctx, domain.RevokeEvent{
+		// 用 WithoutCancel 剥掉取消信号。
+		//
+		// 触发这个 defer 的失败里，最常见的一种恰恰就是 ctx 被取消——
+		// 管理员对上千个会话执行 RevokeUser 撞上 handler 超时、或客户端断开。
+		// 那时 store.Delete 因 ctx 报错退出，而 deferred 的 announce 若沿用
+		// 同一个已死的 ctx，go-redis 会在取连接阶段直接拒掉 PUBLISH——
+		// token 已经从 Redis 删了，事件却发不出去，SDK 继续用缓存放行
+		// 一整个 cache_ttl。这正是 defer 要堵的洞，不剥掉取消信号就等于没堵。
+		s.announce(context.WithoutCancel(ctx), domain.RevokeEvent{
 			Tokens: revoked,
 			UserID: userID,
 			AppID:  eventAppID,
