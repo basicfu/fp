@@ -1,0 +1,316 @@
+package service_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func newUserService(t *testing.T) *service.UserService {
+	t.Helper()
+	return service.NewUserService(testsupport.NewTestDB(t))
+}
+
+func TestEnsureUserWithIdentityCreatesThenReuses(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	in := service.EnsureIdentityInput{
+		Type:     domain.IdentityTypePhone,
+		Subject:  "13800138000",
+		Nickname: "用户8000",
+	}
+
+	u1, id1, created, err := svc.EnsureUserWithIdentity(ctx, in)
+	if err != nil {
+		t.Fatalf("首次 EnsureUserWithIdentity: %v", err)
+	}
+	if !created {
+		t.Fatal("首次调用 created 应为 true")
+	}
+	if u1.Nickname != "用户8000" {
+		t.Fatalf("Nickname = %q", u1.Nickname)
+	}
+	if id1.Type != domain.IdentityTypePhone || id1.Subject != "13800138000" {
+		t.Fatalf("identity = %+v", id1)
+	}
+
+	u2, id2, created, err := svc.EnsureUserWithIdentity(ctx, in)
+	if err != nil {
+		t.Fatalf("再次 EnsureUserWithIdentity: %v", err)
+	}
+	if created {
+		t.Fatal("已存在时 created 应为 false")
+	}
+	if u2.ID != u1.ID {
+		t.Fatalf("UserID 不一致: %v vs %v", u2.ID, u1.ID)
+	}
+	if id2.ID != id1.ID {
+		t.Fatalf("IdentityID 不一致: %v vs %v", id2.ID, id1.ID)
+	}
+}
+
+// 归并规则的核心用例：同一手机号在 sms_code 与 password 两种登录方式下
+// 必须落到同一个 user。两者共用 identity(type='phone')。
+func TestSamePhoneAcrossConnectorsMergesToOneUser(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	// 短信验证码首次登录，创建用户
+	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("短信登录建号: %v", err)
+	}
+
+	// 该用户设置密码后，用手机号+密码登录，查到的必须是同一个 user
+	if err := svc.SetPassword(ctx, u1.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	u2, _, err := svc.FindByIdentity(ctx, domain.IdentityTypePhone, "13800138000")
+	if err != nil {
+		t.Fatalf("FindByIdentity: %v", err)
+	}
+	if u2.ID != u1.ID {
+		t.Fatalf("同一手机号归并失败: %v vs %v", u2.ID, u1.ID)
+	}
+	if err := svc.VerifyPassword(ctx, u2.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("VerifyPassword: %v", err)
+	}
+}
+
+// 不同类型的标识各自独立：同一个字符串作为 username 和 phone 是两个人。
+func TestDifferentIdentityTypesDoNotMerge(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("phone: %v", err)
+	}
+	u2, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("username: %v", err)
+	}
+	if u1.ID == u2.ID {
+		t.Fatal("不同 type 的同名 subject 不应归并到同一用户")
+	}
+}
+
+// 微信这类第三方标识通过 union_key 归并：同一个人的多个 openid 落到同一 user。
+func TestWechatMergesByUnionKey(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeWechatMP, Subject: "openid-mp", UnionKey: "union-1",
+	})
+	if err != nil {
+		t.Fatalf("首个 openid: %v", err)
+	}
+
+	// 同一 unionId 下的另一个 openid（模拟小程序端）
+	u2, id2, created, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: "wechat_mini", Subject: "openid-mini", UnionKey: "union-1",
+	})
+	if err != nil {
+		t.Fatalf("第二个 openid: %v", err)
+	}
+	if created {
+		t.Fatal("同 unionKey 不应创建新用户")
+	}
+	if u2.ID != u1.ID {
+		t.Fatalf("unionKey 归并失败: %v vs %v", u2.ID, u1.ID)
+	}
+	if id2.Subject != "openid-mini" {
+		t.Fatalf("应为新建的 identity 行, got %+v", id2)
+	}
+
+	ids, err := svc.ListIdentities(ctx, u1.ID)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("identity 数量 = %d, want 2", len(ids))
+	}
+}
+
+func TestAttachIdentityRejectsSubjectOwnedByAnotherUser(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("u1: %v", err)
+	}
+	u2, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13900139000",
+	})
+	if err != nil {
+		t.Fatalf("u2: %v", err)
+	}
+
+	// 把 u1 已占用的手机号绑到 u2 上必须失败，且必须是可识别的冲突错误。
+	_, err = svc.AttachIdentity(ctx, u2.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	_ = u1
+}
+
+func TestFindByIdentityNotFound(t *testing.T) {
+	svc := newUserService(t)
+	_, _, err := svc.FindByIdentity(context.Background(), domain.IdentityTypePhone, "13800138000")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestVerifyPasswordWithoutPasswordSet(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	// 未设置密码的用户，任何密码都不应通过，且不能 panic。
+	if err := svc.VerifyPassword(ctx, u.ID, ""); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("空密码 err = %v, want ErrInvalidCredential", err)
+	}
+	if err := svc.VerifyPassword(ctx, u.ID, "anything"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("任意密码 err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestSetPasswordRejectsTooShort(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	if err := svc.SetPassword(ctx, u.ID, "short"); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestSetStatusEnforcesStateMachine(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	frozen, err := svc.SetStatus(ctx, u.ID, domain.UserStatusFrozen)
+	if err != nil {
+		t.Fatalf("冻结: %v", err)
+	}
+	if frozen.Status != domain.UserStatusFrozen {
+		t.Fatalf("Status = %q", frozen.Status)
+	}
+	if frozen.CanLogin() {
+		t.Fatal("冻结用户不应可登录")
+	}
+
+	// FROZEN → PENDING_DELETE 不是合法迁移
+	if _, err := svc.SetStatus(ctx, u.ID, domain.UserStatusPendingDelete); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+
+	if _, err := svc.SetStatus(ctx, u.ID, domain.UserStatusActive); err != nil {
+		t.Fatalf("解冻: %v", err)
+	}
+}
+
+func TestEnsureRegistrationIsIdempotent(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	users := service.NewUserService(pool)
+	apps := service.NewApplicationService(pool)
+	ctx := context.Background()
+
+	app, _, err := apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create app: %v", err)
+	}
+	u, _, _, err := users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := users.EnsureRegistration(ctx, u.ID, app.ID); err != nil {
+			t.Fatalf("第 %d 次 EnsureRegistration: %v", i+1, err)
+		}
+	}
+
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		u.ID, app.ID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("注册关系数量 = %d, want 1", n)
+	}
+}
+
+func TestGetByIDNotFound(t *testing.T) {
+	svc := newUserService(t)
+	if _, err := svc.GetByID(context.Background(), uuid.Nil); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTouchIdentityLogin(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	_, id, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	if id.LastLoginAt != 0 {
+		t.Fatalf("新建 identity 的 LastLoginAt = %d, want 0", id.LastLoginAt)
+	}
+
+	if err := svc.TouchIdentityLogin(ctx, id.ID); err != nil {
+		t.Fatalf("TouchIdentityLogin: %v", err)
+	}
+
+	_, got, err := svc.FindByIdentity(ctx, domain.IdentityTypePhone, "13800138000")
+	if err != nil {
+		t.Fatalf("FindByIdentity: %v", err)
+	}
+	if got.LastLoginAt == 0 {
+		t.Fatal("LastLoginAt 未更新")
+	}
+}
