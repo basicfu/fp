@@ -8,7 +8,20 @@
 
 **Tech Stack:** Go 1.24 · chi v5 · pgx/v5 · sqlc · goose · go-redis/v9 · PostgreSQL 18 · log/slog · bcrypt
 
-**范围：** 设计大纲的 M1–M7。本计划**不含** gRPC 服务、Go SDK、Demo 服务（见计划二）与管理 UI（见计划三）。
+**范围：** 设计大纲的 M1–M7。本计划**不含** gRPC 服务、Go SDK、Demo 服务（见计划二）与管理 UI 前端（见计划三）。
+
+**M1–M7 内部也有裁剪**，以下属于设计大纲的目标形态但不在本计划内，且都不会造成返工（加它们是新增表/新增字段，不改已有接口）：
+
+| 裁掉的 | 为什么可以推迟 |
+|---|---|
+| 用户扩展字段 schema（`user_field_def` / `user_field_value`） | 独立两张表，接入时不动 `app_user` |
+| 登录风控（失败锁定、异地提醒、IP 黑白名单、设备指纹） | 设计为登录流程上的可插拔环节，接在 `AuthService` 里即可 |
+| MFA（TOTP / 短信二次验证） | 同上，是 `Login` 之后的一段追加流程 |
+| 换绑手机的双路径（旧手机验证 / 实名验证） | `AttachIdentity` 已就位，缺的只是编排 |
+| 注销保护期到期后的实际删除 | 状态机与保护期内撤销已实现，缺的是定时任务 |
+| 授权 / casbin / 角色 | 见全局约束：交付授权模块前**不得**引入任何过渡态 `role` 字段 |
+| 邮箱验证码、微信公众号、扫码登录 | `Connector` 契约已由两个实现验证，新增即新增一个文件 |
+| 多供应商的 UI 配置界面 | 降级逻辑已实现（`Sender.AddProvider` 顺序即优先级），缺的是配置入口 |
 
 **上游文档：** [2026-08-24-fp-foundation-platform-design.md](../specs/2026-08-24-fp-foundation-platform-design.md)
 
@@ -8881,3 +8894,2197 @@ Expected: 全部 PASS
 git add internal
 git commit -m "feat: 登录编排与登录审计日志"
 ```
+
+---
+
+## Task 13: 管理 HTTP API
+
+管理 UI 的传输层。三条约束：
+
+- **只做协议转换，不含业务逻辑**——所有判断都在 `service` 层，`httpapi` 里不出现 `if user.Status == ...` 这类代码
+- **`GET /admin/api/connectors` 返回全部登录方式的 `ConfigSchema`**，管理 UI 靠它渲染动态表单。新增登录方式后前端零改动，这是设计文档「配置化优先」原则的落点
+- 计划三的前端只消费这套 API，不新增服务端接口
+
+**Files:**
+- Modify: `internal/service/user.go`（新增列表查询）
+- Create: `internal/httpapi/application.go`, `internal/httpapi/user.go`, `internal/httpapi/connector.go`
+- Modify: `internal/httpapi/router.go`, `internal/httpapi/admin_test.go`, `cmd/fp/main.go`
+- Test: `internal/service/user_list_test.go`, `internal/httpapi/application_test.go`, `internal/httpapi/user_test.go`
+
+**Interfaces:**
+- Consumes: 全部 service、`connector.Registry`
+- Produces:
+  - `type service.UserListQuery struct{ Keyword, Status string; Limit, Offset int }`
+  - `type service.UserListItem struct{ User domain.User; Identities []domain.Identity }`
+  - `func (*UserService) List(ctx context.Context, q UserListQuery) (items []UserListItem, total int, err error)`
+  - `func httpapi.NewRouter(d httpapi.Deps) http.Handler`（签名变更）
+  - `type httpapi.Deps struct{ Admin *service.AdminService; Apps *service.ApplicationService; Users *service.UserService; Sessions *service.SessionService; Logs *service.LoginLogService; Registry *connector.Registry }`
+  - `func httpapi.pathUUID(r *http.Request, key string) (uuid.UUID, error)`
+  - HTTP 路由见下方 Step 6
+
+- [ ] **Step 1: 写失败的用户列表测试**
+
+`internal/service/user_list_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func seedUsers(t *testing.T, svc *service.UserService) {
+	t.Helper()
+	ctx := context.Background()
+
+	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000", Nickname: "阿里斯",
+	})
+	if err != nil {
+		t.Fatalf("u1: %v", err)
+	}
+	if _, err := svc.AttachIdentity(ctx, u1.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "alice",
+	}); err != nil {
+		t.Fatalf("u1 username: %v", err)
+	}
+
+	if _, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13900139000", Nickname: "鲍勃",
+	}); err != nil {
+		t.Fatalf("u2: %v", err)
+	}
+	u3, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13700137000", Nickname: "查理",
+	})
+	if err != nil {
+		t.Fatalf("u3: %v", err)
+	}
+	if _, err := svc.SetStatus(ctx, u3.ID, domain.UserStatusFrozen); err != nil {
+		t.Fatalf("冻结 u3: %v", err)
+	}
+}
+
+func TestUserListReturnsAllWithIdentities(t *testing.T) {
+	svc := newUserService(t)
+	seedUsers(t, svc)
+
+	items, total, err := svc.List(context.Background(), service.UserListQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3", total)
+	}
+	if len(items) != 3 {
+		t.Fatalf("len = %d, want 3", len(items))
+	}
+
+	var found bool
+	for _, it := range items {
+		if it.User.Nickname == "阿里斯" {
+			found = true
+			if len(it.Identities) != 2 {
+				t.Fatalf("阿里斯 的 identity 数 = %d, want 2", len(it.Identities))
+			}
+		}
+	}
+	if !found {
+		t.Fatal("未找到 阿里斯")
+	}
+}
+
+func TestUserListSearchesAcrossIdentitiesAndNickname(t *testing.T) {
+	svc := newUserService(t)
+	seedUsers(t, svc)
+	ctx := context.Background()
+
+	tests := []struct {
+		keyword string
+		want    int
+	}{
+		{"13800138000", 1}, // 精确手机号
+		{"1380", 1},        // 手机号前缀
+		{"alice", 1},       // 用户名
+		{"鲍勃", 1},          // 昵称
+		{"138", 1},
+		{"137", 1},
+		{"nonexistent", 0},
+	}
+	for _, tt := range tests {
+		items, total, err := svc.List(ctx, service.UserListQuery{Keyword: tt.keyword, Limit: 10})
+		if err != nil {
+			t.Fatalf("List(%q): %v", tt.keyword, err)
+		}
+		if total != tt.want || len(items) != tt.want {
+			t.Errorf("List(%q) total=%d len=%d, want %d", tt.keyword, total, len(items), tt.want)
+		}
+	}
+}
+
+// 同一个用户有多条 identity 命中关键词时，结果里不能出现重复行。
+func TestUserListDeduplicatesMultiIdentityMatches(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	if _, err := svc.AttachIdentity(ctx, u.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "138user",
+	}); err != nil {
+		t.Fatalf("加 identity: %v", err)
+	}
+
+	// "138" 同时命中手机号与用户名
+	items, total, err := svc.List(ctx, service.UserListQuery{Keyword: "138", Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("total=%d len=%d, want 1（不应重复）", total, len(items))
+	}
+}
+
+func TestUserListFiltersByStatus(t *testing.T) {
+	svc := newUserService(t)
+	seedUsers(t, svc)
+	ctx := context.Background()
+
+	items, total, err := svc.List(ctx, service.UserListQuery{Status: domain.UserStatusFrozen, Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("total=%d len=%d, want 1", total, len(items))
+	}
+	if items[0].User.Nickname != "查理" {
+		t.Fatalf("nickname = %q", items[0].User.Nickname)
+	}
+}
+
+func TestUserListPaginates(t *testing.T) {
+	svc := newUserService(t)
+	seedUsers(t, svc)
+	ctx := context.Background()
+
+	first, total, err := svc.List(ctx, service.UserListQuery{Limit: 2, Offset: 0})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3（total 应为过滤后的总数，不受分页影响）", total)
+	}
+	if len(first) != 2 {
+		t.Fatalf("len = %d, want 2", len(first))
+	}
+
+	second, _, err := svc.List(ctx, service.UserListQuery{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(second) != 1 {
+		t.Fatalf("第二页 len = %d, want 1", len(second))
+	}
+	if second[0].User.ID == first[0].User.ID {
+		t.Fatal("两页出现了同一个用户")
+	}
+}
+
+func TestUserListEmptyResultIsNotNil(t *testing.T) {
+	svc := newUserService(t)
+	items, total, err := svc.List(context.Background(), service.UserListQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if items == nil {
+		t.Fatal("应返回空切片而非 nil，否则 JSON 序列化成 null")
+	}
+	if total != 0 {
+		t.Fatalf("total = %d, want 0", total)
+	}
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `go test ./internal/service/ -run UserList -v`
+Expected: 编译失败，`undefined: service.UserListQuery`
+
+- [ ] **Step 3: 实现用户列表查询**
+
+追加到 `internal/service/user.go`：
+
+```go
+// UserListQuery 是管理端的用户查询条件。
+type UserListQuery struct {
+	// Keyword 同时匹配昵称与任意登录标识（手机号 / 用户名 / 邮箱 / openid），前缀与子串均可。
+	Keyword string
+	Status  string
+	Limit   int
+	Offset  int
+}
+
+// UserListItem 是列表中的一行：用户本体加上他的全部登录标识。
+type UserListItem struct {
+	User       domain.User
+	Identities []domain.Identity
+}
+
+// List 分页查询用户。total 是符合条件的总数，不受分页影响。
+func (s *UserService) List(ctx context.Context, q UserListQuery) ([]UserListItem, int, error) {
+	if q.Limit <= 0 || q.Limit > 200 {
+		q.Limit = 20
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+
+	// EXISTS 子查询而非 JOIN：一个用户有多条 identity 命中关键词时，
+	// JOIN 会产生重复行，还得再套一层 DISTINCT 才能算对 total。
+	const where = `
+		WHERE ($1 = '' OR u.nickname ILIKE '%' || $1 || '%'
+		       OR EXISTS (SELECT 1 FROM identity i
+		                  WHERE i.user_id = u.id AND i.subject ILIKE '%' || $1 || '%'))
+		  AND ($2 = '' OR u.status = $2)`
+
+	var total int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM app_user u`+where, q.Keyword, q.Status).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("service: 统计用户数: %w", err)
+	}
+	if total == 0 {
+		return []UserListItem{}, 0, nil
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+userColumnsPrefixed+` FROM app_user u`+where+
+			` ORDER BY u.created_at DESC LIMIT $3 OFFSET $4`,
+		q.Keyword, q.Status, q.Limit, q.Offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("service: 查询用户列表: %w", err)
+	}
+	defer rows.Close()
+
+	items := []UserListItem{}
+	ids := []uuid.UUID{}
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("service: 扫描用户: %w", err)
+		}
+		items = append(items, UserListItem{User: *u, Identities: []domain.Identity{}})
+		ids = append(ids, u.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("service: 遍历用户: %w", err)
+	}
+
+	// 一次性把这一页所有用户的 identity 捞回来，避免每行一次查询。
+	byUser, err := s.identitiesFor(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		if list, ok := byUser[items[i].User.ID]; ok {
+			items[i].Identities = list
+		}
+	}
+	return items, total, nil
+}
+
+// identitiesFor 批量查询多个用户的登录标识。
+func (s *UserService) identitiesFor(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID][]domain.Identity, error) {
+	out := map[uuid.UUID][]domain.Identity{}
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+identityColumns+` FROM identity WHERE user_id = ANY($1) ORDER BY created_at`, userIDs)
+	if err != nil {
+		return nil, fmt.Errorf("service: 批量查询 identity: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		id, err := scanIdentity(rows)
+		if err != nil {
+			return nil, fmt.Errorf("service: 扫描 identity: %w", err)
+		}
+		out[id.UserID] = append(out[id.UserID], *id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("service: 遍历 identity: %w", err)
+	}
+	return out, nil
+}
+```
+
+同时在 `internal/service/user.go` 里，紧跟 `userColumns` 之后加一份带表别名的版本（`List` 的 SQL 用了 `u` 别名）：
+
+```go
+// userColumnsPrefixed 与 userColumns 列顺序完全一致，仅加上 u. 前缀，
+// 因此可以复用同一个 scanUser。
+const userColumnsPrefixed = `
+	u.id, u.password_hash, u.nickname, u.avatar_url, u.gender, u.status,
+	coalesce((extract(epoch from u.delete_submitted_at) * 1000)::bigint, 0),
+	(extract(epoch from u.created_at) * 1000)::bigint,
+	(extract(epoch from u.updated_at) * 1000)::bigint`
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `go test ./internal/service/ -run UserList -v`
+Expected: 6 个测试 PASS
+
+- [ ] **Step 5: 实现三个 handler 文件**
+
+`internal/httpapi/connector.go`：
+
+```go
+package httpapi
+
+import (
+	"net/http"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
+)
+
+type connectorHandler struct {
+	registry *connector.Registry
+}
+
+type connectorSchemaDTO struct {
+	Type   string         `json:"type"`
+	Fields []domain.Field `json:"fields"`
+}
+
+// list 返回全部已注册登录方式的配置元数据。
+// 管理 UI 靠它渲染动态表单——新增登录方式后前端零改动。
+func (h *connectorHandler) list(w http.ResponseWriter, _ *http.Request) {
+	schemas := h.registry.Schemas()
+	out := make([]connectorSchemaDTO, 0, len(schemas))
+	for _, typ := range h.registry.Types() {
+		fields := schemas[typ]
+		if fields == nil {
+			fields = []domain.Field{}
+		}
+		out = append(out, connectorSchemaDTO{Type: typ, Fields: fields})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+```
+
+`internal/httpapi/application.go`：
+
+```go
+package httpapi
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+)
+
+type applicationHandler struct {
+	svc *service.ApplicationService
+}
+
+type sessionPolicyDTO struct {
+	IdleTimeoutSeconds       int32 `json:"idleTimeoutSeconds"`
+	IdleTimeoutMobileSeconds int32 `json:"idleTimeoutMobileSeconds"`
+	MaxLifetimeSeconds       int32 `json:"maxLifetimeSeconds"`
+	RotateIntervalSeconds    int32 `json:"rotateIntervalSeconds"`
+	ExtendIntervalSeconds    int32 `json:"extendIntervalSeconds"`
+	TokenCacheTTLSeconds     int32 `json:"tokenCacheTtlSeconds"`
+}
+
+type applicationDTO struct {
+	ID           string           `json:"id"`
+	Name         string           `json:"name"`
+	Slug         string           `json:"slug"`
+	AppID        string           `json:"appId"`
+	Status       string           `json:"status"`
+	CookieDomain string           `json:"cookieDomain"`
+	Session      sessionPolicyDTO `json:"session"`
+	CreatedAt    int64            `json:"createdAt"`
+	UpdatedAt    int64            `json:"updatedAt"`
+}
+
+func toApplicationDTO(a domain.Application) applicationDTO {
+	return applicationDTO{
+		ID: a.ID.String(), Name: a.Name, Slug: a.Slug, AppID: a.AppID,
+		Status: a.Status, CookieDomain: a.CookieDomain,
+		Session: sessionPolicyDTO{
+			IdleTimeoutSeconds:       a.Session.IdleTimeoutSeconds,
+			IdleTimeoutMobileSeconds: a.Session.IdleTimeoutMobileSeconds,
+			MaxLifetimeSeconds:       a.Session.MaxLifetimeSeconds,
+			RotateIntervalSeconds:    a.Session.RotateIntervalSeconds,
+			ExtendIntervalSeconds:    a.Session.ExtendIntervalSeconds,
+			TokenCacheTTLSeconds:     a.Session.TokenCacheTTLSeconds,
+		},
+		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+	}
+}
+
+func (h *applicationHandler) list(w http.ResponseWriter, r *http.Request) {
+	apps, err := h.svc.List(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]applicationDTO, 0, len(apps))
+	for _, a := range apps {
+		out = append(out, toApplicationDTO(a))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type createApplicationRequest struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+type createApplicationResponse struct {
+	Application applicationDTO `json:"application"`
+	// AppSecret 是明文密钥，只在创建时返回这一次，之后无法读回。
+	AppSecret string `json:"appSecret"`
+}
+
+func (h *applicationHandler) create(w http.ResponseWriter, r *http.Request) {
+	var req createApplicationRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	app, secret, err := h.svc.Create(r.Context(), req.Name, req.Slug)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, createApplicationResponse{
+		Application: toApplicationDTO(*app),
+		AppSecret:   secret,
+	})
+}
+
+func (h *applicationHandler) get(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	app, err := h.svc.GetByID(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
+}
+
+func (h *applicationHandler) updateSession(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req sessionPolicyDTO
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	app, err := h.svc.UpdateSessionPolicy(r.Context(), id, domain.SessionPolicy{
+		IdleTimeoutSeconds:       req.IdleTimeoutSeconds,
+		IdleTimeoutMobileSeconds: req.IdleTimeoutMobileSeconds,
+		MaxLifetimeSeconds:       req.MaxLifetimeSeconds,
+		RotateIntervalSeconds:    req.RotateIntervalSeconds,
+		ExtendIntervalSeconds:    req.ExtendIntervalSeconds,
+		TokenCacheTTLSeconds:     req.TokenCacheTTLSeconds,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
+}
+
+type connectorDTO struct {
+	Type    string         `json:"type"`
+	Enabled bool           `json:"enabled"`
+	Config  map[string]any `json:"config"`
+}
+
+func (h *applicationHandler) listConnectors(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	list, err := h.svc.ListConnectors(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]connectorDTO, 0, len(list))
+	for _, c := range list {
+		out = append(out, connectorDTO{Type: c.Type, Enabled: c.Enabled, Config: c.Config})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type putConnectorRequest struct {
+	Enabled bool           `json:"enabled"`
+	Config  map[string]any `json:"config"`
+}
+
+func (h *applicationHandler) putConnector(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req putConnectorRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := h.svc.SetConnector(r.Context(), id, chi.URLParam(r, "type"), req.Enabled, req.Config); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// pathUUID 从 chi 路径参数解析 UUID。
+func pathUUID(r *http.Request, key string) (uuid.UUID, error) {
+	id, err := uuid.Parse(chi.URLParam(r, key))
+	if err != nil {
+		return uuid.Nil, domain.Errorf(domain.ErrInvalidArgument, "路径参数 %s 不是合法 UUID", key)
+	}
+	return id, nil
+}
+```
+
+`internal/httpapi/user.go`：
+
+```go
+package httpapi
+
+import (
+	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+)
+
+type userHandler struct {
+	users    *service.UserService
+	sessions *service.SessionService
+	logs     *service.LoginLogService
+}
+
+type identityDTO struct {
+	Type        string `json:"type"`
+	Subject     string `json:"subject"`
+	LastLoginAt int64  `json:"lastLoginAt"`
+}
+
+type userDTO struct {
+	ID          string        `json:"id"`
+	Nickname    string        `json:"nickname"`
+	AvatarURL   string        `json:"avatarUrl"`
+	Status      string        `json:"status"`
+	HasPassword bool          `json:"hasPassword"`
+	Identities  []identityDTO `json:"identities"`
+	CreatedAt   int64         `json:"createdAt"`
+}
+
+// toUserDTO 组装对外的用户视图。
+// 注意：password_hash 绝不出现在响应里，只暴露"是否设过密码"。
+func toUserDTO(u domain.User, ids []domain.Identity) userDTO {
+	out := userDTO{
+		ID: u.ID.String(), Nickname: u.Nickname, AvatarURL: u.AvatarURL,
+		Status: u.Status, HasPassword: u.PasswordHash != "",
+		Identities: make([]identityDTO, 0, len(ids)),
+		CreatedAt:  u.CreatedAt,
+	}
+	for _, i := range ids {
+		out.Identities = append(out.Identities, identityDTO{
+			Type: i.Type, Subject: i.Subject, LastLoginAt: i.LastLoginAt,
+		})
+	}
+	return out
+}
+
+type userListResponse struct {
+	Items []userDTO `json:"items"`
+	Total int       `json:"total"`
+}
+
+func (h *userHandler) list(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+
+	items, total, err := h.users.List(r.Context(), service.UserListQuery{
+		Keyword: q.Get("keyword"), Status: q.Get("status"),
+		Limit: limit, Offset: offset,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := userListResponse{Items: make([]userDTO, 0, len(items)), Total: total}
+	for _, it := range items {
+		out.Items = append(out.Items, toUserDTO(it.User, it.Identities))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *userHandler) get(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	u, err := h.users.GetByID(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	ids, err := h.users.ListIdentities(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toUserDTO(*u, ids))
+}
+
+type setStatusRequest struct {
+	Status string `json:"status"`
+}
+
+// setStatus 改用户状态。状态机校验在 service 层，这里只做转发；
+// 冻结时顺带撤销该用户的全部会话，否则已登录的设备还能继续用。
+func (h *userHandler) setStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req setStatusRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	u, err := h.users.SetStatus(r.Context(), id, req.Status)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !u.CanLogin() {
+		if _, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonFreeze); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	ids, err := h.users.ListIdentities(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toUserDTO(*u, ids))
+}
+
+type setPasswordRequest struct {
+	Password string `json:"password"`
+}
+
+// setPassword 管理员重置密码。改密后必须撤销全部会话——
+// 否则「密码泄露后改密」这个动作起不到任何作用。
+func (h *userHandler) setPassword(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req setPasswordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := h.users.SetPassword(r.Context(), id, req.Password); err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonPasswordChanged); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+type sessionDTO struct {
+	ID            string `json:"id"`
+	AppID         string `json:"appId"`
+	IP            string `json:"ip"`
+	UA            string `json:"ua"`
+	Mobile        bool   `json:"mobile"`
+	FirstAuthAt   int64  `json:"firstAuthAt"`
+	IdleExpiresAt int64  `json:"idleExpiresAt"`
+}
+
+func (h *userHandler) listSessions(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	list, err := h.sessions.ListByUser(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// 轮换过渡期内同一会话会有新旧两个 token，按会话 ID 去重后再返回，
+	// 否则管理端会把一台设备显示成两台。
+	seen := map[string]bool{}
+	out := make([]sessionDTO, 0, len(list))
+	for _, s := range list {
+		if seen[s.ID] {
+			continue
+		}
+		seen[s.ID] = true
+		out = append(out, sessionDTO{
+			ID: s.ID, AppID: s.AppID.String(), IP: s.IP, UA: s.UA, Mobile: s.Mobile,
+			FirstAuthAt: s.FirstAuthAt, IdleExpiresAt: s.IdleExpiresAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type revokeResponse struct {
+	Revoked int `json:"revoked"`
+}
+
+func (h *userHandler) revokeAllSessions(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	n, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonKick)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, revokeResponse{Revoked: n})
+}
+
+func (h *userHandler) revokeSession(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	n, err := h.sessions.RevokeSession(r.Context(), id, chi.URLParam(r, "sid"), domain.RevokeReasonKick)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, revokeResponse{Revoked: n})
+}
+
+type loginLogDTO struct {
+	ID           string `json:"id"`
+	IdentityType string `json:"identityType"`
+	Subject      string `json:"subject"`
+	Event        string `json:"event"`
+	Success      bool   `json:"success"`
+	Reason       string `json:"reason"`
+	IP           string `json:"ip"`
+	UA           string `json:"ua"`
+	CreatedAt    int64  `json:"createdAt"`
+}
+
+func (h *userHandler) listLoginLogs(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	list, err := h.logs.ListByUser(r.Context(), id, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]loginLogDTO, 0, len(list))
+	for _, l := range list {
+		out = append(out, loginLogDTO{
+			ID: l.ID.String(), IdentityType: l.IdentityType, Subject: l.Subject,
+			Event: l.Event, Success: l.Success, Reason: l.Reason,
+			IP: l.IP, UA: l.UA, CreatedAt: l.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+```
+
+- [ ] **Step 6: 重写路由装配**
+
+`internal/httpapi/router.go` 整体替换为：
+
+```go
+package httpapi
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/service"
+)
+
+// Deps 是管理 API 需要的全部依赖。
+type Deps struct {
+	Admin    *service.AdminService
+	Apps     *service.ApplicationService
+	Users    *service.UserService
+	Sessions *service.SessionService
+	Logs     *service.LoginLogService
+	Registry *connector.Registry
+}
+
+// NewRouter 装配管理 UI 的 HTTP 路由。
+//
+// 这套 API 只服务管理控制台。SDK 走 gRPC（计划二），终端用户的登录接口
+// 在第一阶段也由 SDK 代理，fp 暂不直接对终端用户暴露 HTTP。
+func NewRouter(d Deps) http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Recoverer)
+
+	ah := &adminHandler{svc: d.Admin}
+	appH := &applicationHandler{svc: d.Apps}
+	userH := &userHandler{users: d.Users, sessions: d.Sessions, logs: d.Logs}
+	connH := &connectorHandler{registry: d.Registry}
+
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	r.Route("/admin/api", func(r chi.Router) {
+		r.Post("/login", ah.login)
+
+		r.Group(func(r chi.Router) {
+			r.Use(requireAdmin(d.Admin))
+
+			r.Post("/logout", ah.logout)
+			r.Get("/me", ah.me)
+
+			r.Get("/connectors", connH.list)
+
+			r.Get("/applications", appH.list)
+			r.Post("/applications", appH.create)
+			r.Get("/applications/{id}", appH.get)
+			r.Patch("/applications/{id}/session", appH.updateSession)
+			r.Get("/applications/{id}/connectors", appH.listConnectors)
+			r.Put("/applications/{id}/connectors/{type}", appH.putConnector)
+
+			r.Get("/users", userH.list)
+			r.Get("/users/{id}", userH.get)
+			r.Patch("/users/{id}/status", userH.setStatus)
+			r.Put("/users/{id}/password", userH.setPassword)
+			r.Get("/users/{id}/sessions", userH.listSessions)
+			r.Delete("/users/{id}/sessions", userH.revokeAllSessions)
+			r.Delete("/users/{id}/sessions/{sid}", userH.revokeSession)
+			r.Get("/users/{id}/login-logs", userH.listLoginLogs)
+		})
+	})
+
+	return r
+}
+```
+
+- [ ] **Step 7: 更新 admin_test.go 的构造函数**
+
+`internal/httpapi/admin_test.go` 里的 `newAdminServer` 改为：
+
+```go
+func newAdminServer(t *testing.T) (http.Handler, *service.AdminService) {
+	t.Helper()
+	h, _, deps := newAdminEnv(t)
+	return h, deps.Admin
+}
+```
+
+并新增共用的环境构造（放在 `internal/httpapi/env_test.go`）：
+
+```go
+package httpapi_test
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/httpapi"
+	"github.com/basicfu/fp/internal/notify"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+// newAdminEnv 装配一套完整的管理 API 环境，并返回一个已登录管理员的 token。
+func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
+	t.Helper()
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+
+	users := service.NewUserService(pool)
+	codes := notify.NewCodeService(rdb)
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewPassword(users)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
+	}
+
+	deps := httpapi.Deps{
+		Admin:    service.NewAdminService(pool, rdb),
+		Apps:     service.NewApplicationService(pool),
+		Users:    users,
+		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Logs:     service.NewLoginLogService(pool),
+		Registry: reg,
+	}
+
+	ctx := context.Background()
+	if err := deps.Admin.EnsureBootstrap(ctx, "admin", "secret123456"); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+	token, err := deps.Admin.Login(ctx, "admin", "secret123456")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	return httpapi.NewRouter(deps), token, deps
+}
+
+// do 发一个请求并返回响应记录器。token 为空时不带鉴权头。
+func do(t *testing.T, h http.Handler, token, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var r *http.Request
+	if body == "" {
+		r = httptest.NewRequest(method, path, nil)
+	} else {
+		r = httptest.NewRequest(method, path, strings.NewReader(body))
+	}
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec
+}
+
+// decode 把响应体解析进 v，失败时终止测试。
+func decode(t *testing.T, rec *httptest.ResponseRecorder, v any) {
+	t.Helper()
+	if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
+		t.Fatalf("解析响应失败: %v, body = %s", err, rec.Body.String())
+	}
+}
+```
+
+- [ ] **Step 8: 写 HTTP 层测试**
+
+`internal/httpapi/application_test.go`：
+
+```go
+package httpapi_test
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+)
+
+func TestConnectorSchemasExposed(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodGet, "/admin/api/connectors", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var schemas []struct {
+		Type   string `json:"type"`
+		Fields []struct {
+			Key  string `json:"key"`
+			Type string `json:"type"`
+		} `json:"fields"`
+	}
+	decode(t, rec, &schemas)
+	if len(schemas) != 2 {
+		t.Fatalf("登录方式数 = %d, want 2", len(schemas))
+	}
+	// Registry.Types() 按字典序，password 在 sms_code 之前
+	if schemas[0].Type != "password" || schemas[1].Type != "sms_code" {
+		t.Fatalf("顺序不对: %+v", schemas)
+	}
+	if len(schemas[0].Fields) == 0 {
+		t.Fatal("password 的 fields 为空，动态表单将渲染不出任何控件")
+	}
+}
+
+func TestApplicationCRUDOverHTTP(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodGet, "/admin/api/applications", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", rec.Code)
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("空列表 body = %s, want []", rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodPost, "/admin/api/applications",
+		`{"name":"新项目前台","slug":"newproj-web"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Application struct {
+			ID    string `json:"id"`
+			AppID string `json:"appId"`
+		} `json:"application"`
+		AppSecret string `json:"appSecret"`
+	}
+	decode(t, rec, &created)
+	if created.AppSecret == "" || created.Application.AppID == "" {
+		t.Fatalf("创建响应缺字段: %s", rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodGet, "/admin/api/applications/"+created.Application.ID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"idleTimeoutSeconds":604800`) {
+		t.Fatalf("默认会话策略未返回: %s", rec.Body.String())
+	}
+	// 详情响应绝不能包含密钥
+	if strings.Contains(rec.Body.String(), created.AppSecret) {
+		t.Fatal("详情响应泄露了 appSecret")
+	}
+}
+
+func TestUpdateSessionPolicyValidation(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+	path := "/admin/api/applications/" + created.Application.ID + "/session"
+
+	// extend_interval 不小于 idle_timeout：非法
+	rec = do(t, h, token, http.MethodPatch, path,
+		`{"idleTimeoutSeconds":604800,"idleTimeoutMobileSeconds":2592000,"maxLifetimeSeconds":7776000,"rotateIntervalSeconds":86400,"extendIntervalSeconds":604800,"tokenCacheTtlSeconds":30}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法策略 status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodPatch, path,
+		`{"idleTimeoutSeconds":604800,"idleTimeoutMobileSeconds":2592000,"maxLifetimeSeconds":7776000,"rotateIntervalSeconds":86400,"extendIntervalSeconds":600,"tokenCacheTtlSeconds":60}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("合法策略 status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"tokenCacheTtlSeconds":60`) {
+		t.Fatalf("策略未生效: %s", rec.Body.String())
+	}
+}
+
+func TestApplicationConnectorOverHTTP(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+	base := "/admin/api/applications/" + created.Application.ID + "/connectors"
+
+	rec = do(t, h, token, http.MethodPut, base+"/password", `{"enabled":true,"config":{"allowEmail":true}}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("put status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodGet, base, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"type":"password"`) ||
+		!strings.Contains(rec.Body.String(), `"allowEmail":true`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestAdminAPIRequiresAuth(t *testing.T) {
+	h, _, _ := newAdminEnv(t)
+	for _, path := range []string{
+		"/admin/api/applications", "/admin/api/users", "/admin/api/connectors", "/admin/api/me",
+	} {
+		rec := do(t, h, "", http.MethodGet, path, "")
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s status = %d, want 401", path, rec.Code)
+		}
+	}
+}
+
+func TestBadUUIDReturns400(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	rec := do(t, h, token, http.MethodGet, "/admin/api/applications/not-a-uuid", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+```
+
+`internal/httpapi/user_test.go`：
+
+```go
+package httpapi_test
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/httpapi"
+	"github.com/basicfu/fp/internal/service"
+)
+
+func seedUser(t *testing.T, deps httpapi.Deps, phone, nickname string) domain.User {
+	t.Helper()
+	u, _, _, err := deps.Users.EnsureUserWithIdentity(context.Background(), service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: phone, Nickname: nickname,
+	})
+	if err != nil {
+		t.Fatalf("建号 %s: %v", phone, err)
+	}
+	return *u
+}
+
+func TestUserListAndSearchOverHTTP(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	seedUser(t, deps, "13800138000", "阿里斯")
+	seedUser(t, deps, "13900139000", "鲍勃")
+
+	rec := do(t, h, token, http.MethodGet, "/admin/api/users", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Items []struct {
+			ID          string `json:"id"`
+			Nickname    string `json:"nickname"`
+			HasPassword bool   `json:"hasPassword"`
+			Identities  []struct {
+				Type    string `json:"type"`
+				Subject string `json:"subject"`
+			} `json:"identities"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	decode(t, rec, &list)
+	if list.Total != 2 || len(list.Items) != 2 {
+		t.Fatalf("total=%d len=%d, want 2", list.Total, len(list.Items))
+	}
+	if len(list.Items[0].Identities) == 0 {
+		t.Fatal("列表未带出登录标识")
+	}
+
+	rec = do(t, h, token, http.MethodGet, "/admin/api/users?keyword=13800", "")
+	decode(t, rec, &list)
+	if list.Total != 1 {
+		t.Fatalf("搜索 total = %d, want 1", list.Total)
+	}
+}
+
+// 响应里绝不能出现密码哈希。
+func TestUserResponseNeverLeaksPasswordHash(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+	if err := deps.Users.SetPassword(context.Background(), u.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	for _, path := range []string{"/admin/api/users", "/admin/api/users/" + u.ID.String()} {
+		rec := do(t, h, token, http.MethodGet, path, "")
+		body := rec.Body.String()
+		if strings.Contains(body, "$2a$") || strings.Contains(body, "passwordHash") {
+			t.Fatalf("%s 泄露了密码哈希: %s", path, body)
+		}
+		if !strings.Contains(body, `"hasPassword":true`) {
+			t.Fatalf("%s 未返回 hasPassword: %s", path, body)
+		}
+	}
+}
+
+func TestSetUserStatusRevokesSessions(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	app, _, err := deps.Apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	sess, err := deps.Sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	rec := do(t, h, token, http.MethodPatch, "/admin/api/users/"+u.ID.String()+"/status",
+		`{"status":"FROZEN"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 冻结必须连带踢掉已登录的设备
+	if _, err := deps.Sessions.Validate(ctx, sess.Token, app); err == nil {
+		t.Fatal("冻结后会话仍然有效")
+	}
+}
+
+func TestSetUserStatusRejectsIllegalTransition(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	rec := do(t, h, token, http.MethodPatch, "/admin/api/users/"+u.ID.String()+"/status",
+		`{"status":"DELETED"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400（ACTIVE → DELETED 不是合法迁移）", rec.Code)
+	}
+}
+
+func TestResetPasswordRevokesSessions(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	app, _, err := deps.Apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	sess, err := deps.Sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	rec := do(t, h, token, http.MethodPut, "/admin/api/users/"+u.ID.String()+"/password",
+		`{"password":"newpassword123"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// 改密不撤销会话的话，「密码泄露后改密」这个动作等于没做
+	if _, err := deps.Sessions.Validate(ctx, sess.Token, app); err == nil {
+		t.Fatal("改密后旧会话仍然有效")
+	}
+	if err := deps.Users.VerifyPassword(ctx, u.ID, "newpassword123"); err != nil {
+		t.Fatalf("新密码不可用: %v", err)
+	}
+}
+
+func TestResetPasswordRejectsTooShort(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	rec := do(t, h, token, http.MethodPut, "/admin/api/users/"+u.ID.String()+"/password",
+		`{"password":"short"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestListAndRevokeSessionsOverHTTP(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	app, _, err := deps.Apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := deps.Sessions.Issue(ctx, service.IssueInput{
+			UserID: u.ID, App: app, UA: "device", IP: "1.2.3.4",
+		}); err != nil {
+			t.Fatalf("Issue %d: %v", i, err)
+		}
+	}
+
+	base := "/admin/api/users/" + u.ID.String() + "/sessions"
+	rec := do(t, h, token, http.MethodGet, base, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var sessions []struct {
+		ID string `json:"id"`
+		IP string `json:"ip"`
+	}
+	decode(t, rec, &sessions)
+	if len(sessions) != 2 {
+		t.Fatalf("会话数 = %d, want 2", len(sessions))
+	}
+
+	// 踢掉其中一个
+	rec = do(t, h, token, http.MethodDelete, base+"/"+sessions[0].ID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("单个踢下线 status = %d", rec.Code)
+	}
+	rec = do(t, h, token, http.MethodGet, base, "")
+	decode(t, rec, &sessions)
+	if len(sessions) != 1 {
+		t.Fatalf("剩余会话数 = %d, want 1", len(sessions))
+	}
+
+	// 全部踢掉
+	rec = do(t, h, token, http.MethodDelete, base, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("全部踢下线 status = %d", rec.Code)
+	}
+	rec = do(t, h, token, http.MethodGet, base, "")
+	decode(t, rec, &sessions)
+	if len(sessions) != 0 {
+		t.Fatalf("剩余会话数 = %d, want 0", len(sessions))
+	}
+}
+
+func TestUserNotFound(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	rec := do(t, h, token, http.MethodGet,
+		"/admin/api/users/00000000-0000-0000-0000-000000000000", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+```
+
+- [ ] **Step 9: 更新 main**
+
+`cmd/fp/main.go` 里装配全部依赖：
+
+```go
+	sessionStore := store.NewSessionStore(rdb)
+	revokePub := store.NewRevokePublisher(rdb)
+
+	userSvc := service.NewUserService(pool)
+	codeSvc := notify.NewCodeService(rdb)
+
+	registry := connector.NewRegistry()
+	if err := registry.Register(connector.NewPassword(userSvc)); err != nil {
+		return err
+	}
+	if err := registry.Register(connector.NewSMSCode(codeSvc)); err != nil {
+		return err
+	}
+
+	adminSvc := service.NewAdminService(pool, rdb)
+	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdminUser, cfg.BootstrapAdminPassword); err != nil {
+		return err
+	}
+
+	httpSrv := &http.Server{
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.NewRouter(httpapi.Deps{
+			Admin:    adminSvc,
+			Apps:     service.NewApplicationService(pool),
+			Users:    userSvc,
+			Sessions: service.NewSessionService(sessionStore, revokePub),
+			Logs:     service.NewLoginLogService(pool),
+			Registry: registry,
+		}),
+	}
+```
+
+补 import：`"github.com/basicfu/fp/internal/connector"`、`"github.com/basicfu/fp/internal/notify"`。
+
+- [ ] **Step 10: 运行全部测试**
+
+Run: `make test`
+Expected: 全部 PASS
+
+- [ ] **Step 11: 手工验证**
+
+```bash
+make run
+```
+
+另开终端：
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8080/admin/api/login -d '{"username":"admin","password":"admin123456"}' | grep -o '"token":"[^"]*' | cut -d'"' -f4); curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/admin/api/connectors
+```
+
+Expected: 返回 password 与 sms_code 两组配置元数据，字段齐全。
+
+- [ ] **Step 12: 提交**
+
+```bash
+git add internal cmd
+git commit -m "feat: 管理 HTTP API——应用、用户、会话、审计日志与动态表单元数据"
+```
+
+---
+
+## Task 14: 端到端集成测试
+
+前面每个任务都在自己的层内验证。本任务把整条链路串起来跑一遍，**验收标准就是它**。
+
+放在独立的 `internal/integration` 包里，只通过公开 API 使用各个组件——如果这里需要访问某个包的私有细节，说明分层没做对。
+
+**Files:**
+- Create: `internal/integration/env_test.go`, `internal/integration/phase1_test.go`
+- Test: 同上
+
+**Interfaces:**
+- Consumes: 全部包的公开 API
+- Produces: 无（纯测试）
+
+**验收对照表**（第一阶段的 8 步，UI 相关步骤在本阶段以 API 调用代替）：
+
+| # | 验收项 | 覆盖它的测试 |
+|---|---|---|
+| 1 | 管理员登录控制台 | `TestPhase1EndToEnd` 第 1 步 |
+| 2 | 建应用拿 appId/appSecret | `TestPhase1EndToEnd` 第 2 步 |
+| 3 | 启用两种登录方式并配置 | `TestPhase1EndToEnd` 第 3 步 |
+| 4 | SDK 用 appId/appSecret 初始化 | `TestAppSecretVerification`（凭据校验，SDK 本体在计划二） |
+| 5 | 两种方式都能注册/登录 | `TestPhase1EndToEnd` 第 5–7 步、`TestBothLoginMethodsResolveToSameUser` |
+| 6 | 带 token 放行、无 token 401 | `TestTokenValidationAndRejection` |
+| 7 | 管理端踢下线后 token 失效 | `TestKickFromAdminInvalidatesToken` |
+| 8 | fp 不可用时缓存期内仍能校验 | `TestCacheTTLGuidesSDKBehaviour`（验证 fp 下发的 cache_ttl 契约；真实降级在计划二的 SDK 里） |
+
+- [ ] **Step 1: 写集成环境装配**
+
+`internal/integration/env_test.go`：
+
+```go
+// Package integration_test 把 fp 的各层串起来做端到端验证。
+// 它只使用各包的公开 API——若这里需要访问私有细节，说明分层出了问题。
+package integration_test
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/httpapi"
+	"github.com/basicfu/fp/internal/notify"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+const (
+	adminUser = "admin"
+	adminPass = "secret123456"
+)
+
+// env 是一套完整装配好的 fp。
+type env struct {
+	t      *testing.T
+	server *httptest.Server
+
+	auth     *service.AuthService
+	apps     *service.ApplicationService
+	users    *service.UserService
+	sessions *service.SessionService
+	logs     *service.LoginLogService
+	sms      *notify.FakeProvider
+	revoke   *store.RevokePublisher
+
+	adminToken string
+}
+
+// newEnv 按 cmd/fp/main.go 的方式装配全部依赖，只把短信通道换成假供应商。
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+	ctx := context.Background()
+
+	apps := service.NewApplicationService(pool)
+	users := service.NewUserService(pool)
+	logs := service.NewLoginLogService(pool)
+	codes := notify.NewCodeService(rdb)
+
+	sessionStore := store.NewSessionStore(rdb)
+	revokePub := store.NewRevokePublisher(rdb)
+	sessions := service.NewSessionService(sessionStore, revokePub)
+
+	registry := connector.NewRegistry()
+	if err := registry.Register(connector.NewPassword(users)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	if err := registry.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
+	}
+
+	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
+	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
+	sender.AddProvider(sms)
+
+	admin := service.NewAdminService(pool, rdb)
+	if err := admin.EnsureBootstrap(ctx, adminUser, adminPass); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+
+	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
+		Admin: admin, Apps: apps, Users: users,
+		Sessions: sessions, Logs: logs, Registry: registry,
+	}))
+	t.Cleanup(srv.Close)
+
+	return &env{
+		t: t, server: srv,
+		auth: service.NewAuthService(service.AuthDeps{
+			Apps: apps, Users: users, Sessions: sessions, Logs: logs,
+			Registry: registry, Notifier: sender, Codes: codes,
+		}),
+		apps: apps, users: users, sessions: sessions, logs: logs,
+		sms: sms, revoke: revokePub,
+	}
+}
+
+// adminLogin 通过 HTTP 登录管理控制台，并把 token 记在 env 上。
+func (e *env) adminLogin() string {
+	e.t.Helper()
+	var out struct {
+		Token string `json:"token"`
+	}
+	e.request(http.MethodPost, "/admin/api/login",
+		`{"username":"`+adminUser+`","password":"`+adminPass+`"}`, http.StatusOK, &out)
+	e.adminToken = out.Token
+	return out.Token
+}
+
+// request 发一个管理 API 请求，断言状态码，并把响应体解析进 out（out 为 nil 时跳过）。
+func (e *env) request(method, path, body string, wantStatus int, out any) {
+	e.t.Helper()
+
+	var reader *strings.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	var req *http.Request
+	var err error
+	if reader != nil {
+		req, err = http.NewRequest(method, e.server.URL+path, reader)
+	} else {
+		req, err = http.NewRequest(method, e.server.URL+path, nil)
+	}
+	if err != nil {
+		e.t.Fatalf("构造请求 %s %s: %v", method, path, err)
+	}
+	if e.adminToken != "" {
+		req.Header.Set("Authorization", "Bearer "+e.adminToken)
+	}
+
+	resp, err := e.server.Client().Do(req)
+	if err != nil {
+		e.t.Fatalf("请求 %s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	// 先把 body 读完再判断状态码：失败时要把它打进错误信息，
+	// 成功时还要解析，一次读取两处都能用。
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		e.t.Fatalf("读取 %s %s 响应: %v", method, path, err)
+	}
+	if resp.StatusCode != wantStatus {
+		e.t.Fatalf("%s %s status = %d, want %d, body = %s",
+			method, path, resp.StatusCode, wantStatus, string(raw))
+	}
+	if out == nil {
+		return
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		e.t.Fatalf("解析 %s %s 响应: %v, body = %s", method, path, err, string(raw))
+	}
+}
+
+// smsLogin 走完整的「发码 → 取码 → 登录」流程。
+func (e *env) smsLogin(appID, phone string) *service.LoginResult {
+	e.t.Helper()
+	ctx := context.Background()
+
+	if err := e.auth.SendLoginCode(ctx, appID, phone); err != nil {
+		e.t.Fatalf("SendLoginCode: %v", err)
+	}
+	code := e.sms.LastParam("code")
+	if code == "" {
+		e.t.Fatal("未从假供应商取到验证码")
+	}
+	res, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         appID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": phone, "code": code},
+		IP:            "203.0.113.7", UA: "integration-test",
+	})
+	if err != nil {
+		e.t.Fatalf("Login(sms_code): %v", err)
+	}
+	return res
+}
+
+// createApp 通过管理 API 建应用并启用两种登录方式，返回 appId 与明文 secret。
+func (e *env) createApp(name, slug string) (internalID, appID, secret string) {
+	e.t.Helper()
+
+	var created struct {
+		Application struct {
+			ID    string `json:"id"`
+			AppID string `json:"appId"`
+		} `json:"application"`
+		AppSecret string `json:"appSecret"`
+	}
+	e.request(http.MethodPost, "/admin/api/applications",
+		`{"name":"`+name+`","slug":"`+slug+`"}`, http.StatusCreated, &created)
+
+	base := "/admin/api/applications/" + created.Application.ID + "/connectors"
+	e.request(http.MethodPut, base+"/password", `{"enabled":true,"config":{}}`, http.StatusNoContent, nil)
+	e.request(http.MethodPut, base+"/sms_code", `{"enabled":true,"config":{}}`, http.StatusNoContent, nil)
+
+	return created.Application.ID, created.Application.AppID, created.AppSecret
+}
+
+// waitFor 每 20ms 检查一次 cond，直到成立或超时。
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等待超时: %s", what)
+}
+```
+
+`env_test.go` 需要 `import "io"`。
+
+- [ ] **Step 2: 写主流程集成测试**
+
+`internal/integration/phase1_test.go`：
+
+```go
+package integration_test
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+)
+
+// TestPhase1EndToEnd 按验收清单从头走一遍。
+func TestPhase1EndToEnd(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	// ① 管理员登录控制台
+	if token := e.adminLogin(); token == "" {
+		t.Fatal("管理员登录未拿到 token")
+	}
+	var me struct {
+		Username string `json:"username"`
+	}
+	e.request(http.MethodGet, "/admin/api/me", "", http.StatusOK, &me)
+	if me.Username != adminUser {
+		t.Fatalf("me.username = %q, want %q", me.Username, adminUser)
+	}
+
+	// ② 建应用，拿到 appId 与仅此一次可见的 appSecret
+	internalID, appID, secret := e.createApp("新项目前台", "newproj-web")
+	if appID == "" || secret == "" {
+		t.Fatal("appId 或 appSecret 为空")
+	}
+
+	// ③ 两种登录方式已启用，且配置元数据可供 UI 渲染表单
+	var schemas []struct {
+		Type   string `json:"type"`
+		Fields []struct {
+			Key string `json:"key"`
+		} `json:"fields"`
+	}
+	e.request(http.MethodGet, "/admin/api/connectors", "", http.StatusOK, &schemas)
+	if len(schemas) != 2 {
+		t.Fatalf("登录方式数 = %d, want 2", len(schemas))
+	}
+	for _, s := range schemas {
+		if len(s.Fields) == 0 {
+			t.Fatalf("%s 的配置字段为空，管理 UI 渲染不出表单", s.Type)
+		}
+	}
+
+	// ④ appSecret 可用于 SDK 身份校验
+	if _, err := e.apps.VerifySecret(ctx, appID, secret); err != nil {
+		t.Fatalf("VerifySecret: %v", err)
+	}
+
+	// ⑤ 短信验证码首次登录即注册
+	first := e.smsLogin(appID, "13800138000")
+	if first.User.Status != domain.UserStatusActive {
+		t.Fatalf("新用户状态 = %q", first.User.Status)
+	}
+
+	// ⑥ 带 token 校验通过，且拿到 cache_ttl
+	vr, err := e.auth.ValidateToken(ctx, appID, first.Session.Token)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if vr.CacheTTL <= 0 {
+		t.Fatalf("CacheTTL = %v, 必须为正", vr.CacheTTL)
+	}
+	if vr.Session.UserID != first.User.ID {
+		t.Fatal("token 指向的用户不对")
+	}
+
+	// ⑦ 设密码后用手机号+密码登录，必须是同一个人
+	if err := e.users.SetPassword(ctx, first.User.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	second, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         appID,
+		ConnectorType: connector.TypePassword,
+		Credentials:   connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
+	})
+	if err != nil {
+		t.Fatalf("Login(password): %v", err)
+	}
+	if second.User.ID != first.User.ID {
+		t.Fatalf("账号归并失败: %v vs %v", second.User.ID, first.User.ID)
+	}
+
+	// ⑧ 管理端能看到这个用户与他的两个在线会话
+	var list struct {
+		Items []struct {
+			ID       string `json:"id"`
+			Nickname string `json:"nickname"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	e.request(http.MethodGet, "/admin/api/users?keyword=13800138000", "", http.StatusOK, &list)
+	if list.Total != 1 {
+		t.Fatalf("用户搜索 total = %d, want 1", list.Total)
+	}
+	userPath := "/admin/api/users/" + first.User.ID.String()
+
+	var sessions []struct {
+		ID string `json:"id"`
+		IP string `json:"ip"`
+	}
+	e.request(http.MethodGet, userPath+"/sessions", "", http.StatusOK, &sessions)
+	if len(sessions) != 2 {
+		t.Fatalf("在线会话数 = %d, want 2", len(sessions))
+	}
+
+	// ⑨ 审计日志记录了两次成功登录，手机号已脱敏
+	var auditLogs []struct {
+		Subject string `json:"subject"`
+		Success bool   `json:"success"`
+		IP      string `json:"ip"`
+	}
+	e.request(http.MethodGet, userPath+"/login-logs", "", http.StatusOK, &auditLogs)
+	if len(auditLogs) < 2 {
+		t.Fatalf("审计记录数 = %d, want >= 2", len(auditLogs))
+	}
+	for _, l := range auditLogs {
+		if l.Subject == "13800138000" {
+			t.Fatal("审计日志里出现了未脱敏的手机号")
+		}
+	}
+
+	// ⑩ 管理端踢下线，两个会话全部失效
+	var revoked struct {
+		Revoked int `json:"revoked"`
+	}
+	e.request(http.MethodDelete, userPath+"/sessions", "", http.StatusOK, &revoked)
+	if revoked.Revoked != 2 {
+		t.Fatalf("撤销数 = %d, want 2", revoked.Revoked)
+	}
+	for name, tok := range map[string]string{"短信登录": first.Session.Token, "密码登录": second.Session.Token} {
+		if _, err := e.auth.ValidateToken(ctx, appID, tok); !errors.Is(err, domain.ErrUnauthorized) {
+			t.Fatalf("%s 的 token 仍有效, err = %v", name, err)
+		}
+	}
+
+	_ = internalID
+}
+
+func TestBothLoginMethodsResolveToSameUser(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appID, _ := e.createApp("A", "a")
+	ctx := context.Background()
+
+	first := e.smsLogin(appID, "13800138000")
+	if err := e.users.SetPassword(ctx, first.User.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	// 手机号 + 密码
+	byPhone, err := e.auth.Login(ctx, service.LoginInput{
+		AppID: appID, ConnectorType: connector.TypePassword,
+		Credentials: connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
+	})
+	if err != nil {
+		t.Fatalf("手机号密码登录: %v", err)
+	}
+
+	// 再给他加一个用户名，用用户名 + 同一个密码登录
+	if _, err := e.users.AttachIdentity(ctx, first.User.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "alice",
+	}); err != nil {
+		t.Fatalf("AttachIdentity: %v", err)
+	}
+	byUsername, err := e.auth.Login(ctx, service.LoginInput{
+		AppID: appID, ConnectorType: connector.TypePassword,
+		Credentials: connector.Credentials{"account": "alice", "password": "hunter2hunter2"},
+	})
+	if err != nil {
+		t.Fatalf("用户名密码登录: %v", err)
+	}
+
+	if byPhone.User.ID != first.User.ID || byUsername.User.ID != first.User.ID {
+		t.Fatal("三种登录路径没有落到同一个用户")
+	}
+}
+
+func TestTokenValidationAndRejection(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appID, _ := e.createApp("A", "a")
+	ctx := context.Background()
+
+	res := e.smsLogin(appID, "13800138000")
+
+	if _, err := e.auth.ValidateToken(ctx, appID, res.Session.Token); err != nil {
+		t.Fatalf("有效 token 应通过: %v", err)
+	}
+	for name, tok := range map[string]string{
+		"空 token":    "",
+		"伪造 token":   "definitely-not-a-real-token",
+		"截断的 token": res.Session.Token[:len(res.Session.Token)-1],
+	} {
+		if _, err := e.auth.ValidateToken(ctx, appID, tok); !errors.Is(err, domain.ErrUnauthorized) {
+			t.Errorf("%s 应被拒绝, err = %v", name, err)
+		}
+	}
+
+	// 另一个应用的 appId 校验同一个 token 也必须失败
+	_, otherAppID, _ := e.createApp("B", "b")
+	if _, err := e.auth.ValidateToken(ctx, otherAppID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("跨应用校验应被拒绝, err = %v", err)
+	}
+}
+
+func TestAppSecretVerification(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appID, secret := e.createApp("A", "a")
+	ctx := context.Background()
+
+	if _, err := e.apps.VerifySecret(ctx, appID, secret); err != nil {
+		t.Fatalf("正确凭据: %v", err)
+	}
+	if _, err := e.apps.VerifySecret(ctx, appID, "wrong"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("错误 secret err = %v, want ErrInvalidCredential", err)
+	}
+	// 未知 appId 与错误 secret 返回同一错误，避免 appId 枚举
+	if _, err := e.apps.VerifySecret(ctx, "nope", secret); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("未知 appId err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestKickFromAdminInvalidatesToken(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appID, _ := e.createApp("A", "a")
+	ctx := context.Background()
+
+	res := e.smsLogin(appID, "13800138000")
+	userPath := "/admin/api/users/" + res.User.ID.String()
+
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	e.request(http.MethodGet, userPath+"/sessions", "", http.StatusOK, &sessions)
+	if len(sessions) != 1 {
+		t.Fatalf("会话数 = %d, want 1", len(sessions))
+	}
+
+	var revoked struct {
+		Revoked int `json:"revoked"`
+	}
+	e.request(http.MethodDelete, userPath+"/sessions/"+sessions[0].ID, "", http.StatusOK, &revoked)
+	if revoked.Revoked != 1 {
+		t.Fatalf("撤销数 = %d, want 1", revoked.Revoked)
+	}
+	if _, err := e.auth.ValidateToken(ctx, appID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("踢下线后 token 仍有效, err = %v", err)
+	}
+}
+
+// 撤销必须广播事件——计划二的 gRPC 双向流靠它把撤销实时推给 SDK。
+func TestRevocationIsBroadcast(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appID, _ := e.createApp("A", "a")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, closeFn, err := e.revoke.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer closeFn()
+
+	res := e.smsLogin(appID, "13800138000")
+	userPath := "/admin/api/users/" + res.User.ID.String()
+	e.request(http.MethodDelete, userPath+"/sessions", "", http.StatusOK, nil)
+
+	select {
+	case ev := <-events:
+		if ev.UserID != res.User.ID {
+			t.Fatalf("事件 UserID = %v, want %v", ev.UserID, res.User.ID)
+		}
+		if len(ev.Tokens) == 0 {
+			t.Fatal("事件未携带 token 列表，SDK 无从知道该清哪些缓存条目")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("3 秒内未收到撤销广播")
+	}
+}
+
+func TestFrozenUserCannotLogin(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appID, _ := e.createApp("A", "a")
+	ctx := context.Background()
+
+	res := e.smsLogin(appID, "13800138000")
+	userPath := "/admin/api/users/" + res.User.ID.String()
+
+	e.request(http.MethodPatch, userPath+"/status", `{"status":"FROZEN"}`, http.StatusOK, nil)
+
+	// 冻结连带踢掉已登录设备
+	if _, err := e.auth.ValidateToken(ctx, appID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("冻结后旧 token 仍有效, err = %v", err)
+	}
+	// 也无法重新登录
+	if err := e.auth.SendLoginCode(ctx, appID, "13800138000"); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID: appID, ConnectorType: connector.TypeSMSCode,
+		Credentials: connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
+	}); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("冻结用户登录 err = %v, want ErrForbidden", err)
+	}
+
+	// 解冻后恢复
+	e.request(http.MethodPatch, userPath+"/status", `{"status":"ACTIVE"}`, http.StatusOK, nil)
+	if again := e.smsLogin(appID, "13800138000"); again.User.ID != res.User.ID {
+		t.Fatal("解冻后登录不是同一用户")
+	}
+}
+
+// cache_ttl 是 fp 与 SDK 之间的核心契约：SDK 只按它缓存判定结果，
+// 永远不自己推断 token 是否过期。这里验证 fp 侧的下发规则正确。
+func TestCacheTTLGuidesSDKBehaviour(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	internalID, appID, _ := e.createApp("A", "a")
+	ctx := context.Background()
+
+	// 把缓存窗口调成 60 秒、空闲超时调成 120 秒
+	e.request(http.MethodPatch, "/admin/api/applications/"+internalID+"/session",
+		`{"idleTimeoutSeconds":120,"idleTimeoutMobileSeconds":120,"maxLifetimeSeconds":3600,`+
+			`"rotateIntervalSeconds":3600,"extendIntervalSeconds":30,"tokenCacheTtlSeconds":60}`,
+		http.StatusOK, nil)
+
+	res := e.smsLogin(appID, "13800138000")
+	vr, err := e.auth.ValidateToken(ctx, appID, res.Session.Token)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if vr.CacheTTL != 60*time.Second {
+		t.Fatalf("CacheTTL = %v, want 60s", vr.CacheTTL)
+	}
+	// cache_ttl 绝不能超过 token 剩余有效期
+	remaining := vr.Session.RemainingAt(time.Now().UnixMilli(), domain.SessionPolicy{
+		IdleTimeoutSeconds: 120, MaxLifetimeSeconds: 3600, TokenCacheTTLSeconds: 60,
+		RotateIntervalSeconds: 3600, ExtendIntervalSeconds: 30,
+	})
+	if vr.CacheTTL > remaining {
+		t.Fatalf("CacheTTL(%v) 超过了剩余有效期(%v)", vr.CacheTTL, remaining)
+	}
+}
+
+// 未启用的登录方式必须被拒绝，且拒绝发生在凭据校验之前。
+func TestDisabledConnectorIsRejected(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	internalID, appID, _ := e.createApp("A", "a")
+	ctx := context.Background()
+
+	res := e.smsLogin(appID, "13800138000")
+	if err := e.users.SetPassword(ctx, res.User.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	e.request(http.MethodPut, "/admin/api/applications/"+internalID+"/connectors/password",
+		`{"enabled":false,"config":{}}`, http.StatusNoContent, nil)
+
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID: appID, ConnectorType: connector.TypePassword,
+		Credentials: connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
+	}); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden（即使密码正确也应拒绝）", err)
+	}
+}
+
+// 多个应用挂在同一个 fp 部署下即共享用户体系——这是"多平台共享用户"的落点。
+func TestApplicationsShareUserPool(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appA, _ := e.createApp("平台A", "plat-a")
+	_, appB, _ := e.createApp("平台B", "plat-b")
+
+	inA := e.smsLogin(appA, "13800138000")
+	inB := e.smsLogin(appB, "13800138000")
+
+	if inA.User.ID != inB.User.ID {
+		t.Fatalf("同一手机号在两个应用下应是同一个用户: %v vs %v", inA.User.ID, inB.User.ID)
+	}
+	// 但会话彼此独立
+	if inA.Session.ID == inB.Session.ID {
+		t.Fatal("两个应用的会话不应是同一个")
+	}
+	ctx := context.Background()
+	if _, err := e.auth.ValidateToken(ctx, appA, inB.Session.Token); err == nil {
+		t.Fatal("B 的 token 不应能在 A 上通过")
+	}
+}
+```
+
+- [ ] **Step 3: 运行集成测试**
+
+Run: `go test ./internal/integration/ -v`
+Expected: 10 个测试全部 PASS
+
+若 `TestRevocationIsBroadcast` 偶发超时，检查 `store.RevokePublisher.Subscribe` 是否在返回前完成了 `sub.Receive`——订阅未建立就发布会丢消息。
+
+- [ ] **Step 4: 运行全部测试并检查覆盖**
+
+```bash
+make test
+```
+
+```bash
+FP_TEST_POSTGRES_URL=postgres://fp:fp@localhost:5433/fp?sslmode=disable FP_TEST_REDIS_URL=redis://localhost:6380/1 go test ./... -cover
+```
+
+Expected: 全部 PASS。`internal/service`、`internal/connector`、`internal/notify` 三个包的覆盖率应在 70% 以上；低于此说明有分支没被测到，补测试而不是调低预期。
+
+- [ ] **Step 5: 手工跑一遍完整流程**
+
+```bash
+make run
+```
+
+另开终端，依次执行（每步都应成功）：
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8080/admin/api/login -d '{"username":"admin","password":"admin123456"}' | grep -o '"token":"[^"]*' | cut -d'"' -f4) && echo "admin token: $TOKEN"
+```
+
+```bash
+curl -s -X POST localhost:8080/admin/api/applications -H "Authorization: Bearer $TOKEN" -d '{"name":"手工验证","slug":"manual"}'
+```
+
+```bash
+curl -s localhost:8080/admin/api/connectors -H "Authorization: Bearer $TOKEN"
+```
+
+Expected: 第二条返回含 `appId` 与 `appSecret` 的 JSON；第三条返回两种登录方式的配置字段。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add internal
+git commit -m "test: 第一阶段端到端集成测试"
+```
+
+---
+
+## 完成标志
+
+全部 14 个任务完成后，`fp` 应当具备：
+
+- 单二进制启动，自动迁移数据库，同时提供管理 HTTP API（:8080）
+- 管理控制台 API：应用管理、登录方式配置（含动态表单元数据）、用户管理、会话管理、审计日志
+- 两种登录方式（密码、短信验证码）通过统一的 `Connector` 契约实现，新增方式不改编排逻辑
+- 完整的令牌生命周期：签发、校验（下发 `cache_ttl`）、延期降频、轮换与过渡期、绝对上限、撤销与广播
+- 账号归并规则显式实现并被测试锁死
+
+**尚未具备**（计划二、三的内容）：gRPC 服务与 Go SDK、Demo 业务服务、管理 UI 前端。
+
+## 下一步
+
+- **计划二**：gRPC 双向流服务（M8）+ Go SDK（M9）+ Demo 业务服务（M11）
+- **计划三**：管理 UI 前端（M10），前置条件是确定前端框架
