@@ -70,3 +70,12 @@ func (c *SMSCodeConnector) Authenticate(ctx context.Context, cfg map[string]any,
 		AllowCreate: ConfigBool(cfg, "autoRegister", true),
 	}, nil
 }
+
+// SubjectFrom 实现 Connector。
+func (c *SMSCodeConnector) SubjectFrom(creds Credentials) (string, string) {
+	phone := creds.Get("phone")
+	if phone == "" {
+		return "", ""
+	}
+	return domain.IdentityTypePhone, phone
+}

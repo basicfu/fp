@@ -19,6 +19,7 @@ func (s stubConnector) ConfigSchema() []domain.Field {
 func (s stubConnector) Authenticate(context.Context, map[string]any, connector.Credentials) (*connector.Result, error) {
 	return &connector.Result{IdentityType: "stub", Subject: "s"}, nil
 }
+func (s stubConnector) SubjectFrom(connector.Credentials) (string, string) { return "stub", "s" }
 
 func TestRegistryRegisterAndGet(t *testing.T) {
 	r := connector.NewRegistry()

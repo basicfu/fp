@@ -83,6 +83,15 @@ func (c *PasswordConnector) Authenticate(ctx context.Context, cfg map[string]any
 	}, nil
 }
 
+// SubjectFrom 实现 Connector。
+func (c *PasswordConnector) SubjectFrom(creds Credentials) (string, string) {
+	account := creds.Get("account")
+	if account == "" {
+		return "", ""
+	}
+	return DetectIdentityType(account), account
+}
+
 func identityTypeAllowed(cfg map[string]any, identityType string) bool {
 	switch identityType {
 	case domain.IdentityTypePhone:

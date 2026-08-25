@@ -216,3 +216,16 @@ func TestPasswordEmailDisabledByDefault(t *testing.T) {
 		t.Fatalf("打开后仍失败: %v", err)
 	}
 }
+
+func TestPasswordSubjectFrom(t *testing.T) {
+	c := connector.NewPassword(newFakeLookup())
+
+	typ, subj := c.SubjectFrom(connector.Credentials{"account": "13800138000"})
+	if typ != domain.IdentityTypePhone || subj != "13800138000" {
+		t.Fatalf("SubjectFrom = (%q, %q)", typ, subj)
+	}
+	// 凭据里没有 account 时返回空串，而不是 panic 或臆造值
+	if typ, subj := c.SubjectFrom(connector.Credentials{}); typ != "" || subj != "" {
+		t.Fatalf("空凭据 SubjectFrom = (%q, %q), want 两个空串", typ, subj)
+	}
+}

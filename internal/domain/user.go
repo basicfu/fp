@@ -52,3 +52,29 @@ type User struct {
 func (u User) CanLogin() bool {
 	return u.Status == UserStatusActive || u.Status == UserStatusPendingDelete
 }
+
+// 登录日志事件类型。
+const (
+	LoginEventLogin  = "login"
+	LoginEventLogout = "logout"
+	LoginEventRotate = "rotate"
+	LoginEventRevoke = "revoke"
+)
+
+// LoginLog 是一条登录审计记录。
+// UserID / ApplicationID 用指针是因为登录失败时它们可能为空。
+type LoginLog struct {
+	ID            uuid.UUID
+	UserID        *uuid.UUID
+	ApplicationID *uuid.UUID
+	IdentityType  string
+	// Subject 是脱敏后的登录标识。完整值通过 UserID 关联查询。
+	Subject   string
+	Event     string
+	Success   bool
+	Reason    string
+	IP        string
+	UA        string
+	SessionID string
+	CreatedAt int64
+}

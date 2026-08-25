@@ -113,3 +113,15 @@ func TestSMSCodeAutoRegisterConfigurable(t *testing.T) {
 		t.Fatal("autoRegister=false 时 AllowCreate 应为 false")
 	}
 }
+
+func TestSMSCodeSubjectFrom(t *testing.T) {
+	c := connector.NewSMSCode(&fakeCodes{})
+
+	typ, subj := c.SubjectFrom(connector.Credentials{"phone": "13800138000"})
+	if typ != domain.IdentityTypePhone || subj != "13800138000" {
+		t.Fatalf("SubjectFrom = (%q, %q)", typ, subj)
+	}
+	if typ, subj := c.SubjectFrom(connector.Credentials{}); typ != "" || subj != "" {
+		t.Fatalf("空凭据 SubjectFrom = (%q, %q), want 两个空串", typ, subj)
+	}
+}

@@ -51,6 +51,9 @@ type Connector interface {
 	// Authenticate 校验凭据。cfg 是该应用为本登录方式保存的配置。
 	// 校验失败必须返回 domain.ErrInvalidCredential 的包装。
 	Authenticate(ctx context.Context, cfg map[string]any, creds Credentials) (*Result, error)
+	// SubjectFrom 尽力从凭据里提取登录标识，仅用于审计日志。
+	// 不做校验、不保证标识存在；凭据里没有可用信息时返回两个空串。
+	SubjectFrom(creds Credentials) (identityType, subject string)
 }
 
 // Registry 是进程内的登录方式注册表。构造后即只读，无需加锁。
