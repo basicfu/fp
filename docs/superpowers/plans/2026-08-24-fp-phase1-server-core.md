@@ -6263,7 +6263,7 @@ git commit -m "feat: 阿里云短信 Provider 与 sms_code 登录方式"
   - `func (*SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.Duration) error`
   - `func (*SessionStore) Get(ctx context.Context, token string) (*domain.Session, error)`
   - `func (*SessionStore) Delete(ctx context.Context, token string) error`
-  - `func (*SessionStore) Expire(ctx context.Context, token string, ttl time.Duration) error`
+  - ~~`Expire`~~ **不提供**：它只能重设会话主键的 TTL，碰不到用户索引，会让会话活得比索引久——在线设备列表静默清空、批量撤销漏掉仍然有效的会话。延期一律走 `Put`（它会同时刷新两者）
   - `func (*SessionStore) ListUserTokens(ctx context.Context, userID uuid.UUID) ([]string, error)`
   - `func (*SessionStore) DeleteUserTokens(ctx context.Context, userID uuid.UUID) (int, error)`
   - `func (*SessionStore) TryLock(ctx context.Context, key string, ttl time.Duration) (bool, error)`
@@ -6413,6 +6413,30 @@ func TestSessionStoreDelete(t *testing.T) {
 	}
 }
 
+// ttl <= 0 必须报错，绝不能写进 Redis。
+//
+// go-redis 对 expiration <= 0 会省略 TTL 参数，SET 出来是永不过期的键；
+// 而 ListUserTokens 只清理"已消失"的键，会把它当活跃会话永远列下去。
+// Task 10 的延期逻辑传的是"剩余有效期"，会话恰好过期时正是 0。
+func TestSessionStorePutRejectsNonPositiveTTL(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
+	ctx := context.Background()
+
+	for _, ttl := range []time.Duration{0, -time.Second} {
+		err := st.Put(ctx, sampleSession("tok-1", uuid.New()), ttl)
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("ttl=%v err = %v, want ErrInvalidArgument", ttl, err)
+		}
+	}
+	// 确认真的什么都没写进去
+	if n, err := rdb.Exists(ctx, "fp:sess:tok-1").Result(); err != nil {
+		t.Fatalf("Exists: %v", err)
+	} else if n != 0 {
+		t.Fatal("拒绝后仍然写入了会话键")
+	}
+}
+
 func TestSessionStoreTTLExpires(t *testing.T) {
 	st := store.NewSessionStore(testsupport.NewTestRedis(t))
 	ctx := context.Background()
@@ -6423,22 +6447,6 @@ func TestSessionStoreTTLExpires(t *testing.T) {
 	time.Sleep(400 * time.Millisecond)
 	if _, err := st.Get(ctx, "tok-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("TTL 到期后 err = %v, want ErrNotFound", err)
-	}
-}
-
-func TestSessionStoreExpireExtends(t *testing.T) {
-	st := store.NewSessionStore(testsupport.NewTestRedis(t))
-	ctx := context.Background()
-
-	if err := st.Put(ctx, sampleSession("tok-1", uuid.New()), 300*time.Millisecond); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if err := st.Expire(ctx, "tok-1", 5*time.Second); err != nil {
-		t.Fatalf("Expire: %v", err)
-	}
-	time.Sleep(400 * time.Millisecond)
-	if _, err := st.Get(ctx, "tok-1"); err != nil {
-		t.Fatalf("延长 TTL 后仍应存在: %v", err)
 	}
 }
 
@@ -6474,7 +6482,8 @@ func TestSessionStoreListUserTokens(t *testing.T) {
 // 索引是超集：token 到期后 Redis 自动清掉主键，但索引里还留着。
 // ListUserTokens 必须顺手清理这些悬挂项，否则在线设备列表会越积越多。
 func TestSessionStoreListPrunesDanglingTokens(t *testing.T) {
-	st := store.NewSessionStore(testsupport.NewTestRedis(t))
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
 	ctx := context.Background()
 	uid := uuid.New()
 
@@ -6494,13 +6503,15 @@ func TestSessionStoreListPrunesDanglingTokens(t *testing.T) {
 		t.Fatalf("tokens = %v, want [live]", tokens)
 	}
 
-	// 再查一次，确认悬挂项已被真正移除而不是每次都过滤。
-	tokens, err = st.ListUserTokens(ctx, uid)
-	if err != nil {
-		t.Fatalf("二次 ListUserTokens: %v", err)
-	}
-	if len(tokens) != 1 {
-		t.Fatalf("tokens = %v", tokens)
+	// 直接查 Redis 集合的基数，而不是再调一次 ListUserTokens。
+	//
+	// 只看返回值是证明不了"清理"的：一个只过滤、从不 SREM 的实现，
+	// 两次调用都会返回 [live]，断言全绿而索引一直在涨。必须越过被测函数
+	// 去看它对存储的实际副作用。
+	if card, err := rdb.SCard(ctx, "fp:usess:"+uid.String()).Result(); err != nil {
+		t.Fatalf("SCard: %v", err)
+	} else if card != 1 {
+		t.Fatalf("索引基数 = %d, want 1——悬挂项只是被过滤掉了，没有真正 SREM", card)
 	}
 }
 
@@ -6604,11 +6615,21 @@ func NewSessionStore(rdb *redis.Client) *SessionStore {
 	return &SessionStore{rdb: rdb}
 }
 
-// Put 写入会话，并把 token 记进该用户的索引。
+// Put 写入会话，并把 token 记进该用户的索引。**延期也走这里**——
+// 它是唯一同时刷新会话主键与用户索引的入口，只刷主键会让索引先于会话过期，
+// 在线设备列表静默清空、批量撤销漏掉仍然有效的会话。
 //
-// 索引的 TTL 取会话 TTL 与 7 天中较大者：索引是超集，允许含已过期的 token，
-// ListUserTokens 会在读取时清理，因此索引过期得晚一些是安全的。
+// 索引 TTL 取会话 TTL 与 7 天中的**较大者**，保证索引不早于会话过期。
+// 索引本身是超集（允许含已过期的 token），ListUserTokens 读取时会清理。
+//
+// ttl <= 0 直接报错：go-redis 对 expiration <= 0 会**省略 TTL 参数**，
+// SET 出来的是一个永不过期的键。这类键没有任何东西会回收它——
+// ListUserTokens 只清理"已消失"的键，反而会把它当成活跃会话一直列出去。
 func (s *SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.Duration) error {
+	if ttl <= 0 {
+		return domain.Errorf(domain.ErrInvalidArgument,
+			"会话 TTL 必须为正，收到 %v（写入会得到一个永不过期的键）", ttl)
+	}
 	raw, err := json.Marshal(sess)
 	if err != nil {
 		return fmt.Errorf("store: 序列化会话: %w", err)
@@ -6664,14 +6685,6 @@ func (s *SessionStore) Delete(ctx context.Context, token string) error {
 	return nil
 }
 
-// Expire 重设会话主键的 TTL。用于延期。
-func (s *SessionStore) Expire(ctx context.Context, token string, ttl time.Duration) error {
-	if err := s.rdb.Expire(ctx, sessionKeyPrefix+token, ttl).Err(); err != nil {
-		return fmt.Errorf("store: 延长会话 TTL: %w", err)
-	}
-	return nil
-}
-
 // ListUserTokens 返回该用户当前仍然存活的 token，并顺手把索引里的悬挂项移除。
 func (s *SessionStore) ListUserTokens(ctx context.Context, userID uuid.UUID) ([]string, error) {
 	indexKey := userSessionsPrefix + userID.String()
@@ -6683,33 +6696,68 @@ func (s *SessionStore) ListUserTokens(ctx context.Context, userID uuid.UUID) ([]
 		return []string{}, nil
 	}
 
-	keys := make([]string, len(tokens))
-	for i, tok := range tokens {
-		keys[i] = sessionKeyPrefix + tok
-	}
-	values, err := s.rdb.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, fmt.Errorf("store: 批量读取会话: %w", err)
-	}
-
 	alive := make([]string, 0, len(tokens))
 	var dangling []any
-	for i, v := range values {
-		if v == nil {
-			dangling = append(dangling, tokens[i])
-			continue
+
+	// 分批发命令。MGET / SREM / DEL 都是 O(N) 且在 Redis 单线程里跑完才让位，
+	// 一次塞进成千上万个 key 会把整个实例卡住——而一个长期活跃、从不显式登出
+	// 的用户，索引里堆积几千个 token 是完全可能的。
+	for _, batch := range chunkStrings(tokens, redisBatchSize) {
+		keys := make([]string, len(batch))
+		for i, tok := range batch {
+			keys[i] = sessionKeyPrefix + tok
 		}
-		alive = append(alive, tokens[i])
+		values, err := s.rdb.MGet(ctx, keys...).Result()
+		if err != nil {
+			return nil, fmt.Errorf("store: 批量读取会话: %w", err)
+		}
+		for i, v := range values {
+			if v == nil {
+				dangling = append(dangling, batch[i])
+				continue
+			}
+			alive = append(alive, batch[i])
+		}
 	}
-	if len(dangling) > 0 {
-		if err := s.rdb.SRem(ctx, indexKey, dangling...).Err(); err != nil {
-			return nil, fmt.Errorf("store: 清理悬挂 token: %w", err)
+
+	for _, batch := range chunkAny(dangling, redisBatchSize) {
+		if err := s.rdb.SRem(ctx, indexKey, batch...).Err(); err != nil {
+			// 清理失败不该让整个设备列表不可用——读取本身已经成功了。
+			slog.Warn("store: 清理悬挂 token 失败", "err", err, "count", len(batch))
+			break
 		}
 	}
 	return alive, nil
 }
 
-// DeleteUserTokens 撤销该用户的全部会话，返回实际删除的数量。
+// redisBatchSize 是单条 Redis 命令携带的最大 key/member 数。
+const redisBatchSize = 500
+
+func chunkStrings(in []string, size int) [][]string {
+	var out [][]string
+	for len(in) > size {
+		out = append(out, in[:size])
+		in = in[size:]
+	}
+	if len(in) > 0 {
+		out = append(out, in)
+	}
+	return out
+}
+
+func chunkAny(in []any, size int) [][]any {
+	var out [][]any
+	for len(in) > size {
+		out = append(out, in[:size])
+		in = in[size:]
+	}
+	if len(in) > 0 {
+		out = append(out, in)
+	}
+	return out
+}
+
+// DeleteUserTokens 撤销该用户的全部会话，返回 Redis 实际删除的键数。
 func (s *SessionStore) DeleteUserTokens(ctx context.Context, userID uuid.UUID) (int, error) {
 	tokens, err := s.ListUserTokens(ctx, userID)
 	if err != nil {
@@ -6719,20 +6767,27 @@ func (s *SessionStore) DeleteUserTokens(ctx context.Context, userID uuid.UUID) (
 		return 0, nil
 	}
 
-	keys := make([]string, len(tokens))
-	members := make([]any, len(tokens))
-	for i, tok := range tokens {
-		keys[i] = sessionKeyPrefix + tok
-		members[i] = tok
-	}
+	// 同样分批，理由见 ListUserTokens。
+	deleted := 0
+	for _, batch := range chunkStrings(tokens, redisBatchSize) {
+		keys := make([]string, len(batch))
+		members := make([]any, len(batch))
+		for i, tok := range batch {
+			keys[i] = sessionKeyPrefix + tok
+			members[i] = tok
+		}
 
-	pipe := s.rdb.TxPipeline()
-	pipe.Del(ctx, keys...)
-	pipe.SRem(ctx, userSessionsPrefix+userID.String(), members...)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return 0, fmt.Errorf("store: 批量删除会话: %w", err)
+		pipe := s.rdb.TxPipeline()
+		del := pipe.Del(ctx, keys...)
+		pipe.SRem(ctx, userSessionsPrefix+userID.String(), members...)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return deleted, fmt.Errorf("store: 批量删除会话: %w", err)
+		}
+		// 返回 Redis 实际删掉的条数，而不是我们打算删的条数——
+		// 撤销事件会把这个数字报给管理员，虚报没有意义。
+		deleted += int(del.Val())
 	}
-	return len(tokens), nil
+	return deleted, nil
 }
 
 // TryLock 尝试获取一把带 TTL 的互斥锁，用于给延期写与轮换去重。
