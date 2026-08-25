@@ -3260,6 +3260,58 @@ func TestVerifyPasswordWithoutPasswordSet(t *testing.T) {
 	}
 }
 
+// 三条失败路径的耗时必须同量级，否则响应时间会泄露账号是否存在。
+//
+// 判定用的是"下限"而不是"两者之差"：bcrypt cost 10 至少几十毫秒，
+// 而短路掉 bcrypt 的路径是微秒级，两者相差三个数量级以上。
+// 取一个远低于 bcrypt 实测耗时、又远高于纯查询耗时的阈值，
+// 既能抓住"被短路了"，又不会因机器快慢而抖动。
+func TestVerifyPasswordEqualizesTiming(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	const minBcrypt = 5 * time.Millisecond
+
+	withPwd, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	if err := svc.SetPassword(ctx, withPwd.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	noPwd, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13900139000",
+	})
+	if err != nil {
+		t.Fatalf("建号2: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		userID uuid.UUID
+	}{
+		{"用户不存在", uuid.New()},
+		{"用户存在但未设密码", noPwd.ID},
+		{"用户存在但密码错误", withPwd.ID},
+	}
+	for _, tc := range cases {
+		start := time.Now()
+		err := svc.VerifyPassword(ctx, tc.userID, "definitely-wrong-password")
+		elapsed := time.Since(start)
+
+		if !errors.Is(err, domain.ErrInvalidCredential) {
+			t.Errorf("%s: err = %v, want ErrInvalidCredential", tc.name, err)
+		}
+		if elapsed < minBcrypt {
+			t.Errorf("%s: 耗时 %v < %v，说明跳过了 bcrypt，响应时间会泄露账号是否存在",
+				tc.name, elapsed, minBcrypt)
+		}
+	}
+}
+
 func TestSetPasswordRejectsTooShort(t *testing.T) {
 	svc := newUserService(t)
 	ctx := context.Background()
@@ -3690,18 +3742,36 @@ func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, plain s
 	return nil
 }
 
-// VerifyPassword 校验用户密码。未设置密码的用户一律返回 ErrInvalidCredential。
+// dummyPasswordHash 是一个固定的 bcrypt 哈希，只用来消耗时间。
+//
+// 它存在的唯一理由是抹平时序差异：见 VerifyPassword 的说明。进程启动时算一次。
+var dummyPasswordHash = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("fp-timing-equalizer"), bcryptCost)
+	if err != nil {
+		panic("service: 生成哑密码哈希失败: " + err.Error())
+	}
+	return h
+}()
+
+// VerifyPassword 校验用户密码。
+//
+// 用户不存在、或存在但没设过密码时，**仍然执行一次等价开销的 bcrypt 比对**再返回失败。
+//
+// 为什么必须这样：password 登录靠"三种失败返回同一个错误"来防账号枚举，但如果
+// 账号不存在时直接返回、账号存在时才跑 bcrypt（cost 10，几十到上百毫秒），
+// 两者的**响应时间**差一到两个数量级——攻击者根本不用看响应内容，掐表就能问出
+// "这个手机号注册过没有"。返回同一个错误却在时序上泄露，比不做防枚举更糟：
+// 它给出的是虚假的安全感。
 func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID, plain string) error {
 	var hash string
 	err := s.pool.QueryRow(ctx, `SELECT password_hash FROM app_user WHERE id = $1`, userID).Scan(&hash)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("service: 读取密码哈希: %w", err)
 	}
-	if hash == "" {
-		// 未设置密码。bcrypt 对空哈希会直接报错，这里显式短路以保证错误一致。
+	if errors.Is(err, pgx.ErrNoRows) || hash == "" {
+		// 用户不存在，或存在但未设密码。消耗等量时间后统一失败。
+		// 比对结果必然不成立，这里刻意丢弃。
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(plain))
 		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)); err != nil {
@@ -4261,6 +4331,8 @@ type fakeLookup struct {
 	byIdentity map[string]uuid.UUID
 	passwords  map[uuid.UUID]string
 	statuses   map[uuid.UUID]string
+	// verifyCalls 记录 VerifyPassword 被调用的次数，用于验证时序抹平。
+	verifyCalls int
 }
 
 func newFakeLookup() *fakeLookup {
@@ -4289,6 +4361,7 @@ func (f *fakeLookup) FindByIdentity(_ context.Context, identityType, subject str
 }
 
 func (f *fakeLookup) VerifyPassword(_ context.Context, userID uuid.UUID, plain string) error {
+	f.verifyCalls++
 	want, ok := f.passwords[userID]
 	if !ok || want == "" || want != plain {
 		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
@@ -4370,6 +4443,36 @@ func TestPasswordAuthenticateUnknownAccountLooksLikeWrongPassword(t *testing.T) 
 	})
 	if !errors.Is(err, domain.ErrInvalidCredential) {
 		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+// 账号不存在时也必须走一次口令校验，否则"跳过 bcrypt"会让响应时间
+// 泄露该账号是否注册过——同错误的防枚举设计就被时序旁路架空了。
+func TestPasswordAlwaysVerifiesToEqualizeTiming(t *testing.T) {
+	lookup := newFakeLookup()
+	c := connector.NewPassword(lookup)
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "whatever",
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+	if lookup.verifyCalls != 1 {
+		t.Fatalf("账号不存在时 VerifyPassword 调用次数 = %d, want 1（用于抹平时序）", lookup.verifyCalls)
+	}
+
+	// 账号存在时同样只调一次，不能变成两次
+	lookup2 := newFakeLookup()
+	lookup2.add(domain.IdentityTypePhone, "13800138000", "hunter2hunter2", domain.UserStatusActive)
+	c2 := connector.NewPassword(lookup2)
+	if _, err := c2.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "hunter2hunter2",
+	}); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if lookup2.verifyCalls != 1 {
+		t.Fatalf("账号存在时 VerifyPassword 调用次数 = %d, want 1", lookup2.verifyCalls)
 	}
 }
 
@@ -4498,11 +4601,19 @@ func (c *PasswordConnector) Authenticate(ctx context.Context, cfg map[string]any
 		return nil, invalid
 	}
 
-	user, _, err := c.lookup.FindByIdentity(ctx, identityType, account)
-	if err != nil {
-		return nil, invalid
+	// 无论账号是否存在都要走一次口令校验。
+	//
+	// 账号不存在时如果直接返回，就跳过了 bcrypt——而 bcrypt 是这条路径上唯一
+	// 昂贵的一步，跳没跳会在响应时间上差一到两个数量级。攻击者不看响应内容、
+	// 只掐表，就能把"哪些手机号注册过"问出来，上面 invalid 那套同错误设计
+	// 也就形同虚设。VerifyPassword 对不存在的用户会跑一次哑哈希比对来抹平时序。
+	user, _, lookupErr := c.lookup.FindByIdentity(ctx, identityType, account)
+	userID := uuid.Nil
+	if lookupErr == nil {
+		userID = user.ID
 	}
-	if err := c.lookup.VerifyPassword(ctx, user.ID, password); err != nil {
+	verifyErr := c.lookup.VerifyPassword(ctx, userID, password)
+	if lookupErr != nil || verifyErr != nil {
 		return nil, invalid
 	}
 
@@ -4532,6 +4643,9 @@ func identityTypeAllowed(cfg map[string]any, identityType string) bool {
 //	11 位、以 1 开头的纯数字 → phone
 //	含 @                    → email
 //	其余                    → username
+//
+// **调用方必须先去掉首尾空白**（Credentials.Get 已经做了）。
+// 手机号判定要求长度恰好 11，"  13800138000  " 会被判成 username。
 func DetectIdentityType(account string) string {
 	if strings.Contains(account, "@") {
 		return domain.IdentityTypeEmail
