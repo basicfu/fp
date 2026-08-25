@@ -10,6 +10,7 @@ import (
 
 	"github.com/basicfu/fp/internal/config"
 	"github.com/basicfu/fp/internal/logging"
+	"github.com/basicfu/fp/internal/store"
 )
 
 func main() {
@@ -25,10 +26,28 @@ func run() error {
 		return err
 	}
 	log := logging.Setup(cfg.LogLevel)
-	log.Info("fp 启动", "env", cfg.Env, "http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	pool, err := store.OpenPostgres(ctx, cfg.PostgresURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := store.Migrate(ctx, pool); err != nil {
+		return err
+	}
+	log.Info("数据库迁移完成")
+
+	rdb, err := store.OpenRedis(ctx, cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	defer rdb.Close()
+
+	log.Info("fp 启动", "env", cfg.Env, "http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr)
 
 	<-ctx.Done()
 	log.Info("fp 收到退出信号，正在关闭")
