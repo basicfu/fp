@@ -7876,6 +7876,7 @@ git commit -m "feat: 会话撤销与撤销事件广播"
   - `func (*AuthService) SendLoginCode(ctx context.Context, appID, phone string) error`
   - `func (*AuthService) Logout(ctx context.Context, token string) error`
   - `func (*AuthService) ValidateToken(ctx context.Context, appID, token string) (*ValidateResult, error)`
+  - `func (*AuthService) activeApp(ctx context.Context, appID string) (*domain.Application, error)` — 登录/发码/校验三条入口共用，强制应用必须处于 ACTIVE
   - **接口变更**：`connector.Connector` 新增 `SubjectFrom(creds Credentials) (identityType, subject string)`，`PasswordConnector` / `SMSCodeConnector` 各实现一份
 
 - [ ] **Step 1: 写迁移**
@@ -8178,6 +8179,9 @@ type authEnv struct {
 	sms   *notify.FakeProvider
 	codes *notify.CodeService
 	app   *domain.Application
+	// pool 用于少数需要绕过 service 层直接改库的用例（例如制造"应用已停用"这种
+	// 第一阶段还没有管理接口可以到达的状态）。
+	pool *pgxpool.Pool
 }
 
 func newAuthEnv(t *testing.T) *authEnv {
@@ -8220,7 +8224,7 @@ func newAuthEnv(t *testing.T) *authEnv {
 			Registry: reg, Notifier: sender, Codes: codes,
 		}),
 		apps: apps, users: users, sess: sessions, logs: logs,
-		sms: sms, codes: codes, app: app,
+		sms: sms, codes: codes, app: app, pool: pool,
 	}
 }
 
@@ -8468,6 +8472,36 @@ func TestFailedLoginWritesAuditLog(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("未找到失败的审计记录: %+v", list)
+	}
+}
+
+// 应用被停用后，登录、发码、token 校验三条入口必须同时失效。
+// 第一阶段没有停用应用的管理接口，因此这里直接改库来制造该状态。
+func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+
+	if _, err := e.pool.Exec(ctx,
+		`UPDATE application SET status = $2 WHERE id = $1`,
+		e.app.ID, domain.ApplicationStatusDisabled); err != nil {
+		t.Fatalf("停用应用: %v", err)
+	}
+
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("SendLoginCode err = %v, want ErrForbidden", err)
+	}
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": "123456"},
+	}); !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("Login err = %v, want ErrForbidden", err)
+	}
+	// 已签发的 token 也必须立刻失效
+	if _, err := e.auth.ValidateToken(ctx, e.app.AppID, res.Session.Token); !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("ValidateToken err = %v, want ErrForbidden", err)
 	}
 }
 
@@ -8725,7 +8759,7 @@ type LoginResult struct {
 // 校验顺序：应用 → 登录方式是否启用 → 手机号格式 → 频率限制 → 发送。
 // 格式校验必须早于验证码生成，否则畸形号码也会消耗一次发送额度。
 func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) error {
-	app, err := s.deps.Apps.GetByAppID(ctx, appID)
+	app, err := s.activeApp(ctx, appID)
 	if err != nil {
 		return err
 	}
@@ -8750,7 +8784,7 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 
 // Login 执行一次完整登录。
 func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, error) {
-	app, err := s.deps.Apps.GetByAppID(ctx, in.AppID)
+	app, err := s.activeApp(ctx, in.AppID)
 	if err != nil {
 		return nil, err
 	}
@@ -8824,11 +8858,31 @@ func (s *AuthService) Logout(ctx context.Context, token string) error {
 
 // ValidateToken 是 SDK 回源的入口：校验 token 并给出缓存时长。
 func (s *AuthService) ValidateToken(ctx context.Context, appID, token string) (*ValidateResult, error) {
-	app, err := s.deps.Apps.GetByAppID(ctx, appID)
+	app, err := s.activeApp(ctx, appID)
 	if err != nil {
 		return nil, err
 	}
 	return s.deps.Sessions.Validate(ctx, token, app)
+}
+
+// activeApp 取应用并要求它处于启用状态。
+//
+// 应用被停用后，登录、发码、token 校验三条入口都必须立即失效，否则
+// "停用应用"只是个不生效的标记位——`status` 列有值、有常量，却没人读取，
+// 是最容易在后续阶段酿成事故的一类死字段。
+//
+// 注意：第一阶段还没有把应用置为 DISABLED 的管理接口，因此这条分支目前
+// 只能由直接改库触发。这是刻意的：先让字段有意义，再在后续阶段补上开关，
+// 而不是反过来先做开关再发现没人校验。
+func (s *AuthService) activeApp(ctx context.Context, appID string) (*domain.Application, error) {
+	app, err := s.deps.Apps.GetByAppID(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	if app.Status != domain.ApplicationStatusActive {
+		return nil, domain.Errorf(domain.ErrForbidden, "应用已停用")
+	}
+	return app, nil
 }
 
 // connectorFor 取出该应用启用的登录方式及其配置。
