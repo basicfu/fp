@@ -303,18 +303,36 @@ func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, plain s
 	return nil
 }
 
-// VerifyPassword 校验用户密码。未设置密码的用户一律返回 ErrInvalidCredential。
+// dummyPasswordHash 是一个固定的 bcrypt 哈希，只用来消耗时间。
+//
+// 它存在的唯一理由是抹平时序差异：见 VerifyPassword 的说明。进程启动时算一次。
+var dummyPasswordHash = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("fp-timing-equalizer"), bcryptCost)
+	if err != nil {
+		panic("service: 生成哑密码哈希失败: " + err.Error())
+	}
+	return h
+}()
+
+// VerifyPassword 校验用户密码。
+//
+// 用户不存在、或存在但没设过密码时，**仍然执行一次等价开销的 bcrypt 比对**再返回失败。
+//
+// 为什么必须这样：password 登录靠"三种失败返回同一个错误"来防账号枚举，但如果
+// 账号不存在时直接返回、账号存在时才跑 bcrypt（cost 10，几十到上百毫秒），
+// 两者的**响应时间**差一到两个数量级——攻击者根本不用看响应内容，掐表就能问出
+// "这个手机号注册过没有"。返回同一个错误却在时序上泄露，比不做防枚举更糟：
+// 它给出的是虚假的安全感。
 func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID, plain string) error {
 	var hash string
 	err := s.pool.QueryRow(ctx, `SELECT password_hash FROM app_user WHERE id = $1`, userID).Scan(&hash)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("service: 读取密码哈希: %w", err)
 	}
-	if hash == "" {
-		// 未设置密码。bcrypt 对空哈希会直接报错，这里显式短路以保证错误一致。
+	if errors.Is(err, pgx.ErrNoRows) || hash == "" {
+		// 用户不存在，或存在但未设密码。消耗等量时间后统一失败。
+		// 比对结果必然不成立，这里刻意丢弃。
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(plain))
 		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)); err != nil {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/basicfu/fp/internal/domain"
 )
 
@@ -57,11 +59,19 @@ func (c *PasswordConnector) Authenticate(ctx context.Context, cfg map[string]any
 		return nil, invalid
 	}
 
-	user, _, err := c.lookup.FindByIdentity(ctx, identityType, account)
-	if err != nil {
-		return nil, invalid
+	// 无论账号是否存在都要走一次口令校验。
+	//
+	// 账号不存在时如果直接返回，就跳过了 bcrypt——而 bcrypt 是这条路径上唯一
+	// 昂贵的一步，跳没跳会在响应时间上差一到两个数量级。攻击者不看响应内容、
+	// 只掐表，就能把"哪些手机号注册过"问出来，上面 invalid 那套同错误设计
+	// 也就形同虚设。VerifyPassword 对不存在的用户会跑一次哑哈希比对来抹平时序。
+	user, _, lookupErr := c.lookup.FindByIdentity(ctx, identityType, account)
+	userID := uuid.Nil
+	if lookupErr == nil {
+		userID = user.ID
 	}
-	if err := c.lookup.VerifyPassword(ctx, user.ID, password); err != nil {
+	verifyErr := c.lookup.VerifyPassword(ctx, userID, password)
+	if lookupErr != nil || verifyErr != nil {
 		return nil, invalid
 	}
 
@@ -91,6 +101,9 @@ func identityTypeAllowed(cfg map[string]any, identityType string) bool {
 //	11 位、以 1 开头的纯数字 → phone
 //	含 @                    → email
 //	其余                    → username
+//
+// **调用方必须先去掉首尾空白**（Credentials.Get 已经做了）。
+// 手机号判定要求长度恰好 11，"  13800138000  " 会被判成 username。
 func DetectIdentityType(account string) string {
 	if strings.Contains(account, "@") {
 		return domain.IdentityTypeEmail

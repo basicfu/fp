@@ -17,6 +17,8 @@ type fakeLookup struct {
 	byIdentity map[string]uuid.UUID
 	passwords  map[uuid.UUID]string
 	statuses   map[uuid.UUID]string
+	// verifyCalls 记录 VerifyPassword 被调用的次数，用于验证时序抹平。
+	verifyCalls int
 }
 
 func newFakeLookup() *fakeLookup {
@@ -45,6 +47,7 @@ func (f *fakeLookup) FindByIdentity(_ context.Context, identityType, subject str
 }
 
 func (f *fakeLookup) VerifyPassword(_ context.Context, userID uuid.UUID, plain string) error {
+	f.verifyCalls++
 	want, ok := f.passwords[userID]
 	if !ok || want == "" || want != plain {
 		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
@@ -126,6 +129,36 @@ func TestPasswordAuthenticateUnknownAccountLooksLikeWrongPassword(t *testing.T) 
 	})
 	if !errors.Is(err, domain.ErrInvalidCredential) {
 		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+// 账号不存在时也必须走一次口令校验，否则"跳过 bcrypt"会让响应时间
+// 泄露该账号是否注册过——同错误的防枚举设计就被时序旁路架空了。
+func TestPasswordAlwaysVerifiesToEqualizeTiming(t *testing.T) {
+	lookup := newFakeLookup()
+	c := connector.NewPassword(lookup)
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "whatever",
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+	if lookup.verifyCalls != 1 {
+		t.Fatalf("账号不存在时 VerifyPassword 调用次数 = %d, want 1（用于抹平时序）", lookup.verifyCalls)
+	}
+
+	// 账号存在时同样只调一次，不能变成两次
+	lookup2 := newFakeLookup()
+	lookup2.add(domain.IdentityTypePhone, "13800138000", "hunter2hunter2", domain.UserStatusActive)
+	c2 := connector.NewPassword(lookup2)
+	if _, err := c2.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "hunter2hunter2",
+	}); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if lookup2.verifyCalls != 1 {
+		t.Fatalf("账号存在时 VerifyPassword 调用次数 = %d, want 1", lookup2.verifyCalls)
 	}
 }
 

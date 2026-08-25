@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -448,6 +449,58 @@ func TestVerifyPasswordWithoutPasswordSet(t *testing.T) {
 	}
 	if err := svc.VerifyPassword(ctx, u.ID, "anything"); !errors.Is(err, domain.ErrInvalidCredential) {
 		t.Fatalf("任意密码 err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+// 三条失败路径的耗时必须同量级，否则响应时间会泄露账号是否存在。
+//
+// 判定用的是"下限"而不是"两者之差"：bcrypt cost 10 至少几十毫秒，
+// 而短路掉 bcrypt 的路径是微秒级，两者相差三个数量级以上。
+// 取一个远低于 bcrypt 实测耗时、又远高于纯查询耗时的阈值，
+// 既能抓住"被短路了"，又不会因机器快慢而抖动。
+func TestVerifyPasswordEqualizesTiming(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	const minBcrypt = 5 * time.Millisecond
+
+	withPwd, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	if err := svc.SetPassword(ctx, withPwd.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	noPwd, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13900139000",
+	})
+	if err != nil {
+		t.Fatalf("建号2: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		userID uuid.UUID
+	}{
+		{"用户不存在", uuid.New()},
+		{"用户存在但未设密码", noPwd.ID},
+		{"用户存在但密码错误", withPwd.ID},
+	}
+	for _, tc := range cases {
+		start := time.Now()
+		err := svc.VerifyPassword(ctx, tc.userID, "definitely-wrong-password")
+		elapsed := time.Since(start)
+
+		if !errors.Is(err, domain.ErrInvalidCredential) {
+			t.Errorf("%s: err = %v, want ErrInvalidCredential", tc.name, err)
+		}
+		if elapsed < minBcrypt {
+			t.Errorf("%s: 耗时 %v < %v，说明跳过了 bcrypt，响应时间会泄露账号是否存在",
+				tc.name, elapsed, minBcrypt)
+		}
 	}
 }
 
