@@ -1,25 +1,19 @@
 package httpapi_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/service"
-	"github.com/basicfu/fp/internal/testsupport"
 )
 
 func newAdminServer(t *testing.T) (http.Handler, *service.AdminService) {
 	t.Helper()
-	svc := service.NewAdminService(testsupport.NewTestDB(t), testsupport.NewTestRedis(t))
-	if err := svc.EnsureBootstrap(context.Background(), "admin", "secret123456"); err != nil {
-		t.Fatalf("EnsureBootstrap: %v", err)
-	}
-	return httpapi.NewRouter(svc), svc
+	h, _, deps := newAdminEnv(t)
+	return h, deps.Admin
 }
 
 func TestHealthz(t *testing.T) {

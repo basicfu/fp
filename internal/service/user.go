@@ -30,6 +30,14 @@ const userColumns = `
 	(extract(epoch from created_at) * 1000)::bigint,
 	(extract(epoch from updated_at) * 1000)::bigint`
 
+// userColumnsPrefixed 与 userColumns 列顺序完全一致，仅加上 u. 前缀，
+// 因此可以复用同一个 scanUser。
+const userColumnsPrefixed = `
+	u.id, u.password_hash, u.nickname, u.avatar_url, u.gender, u.status,
+	coalesce((extract(epoch from u.delete_submitted_at) * 1000)::bigint, 0),
+	(extract(epoch from u.created_at) * 1000)::bigint,
+	(extract(epoch from u.updated_at) * 1000)::bigint`
+
 const identityColumns = `
 	id, user_id, type, subject, union_key, credential,
 	coalesce((extract(epoch from last_login_at) * 1000)::bigint, 0),
@@ -398,6 +406,109 @@ func (s *UserService) EnsureRegistration(ctx context.Context, userID, appID uuid
 		return fmt.Errorf("service: 写入注册关系: %w", err)
 	}
 	return nil
+}
+
+// UserListQuery 是管理端的用户查询条件。
+type UserListQuery struct {
+	// Keyword 同时匹配昵称与任意登录标识（手机号 / 用户名 / 邮箱 / openid），前缀与子串均可。
+	Keyword string
+	Status  string
+	Limit   int
+	Offset  int
+}
+
+// UserListItem 是列表中的一行：用户本体加上他的全部登录标识。
+type UserListItem struct {
+	User       domain.User
+	Identities []domain.Identity
+}
+
+// List 分页查询用户。total 是符合条件的总数，不受分页影响。
+func (s *UserService) List(ctx context.Context, q UserListQuery) ([]UserListItem, int, error) {
+	if q.Limit <= 0 || q.Limit > 200 {
+		q.Limit = 20
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+
+	// EXISTS 子查询而非 JOIN：一个用户有多条 identity 命中关键词时，
+	// JOIN 会产生重复行，还得再套一层 DISTINCT 才能算对 total。
+	const where = `
+		WHERE ($1 = '' OR u.nickname ILIKE '%' || $1 || '%'
+		       OR EXISTS (SELECT 1 FROM identity i
+		                  WHERE i.user_id = u.id AND i.subject ILIKE '%' || $1 || '%'))
+		  AND ($2 = '' OR u.status = $2)`
+
+	var total int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM app_user u`+where, q.Keyword, q.Status).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("service: 统计用户数: %w", err)
+	}
+	if total == 0 {
+		return []UserListItem{}, 0, nil
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+userColumnsPrefixed+` FROM app_user u`+where+
+			` ORDER BY u.created_at DESC LIMIT $3 OFFSET $4`,
+		q.Keyword, q.Status, q.Limit, q.Offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("service: 查询用户列表: %w", err)
+	}
+	defer rows.Close()
+
+	items := []UserListItem{}
+	ids := []uuid.UUID{}
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("service: 扫描用户: %w", err)
+		}
+		items = append(items, UserListItem{User: *u, Identities: []domain.Identity{}})
+		ids = append(ids, u.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("service: 遍历用户: %w", err)
+	}
+
+	// 一次性把这一页所有用户的 identity 捞回来，避免每行一次查询。
+	byUser, err := s.identitiesFor(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		if list, ok := byUser[items[i].User.ID]; ok {
+			items[i].Identities = list
+		}
+	}
+	return items, total, nil
+}
+
+// identitiesFor 批量查询多个用户的登录标识。
+func (s *UserService) identitiesFor(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID][]domain.Identity, error) {
+	out := map[uuid.UUID][]domain.Identity{}
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+identityColumns+` FROM identity WHERE user_id = ANY($1) ORDER BY created_at`, userIDs)
+	if err != nil {
+		return nil, fmt.Errorf("service: 批量查询 identity: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		id, err := scanIdentity(rows)
+		if err != nil {
+			return nil, fmt.Errorf("service: 扫描 identity: %w", err)
+		}
+		out[id.UserID] = append(out[id.UserID], *id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("service: 遍历 identity: %w", err)
+	}
+	return out, nil
 }
 
 // querier 抽象 pgxpool.Pool 与 pgx.Tx 的公共查询能力，让辅助函数在事务内外都能用。

@@ -1,0 +1,151 @@
+package httpapi_test
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+)
+
+func TestConnectorSchemasExposed(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodGet, "/admin/api/connectors", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var schemas []struct {
+		Type   string `json:"type"`
+		Fields []struct {
+			Key  string `json:"key"`
+			Type string `json:"type"`
+		} `json:"fields"`
+	}
+	decode(t, rec, &schemas)
+	if len(schemas) != 2 {
+		t.Fatalf("登录方式数 = %d, want 2", len(schemas))
+	}
+	// Registry.Types() 按字典序，password 在 sms_code 之前
+	if schemas[0].Type != "password" || schemas[1].Type != "sms_code" {
+		t.Fatalf("顺序不对: %+v", schemas)
+	}
+	if len(schemas[0].Fields) == 0 {
+		t.Fatal("password 的 fields 为空，动态表单将渲染不出任何控件")
+	}
+}
+
+func TestApplicationCRUDOverHTTP(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodGet, "/admin/api/applications", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", rec.Code)
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("空列表 body = %s, want []", rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodPost, "/admin/api/applications",
+		`{"name":"新项目前台","slug":"newproj-web"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Application struct {
+			ID    string `json:"id"`
+			AppID string `json:"appId"`
+		} `json:"application"`
+		AppSecret string `json:"appSecret"`
+	}
+	decode(t, rec, &created)
+	if created.AppSecret == "" || created.Application.AppID == "" {
+		t.Fatalf("创建响应缺字段: %s", rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodGet, "/admin/api/applications/"+created.Application.ID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"idleTimeoutSeconds":604800`) {
+		t.Fatalf("默认会话策略未返回: %s", rec.Body.String())
+	}
+	// 详情响应绝不能包含密钥
+	if strings.Contains(rec.Body.String(), created.AppSecret) {
+		t.Fatal("详情响应泄露了 appSecret")
+	}
+}
+
+func TestUpdateSessionPolicyValidation(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+	path := "/admin/api/applications/" + created.Application.ID + "/session"
+
+	// extend_interval 不小于 idle_timeout：非法
+	rec = do(t, h, token, http.MethodPatch, path,
+		`{"idleTimeoutSeconds":604800,"idleTimeoutMobileSeconds":2592000,"maxLifetimeSeconds":7776000,"rotateIntervalSeconds":86400,"extendIntervalSeconds":604800,"tokenCacheTtlSeconds":30}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法策略 status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodPatch, path,
+		`{"idleTimeoutSeconds":604800,"idleTimeoutMobileSeconds":2592000,"maxLifetimeSeconds":7776000,"rotateIntervalSeconds":86400,"extendIntervalSeconds":600,"tokenCacheTtlSeconds":60}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("合法策略 status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"tokenCacheTtlSeconds":60`) {
+		t.Fatalf("策略未生效: %s", rec.Body.String())
+	}
+}
+
+func TestApplicationConnectorOverHTTP(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+	base := "/admin/api/applications/" + created.Application.ID + "/connectors"
+
+	rec = do(t, h, token, http.MethodPut, base+"/password", `{"enabled":true,"config":{"allowEmail":true}}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("put status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodGet, base, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"type":"password"`) ||
+		!strings.Contains(rec.Body.String(), `"allowEmail":true`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestAdminAPIRequiresAuth(t *testing.T) {
+	h, _, _ := newAdminEnv(t)
+	for _, path := range []string{
+		"/admin/api/applications", "/admin/api/users", "/admin/api/connectors", "/admin/api/me",
+	} {
+		rec := do(t, h, "", http.MethodGet, path, "")
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s status = %d, want 401", path, rec.Code)
+		}
+	}
+}
+
+func TestBadUUIDReturns400(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	rec := do(t, h, token, http.MethodGet, "/admin/api/applications/not-a-uuid", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}

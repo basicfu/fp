@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/basicfu/fp/internal/config"
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/logging"
+	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 )
@@ -52,14 +54,35 @@ func run() error {
 	}
 	defer rdb.Close()
 
+	sessionStore := store.NewSessionStore(rdb)
+	revokePub := store.NewRevokePublisher(rdb)
+
+	userSvc := service.NewUserService(pool)
+	codeSvc := notify.NewCodeService(rdb)
+
+	registry := connector.NewRegistry()
+	if err := registry.Register(connector.NewPassword(userSvc)); err != nil {
+		return err
+	}
+	if err := registry.Register(connector.NewSMSCode(codeSvc)); err != nil {
+		return err
+	}
+
 	adminSvc := service.NewAdminService(pool, rdb)
 	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdminUser, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
 
 	httpSrv := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: httpapi.NewRouter(adminSvc),
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.NewRouter(httpapi.Deps{
+			Admin:    adminSvc,
+			Apps:     service.NewApplicationService(pool),
+			Users:    userSvc,
+			Sessions: service.NewSessionService(sessionStore, revokePub),
+			Logs:     service.NewLoginLogService(pool),
+			Registry: registry,
+		}),
 	}
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
