@@ -181,6 +181,51 @@ func TestLoginRejectsDisabledConnector(t *testing.T) {
 	}
 }
 
+// 停用登录方式后，一次被拒绝的登录尝试不能消费掉验证码——这个断言比
+// "返回 ErrForbidden" 更严格：两种实现（开关检查在 Authenticate 之前或之后）
+// 在被拒绝这件事上表现一致，只有验证码是否被消费能区分它们。
+func TestDisabledConnectorRejectsBeforeConsumingCode(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	// 先在启用状态下拿到一个真实验证码
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	code := e.sms.LastParam("code")
+	if code == "" {
+		t.Fatal("未取到验证码")
+	}
+
+	// 再停用该登录方式
+	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, false, nil); err != nil {
+		t.Fatalf("停用 sms_code: %v", err)
+	}
+
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": code},
+	}); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+
+	// 关键断言：验证码必须**没有被消费**。
+	// 重新启用后它应当仍然可用——若已被消费，说明 Authenticate 被调用了，
+	// 也就是说开关检查发生在凭据校验之后。
+	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, true, nil); err != nil {
+		t.Fatalf("重新启用 sms_code: %v", err)
+	}
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": code},
+	}); err != nil {
+		t.Fatalf("验证码在被拒绝的那次登录中已被消费——说明应用级开关检查"+
+			"发生在 Authenticate 之后，顺序错了: %v", err)
+	}
+}
+
 func TestLoginRejectsUnconfiguredConnector(t *testing.T) {
 	e := newAuthEnv(t)
 	_, err := e.auth.Login(context.Background(), service.LoginInput{
