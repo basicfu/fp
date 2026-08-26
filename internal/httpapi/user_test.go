@@ -215,6 +215,11 @@ func TestListAndRevokeSessionsOverHTTP(t *testing.T) {
 // token 各算一条，这是它的既定行为，见 session_rotate_test.go 的
 // TestRotationDoesNotDuplicateDeviceEntry）；去重是 HTTP 层 listSessions 的职责。
 // 这里用假时钟直接触发一次真实轮换，验证在线设备列表确实把新旧 token 合并成了一台设备。
+//
+// 还必须断言 idleExpiresAt：tryRotate 把旧 token 缩短到 now + max(30s, cache_ttl)，
+// 新 token 才拿到完整的空闲窗口。只断言"只有一条"测不出去重挑错了哪一条——
+// 如果去重逻辑留了先出现的那条（旧 token，插入顺序在前），管理端会把一台刚刚
+// 轮换过、完全健康的设备显示成"几十秒后过期"。
 func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
@@ -277,7 +282,8 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var list []struct {
-		ID string `json:"id"`
+		ID            string `json:"id"`
+		IdleExpiresAt int64  `json:"idleExpiresAt"`
 	}
 	decode(t, rec, &list)
 	if len(list) != 1 {
@@ -285,6 +291,74 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 	}
 	if list[0].ID != sess.ID {
 		t.Fatalf("会话 ID = %q, want %q", list[0].ID, sess.ID)
+	}
+	// 必须留下新 token 完整的空闲窗口，而不是旧 token 即将在过渡期内到期的那个值。
+	if list[0].IdleExpiresAt != res.Session.IdleExpiresAt {
+		t.Fatalf("idleExpiresAt = %d, want %d（应保留新 token 的窗口，不能显示旧 token 即将过期的假象）",
+			list[0].IdleExpiresAt, res.Session.IdleExpiresAt)
+	}
+}
+
+// 审计日志接口此前零覆盖——它是唯一一条完全没有端到端验证的路由，
+// 而计划三的控制台恰恰要绑定它返回的形状（脱敏后的标识、IP、UA、原因）。
+func TestListLoginLogsOverHTTP(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	if err := deps.Logs.Write(ctx, domain.LoginLog{
+		UserID:       &u.ID,
+		IdentityType: domain.IdentityTypePhone,
+		Subject:      "138****8000",
+		Event:        domain.LoginEventLogin,
+		Success:      false,
+		Reason:       "验证码不正确",
+		IP:           "203.0.113.9",
+		UA:           "console-test",
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	rec := do(t, h, token, http.MethodGet,
+		"/admin/api/users/"+u.ID.String()+"/login-logs", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var logs []struct {
+		ID           string `json:"id"`
+		IdentityType string `json:"identityType"`
+		Subject      string `json:"subject"`
+		Event        string `json:"event"`
+		Success      bool   `json:"success"`
+		Reason       string `json:"reason"`
+		IP           string `json:"ip"`
+		UA           string `json:"ua"`
+		CreatedAt    int64  `json:"createdAt"`
+	}
+	decode(t, rec, &logs)
+	if len(logs) != 1 {
+		t.Fatalf("记录数 = %d, want 1", len(logs))
+	}
+	l := logs[0]
+	if l.Subject != "138****8000" {
+		t.Errorf("Subject = %q, want 138****8000", l.Subject)
+	}
+	if l.Event != domain.LoginEventLogin || l.Success {
+		t.Errorf("Event = %q Success = %v", l.Event, l.Success)
+	}
+	if l.Reason != "验证码不正确" || l.IP != "203.0.113.9" || l.UA != "console-test" {
+		t.Errorf("字段缺失: %+v", l)
+	}
+	if l.ID == "" || l.CreatedAt == 0 {
+		t.Errorf("ID / CreatedAt 未填充: %+v", l)
+	}
+
+	// 空结果必须是 []，不能是 null——前端会直接迭代它
+	other := seedUser(t, deps, "13900139000", "鲍勃")
+	rec = do(t, h, token, http.MethodGet,
+		"/admin/api/users/"+other.ID.String()+"/login-logs", "")
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("空结果 body = %s, want []", rec.Body.String())
 	}
 }
 

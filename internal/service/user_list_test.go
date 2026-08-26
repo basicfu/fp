@@ -4,8 +4,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/testsupport"
 )
 
 func seedUsers(t *testing.T, svc *service.UserService) {
@@ -180,5 +183,62 @@ func TestUserListEmptyResultIsNotNil(t *testing.T) {
 	}
 	if total != 0 {
 		t.Fatalf("total = %d, want 0", total)
+	}
+}
+
+// TestUserListPaginationSurvivesCreatedAtTies 直接构造"多行 created_at 完全相同"的场景——
+// 用一条 INSERT 语句批量插入若干行，它们共享同一个 now() 快照，模拟批量导入/播种。
+// 只按 created_at 排序不是全序：打平时 LIMIT/OFFSET 翻页可能让同一行重复出现在两页，
+// 也可能一页都不出现。加了 u.id DESC 之后排序变成全序（uuidv7 唯一），必须稳定。
+func TestUserListPaginationSurvivesCreatedAtTies(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	svc := service.NewUserService(pool)
+	ctx := context.Background()
+
+	const total = 5
+	rows, err := pool.Query(ctx, `
+		INSERT INTO app_user (created_at)
+		SELECT now() FROM generate_series(1, 5)
+		RETURNING id`)
+	if err != nil {
+		t.Fatalf("批量插入: %v", err)
+	}
+	seeded := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			t.Fatalf("扫描 id: %v", err)
+		}
+		seeded[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历插入结果: %v", err)
+	}
+	if len(seeded) != total {
+		t.Fatalf("播种行数 = %d, want %d", len(seeded), total)
+	}
+
+	seen := map[uuid.UUID]int{}
+	for offset := 0; offset < total; offset += 2 {
+		items, _, err := svc.List(ctx, service.UserListQuery{Limit: 2, Offset: offset})
+		if err != nil {
+			t.Fatalf("List(offset=%d): %v", offset, err)
+		}
+		for _, it := range items {
+			seen[it.User.ID]++
+		}
+	}
+
+	for id := range seeded {
+		switch seen[id] {
+		case 0:
+			t.Errorf("用户 %s 在 created_at 打平的情况下被分页跳过了", id)
+		case 1:
+			// 正常
+		default:
+			t.Errorf("用户 %s 在 created_at 打平的情况下被分页重复返回了 %d 次", id, seen[id])
+		}
 	}
 }

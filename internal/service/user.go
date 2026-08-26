@@ -451,7 +451,11 @@ func (s *UserService) List(ctx context.Context, q UserListQuery) ([]UserListItem
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+userColumnsPrefixed+` FROM app_user u`+where+
-			` ORDER BY u.created_at DESC LIMIT $3 OFFSET $4`,
+			// id 是 uuidv7（时间有序），作为 tiebreak 是免费且一致的。
+			// 只按 created_at 排序不安全：它默认 now()，而 now() 取的是**事务**时间戳，
+			// 批量导入/播种时同一事务里的多行取值完全相同，LIMIT/OFFSET 翻页会
+			// 让并列的行重复出现在两页、或者一页都不出现。
+			` ORDER BY u.created_at DESC, u.id DESC LIMIT $3 OFFSET $4`,
 		q.Keyword, q.Status, q.Limit, q.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("service: 查询用户列表: %w", err)

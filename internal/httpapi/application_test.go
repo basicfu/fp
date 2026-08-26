@@ -130,14 +130,38 @@ func TestApplicationConnectorOverHTTP(t *testing.T) {
 	}
 }
 
+// 每一条受保护路由都要覆盖，尤其是会改状态的那些。
+//
+// 只测四条 GET 是不够的：DELETE /users/{id}/sessions、PUT /users/{id}/password、
+// PATCH /users/{id}/status、PUT /applications/{id}/connectors/{type} 全都可以
+// 被挪到 requireAdmin 组之外而没有任何测试变红——而它们恰恰是危险的那几条。
 func TestAdminAPIRequiresAuth(t *testing.T) {
 	h, _, _ := newAdminEnv(t)
-	for _, path := range []string{
-		"/admin/api/applications", "/admin/api/users", "/admin/api/connectors", "/admin/api/me",
-	} {
-		rec := do(t, h, "", http.MethodGet, path, "")
+
+	const someUUID = "00000000-0000-0000-0000-000000000001"
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/admin/api/me"},
+		{http.MethodPost, "/admin/api/logout"},
+		{http.MethodGet, "/admin/api/connectors"},
+		{http.MethodGet, "/admin/api/applications"},
+		{http.MethodPost, "/admin/api/applications"},
+		{http.MethodGet, "/admin/api/applications/" + someUUID},
+		{http.MethodPatch, "/admin/api/applications/" + someUUID + "/session"},
+		{http.MethodGet, "/admin/api/applications/" + someUUID + "/connectors"},
+		{http.MethodPut, "/admin/api/applications/" + someUUID + "/connectors/password"},
+		{http.MethodGet, "/admin/api/users"},
+		{http.MethodGet, "/admin/api/users/" + someUUID},
+		{http.MethodPatch, "/admin/api/users/" + someUUID + "/status"},
+		{http.MethodPut, "/admin/api/users/" + someUUID + "/password"},
+		{http.MethodGet, "/admin/api/users/" + someUUID + "/sessions"},
+		{http.MethodDelete, "/admin/api/users/" + someUUID + "/sessions"},
+		{http.MethodDelete, "/admin/api/users/" + someUUID + "/sessions/sid"},
+		{http.MethodGet, "/admin/api/users/" + someUUID + "/login-logs"},
+	}
+	for _, r := range routes {
+		rec := do(t, h, "", r.method, r.path, `{}`)
 		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s status = %d, want 401", path, rec.Code)
+			t.Errorf("%s %s status = %d, want 401", r.method, r.path, rec.Code)
 		}
 	}
 }

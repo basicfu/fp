@@ -68,6 +68,8 @@ func run() error {
 		return err
 	}
 
+	sessionSvc := service.NewSessionService(sessionStore, revokePub)
+
 	adminSvc := service.NewAdminService(pool, rdb)
 	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdminUser, cfg.BootstrapAdminPassword); err != nil {
 		return err
@@ -79,7 +81,8 @@ func run() error {
 			Admin:    adminSvc,
 			Apps:     service.NewApplicationService(pool),
 			Users:    userSvc,
-			Sessions: service.NewSessionService(sessionStore, revokePub),
+			Accounts: service.NewAccountService(userSvc, sessionSvc),
+			Sessions: sessionSvc,
 			Logs:     service.NewLoginLogService(pool),
 			Registry: registry,
 		}),

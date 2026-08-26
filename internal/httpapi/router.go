@@ -15,6 +15,7 @@ type Deps struct {
 	Admin    *service.AdminService
 	Apps     *service.ApplicationService
 	Users    *service.UserService
+	Accounts *service.AccountService
 	Sessions *service.SessionService
 	Logs     *service.LoginLogService
 	Registry *connector.Registry
@@ -31,7 +32,7 @@ func NewRouter(d Deps) http.Handler {
 
 	ah := &adminHandler{svc: d.Admin}
 	appH := &applicationHandler{svc: d.Apps}
-	userH := &userHandler{users: d.Users, sessions: d.Sessions, logs: d.Logs}
+	userH := &userHandler{users: d.Users, accounts: d.Accounts, sessions: d.Sessions, logs: d.Logs}
 	connH := &connectorHandler{registry: d.Registry}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {

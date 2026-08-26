@@ -12,6 +12,7 @@ import (
 
 type userHandler struct {
 	users    *service.UserService
+	accounts *service.AccountService
 	sessions *service.SessionService
 	logs     *service.LoginLogService
 }
@@ -97,8 +98,8 @@ type setStatusRequest struct {
 	Status string `json:"status"`
 }
 
-// setStatus 改用户状态。状态机校验在 service 层，这里只做转发；
-// 冻结时顺带撤销该用户的全部会话，否则已登录的设备还能继续用。
+// setStatus 改用户状态。状态机校验以及"不可登录状态必须连带撤销会话"这条
+// 安全耦合都在 service.AccountService 里，这里只做转发——不含业务逻辑。
 func (h *userHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -110,16 +111,10 @@ func (h *userHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	u, err := h.users.SetStatus(r.Context(), id, req.Status)
+	u, err := h.accounts.SetStatus(r.Context(), id, req.Status)
 	if err != nil {
 		writeError(w, err)
 		return
-	}
-	if !u.CanLogin() {
-		if _, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonFreeze); err != nil {
-			writeError(w, err)
-			return
-		}
 	}
 	ids, err := h.users.ListIdentities(r.Context(), id)
 	if err != nil {
@@ -133,8 +128,8 @@ type setPasswordRequest struct {
 	Password string `json:"password"`
 }
 
-// setPassword 管理员重置密码。改密后必须撤销全部会话——
-// 否则「密码泄露后改密」这个动作起不到任何作用。
+// setPassword 管理员重置密码。"改密必须连带撤销全部会话"这条安全耦合在
+// service.AccountService 里，这里只做转发——不含业务逻辑。
 func (h *userHandler) setPassword(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -146,11 +141,7 @@ func (h *userHandler) setPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := h.users.SetPassword(r.Context(), id, req.Password); err != nil {
-		writeError(w, err)
-		return
-	}
-	if _, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonPasswordChanged); err != nil {
+	if err := h.accounts.ResetPassword(r.Context(), id, req.Password); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -178,19 +169,34 @@ func (h *userHandler) listSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	// 轮换过渡期内同一会话会有新旧两个 token，按会话 ID 去重后再返回，
+	// 轮换过渡期内同一会话会有新旧两个 token，按会话 ID 去重，
 	// 否则管理端会把一台设备显示成两台。
-	seen := map[string]bool{}
-	out := make([]sessionDTO, 0, len(list))
+	//
+	// 去重时**必须留 IdleExpiresAt 更大的那条**，不能随便留一条：
+	// tryRotate 会刻意把旧 token 缩短到 now + max(30s, cache_ttl)，而新 token
+	// 拿到完整的空闲窗口。ListUserTokens 走 SMEMBERS，成员数不多时是插入顺序，
+	// 也就是**旧的在前**——随便留一条的话，管理端会把一台刚刚轮换过、
+	// 完全健康的设备显示成"30 秒后过期"。
+	byID := map[string]sessionDTO{}
+	order := make([]string, 0, len(list))
 	for _, s := range list {
-		if seen[s.ID] {
-			continue
-		}
-		seen[s.ID] = true
-		out = append(out, sessionDTO{
+		dto := sessionDTO{
 			ID: s.ID, AppID: s.AppID.String(), IP: s.IP, UA: s.UA, Mobile: s.Mobile,
 			FirstAuthAt: s.FirstAuthAt, IdleExpiresAt: s.IdleExpiresAt,
-		})
+		}
+		prev, seen := byID[s.ID]
+		if !seen {
+			order = append(order, s.ID)
+			byID[s.ID] = dto
+			continue
+		}
+		if dto.IdleExpiresAt > prev.IdleExpiresAt {
+			byID[s.ID] = dto
+		}
+	}
+	out := make([]sessionDTO, 0, len(order))
+	for _, id := range order {
+		out = append(out, byID[id])
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -32,11 +32,13 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
 
+	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb))
 	deps := httpapi.Deps{
 		Admin:    service.NewAdminService(pool, rdb),
 		Apps:     service.NewApplicationService(pool),
 		Users:    users,
-		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Accounts: service.NewAccountService(users, sessions),
+		Sessions: sessions,
 		Logs:     service.NewLoginLogService(pool),
 		Registry: reg,
 	}
