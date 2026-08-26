@@ -11094,6 +11094,7 @@ import (
 
 type userHandler struct {
 	users    *service.UserService
+	accounts *service.AccountService
 	sessions *service.SessionService
 	logs     *service.LoginLogService
 }
@@ -11192,16 +11193,10 @@ func (h *userHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	u, err := h.users.SetStatus(r.Context(), id, req.Status)
+	u, err := h.accounts.SetStatus(r.Context(), id, req.Status)
 	if err != nil {
 		writeError(w, err)
 		return
-	}
-	if !u.CanLogin() {
-		if _, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonFreeze); err != nil {
-			writeError(w, err)
-			return
-		}
 	}
 	ids, err := h.users.ListIdentities(r.Context(), id)
 	if err != nil {
@@ -11228,11 +11223,7 @@ func (h *userHandler) setPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := h.users.SetPassword(r.Context(), id, req.Password); err != nil {
-		writeError(w, err)
-		return
-	}
-	if _, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonPasswordChanged); err != nil {
+	if err := h.accounts.ResetPassword(r.Context(), id, req.Password); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -11400,7 +11391,7 @@ func NewRouter(d Deps) http.Handler {
 
 	ah := &adminHandler{svc: d.Admin}
 	appH := &applicationHandler{svc: d.Apps}
-	userH := &userHandler{users: d.Users, sessions: d.Sessions, logs: d.Logs}
+	userH := &userHandler{users: d.Users, accounts: d.Accounts, sessions: d.Sessions, logs: d.Logs}
 	connH := &connectorHandler{registry: d.Registry}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
