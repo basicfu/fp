@@ -10844,7 +10844,7 @@ func TestAccountResetPasswordDoesNotRevokeOnInvalidPassword(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: 实现三个 handler 文件**
+- [ ] **Step 6: 实现三个 handler 文件**
 
 `internal/httpapi/connector.go`：
 
