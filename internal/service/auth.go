@@ -120,16 +120,24 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	if user.Status == domain.UserStatusPendingDelete {
 		revived, err := s.deps.Users.SetStatus(ctx, user.ID, domain.UserStatusActive)
 		if err != nil {
+			s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 			return nil, err
 		}
 		user = revived
 	}
 
+	// 认证之后的每一步失败，都必须照样留下审计记录。
+	//
+	// 这些恰恰是"凭据已经验过、一次性验证码已经被消费掉"的那些尝试——
+	// 出事故时最想查的就是它们。只在凭据校验失败时记录，等于把成功通过
+	// 认证却没能建立会话的那批请求全部丢进黑洞。
 	if err := s.deps.Users.EnsureRegistration(ctx, user.ID, app.ID); err != nil {
+		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
 	if identity != nil {
 		if err := s.deps.Users.TouchIdentityLogin(ctx, identity.ID); err != nil {
+			s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 			return nil, err
 		}
 	}
@@ -138,6 +146,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		UserID: user.ID, App: app, IP: in.IP, UA: in.UA, Mobile: in.Mobile,
 	})
 	if err != nil {
+		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
 
@@ -152,9 +161,34 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	return &LoginResult{User: user, Session: sess}, nil
 }
 
-// Logout 作废 token。
+// Logout 作废 token 所属的整个会话，并留下审计记录。
+//
+// 记录这一条不是可有可无：登出是账号生命周期里的一个真实事件，
+// 排查"这个账号什么时候在哪台设备上退出的"要靠它。domain 里已经定义了
+// LoginEventLogout 常量——定义了却从不写入，就是那种"字段存在但没人用"
+// 的死代码，而这个任务本身就在别处反对它。
 func (s *AuthService) Logout(ctx context.Context, token string) error {
-	return s.deps.Sessions.Revoke(ctx, token, domain.RevokeReasonLogout)
+	// 先取会话，拿到 user/app 归属再撤销；撤销之后就查不到了。
+	sess, lookupErr := s.deps.Sessions.SessionByToken(ctx, token)
+
+	if err := s.deps.Sessions.Revoke(ctx, token, domain.RevokeReasonLogout); err != nil {
+		return err
+	}
+
+	// 查不到会话（重复登出、token 已过期）就没有可记的归属信息，静默略过。
+	if lookupErr != nil || sess == nil {
+		return nil
+	}
+	s.writeLog(ctx, domain.LoginLog{
+		UserID:        &sess.UserID,
+		ApplicationID: &sess.AppID,
+		Event:         domain.LoginEventLogout,
+		Success:       true,
+		IP:            sess.IP,
+		UA:            sess.UA,
+		SessionID:     sess.ID,
+	})
+	return nil
 }
 
 // ValidateToken 是 SDK 回源的入口：校验 token 并给出缓存时长。

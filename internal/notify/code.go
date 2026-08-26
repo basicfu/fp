@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -60,11 +61,25 @@ func NewCodeService(rdb *redis.Client) *CodeService {
 	return &CodeService{rdb: rdb}
 }
 
-// Issue 生成并存储一个验证码，覆盖该 (purpose, target) 下已有的验证码。
+// Issue 返回该 (purpose, target) 下当前有效的验证码：若已有未过期的验证码，
+// 原样返回；否则生成一个新的并存储。
+//
+// 不能无条件覆盖。覆盖的话，频率限制窗口内的第二次"发送"点击会用新码
+// 顶掉用户手里已经收到的旧码，而 Sender.Send 内部的限流又会把这次发送
+// 直接拒掉：新码从未送达、旧码已经作废，用户在整个限流窗口内都登录不了。
+//
+// 只有真的生成新码时才清尝试计数：否则重复点"重发"会无限重置爆破计数器。
 func (s *CodeService) Issue(ctx context.Context, purpose, target string) (string, error) {
 	if purpose == "" || target == "" {
 		return "", domain.Errorf(domain.ErrInvalidArgument, "purpose 与 target 不能为空")
 	}
+
+	if existing, err := s.rdb.Get(ctx, codeKey(purpose, target)).Result(); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, redis.Nil) {
+		return "", fmt.Errorf("notify: 读取现有验证码: %w", err)
+	}
+
 	code, err := randomDigits(codeLength)
 	if err != nil {
 		return "", err

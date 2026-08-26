@@ -73,22 +73,29 @@ func MaskSubject(identityType, subject string) string {
 	if subject == "" {
 		return ""
 	}
+	// 一律按 rune 切，不能按字节切。
+	//
+	// 按字节切会把多字节字符劈开，产出非法 UTF-8——PostgreSQL 的 text 列
+	// 直接拒收，Write 报错、writeLog 按设计吞掉，结果是**这条审计记录根本
+	// 不存在**，成功登录也一样。更糟的是它可被利用：攻击者只要在账号前加
+	// 一个非 ASCII 字符，自己那些失败登录记录就全都写不进去了。
 	switch identityType {
 	case domain.IdentityTypePhone:
-		if len(subject) != 11 {
+		r := []rune(subject)
+		if len(r) != 11 {
 			return maskTail(subject)
 		}
-		return subject[:3] + "****" + subject[7:]
+		return string(r[:3]) + "****" + string(r[7:])
 	case domain.IdentityTypeEmail:
 		at := strings.LastIndex(subject, "@")
 		if at <= 0 {
 			return maskTail(subject)
 		}
-		local, domainPart := subject[:at], subject[at:]
+		local, domainPart := []rune(subject[:at]), subject[at:]
 		if len(local) <= 1 {
 			return "*" + domainPart
 		}
-		return local[:1] + "****" + local[len(local)-1:] + domainPart
+		return string(local[:1]) + "****" + string(local[len(local)-1:]) + domainPart
 	default:
 		return maskTail(subject)
 	}

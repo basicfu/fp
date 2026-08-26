@@ -294,13 +294,65 @@ func TestLoginCancelsPendingDeletion(t *testing.T) {
 	}
 }
 
-// 注册关系必须幂等：同一用户重复登录不能因重复插入而失败。
+// 登录必须真的写下注册关系，并且幂等。
+//
+// 只断言"两次登录是同一个用户"是不够的：把 EnsureRegistration 整行删掉，
+// 那种写法照样全绿——没有任何断言去看 user_application 里到底有没有行。
 func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
 	e := newAuthEnv(t)
+	ctx := context.Background()
+
 	first := e.smsLogin(t, "13800138000")
+
+	var n int
+	if err := e.pool.QueryRow(ctx,
+		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		first.User.ID, e.app.ID).Scan(&n); err != nil {
+		t.Fatalf("查询注册关系: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("注册关系数 = %d, want 1——登录没有写入 user_application", n)
+	}
+
 	again := e.smsLogin(t, "13800138000")
 	if again.User.ID != first.User.ID {
 		t.Fatal("两次登录不是同一用户")
+	}
+	if err := e.pool.QueryRow(ctx,
+		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		first.User.ID, e.app.ID).Scan(&n); err != nil {
+		t.Fatalf("二次查询注册关系: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("重复登录后注册关系数 = %d, want 仍为 1", n)
+	}
+}
+
+// 登录必须更新该登录标识的最后使用时间。
+//
+// 没有这条断言的话，把 TouchIdentityLogin 整行删掉全套测试照过——
+// 没有任何用例在登录之后去读 identity.last_login_at。
+func TestLoginTouchesIdentityLastLoginAt(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+
+	ids, err := e.users.ListIdentities(ctx, res.User.ID)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	var phone *domain.Identity
+	for i := range ids {
+		if ids[i].Type == domain.IdentityTypePhone {
+			phone = &ids[i]
+		}
+	}
+	if phone == nil {
+		t.Fatal("未找到手机号标识")
+	}
+	if phone.LastLoginAt == 0 {
+		t.Fatal("登录后 identity.last_login_at 仍为 0——TouchIdentityLogin 没被调用")
 	}
 }
 
@@ -356,14 +408,97 @@ func TestFailedLoginWritesAuditLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
 	}
+	var failed *domain.LoginLog
+	for i := range list {
+		if !list[i].Success && list[i].IP == "9.9.9.9" {
+			failed = &list[i]
+		}
+	}
+	if failed == nil {
+		t.Fatalf("未找到失败的审计记录: %+v", list)
+	}
+	if failed.Reason == "" {
+		t.Fatal("失败记录没有 reason")
+	}
+	// 手机号必须是脱敏的。少了这条断言，即便 logFailure 写的是明文
+	// 13800138000，整套测试也全绿，审计表会静静地存着未脱敏的标识。
+	if failed.Subject != "138****8000" {
+		t.Fatalf("失败记录 Subject = %q, want 138****8000（未脱敏）", failed.Subject)
+	}
+	// 失败记录也必须落上应用归属，否则多应用共用一套用户时无从区分
+	if failed.ApplicationID == nil || *failed.ApplicationID != e.app.ID {
+		t.Fatalf("失败记录的 ApplicationID = %v, want %v", failed.ApplicationID, e.app.ID)
+	}
+}
+
+// 被冻结的账号尝试登录也要留痕，而且要挂到该用户名下。
+//
+// 这条路径走的是 logFailureWithUser，此前零覆盖：把那行调用删掉，
+// TestLoginRejectsFrozenUser 只断言错误类型，照样全绿。
+func TestFrozenUserLoginWritesAuditLog(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+	if _, err := e.users.SetStatus(ctx, res.User.ID, domain.UserStatusFrozen); err != nil {
+		t.Fatalf("冻结: %v", err)
+	}
+
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
+		IP:            "7.7.7.7",
+	}); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+
+	list, err := e.logs.ListByUser(ctx, res.User.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
 	var found bool
 	for _, l := range list {
-		if !l.Success && l.IP == "9.9.9.9" && l.Reason != "" {
+		if !l.Success && l.IP == "7.7.7.7" && l.Subject == "138****8000" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("未找到失败的审计记录: %+v", list)
+		t.Fatalf("冻结账号的登录尝试未留下审计记录: %+v", list)
+	}
+}
+
+// 登出要写审计记录。domain 里定义了 LoginEventLogout 常量——
+// 定义了却从不写入就是死字段，本任务在别处正反对这种模式。
+func TestLogoutWritesAuditLog(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+
+	list, err := e.logs.ListByUser(ctx, res.User.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	var found bool
+	for _, l := range list {
+		if l.Event == domain.LoginEventLogout && l.Success && l.SessionID == res.Session.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("登出未留下审计记录: %+v", list)
+	}
+
+	// 重复登出不应报错，也不该再记一条
+	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+		t.Fatalf("重复 Logout: %v", err)
 	}
 }
 
@@ -445,6 +580,65 @@ func TestValidateTokenRejectsWrongApp(t *testing.T) {
 
 	if _, err := e.auth.ValidateToken(ctx, other.AppID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+// 被限流的重发绝不能作废用户手里已经收到的验证码。
+//
+// 这是个用户侧的死锁：如果 Issue 无条件覆盖，窗口内第二次点"发送"会用新码
+// 顶掉旧码，而新码又因限流发不出去——用户手上的码作废了、补发没到、
+// 再点又滚一次，整个窗口内都登录不了。
+func TestRateLimitedResendDoesNotInvalidateDeliveredCode(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+
+	apps := service.NewApplicationService(pool)
+	users := service.NewUserService(pool)
+	codes := notify.NewCodeService(rdb)
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册: %v", err)
+	}
+	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
+	sender := notify.NewSender(pool, store.NewRateLimiter(rdb),
+		[]notify.RateRule{{Name: "30s", Window: 30 * time.Second, Limit: 1}})
+	sender.AddProvider(sms)
+
+	ctx := context.Background()
+	app, _, err := apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	if err := apps.SetConnector(ctx, app.ID, connector.TypeSMSCode, true, nil); err != nil {
+		t.Fatalf("启用: %v", err)
+	}
+	auth := service.NewAuthService(service.AuthDeps{
+		Apps: apps, Users: users,
+		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Logs:     service.NewLoginLogService(pool),
+		Registry: reg, Notifier: sender, Codes: codes,
+	})
+
+	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); err != nil {
+		t.Fatalf("首次发送: %v", err)
+	}
+	delivered := sms.LastParam("code")
+	if delivered == "" {
+		t.Fatal("未取到已送达的验证码")
+	}
+
+	// 窗口内再点一次，必然被限流
+	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("二次发送 err = %v, want ErrRateLimited", err)
+	}
+
+	// 关键断言：用户手里那个码必须仍然可用
+	if _, err := auth.Login(ctx, service.LoginInput{
+		AppID:         app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": delivered},
+	}); err != nil {
+		t.Fatalf("被限流的重发作废了用户已收到的验证码，用户被锁在窗口外: %v", err)
 	}
 }
 

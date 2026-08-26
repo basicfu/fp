@@ -248,6 +248,14 @@ func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, ap
 	return true, &newSess, nil
 }
 
+// SessionByToken 按 token 读取会话，不做任何过期判定，也不产生副作用。
+//
+// 只给需要"撤销之前先拿归属信息"的调用方用（例如登出要记审计）。
+// 鉴权一律走 Validate——它才会判过期、判应用归属，并给出 cache_ttl。
+func (s *SessionService) SessionByToken(ctx context.Context, token string) (*domain.Session, error) {
+	return s.store.Get(ctx, token)
+}
+
 // ListByUser 返回该用户当前存活的全部会话，用于在线设备列表。
 func (s *SessionService) ListByUser(ctx context.Context, userID uuid.UUID) ([]domain.Session, error) {
 	tokens, err := s.store.ListUserTokens(ctx, userID)
