@@ -5116,16 +5116,34 @@ func NewCodeService(rdb *redis.Client) *CodeService {
 	return &CodeService{rdb: rdb}
 }
 
-// Issue 生成并存储一个验证码，覆盖该 (purpose, target) 下已有的验证码。
+// Issue 返回该 (purpose, target) 当前可用的验证码：已有未过期的就复用，
+// 没有才生成新的。
+//
+// **不能无条件覆盖。** 覆盖会造成一个用户侧的死锁：发送链路上的频率限制在
+// Issue 之后才生效，所以窗口内第二次点"发送验证码"时，旧码已经被新码顶掉，
+// 而新码又因限流发不出去——用户手里那个码作废了、补发没到、再点一次又重新
+// 滚一遍，整个窗口内都登录不了。复用之后，被限流的重发不再破坏任何东西。
+//
+// 复用时刻意不清尝试计数：码没变，之前的错误次数就该继续算，
+// 否则反复点"重新发送"就能无限重置防爆破计数。
 func (s *CodeService) Issue(ctx context.Context, purpose, target string) (string, error) {
 	if purpose == "" || target == "" {
 		return "", domain.Errorf(domain.ErrInvalidArgument, "purpose 与 target 不能为空")
 	}
+
+	existing, err := s.rdb.Get(ctx, codeKey(purpose, target)).Result()
+	if err == nil && existing != "" {
+		return existing, nil
+	}
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return "", fmt.Errorf("notify: 读取已有验证码: %w", err)
+	}
+
 	code, err := randomDigits(codeLength)
 	if err != nil {
 		return "", err
 	}
-	// 重新签发时一并清掉旧的尝试计数，否则上一轮的失败次数会拖累新码。
+	// 生成全新验证码时才清尝试计数，否则上一轮的失败次数会拖累新码。
 	if err := s.rdb.Del(ctx, tryKey(purpose, target)).Err(); err != nil {
 		return "", fmt.Errorf("notify: 清理验证码尝试计数: %w", err)
 	}
@@ -8779,6 +8797,7 @@ git commit -m "feat: 会话撤销与撤销事件广播"
   - `func (*AuthService) SendLoginCode(ctx context.Context, appID, phone string) error`
   - `func (*AuthService) Logout(ctx context.Context, token string) error`
   - `func (*AuthService) ValidateToken(ctx context.Context, appID, token string) (*ValidateResult, error)`
+  - **新增**：`func (*SessionService) SessionByToken(ctx context.Context, token string) (*domain.Session, error)` — 只读，供登出在撤销前取归属信息记审计
   - `func (*AuthService) activeApp(ctx context.Context, appID string) (*domain.Application, error)` — 登录/发码/校验三条入口共用，强制应用必须处于 ACTIVE
   - **接口变更**：`connector.Connector` 新增 `SubjectFrom(creds Credentials) (identityType, subject string)`，`PasswordConnector` / `SMSCodeConnector` 各实现一份
 
@@ -8838,11 +8857,58 @@ func TestMaskSubject(t *testing.T) {
 		{domain.IdentityTypeUsername, "ab", "**"},
 		{domain.IdentityTypePhone, "", ""},
 		{domain.IdentityTypeWechatMP, "openid-xyz", "op********"},
+		// 多字节输入：按字节切会劈开汉字、产出非法 UTF-8，
+		// PostgreSQL 的 text 列直接拒收，整条审计记录写不进去。
+		{domain.IdentityTypeEmail, "张三@example.com", "张****三@example.com"},
+		{domain.IdentityTypeUsername, "张三丰", "张三*"},
+		{domain.IdentityTypePhone, "1380013800中", "13****800中"},
 	}
 	for _, tt := range tests {
-		if got := service.MaskSubject(tt.typ, tt.in); got != tt.want {
+		got := service.MaskSubject(tt.typ, tt.in)
+		if got != tt.want {
 			t.Errorf("MaskSubject(%q, %q) = %q, want %q", tt.typ, tt.in, got, tt.want)
 		}
+		// 无论走哪个分支，输出都必须是合法 UTF-8，否则落库时整行会被丢掉
+		if !utf8.ValidString(got) {
+			t.Errorf("MaskSubject(%q, %q) 产出非法 UTF-8: %q", tt.typ, tt.in, got)
+		}
+	}
+}
+
+// 脱敏结果必须能真正写进 PostgreSQL。
+//
+// 非法 UTF-8 会让 Write 报错，而 writeLog 按设计吞掉错误——
+// 于是审计记录静默消失，成功登录也一样。更糟的是可被利用：
+// 攻击者在账号前加一个非 ASCII 字符，自己的失败登录记录就全写不进去。
+func TestMaskedSubjectIsPersistable(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	logs := service.NewLoginLogService(pool)
+	ctx := context.Background()
+
+	subjects := []struct{ typ, subject string }{
+		{domain.IdentityTypeEmail, "张三@example.com"},
+		{domain.IdentityTypeUsername, "用户名"},
+		{domain.IdentityTypePhone, "1380013800中"},
+		{domain.IdentityTypeWechatMP, "微信openid"},
+	}
+	for _, s := range subjects {
+		if err := logs.Write(ctx, domain.LoginLog{
+			IdentityType: s.typ,
+			Subject:      service.MaskSubject(s.typ, s.subject),
+			Event:        domain.LoginEventLogin,
+			Success:      false,
+			Reason:       "test",
+		}); err != nil {
+			t.Fatalf("写入 %q 的脱敏结果失败（多半是非法 UTF-8）: %v", s.subject, err)
+		}
+	}
+
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM login_log`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != len(subjects) {
+		t.Fatalf("落库条数 = %d, want %d", n, len(subjects))
 	}
 }
 
@@ -9015,22 +9081,29 @@ func MaskSubject(identityType, subject string) string {
 	if subject == "" {
 		return ""
 	}
+	// 一律按 rune 切，不能按字节切。
+	//
+	// 按字节切会把多字节字符劈开，产出非法 UTF-8——PostgreSQL 的 text 列
+	// 直接拒收，Write 报错、writeLog 按设计吞掉，结果是**这条审计记录根本
+	// 不存在**，成功登录也一样。更糟的是它可被利用：攻击者只要在账号前加
+	// 一个非 ASCII 字符，自己那些失败登录记录就全都写不进去了。
 	switch identityType {
 	case domain.IdentityTypePhone:
-		if len(subject) != 11 {
+		r := []rune(subject)
+		if len(r) != 11 {
 			return maskTail(subject)
 		}
-		return subject[:3] + "****" + subject[7:]
+		return string(r[:3]) + "****" + string(r[7:])
 	case domain.IdentityTypeEmail:
 		at := strings.LastIndex(subject, "@")
 		if at <= 0 {
 			return maskTail(subject)
 		}
-		local, domainPart := subject[:at], subject[at:]
+		local, domainPart := []rune(subject[:at]), subject[at:]
 		if len(local) <= 1 {
 			return "*" + domainPart
 		}
-		return local[:1] + "****" + local[len(local)-1:] + domainPart
+		return string(local[:1]) + "****" + string(local[len(local)-1:]) + domainPart
 	default:
 		return maskTail(subject)
 	}
@@ -9356,13 +9429,65 @@ func TestLoginCancelsPendingDeletion(t *testing.T) {
 	}
 }
 
-// 注册关系必须幂等：同一用户重复登录不能因重复插入而失败。
+// 登录必须真的写下注册关系，并且幂等。
+//
+// 只断言"两次登录是同一个用户"是不够的：把 EnsureRegistration 整行删掉，
+// 那种写法照样全绿——没有任何断言去看 user_application 里到底有没有行。
 func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
 	e := newAuthEnv(t)
+	ctx := context.Background()
+
 	first := e.smsLogin(t, "13800138000")
+
+	var n int
+	if err := e.pool.QueryRow(ctx,
+		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		first.User.ID, e.app.ID).Scan(&n); err != nil {
+		t.Fatalf("查询注册关系: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("注册关系数 = %d, want 1——登录没有写入 user_application", n)
+	}
+
 	again := e.smsLogin(t, "13800138000")
 	if again.User.ID != first.User.ID {
 		t.Fatal("两次登录不是同一用户")
+	}
+	if err := e.pool.QueryRow(ctx,
+		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		first.User.ID, e.app.ID).Scan(&n); err != nil {
+		t.Fatalf("二次查询注册关系: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("重复登录后注册关系数 = %d, want 仍为 1", n)
+	}
+}
+
+// 登录必须更新该登录标识的最后使用时间。
+//
+// 没有这条断言的话，把 TouchIdentityLogin 整行删掉全套测试照过——
+// 没有任何用例在登录之后去读 identity.last_login_at。
+func TestLoginTouchesIdentityLastLoginAt(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+
+	ids, err := e.users.ListIdentities(ctx, res.User.ID)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	var phone *domain.Identity
+	for i := range ids {
+		if ids[i].Type == domain.IdentityTypePhone {
+			phone = &ids[i]
+		}
+	}
+	if phone == nil {
+		t.Fatal("未找到手机号标识")
+	}
+	if phone.LastLoginAt == 0 {
+		t.Fatal("登录后 identity.last_login_at 仍为 0——TouchIdentityLogin 没被调用")
 	}
 }
 
@@ -9418,14 +9543,97 @@ func TestFailedLoginWritesAuditLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
 	}
+	var failed *domain.LoginLog
+	for i := range list {
+		if !list[i].Success && list[i].IP == "9.9.9.9" {
+			failed = &list[i]
+		}
+	}
+	if failed == nil {
+		t.Fatalf("未找到失败的审计记录: %+v", list)
+	}
+	if failed.Reason == "" {
+		t.Fatal("失败记录没有 reason")
+	}
+	// 手机号必须是脱敏的。少了这条断言，即便 logFailure 写的是明文
+	// 13800138000，整套测试也全绿，审计表会静静地存着未脱敏的标识。
+	if failed.Subject != "138****8000" {
+		t.Fatalf("失败记录 Subject = %q, want 138****8000（未脱敏）", failed.Subject)
+	}
+	// 失败记录也必须落上应用归属，否则多应用共用一套用户时无从区分
+	if failed.ApplicationID == nil || *failed.ApplicationID != e.app.ID {
+		t.Fatalf("失败记录的 ApplicationID = %v, want %v", failed.ApplicationID, e.app.ID)
+	}
+}
+
+// 被冻结的账号尝试登录也要留痕，而且要挂到该用户名下。
+//
+// 这条路径走的是 logFailureWithUser，此前零覆盖：把那行调用删掉，
+// TestLoginRejectsFrozenUser 只断言错误类型，照样全绿。
+func TestFrozenUserLoginWritesAuditLog(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+	if _, err := e.users.SetStatus(ctx, res.User.ID, domain.UserStatusFrozen); err != nil {
+		t.Fatalf("冻结: %v", err)
+	}
+
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	if _, err := e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
+		IP:            "7.7.7.7",
+	}); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+
+	list, err := e.logs.ListByUser(ctx, res.User.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
 	var found bool
 	for _, l := range list {
-		if !l.Success && l.IP == "9.9.9.9" && l.Reason != "" {
+		if !l.Success && l.IP == "7.7.7.7" && l.Subject == "138****8000" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("未找到失败的审计记录: %+v", list)
+		t.Fatalf("冻结账号的登录尝试未留下审计记录: %+v", list)
+	}
+}
+
+// 登出要写审计记录。domain 里定义了 LoginEventLogout 常量——
+// 定义了却从不写入就是死字段，本任务在别处正反对这种模式。
+func TestLogoutWritesAuditLog(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+
+	res := e.smsLogin(t, "13800138000")
+	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+
+	list, err := e.logs.ListByUser(ctx, res.User.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	var found bool
+	for _, l := range list {
+		if l.Event == domain.LoginEventLogout && l.Success && l.SessionID == res.Session.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("登出未留下审计记录: %+v", list)
+	}
+
+	// 重复登出不应报错，也不该再记一条
+	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+		t.Fatalf("重复 Logout: %v", err)
 	}
 }
 
@@ -9506,6 +9714,65 @@ func TestValidateTokenRejectsWrongApp(t *testing.T) {
 
 	if _, err := e.auth.ValidateToken(ctx, other.AppID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+// 被限流的重发绝不能作废用户手里已经收到的验证码。
+//
+// 这是个用户侧的死锁：如果 Issue 无条件覆盖，窗口内第二次点"发送"会用新码
+// 顶掉旧码，而新码又因限流发不出去——用户手上的码作废了、补发没到、
+// 再点又滚一次，整个窗口内都登录不了。
+func TestRateLimitedResendDoesNotInvalidateDeliveredCode(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+
+	apps := service.NewApplicationService(pool)
+	users := service.NewUserService(pool)
+	codes := notify.NewCodeService(rdb)
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册: %v", err)
+	}
+	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
+	sender := notify.NewSender(pool, store.NewRateLimiter(rdb),
+		[]notify.RateRule{{Name: "30s", Window: 30 * time.Second, Limit: 1}})
+	sender.AddProvider(sms)
+
+	ctx := context.Background()
+	app, _, err := apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	if err := apps.SetConnector(ctx, app.ID, connector.TypeSMSCode, true, nil); err != nil {
+		t.Fatalf("启用: %v", err)
+	}
+	auth := service.NewAuthService(service.AuthDeps{
+		Apps: apps, Users: users,
+		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Logs:     service.NewLoginLogService(pool),
+		Registry: reg, Notifier: sender, Codes: codes,
+	})
+
+	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); err != nil {
+		t.Fatalf("首次发送: %v", err)
+	}
+	delivered := sms.LastParam("code")
+	if delivered == "" {
+		t.Fatal("未取到已送达的验证码")
+	}
+
+	// 窗口内再点一次，必然被限流
+	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("二次发送 err = %v, want ErrRateLimited", err)
+	}
+
+	// 关键断言：用户手里那个码必须仍然可用
+	if _, err := auth.Login(ctx, service.LoginInput{
+		AppID:         app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": delivered},
+	}); err != nil {
+		t.Fatalf("被限流的重发作废了用户已收到的验证码，用户被锁在窗口外: %v", err)
 	}
 }
 
@@ -9646,7 +9913,22 @@ func TestSMSCodeSubjectFrom(t *testing.T) {
 Run: `go test ./internal/connector/ -v`
 Expected: 全部 PASS（新增 2 个）
 
-- [ ] **Step 9: 实现 AuthService**
+- [ ] **Step 9: 给 SessionService 补一个只读查询**
+
+`Logout` 需要在撤销**之前**拿到会话的归属信息（撤销之后就查不到了）才能写审计记录。
+追加到 `internal/service/session.go`：
+
+```go
+// SessionByToken 按 token 读取会话，不做任何过期判定，也不产生副作用。
+//
+// 只给需要"撤销之前先拿归属信息"的调用方用（例如登出要记审计）。
+// 鉴权一律走 Validate——它才会判过期、判应用归属，并给出 cache_ttl。
+func (s *SessionService) SessionByToken(ctx context.Context, token string) (*domain.Session, error) {
+	return s.store.Get(ctx, token)
+}
+```
+
+- [ ] **Step 10: 实现 AuthService**
 
 `internal/service/auth.go`：
 
@@ -9773,16 +10055,24 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	if user.Status == domain.UserStatusPendingDelete {
 		revived, err := s.deps.Users.SetStatus(ctx, user.ID, domain.UserStatusActive)
 		if err != nil {
+			s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 			return nil, err
 		}
 		user = revived
 	}
 
+	// 认证之后的每一步失败，都必须照样留下审计记录。
+	//
+	// 这些恰恰是"凭据已经验过、一次性验证码已经被消费掉"的那些尝试——
+	// 出事故时最想查的就是它们。只在凭据校验失败时记录，等于把成功通过
+	// 认证却没能建立会话的那批请求全部丢进黑洞。
 	if err := s.deps.Users.EnsureRegistration(ctx, user.ID, app.ID); err != nil {
+		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
 	if identity != nil {
 		if err := s.deps.Users.TouchIdentityLogin(ctx, identity.ID); err != nil {
+			s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 			return nil, err
 		}
 	}
@@ -9791,6 +10081,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		UserID: user.ID, App: app, IP: in.IP, UA: in.UA, Mobile: in.Mobile,
 	})
 	if err != nil {
+		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
 
@@ -9805,9 +10096,34 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	return &LoginResult{User: user, Session: sess}, nil
 }
 
-// Logout 作废 token。
+// Logout 作废 token 所属的整个会话，并留下审计记录。
+//
+// 记录这一条不是可有可无：登出是账号生命周期里的一个真实事件，
+// 排查"这个账号什么时候在哪台设备上退出的"要靠它。domain 里已经定义了
+// LoginEventLogout 常量——定义了却从不写入，就是那种"字段存在但没人用"
+// 的死代码，而这个任务本身就在别处反对它。
 func (s *AuthService) Logout(ctx context.Context, token string) error {
-	return s.deps.Sessions.Revoke(ctx, token, domain.RevokeReasonLogout)
+	// 先取会话，拿到 user/app 归属再撤销；撤销之后就查不到了。
+	sess, lookupErr := s.deps.Sessions.SessionByToken(ctx, token)
+
+	if err := s.deps.Sessions.Revoke(ctx, token, domain.RevokeReasonLogout); err != nil {
+		return err
+	}
+
+	// 查不到会话（重复登出、token 已过期）就没有可记的归属信息，静默略过。
+	if lookupErr != nil || sess == nil {
+		return nil
+	}
+	s.writeLog(ctx, domain.LoginLog{
+		UserID:        &sess.UserID,
+		ApplicationID: &sess.AppID,
+		Event:         domain.LoginEventLogout,
+		Success:       true,
+		IP:            sess.IP,
+		UA:            sess.UA,
+		SessionID:     sess.ID,
+	})
+	return nil
 }
 
 // ValidateToken 是 SDK 回源的入口：校验 token 并给出缓存时长。
@@ -9935,12 +10251,12 @@ func (s *AuthService) writeLog(ctx context.Context, e domain.LoginLog) {
 }
 ```
 
-- [ ] **Step 10: 运行全部测试**
+- [ ] **Step 11: 运行全部测试**
 
 Run: `./scripts/test.sh`
 Expected: 全部 PASS
 
-- [ ] **Step 11: 提交**
+- [ ] **Step 12: 提交**
 
 ```bash
 git add internal
