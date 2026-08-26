@@ -10535,7 +10535,11 @@ func (s *UserService) List(ctx context.Context, q UserListQuery) ([]UserListItem
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+userColumnsPrefixed+` FROM app_user u`+where+
-			` ORDER BY u.created_at DESC LIMIT $3 OFFSET $4`,
+			// id 是 uuidv7（时间有序），作为 tiebreak 是免费且一致的。
+			// 只按 created_at 排序不安全：它默认 now()，而 now() 取的是**事务**时间戳，
+			// 批量导入/播种时同一事务里的多行取值完全相同，LIMIT/OFFSET 翻页会
+			// 让并列的行重复出现在两页、或者一页都不出现。
+			` ORDER BY u.created_at DESC, u.id DESC LIMIT $3 OFFSET $4`,
 		q.Keyword, q.Status, q.Limit, q.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("service: 查询用户列表: %w", err)
@@ -10613,7 +10617,234 @@ const userColumnsPrefixed = `
 Run: `go test ./internal/service/ -run UserList -v`
 Expected: 6 个测试 PASS
 
-- [ ] **Step 5: 实现三个 handler 文件**
+- [ ] **Step 5: 把两条安全耦合从传输层挪进 service**
+
+`SessionService.Validate` 从不检查用户状态——它只读 Redis、比对应用归属与过期时间。
+这意味着「冻结一个账号真的能把他挡在外面」这件事，**全靠调用方记得在改状态之后
+再调一次撤销**。同理，「密码泄露了就改密码」要真的有用，也全靠调用方记得撤销会话。
+
+把这两条写在 HTTP handler 里有两个问题：
+
+1. 计划二的 gRPC 面、以及将来的用户自助改密，都得各自重新实现一遍，
+   漏掉一次就静默失去保护——而且不会有任何测试变红。
+2. 不是原子的：状态写库成功、撤销失败时 handler 返回 500，状态却已经改了。
+
+新建 `internal/service/account.go`，把耦合关到一个地方：
+
+```go
+package service
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+)
+
+// SessionRevoker 是 AccountService 需要的最小撤销能力。
+// 用窄接口而不是直接依赖 *SessionService，是为了让这层的意图一目了然：
+// 它只需要"把某个用户踢下线"，不需要会话管理的其余部分。
+type SessionRevoker interface {
+	RevokeUser(ctx context.Context, userID uuid.UUID, reason string) (int, error)
+}
+
+// AccountService 承载那些"改完账号状态必须同时作废会话"的操作。
+//
+// 这类耦合绝不能留在传输层：SessionService.Validate 不看用户状态，
+// 所以撤销调用本身就是冻结/改密唯一的执行点。放在 handler 里意味着
+// 每新增一个传输层（计划二的 gRPC、将来的自助改密）都要重新实现一遍，
+// 漏掉一次就静默失去保护，且没有任何测试会因此变红。
+type AccountService struct {
+	users    *UserService
+	sessions SessionRevoker
+}
+
+// NewAccountService 构造 AccountService。
+func NewAccountService(users *UserService, sessions SessionRevoker) *AccountService {
+	return &AccountService{users: users, sessions: sessions}
+}
+
+// SetStatus 迁移用户状态；迁移到不可登录的状态时连带撤销其全部会话。
+//
+// 撤销放在状态写入**之后**：状态是权威事实，先落库；撤销失败时状态已改、
+// 会话未清，重试本操作可自愈（SetStatus 对相同状态是空操作，撤销会重跑）。
+// 反过来先撤销再改状态的话，改状态失败会留下"被踢下线但仍是正常状态"的用户，
+// 那才是真正难以察觉的中间态。
+func (s *AccountService) SetStatus(ctx context.Context, userID uuid.UUID, status string) (*domain.User, error) {
+	u, err := s.users.SetStatus(ctx, userID, status)
+	if err != nil {
+		return nil, err
+	}
+	if !u.CanLogin() {
+		if _, err := s.sessions.RevokeUser(ctx, userID, domain.RevokeReasonFreeze); err != nil {
+			return nil, err
+		}
+	}
+	return u, nil
+}
+
+// ResetPassword 重置密码并作废该用户的全部会话。
+//
+// 不撤销的话，"密码泄露了赶紧改密码"这个动作等于什么都没做——
+// 攻击者手里已经拿到的会话照常有效。
+func (s *AccountService) ResetPassword(ctx context.Context, userID uuid.UUID, plain string) error {
+	if err := s.users.SetPassword(ctx, userID, plain); err != nil {
+		return err
+	}
+	_, err := s.sessions.RevokeUser(ctx, userID, domain.RevokeReasonPasswordChanged)
+	return err
+}
+```
+
+`internal/httpapi/user.go` 的 `userHandler` 相应改为持有 `accounts *service.AccountService`
+而不是 `sessions`（列会话与踢下线仍需要 `sessions`，两者都留）：`setStatus` 调
+`h.accounts.SetStatus`、`setPassword` 调 `h.accounts.ResetPassword`，handler 里
+不再出现 `!u.CanLogin()` 判断和撤销调用。`httpapi.Deps` 增加 `Accounts *service.AccountService`。
+
+对应的 service 层测试放在 `internal/service/account_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
+)
+
+func newAccountEnv(t *testing.T) (*service.AccountService, *service.UserService, *service.SessionService, *service.ApplicationService) {
+	t.Helper()
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+	users := service.NewUserService(pool)
+	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb))
+	return service.NewAccountService(users, sessions), users, sessions, service.NewApplicationService(pool)
+}
+
+// 冻结必须连带作废会话——Validate 不看用户状态，撤销就是唯一的执行点。
+func TestAccountSetStatusRevokesSessionsWhenNotLoginable(t *testing.T) {
+	accounts, users, sessions, apps := newAccountEnv(t)
+	ctx := context.Background()
+
+	app, _, err := apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	u, _, _, err := users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	sess, err := sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	if _, err := accounts.SetStatus(ctx, u.ID, domain.UserStatusFrozen); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	if _, err := sessions.Validate(ctx, sess.Token, app); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("冻结后会话仍有效, err = %v", err)
+	}
+}
+
+// 迁移到仍可登录的状态时不该误伤会话。
+func TestAccountSetStatusKeepsSessionsWhenStillLoginable(t *testing.T) {
+	accounts, users, sessions, apps := newAccountEnv(t)
+	ctx := context.Background()
+
+	app, _, err := apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	u, _, _, err := users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	sess, err := sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// ACTIVE → PENDING_DELETE 仍然可登录（保护期内登录会撤销注销）
+	if _, err := accounts.SetStatus(ctx, u.ID, domain.UserStatusPendingDelete); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	if _, err := sessions.Validate(ctx, sess.Token, app); err != nil {
+		t.Fatalf("注销保护期内的会话被误伤: %v", err)
+	}
+}
+
+// 改密必须作废全部会话，否则"密码泄露就改密码"等于没做。
+func TestAccountResetPasswordRevokesSessions(t *testing.T) {
+	accounts, users, sessions, apps := newAccountEnv(t)
+	ctx := context.Background()
+
+	app, _, err := apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	u, _, _, err := users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	sess, err := sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	if err := accounts.ResetPassword(ctx, u.ID, "newpassword123"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if _, err := sessions.Validate(ctx, sess.Token, app); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("改密后旧会话仍有效, err = %v", err)
+	}
+	if err := users.VerifyPassword(ctx, u.ID, "newpassword123"); err != nil {
+		t.Fatalf("新密码不可用: %v", err)
+	}
+}
+
+// 密码不合法时不得作废会话——操作整体失败，不该留下副作用。
+func TestAccountResetPasswordDoesNotRevokeOnInvalidPassword(t *testing.T) {
+	accounts, users, sessions, apps := newAccountEnv(t)
+	ctx := context.Background()
+
+	app, _, err := apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	u, _, _, err := users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+	sess, err := sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	if err := accounts.ResetPassword(ctx, u.ID, "short"); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := sessions.Validate(ctx, sess.Token, app); err != nil {
+		t.Fatalf("密码校验失败时不该撤销会话: %v", err)
+	}
+}
+```
+
+- [ ] **Step 7: 实现三个 handler 文件**
 
 `internal/httpapi/connector.go`：
 
@@ -11029,19 +11260,34 @@ func (h *userHandler) listSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	// 轮换过渡期内同一会话会有新旧两个 token，按会话 ID 去重后再返回，
+	// 轮换过渡期内同一会话会有新旧两个 token，按会话 ID 去重，
 	// 否则管理端会把一台设备显示成两台。
-	seen := map[string]bool{}
-	out := make([]sessionDTO, 0, len(list))
+	//
+	// 去重时**必须留 IdleExpiresAt 更大的那条**，不能随便留一条：
+	// tryRotate 会刻意把旧 token 缩短到 now + max(30s, cache_ttl)，而新 token
+	// 拿到完整的空闲窗口。ListUserTokens 走 SMEMBERS，成员数不多时是插入顺序，
+	// 也就是**旧的在前**——随便留一条的话，管理端会把一台刚刚轮换过、
+	// 完全健康的设备显示成"30 秒后过期"。
+	byID := map[string]sessionDTO{}
+	order := make([]string, 0, len(list))
 	for _, s := range list {
-		if seen[s.ID] {
-			continue
-		}
-		seen[s.ID] = true
-		out = append(out, sessionDTO{
+		dto := sessionDTO{
 			ID: s.ID, AppID: s.AppID.String(), IP: s.IP, UA: s.UA, Mobile: s.Mobile,
 			FirstAuthAt: s.FirstAuthAt, IdleExpiresAt: s.IdleExpiresAt,
-		})
+		}
+		prev, seen := byID[s.ID]
+		if !seen {
+			order = append(order, s.ID)
+			byID[s.ID] = dto
+			continue
+		}
+		if dto.IdleExpiresAt > prev.IdleExpiresAt {
+			byID[s.ID] = dto
+		}
+	}
+	out := make([]sessionDTO, 0, len(order))
+	for _, id := range order {
+		out = append(out, byID[id])
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -11115,7 +11361,7 @@ func (h *userHandler) listLoginLogs(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-- [ ] **Step 6: 重写路由装配**
+- [ ] **Step 7: 重写路由装配**
 
 `internal/httpapi/router.go` 整体替换为：
 
@@ -11137,6 +11383,7 @@ type Deps struct {
 	Admin    *service.AdminService
 	Apps     *service.ApplicationService
 	Users    *service.UserService
+	Accounts *service.AccountService
 	Sessions *service.SessionService
 	Logs     *service.LoginLogService
 	Registry *connector.Registry
@@ -11193,7 +11440,7 @@ func NewRouter(d Deps) http.Handler {
 }
 ```
 
-- [ ] **Step 7: 更新 admin_test.go 的构造函数**
+- [ ] **Step 8: 更新 admin_test.go 的构造函数**
 
 `internal/httpapi/admin_test.go` 里的 `newAdminServer` 改为：
 
@@ -11242,11 +11489,13 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
 
+	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb))
 	deps := httpapi.Deps{
 		Admin:    service.NewAdminService(pool, rdb),
 		Apps:     service.NewApplicationService(pool),
 		Users:    users,
-		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Accounts: service.NewAccountService(users, sessions),
+		Sessions: sessions,
 		Logs:     service.NewLoginLogService(pool),
 		Registry: reg,
 	}
@@ -11288,7 +11537,7 @@ func decode(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 }
 ```
 
-- [ ] **Step 8: 写 HTTP 层测试**
+- [ ] **Step 9: 写 HTTP 层测试**
 
 `internal/httpapi/application_test.go`：
 
@@ -11425,14 +11674,38 @@ func TestApplicationConnectorOverHTTP(t *testing.T) {
 	}
 }
 
+// 每一条受保护路由都要覆盖，尤其是会改状态的那些。
+//
+// 只测四条 GET 是不够的：DELETE /users/{id}/sessions、PUT /users/{id}/password、
+// PATCH /users/{id}/status、PUT /applications/{id}/connectors/{type} 全都可以
+// 被挪到 requireAdmin 组之外而没有任何测试变红——而它们恰恰是危险的那几条。
 func TestAdminAPIRequiresAuth(t *testing.T) {
 	h, _, _ := newAdminEnv(t)
-	for _, path := range []string{
-		"/admin/api/applications", "/admin/api/users", "/admin/api/connectors", "/admin/api/me",
-	} {
-		rec := do(t, h, "", http.MethodGet, path, "")
+
+	const someUUID = "00000000-0000-0000-0000-000000000001"
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/admin/api/me"},
+		{http.MethodPost, "/admin/api/logout"},
+		{http.MethodGet, "/admin/api/connectors"},
+		{http.MethodGet, "/admin/api/applications"},
+		{http.MethodPost, "/admin/api/applications"},
+		{http.MethodGet, "/admin/api/applications/" + someUUID},
+		{http.MethodPatch, "/admin/api/applications/" + someUUID + "/session"},
+		{http.MethodGet, "/admin/api/applications/" + someUUID + "/connectors"},
+		{http.MethodPut, "/admin/api/applications/" + someUUID + "/connectors/password"},
+		{http.MethodGet, "/admin/api/users"},
+		{http.MethodGet, "/admin/api/users/" + someUUID},
+		{http.MethodPatch, "/admin/api/users/" + someUUID + "/status"},
+		{http.MethodPut, "/admin/api/users/" + someUUID + "/password"},
+		{http.MethodGet, "/admin/api/users/" + someUUID + "/sessions"},
+		{http.MethodDelete, "/admin/api/users/" + someUUID + "/sessions"},
+		{http.MethodDelete, "/admin/api/users/" + someUUID + "/sessions/sid"},
+		{http.MethodGet, "/admin/api/users/" + someUUID + "/login-logs"},
+	}
+	for _, r := range routes {
+		rec := do(t, h, "", r.method, r.path, `{}`)
 		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s status = %d, want 401", path, rec.Code)
+			t.Errorf("%s %s status = %d, want 401", r.method, r.path, rec.Code)
 		}
 	}
 }
@@ -11741,6 +12014,69 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 	}
 }
 
+// 审计日志接口此前零覆盖——它是唯一一条完全没有端到端验证的路由，
+// 而计划三的控制台恰恰要绑定它返回的形状（脱敏后的标识、IP、UA、原因）。
+func TestListLoginLogsOverHTTP(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	if err := deps.Logs.Write(ctx, domain.LoginLog{
+		UserID:       &u.ID,
+		IdentityType: domain.IdentityTypePhone,
+		Subject:      "138****8000",
+		Event:        domain.LoginEventLogin,
+		Success:      false,
+		Reason:       "验证码不正确",
+		IP:           "203.0.113.9",
+		UA:           "console-test",
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	rec := do(t, h, token, http.MethodGet,
+		"/admin/api/users/"+u.ID.String()+"/login-logs", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var logs []struct {
+		ID           string `json:"id"`
+		IdentityType string `json:"identityType"`
+		Subject      string `json:"subject"`
+		Event        string `json:"event"`
+		Success      bool   `json:"success"`
+		Reason       string `json:"reason"`
+		IP           string `json:"ip"`
+		UA           string `json:"ua"`
+		CreatedAt    int64  `json:"createdAt"`
+	}
+	decode(t, rec, &logs)
+	if len(logs) != 1 {
+		t.Fatalf("记录数 = %d, want 1", len(logs))
+	}
+	l := logs[0]
+	if l.Subject != "138****8000" {
+		t.Errorf("Subject = %q, want 138****8000", l.Subject)
+	}
+	if l.Event != domain.LoginEventLogin || l.Success {
+		t.Errorf("Event = %q Success = %v", l.Event, l.Success)
+	}
+	if l.Reason != "验证码不正确" || l.IP != "203.0.113.9" || l.UA != "console-test" {
+		t.Errorf("字段缺失: %+v", l)
+	}
+	if l.ID == "" || l.CreatedAt == 0 {
+		t.Errorf("ID / CreatedAt 未填充: %+v", l)
+	}
+
+	// 空结果必须是 []，不能是 null——前端会直接迭代它
+	other := seedUser(t, deps, "13900139000", "鲍勃")
+	rec = do(t, h, token, http.MethodGet,
+		"/admin/api/users/"+other.ID.String()+"/login-logs", "")
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("空结果 body = %s, want []", rec.Body.String())
+	}
+}
+
 func TestUserNotFound(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 	rec := do(t, h, token, http.MethodGet,
@@ -11751,7 +12087,7 @@ func TestUserNotFound(t *testing.T) {
 }
 ```
 
-- [ ] **Step 9: 更新 main**
+- [ ] **Step 10: 更新 main**
 
 `cmd/fp/main.go` 里装配全部依赖：
 
@@ -11790,12 +12126,12 @@ func TestUserNotFound(t *testing.T) {
 
 补 import：`"github.com/basicfu/fp/internal/connector"`、`"github.com/basicfu/fp/internal/notify"`。
 
-- [ ] **Step 10: 运行全部测试**
+- [ ] **Step 11: 运行全部测试**
 
 Run: `./scripts/test.sh`
 Expected: 全部 PASS
 
-- [ ] **Step 11: 手工验证**
+- [ ] **Step 12: 手工验证**
 
 ```bash
 ./scripts/run.sh
@@ -11809,7 +12145,7 @@ TOKEN=$(curl -s -X POST localhost:8080/admin/api/login -d '{"username":"admin","
 
 Expected: 返回 password 与 sms_code 两组配置元数据，字段齐全。
 
-- [ ] **Step 12: 提交**
+- [ ] **Step 13: 提交**
 
 ```bash
 git add internal cmd
