@@ -12254,6 +12254,7 @@ func newEnv(t *testing.T) *env {
 
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Admin: admin, Apps: apps, Users: users,
+		Accounts: service.NewAccountService(users, sessions),
 		Sessions: sessions, Logs: logs, Registry: registry,
 	}))
 	t.Cleanup(srv.Close)
