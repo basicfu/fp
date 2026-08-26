@@ -6,9 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/internal/testsupport"
 )
 
 func seedUser(t *testing.T, deps httpapi.Deps, phone, nickname string) domain.User {
@@ -205,6 +208,83 @@ func TestListAndRevokeSessionsOverHTTP(t *testing.T) {
 	decode(t, rec, &sessions)
 	if len(sessions) != 0 {
 		t.Fatalf("剩余会话数 = %d, want 0", len(sessions))
+	}
+}
+
+// service.SessionService.ListByUser 故意不按会话 ID 去重（轮换过渡期内新旧
+// token 各算一条，这是它的既定行为，见 session_rotate_test.go 的
+// TestRotationDoesNotDuplicateDeviceEntry）；去重是 HTTP 层 listSessions 的职责。
+// 这里用假时钟直接触发一次真实轮换，验证在线设备列表确实把新旧 token 合并成了一台设备。
+func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+	ctx := context.Background()
+
+	admin := service.NewAdminService(pool, rdb)
+	if err := admin.EnsureBootstrap(ctx, "admin", "secret123456"); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+	adminToken, err := admin.Login(ctx, "admin", "secret123456")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	var nowMs int64 = 1_700_000_000_000
+	sessions := service.NewSessionServiceWithClock(
+		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), func() int64 { return nowMs })
+
+	deps := httpapi.Deps{
+		Admin:    admin,
+		Apps:     service.NewApplicationService(pool),
+		Users:    service.NewUserService(pool),
+		Sessions: sessions,
+		Logs:     service.NewLoginLogService(pool),
+		Registry: connector.NewRegistry(),
+	}
+	h := httpapi.NewRouter(deps)
+
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+	created, _, err := deps.Apps.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	// rotate_interval 设得很短，配合下面推进的假时钟触发一次真实轮换。
+	app, err := deps.Apps.UpdateSessionPolicy(ctx, created.ID, domain.SessionPolicy{
+		IdleTimeoutSeconds: 1000, IdleTimeoutMobileSeconds: 1000, MaxLifetimeSeconds: 100000,
+		RotateIntervalSeconds: 1, ExtendIntervalSeconds: 500, TokenCacheTTLSeconds: 10,
+	})
+	if err != nil {
+		t.Fatalf("更新会话策略: %v", err)
+	}
+
+	sess, err := sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	nowMs += 2000 // 越过 rotate_interval(1s)，下一次 Validate 会触发真实轮换
+	res, err := sessions.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatal("未触发轮换，测试前提不成立")
+	}
+
+	// 过渡期内旧 token 仍存活，新旧两个 token 共享同一个会话 ID。
+	rec := do(t, h, adminToken, http.MethodGet, "/admin/api/users/"+u.ID.String()+"/sessions", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var list []struct {
+		ID string `json:"id"`
+	}
+	decode(t, rec, &list)
+	if len(list) != 1 {
+		t.Fatalf("设备列表返回 %d 条, want 1（新旧 token 应合并成一台设备）", len(list))
+	}
+	if list[0].ID != sess.ID {
+		t.Fatalf("会话 ID = %q, want %q", list[0].ID, sess.ID)
 	}
 }
 
