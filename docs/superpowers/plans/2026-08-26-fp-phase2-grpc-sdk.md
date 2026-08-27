@@ -57,6 +57,11 @@
 - 开发与测试依赖是局域网上已就绪的实例（本机无 Docker）：PostgreSQL `10.9.1.2:15432`（18.6）、Redis `10.9.1.2:4379`（8.2.1）。库 `fp` / `fp_test` 已建。凭据在 git-ignored 的 `.env.local`，**不得提交**
 - 本机**没有 `make`**。入口是 `scripts/test.sh` / `scripts/run.sh`（bash，Git Bash 下运行）
 - **测试必须串行**：`scripts/test.sh` 带 `-p 1`，任何测试**不得**调用 `t.Parallel()`。原因是所有包共用同一个 `fp_test` 库，而 `testsupport.NewTestDB` 每次调用都 TRUNCATE 全表
+- **推进测试时钟一律写单位**：`clk.Advance(2 * time.Second)`，**绝不要**写裸数字。
+  `fakeClock.Advance` 的形参是 `time.Duration`，`Advance(2000)` 是 2000 **纳秒**，
+  取整成毫秒后是 **0**——时钟根本不动。而这类测试通常还有别的检查会先命中，
+  于是测试照常变绿，只是它想验证的那条路径从未被执行。第一阶段的
+  `session_rotate_test.go` 全部是 `N * time.Second` 的写法，照它来
 
 ### 本阶段新增
 
@@ -1262,7 +1267,7 @@ func TestRotationInheritsEpoch(t *testing.T) {
 	if _, err := env.epochs.Bump(ctx, user.ID); err != nil {
 		t.Fatalf("Bump: %v", err)
 	}
-	env.clock.Advance(2000) // 越过 rotate_interval
+	env.clock.Advance(2 * time.Second) // 越过 rotate_interval
 
 	_, err = env.sessions.Validate(ctx, sess.Token, app)
 	if !errors.Is(err, domain.ErrUnauthorized) {
@@ -1915,7 +1920,7 @@ func TestRotationIsAnnouncedToEveryValidateDuringGrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	env.clock.Advance(2000) // 越过 rotate_interval
+	env.clock.Advance(2 * time.Second) // 越过 rotate_interval
 
 	first, err := env.sessions.Validate(ctx, sess.Token, app)
 	if err != nil {
@@ -1958,7 +1963,7 @@ func TestConcurrentValidatesConvergeOnOneNewToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	env.clock.Advance(2000)
+	env.clock.Advance(2 * time.Second)
 
 	const n = 8
 	var mu sync.Mutex
@@ -2016,7 +2021,7 @@ func TestExpiredOldTokenIsNotAnnounced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	env.clock.Advance(2000)
+	env.clock.Advance(2 * time.Second)
 	if _, err := env.sessions.Validate(ctx, sess.Token, app); err != nil {
 		t.Fatalf("触发轮换: %v", err)
 	}
@@ -2974,7 +2979,7 @@ func TestRotationIsRelayedOverGRPC(t *testing.T) {
 	// 把应用改成 1 秒轮换，并让服务端时钟前进越过它。
 	env.setRotateInterval(t, 1)
 	token := env.loginWithPassword(t, ctx)
-	env.clock.Advance(2000)
+	env.clock.Advance(2 * time.Second)
 
 	res, err := env.client.ValidateToken(ctx, &fpv1.ValidateTokenRequest{Token: token})
 	if err != nil {
