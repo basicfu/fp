@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
@@ -54,30 +55,63 @@ func TestSessionIssuedAfterBumpIsAccepted(t *testing.T) {
 	}
 }
 
-// TestRotationInheritsEpoch 守住"轮换不洗白纪元"。
+// TestRotationCarriesEpochForward 守住"轮换不丢纪元"。
 //
-// 轮换里的 newSess := *sess 天然继承 Epoch。谁把它改成重新读一次当前纪元，
-// 一个本该被拒的会话只要熬到轮换点就复活了——而且从此永久有效。
-func TestRotationInheritsEpoch(t *testing.T) {
+// 轮换出的新会话必须继承旧会话的 Epoch（tryRotate 里的 newSess := *sess
+// 天然做到这一点）。若 tryRotate 改成从头构造新会话而漏掉 Epoch，新会话的
+// Epoch 会是零值，与当前（非零）纪元不符——用户会在 token 轮换那一刻被
+// 无声登出，而他什么都没做错。
+//
+// **纪元必须先推到非零值**：用零值的话，"继承了旧值"与"被清成零值"根本
+// 无法区分，测试会对这个 bug 完全失明。
+//
+// 本测试替换了原先的 TestRotationInheritsEpoch。原测试想守住的性质——
+// "轮换不能把一个已经失配的纪元洗白"——在当前实现下结构上不可达：Validate
+// 里纪元比对严格发生在轮换判断之前，纪元不匹配的会话在到达 tryRotate 之前
+// 就已经被拒绝、删除了，根本进不了轮换分支。残留的只有一个微秒级竞态
+// （纪元检查通过后、tryRotate 执行前恰好发生一次 Bump），没有可靠的注入点，
+// 不值得为它单独造 hook。原测试还有第二个独立问题：它用 env.clock.Advance(2000)
+// 推进时间——env.clock 是 *fakeClock，Advance 接收 time.Duration，裸整数 2000
+// 会被解释成 2000 纳秒，Milliseconds() 取整后是 0，时钟其实纹丝不动；即使
+// 改成 2 * time.Second，由于上面那条结构性原因，测试依然测不到 tryRotate。
+func TestRotationCarriesEpochForward(t *testing.T) {
 	env := newAccountEnv(t)
 	ctx := context.Background()
 	user := env.newActiveUser(t)
 
-	// 用一个 rotate_interval 极短的策略，让下一次校验必定触发轮换。
-	app := env.appWithPolicy(t, func(p *domain.SessionPolicy) { p.RotateIntervalSeconds = 1 })
-
-	sess, err := env.sessions.Issue(ctx, service.IssueInput{UserID: user.ID, App: app})
-	if err != nil {
-		t.Fatalf("Issue: %v", err)
+	// 纪元先推到非零值（推两次，具体值不重要，只要非零）。
+	if _, err := env.epochs.Bump(ctx, user.ID); err != nil {
+		t.Fatalf("Bump: %v", err)
 	}
 	if _, err := env.epochs.Bump(ctx, user.ID); err != nil {
 		t.Fatalf("Bump: %v", err)
 	}
-	env.clock.Advance(2000) // 越过 rotate_interval
 
-	_, err = env.sessions.Validate(ctx, sess.Token, app)
-	if !errors.Is(err, domain.ErrUnauthorized) {
-		t.Fatalf("纪元失配的会话在轮换点被放行了: %v", err)
+	// 用一个 rotate_interval 极短的策略，让下一次校验必定触发轮换。
+	app := env.appWithPolicy(t, func(p *domain.SessionPolicy) { p.RotateIntervalSeconds = 1 })
+
+	// Issue 时纪元已经是非零值，这个值会被刻进会话。
+	sess, err := env.sessions.Issue(ctx, service.IssueInput{UserID: user.ID, App: app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	env.clock.Advance(2 * time.Second) // 越过 rotate_interval——务必带 time.Second 单位
+
+	res, err := env.sessions.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("Validate(旧 token): %v", err)
+	}
+	// 护栏：确认轮换真的发生了。少了这一条，测试可能在轮换从未触发的情况下
+	// 也全绿——那样就又退化成"什么都没测但绿了"。
+	if !res.Rotated || res.NewToken == "" {
+		t.Fatalf("期望这次校验触发轮换，Rotated=%v NewToken=%q", res.Rotated, res.NewToken)
+	}
+
+	// 新 token 必须仍然有效：tryRotate 若把 Epoch 丢了或清零，新会话的纪元
+	// 就会与当前纪元不符，这里会被 Validate 拒绝。
+	if _, err := env.sessions.Validate(ctx, res.NewToken, app); err != nil {
+		t.Fatalf("轮换后的新 token 校验失败（纪元在轮换过程中被丢弃或清零了）: %v", err)
 	}
 }
 
