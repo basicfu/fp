@@ -148,6 +148,59 @@ internal/grpcapi/            gRPC 服务端
 
 **关键是生成产物从第一天就放在 `sdk/` 之下**，不能放仓库根的 `gen/fp/v1/`——后者在拆分时 import path 会从 `github.com/basicfu/fp/gen/fp/v1` 变成 `github.com/basicfu/fp/sdk/gen/fp/v1`，那才是真正的破坏性变更。
 
+### 4.5 多实例部署下的推送路径
+
+fp 会部署多个实例挂在 LB 后面。SDK 的 `Watch` 流只落在**其中一台**上，而触发撤销的管理操作会落在**另一台**上。这两台之间没有任何直连。
+
+**靠 Redis pub/sub 桥接**（第一阶段已实现，见 `internal/store/revoke.go`）：
+
+```
+管理员踢下线 → LB → fp 实例 #5
+                        ↓
+        ① 删除 Redis 里的 session          ← 权威撤销，此刻 token 已经失效
+        ② PUBLISH fp:revoke <事件>          ← 广播，只负责"加速通知"
+                        ↓
+        ┌───────────────┼───────────────┐
+     实例 #1         实例 #2          实例 #5     ← 每个实例进程内一份 SUBSCRIBE
+                        ↓
+              SDK 的 Watch 流恰好在这台
+                        ↓
+                 SDK 清掉本地缓存
+```
+
+**这套之所以成立，前提是 fp 对会话完全无状态**：session 在 Redis、用户在 PG，`ValidateToken` 只读共享 Redis，撤销的权威动作也是删共享 Redis。因此：
+
+- SDK 连**哪一台**都得到相同答案——**不需要连接亲和，不需要一致性哈希**，LB 随便分
+- 撤销在**哪一台**触发都一样——删的是共享状态，广播是给所有实例的
+- 某台实例挂掉，SDK 重连到别的实例后行为完全一致
+
+**Task 6 的 `RevokeHub` 就是每个实例的那一份订阅**：一个进程一份 Redis 订阅，扇出给本进程持有的全部 `Watch` 流。绝不能做成"每条流一份订阅"——那会让 Redis 连接数等于全平台 SDK 实例数。
+
+#### 这套机制的诚实边界
+
+**Redis pub/sub 是 fire-and-forget，没有缓冲、没有重放。** 某个 fp 实例的订阅连接在抖动中重连时，那一瞬间发布的事件对这台实例是**永久丢失**的——go-redis 内部会自动重连并重新订阅，但既不会关闭 channel 也不会报错，所以 `RevokeHub.Run` 察觉不到，SDK 那边看到的流也一直是健康的。
+
+**这不是缺陷，是设计上已经接受的取舍**：推送只是把撤销延迟从 `cache_ttl` 压到近乎实时的**加速手段**，权威撤销早已通过删除 Redis 会话完成。丢一条事件的后果是那个 SDK 最长 `cache_ttl` 之后回源被拒——正好退化成没有推送时的行为。
+
+所以撤销的实际保证是两段，**上限由后者兜底**：
+
+| | 机制 | 延迟 |
+|---|---|---|
+| 正常 | Redis 广播 → 流推送 → SDK 清缓存 | 毫秒级 |
+| 推送丢失/流断开 | SDK 缓存到期回源 → fp 查 Redis 查不到 → 拒 | ≤ `cache_ttl`（流断开时收紧到 `DegradedCacheTTL`） |
+
+需要"绝不丢"的话得换成 Redis Stream 加消费组，或给每个实例做事件序号与补拉。**本阶段不做**——它把一个"加速手段"升级成了需要维护偏移量、消费组与补偿逻辑的有状态组件，而收益仅仅是把一个已有兜底的窗口从 30 秒缩到 0。
+
+#### 对 LB 的三条要求
+
+gRPC 是长连接 + HTTP/2 多路复用，套在 LB 后面有几个坑：
+
+1. **LB 的空闲超时必须大于 SDK 的 keepalive `Time`（30 秒）。** 云 LB 普遍默认 60 秒空闲超时——`Watch` 长流加 keepalive PING 本来就不会空闲，这条通常自动满足，但配置里把超时调到 30 秒以下就会周期性掐连接
+2. **L4 LB 会把一个 SDK 实例的全部流量钉在一台 fp 上**（所有 RPC 复用同一条连接）。这对正确性无影响，但负载是**按连接**而非按请求分摊的——SDK 实例少的时候会明显不均
+3. **扩容 fp 不会自动重新分摊存量连接**，见下面的 `MaxConnectionAge`
+
+用 L7（gRPC-aware）LB 能按请求分摊，但它必须能正确处理长流。本阶段按 L4 设计，够用。
+
 ---
 
 ## 五、文件结构
@@ -3309,6 +3362,19 @@ func New(d Deps) *Server {
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    30 * time.Second,
 			Timeout: 10 * time.Second,
+
+			// MaxConnectionAge 让每条连接活满 30 分钟后被优雅回收（先 GOAWAY，
+			// 给 5 分钟宽限期收尾进行中的 RPC），客户端随即重连。
+			//
+			// 没有它的话，**fp 扩容等于白扩**：gRPC 连接是长连接，L4 LB 按连接
+			// 分流，存量 SDK 连接会永远钉在老实例上。新加的实例只能接到新启动的
+			// SDK 进程——而 SDK 进程的重启频率是按周算的。老实例继续过载、
+			// 新实例长期空转，且没有任何报错。
+			//
+			// grpc-go 会自动给 MaxConnectionAge 加 ±10% 抖动，避免所有连接
+			// 同时到期造成重连风暴。
+			MaxConnectionAge:      30 * time.Minute,
+			MaxConnectionAgeGrace: 5 * time.Minute,
 		}),
 	)
 	fpv1.RegisterAuthServiceServer(srv, NewAuthServer(AuthServerDeps{
@@ -4846,6 +4912,18 @@ func (c *Client) Auth() *Auth { return c.auth }
 > **首次连接也会走这条路径**，此时缓存本来就是空的，purge 无害。
 > 不清的话，一次网络抖动就会留下一批"推送期间被撤销、SDK 却一无所知"
 > 的条目，它们会一直有效到各自的 TTL 到期。
+>
+> **为什么明明有降级收紧还要 purge：** 流断开期间 `StreamHealthy()` 为 false，
+> 校验窗口已被收紧到 `DegradedCacheTTL`，绝大部分暴露已经被这一层挡住了。
+> purge 补的是**检测延迟那一段**——从连接实际断掉到 `streamUp` 翻成 false，
+> 硬断开是立即的，但静默黑洞要等满 keepalive `Timeout`（10 秒）。
+> 那 10 秒里写入的条目带着完整 TTL，只有 purge 能清掉它们。
+>
+> **代价要知道：** fp 服务端配了 `MaxConnectionAge`（30 分钟，见 Task 7），
+> 所以每个 SDK 实例大约每半小时会主动重连一次，每次都 purge。表现是
+> 回源量周期性抬头——不是尖峰，因为只有真正被使用的 token 才会回源，
+> 相当于把一个 `cache_ttl` 周期的回源压缩到更短的窗口里。
+> grpc-go 给 `MaxConnectionAge` 自带 ±10% 抖动，多实例不会同时到期。
 
 - [ ] **Step 5: 跑测试并提交**
 
@@ -5349,6 +5427,45 @@ func TestStreamOutageTightensCacheWindow(t *testing.T) {
 	// 断言 1 秒后同一个 token 不再命中缓存（转而尝试回源并失败）。
 	// 这条测试证明收紧对**存量条目**生效——它是 Task 9 那条设计的端到端体现。
 }
+
+// TestRevokeCrossesFpInstances 是多实例部署的核心验证（设计决策 4.5）。
+//
+// 生产上 fp 是多实例挂在 LB 后面：SDK 的 Watch 流只落在其中一台，而管理员
+// 的踢下线操作会落在另一台，两台之间没有任何直连。它们之间靠 Redis
+// pub/sub 桥接——每个实例都 SUBSCRIBE 同一个频道。
+//
+// 这条链路**没有任何单实例测试能覆盖**：单实例下"发布"和"订阅"发生在
+// 同一个进程里，即便有人把广播实现成"只通知本进程的 hub"（完全不碰 Redis），
+// 前面所有测试照样全绿——而线上会表现为"踢下线时灵时不灵"，
+// 灵不灵取决于 LB 把管理请求分给了哪台机器。这是那种只有到了生产、
+// 只有在多实例下、还只是概率性出现的故障。
+func TestRevokeCrossesFpInstances(t *testing.T) {
+	// 装配：**两个** fp 实例，各自监听不同端口，但共用同一套 PG + Redis。
+	//   instanceA := newPhase2Env(t)
+	//   instanceB := instanceA.spawnPeer(t)   // 复用同一个 pool/rdb，新起一个 grpcapi.Server
+	//
+	// 1. SDK 只连 instanceA，登录并校验一次（进本地缓存）
+	//    cache_ttl 配成 600 秒，确保后面的失效只可能来自推送而非 TTL 到期
+	// 2. 通过 **instanceB** 的 service 层触发撤销
+	//    （instanceB.accounts.RevokeAllSessions(...)）
+	// 3. 断言 SDK 在数秒内开始拒绝该 token
+	//
+	// 第 2 步必须走 instanceB。走 instanceA 的话这条测试退化成
+	// TestKickIsPushedToSDKImmediately，一个只通知本进程的实现也能通过。
+}
+
+// TestSDKWorksAgainstAnyInstance 确认 fp 对会话确实无状态。
+//
+// 「不需要连接亲和」这条结论的全部依据就是它。一旦有人往 fp 进程里塞了
+// 进程本地的会话状态（比如"顺手"加个本地 session 缓存省一次 Redis 读），
+// SDK 换一台实例就会拿到不一致的答案，而 LB 什么时候换实例是不可预测的。
+func TestSDKWorksAgainstAnyInstance(t *testing.T) {
+	// 1. 通过 instanceA 登录，拿到 token
+	// 2. 新建一个只连 instanceB 的 SDK client
+	// 3. 断言它校验同一个 token 成功，且 userID / sessionID 与 A 给的一致
+	// 4. 通过 instanceA 登出
+	// 5. 断言连着 instanceB 的 client 也开始拒绝
+}
 ```
 
 - [ ] **Step 3: 跑全量测试**
@@ -5481,6 +5598,9 @@ git commit -m "docs: 可运行的接入示例与手工验收步骤"
 | 11 | 撤销事件不跨应用泄露 | Task 6（`TestScopedRevokeDoesNotLeakToOtherApps`） |
 | 12 | 关闭进程不挂死 | Task 7 关闭顺序 + `TestShutdownCompletesWithOpenWatchStream` |
 | 13 | 冻结/改密不留竞态窗口 | Task 2 纪元（可选任务；砍掉则本项降级为"窗口很窄"） |
+| 14 | **多实例下撤销能跨实例送达** | 设计决策 4.5 + Task 6 每实例一份 Redis 订阅 + Task 12（`TestRevokeCrossesFpInstances`） |
+| 15 | **SDK 连任意实例结果一致（无需连接亲和）** | fp 对会话无状态 + Task 12（`TestSDKWorksAgainstAnyInstance`） |
+| 16 | **fp 扩容后存量连接会重新分摊** | Task 7 `MaxConnectionAge`（30 分钟 + 5 分钟宽限，自带 ±10% 抖动） |
 
 ---
 
