@@ -1248,30 +1248,57 @@ func TestSessionIssuedAfterBumpIsAccepted(t *testing.T) {
 	}
 }
 
-// TestRotationInheritsEpoch 守住"轮换不洗白纪元"。
+// TestRotationCarriesEpochForward 守住"轮换不丢纪元"。
 //
-// 轮换里的 newSess := *sess 天然继承 Epoch。谁把它改成重新读一次当前纪元，
-// 一个本该被拒的会话只要熬到轮换点就复活了——而且从此永久有效。
-func TestRotationInheritsEpoch(t *testing.T) {
+// 轮换出的新会话必须继承旧会话的 Epoch。若 tryRotate 改成从头构造新会话
+// 而漏掉 Epoch，新会话的 Epoch 会是零值，与当前纪元不符——用户会在
+// token 轮换那一刻被无声登出，而他什么都没做错。
+//
+// **纪元必须先递增到非零值。** 用零值的话，"继承了旧值"与"被清成零值"
+// 根本无法区分，测试对这个 bug 完全失明。
+//
+// 关于"轮换洗白纪元"（本测试**不**覆盖，也无法覆盖）：那个场景在当前实现下
+// 结构上不可达——纪元不匹配的会话在 Validate 里会被提前拒掉，根本进不了
+// 轮换分支；就算把 newSess.Epoch 改成重读当前值，读到的也必然等于
+// sess.Epoch，行为完全一致。残留的只有一个微秒级竞态（纪元检查通过后、
+// tryRotate 执行前恰好发生一次 Bump），没有注入点，不值得为它造 hook。
+func TestRotationCarriesEpochForward(t *testing.T) {
 	env := newAccountEnv(t)
 	ctx := context.Background()
 	user := env.newActiveUser(t)
 
-	// 用一个 rotate_interval 极短的策略，让下一次校验必定触发轮换。
+	// 先把纪元推到非零——零值下本测试无法区分"继承"与"清零"。
+	for i := 0; i < 2; i++ {
+		if _, err := env.epochs.Bump(ctx, user.ID); err != nil {
+			t.Fatalf("Bump: %v", err)
+		}
+	}
+
+	// rotate_interval 设 1 秒，让下一次校验必定触发轮换。
 	app := env.appWithPolicy(t, func(p *domain.SessionPolicy) { p.RotateIntervalSeconds = 1 })
 
 	sess, err := env.sessions.Issue(ctx, service.IssueInput{UserID: user.ID, App: app})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if _, err := env.epochs.Bump(ctx, user.ID); err != nil {
-		t.Fatalf("Bump: %v", err)
-	}
-	env.clock.Advance(2 * time.Second) // 越过 rotate_interval
+	// 必须带单位。Advance 的形参是 time.Duration，裸写 2000 是 2000 纳秒，
+	// 取整成毫秒后是 0，时钟纹丝不动，轮换分支根本进不去。
+	env.clock.Advance(2 * time.Second)
 
-	_, err = env.sessions.Validate(ctx, sess.Token, app)
-	if !errors.Is(err, domain.ErrUnauthorized) {
-		t.Fatalf("纪元失配的会话在轮换点被放行了: %v", err)
+	// 这一步的断言本身就是护栏：确认轮换真的发生了。缺了它，
+	// 本测试会退化成"什么都没测但绿了"。
+	res, err := env.sessions.Validate(ctx, sess.Token, app)
+	if err != nil {
+		t.Fatalf("旧 token 校验: %v", err)
+	}
+	if !res.Rotated || res.NewToken == "" {
+		t.Fatalf("越过 rotate_interval 后没有触发轮换: rotated=%v newToken=%q",
+			res.Rotated, res.NewToken)
+	}
+
+	if _, err := env.sessions.Validate(ctx, res.NewToken, app); err != nil {
+		t.Fatalf("轮换出的新 token 校验失败: %v——"+
+			"新会话的纪元与当前纪元不符，说明轮换过程中把它丢了", err)
 	}
 }
 
