@@ -18,22 +18,24 @@
 |---|---|
 | **M8 gRPC 服务端** | proto 契约、代码生成管线、连接认证、一元 RPC（发码/登录/登出/校验）、撤销推送双向流、接进 `main.go` |
 | **M9 Go SDK** | 连接层（keepalive/退避/流健康）、缓存层（LRU+TTL+singleflight）、`fpsdk.Auth`（校验/登录/登出）、HTTP 中间件（轮换回传/降级） |
-| **交接项** | 轮换交接幂等化（Task 3，**必做**）、撤销纪元（Task 2，**可单独砍掉**） |
+| **交接项** | 撤销纪元与批量撤销（Task 2）、轮换交接幂等化（Task 3） |
 | **验收** | 端到端集成测试 + 一个可运行的 demo 业务服务 |
 
 ### 本计划不做的
 
 授权/casbin、配置中心、实名认证、fp-im、OIDC、MFA、微信公众号、扫码登录、邮箱验证码、管理 UI 前端（计划三）、`fpsdk.Local` 系列纯本地能力（限流/防重复提交/ID 生成/敏感词，与 fp 无关，可任何时候单独做）。
 
-### 两个需要你知道的判断
+### 两个交接项为什么在这里
 
-**① Task 2（撤销纪元）是可分离的。** 它修的是第一阶段交接清单里那条「冻结/改密与登录之间的窄竞态」，与 gRPC、SDK 都没有关系，放进本计划纯粹是因为交接清单把它派给了计划二。删掉它，后续任务一行都不用改。
+**① Task 2 修的是第一阶段留下的洞**，与 gRPC、SDK 都没有关系，在这里是因为交接清单把它派给了计划二。
 
-判断它值不值得做，只看一件事：**竞态一旦命中，产生的那个会话是永久有效的。** `SessionService.Validate` 只查「会话存在 / 应用匹配 / 未过期」，**不查用户状态**——所以一个在竞态窗口里签发出来的会话，此后每一次校验都会被放行，一直到空闲超时（C 端 7~30 天）。不是"多活一个请求"，是"多活一个月"。
+**竞态一旦命中，产生的那个会话是永久有效的。** `SessionService.Validate` 只查「会话存在 / 应用匹配 / 未过期」，**不查用户状态**——所以一个在竞态窗口里签发出来的会话，此后每一次校验都会被放行，一直到空闲超时（C 端 7~30 天）。不是"多活一个请求"，是"多活一个月"，而管理界面上显示的是「已冻结」。
 
-命中概率极低（要求管理员的冻结操作精确落在 `Login` 的两次读之间，那是 2~3 次 DB 往返的宽度）。所以这是一个**低频但后果不封顶**的洞——冻结一个失陷账号，它可能还揣着一个能用一个月的会话，而管理界面上显示的是「已冻结」。
+命中概率极低（要求冻结操作精确落在 `Login` 的两次读之间，那是 2~3 次 DB 往返的宽度）。**低频但后果不封顶**——所以做。
 
-**② Task 3（轮换交接幂等化）不可分离。** 没有它 SDK 不可能正确工作：fp 当前的实现里，轮换出的新 token 只会送达并发请求中的一个，其余请求看到的是 `Rotated=false` 且一切正常。那一个响应一旦丢失（请求被取消、页面忽略响应体、网络中断），一个 90 天的会话会在过渡期（默认 30 秒）后无声死亡。这不是"SDK 小心一点"能绕开的。
+同一个任务里还有批量撤销：一次踢 500 个用户若产生 500 条广播，每条都要扇出到全部 fp 实例、每个 SDK 都要处理 500 次。两件事都动 `session.go` / `account.go`，放一起。
+
+**② Task 3（轮换交接幂等化）不做就没法交付。** fp 当前的实现里，轮换出的新 token 只会送达并发请求中的一个，其余请求看到的是 `Rotated=false` 且一切正常。那一个响应一旦丢失（请求被取消、页面忽略响应体、网络中断），一个 90 天的会话会在过渡期（默认 30 秒）后无声死亡。这不是"SDK 小心一点"能绕开的。
 
 ---
 
@@ -387,12 +389,26 @@ option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
 // 必须携带具体的 token 列表而不能只给 user_id：SDK 是按 token 缓存校验结果的，
 // 只给 user_id 的话 SDK 无从知道该清哪些缓存条目。
 message RevokeEvent {
-  // tokens 是本次被撤销的全部 token。
+  // tokens 是本次被撤销的全部 token，**可能跨多个用户**。
+  //
+  // SDK 只需要这一个字段：它的缓存按 token 键控，收到事件就是
+  // cache.drop(tokens...)。下面的 user_ids 只用于日志。
+  //
+  // 单条事件的 token 数有上限（服务端 maxTokensPerEvent，1000）。
+  // 超出的会被切成多条——一条携带三万个 token 的事件约 1 MB，
+  // 广播给 20 个实例就是 20 MB，SDK 侧还要吃一个逼近 gRPC 默认
+  // 4 MB 接收上限的消息。
   repeated string tokens = 1;
-  // user_id 是这些 token 所属的用户。
-  string user_id = 2;
+  // user_ids 是这些 token 所属的用户，**仅用于日志与排障**。
+  //
+  // 是列表而非单值：批量撤销（一次踢 500 个用户）合并成一条事件，
+  // 否则 500 次操作会产生 500 条广播、每条都要扇出到全部实例。
+  repeated string user_ids = 2;
   // app_id 为空串表示跨全部应用的撤销（改密、冻结）。
   // 对应服务端的 uuid.Nil，不要当成"某个应用"来过滤。
+  //
+  // 同一条事件里的所有 token 共享这一个 app_id——批量撤销只在
+  // 「相同 reason + 相同 app 范围」内合并，混合范围会被拆成多条。
   string app_id = 3;
   // reason 是撤销原因，取值见服务端 domain.RevokeReason*。
   //
@@ -746,16 +762,22 @@ git commit -m "feat(proto): AuthService 契约与 buf 代码生成管线"
 
 ---
 
-## Task 2: 撤销纪元（关掉冻结/改密与登录之间的竞态）
+## Task 2: 撤销纪元与批量撤销
 
-> **本任务可整体删除。** 它修的是第一阶段交接清单里的既有问题，与 gRPC、SDK 都无关。
-> 后续任务不依赖它——删掉的话，Task 5 的 `ValidateToken` 少一层校验，其余不变。
->
-> 值不值得做只看一点：**竞态命中产生的会话是永久有效的。** `Validate` 不查用户状态，
-> 所以那个会话此后每次校验都被放行，直到空闲超时（C 端 7~30 天）。
-> 命中概率极低，后果却不封顶——一个已被冻结的账号可能还揣着一个能用一个月的会话。
+两件事都动 `session.go` / `account.go`，放一起做。
 
-### 问题
+**为什么做纪元：** 竞态命中产生的会话是**永久有效**的。`Validate` 只查「会话存在 / 应用匹配 / 未过期」，**不查用户状态**——所以那个会话此后每次校验都被放行，直到空闲超时（C 端 7~30 天）。概率极低，后果不封顶：一个显示为「已冻结」的账号可能还揣着一个能用一个月的会话。
+
+纪元的本质是**用 Redis 上一个整数，代替「每次校验都去读一遍用户表」**。后者是一次 PG 往返，前者便宜一个数量级，而热路径每秒要跑几百次。
+
+**为什么做批量：** 一次踢 500 个用户，若产生 500 条广播，每条都要扇出到全部 fp 实例、每个 SDK 都要处理 500 次。合并成一条（token 列表）之后是 1 条。
+
+> **批量必须是唯一实现，不能是"预留接口"。** 单用户路径要调批量方法、传一个元素的切片。
+> 否则批量分支没有任何生产者，就是死代码——第一阶段的 `Application.Status`、
+> `LoginEventRotate`、`DefaultSMSRateRules` 全是这么来的：字段有、常量有、
+> 测试也断言了，就是没人读。让 n=1 走同一条代码路径，现有每一条测试都在跑它。
+
+### 问题一：签发竞态
 
 `AuthService.Login` 的顺序是：读用户 → 判 `CanLogin()` → 若干次 DB 往返 → `Issue` 签发 → `recheckLoginable` 重查状态。
 
@@ -777,12 +799,46 @@ git commit -m "feat(proto): AuthService 契约与 buf 代码生成管线"
 
 **这个论证依赖 `F1` 严格早于 `F2`。** 所以 `AccountService` 里的顺序是死的：先写状态、再递增纪元、最后清扫。谁把递增挪到状态写入之前，围栏就破了一个洞，而所有测试仍然是绿的。
 
+### 问题二：逐用户广播
+
+`revokeMatching` 目前一次只处理一个用户，发一条事件。一次踢 500 个用户 = 500 条广播 × 每条扇出到全部 fp 实例 × 每个 SDK 处理 500 次。
+
+改成一条事件携带多个用户的 token。**SDK 侧一行都不用改**——它的缓存按 token 键控，`onRevoke` 做的是 `cache.drop(ev.GetTokens()...)`，列表长一点而已。`UserIDs` 变成列表纯粹是为了日志。
+
+**两条硬约束：**
+
+1. **单条事件的 token 数必须有上限。** 一万个用户 × 每人 3 个会话 = 三万个 token ≈ 1 MB JSON，广播给 20 个实例就是 20 MB，SDK 侧还要吃一个逼近 gRPC 默认 4 MB 接收上限的消息。超出上限就切成多条
+2. **合并只在「相同 reason + 相同 app 范围」内进行。** 一条事件只有一个 `AppID` 字段；把跨应用撤销（`uuid.Nil`）和限定应用的撤销混进同一条，必然有一半的过滤是错的
+
+### 纪元该在哪些地方递增
+
+每加一个递增点，先问一句：**这个动作是否意味着「已经签发出去的会话不该继续有效」？** 不是所有账号变更都该递增——改昵称、换头像就不该。
+
+| 动作 | 递增？ | 理由 |
+|---|---|---|
+| 冻结 / 注销（`SetStatus` 到不可登录态） | ✅ | 账号本身不该再有活动会话 |
+| 重置密码 | ✅ | "密码泄露了赶紧改"若不作废旧会话，等于什么都没做 |
+| 踢下线全部设备 | ✅ | 常是"怀疑失陷"的应急动作，要连正在签发路上的那个一起拦 |
+| **踢下线单台设备** | ❌ | 纪元是**用户级**的，递增会把手机、电脑、平板一起踢掉 |
+| 改昵称 / 头像 / 性别 | ❌ | 与凭据和账号有效性无关 |
+| 绑定新的登录方式 | ❌ | 是增加能力，不是削减 |
+
+**还没有、但将来有了必须递增的：**
+
+- **用户自助改密**（第一阶段只有管理员重置，没有自助入口）
+- **解绑登录标识**——仅当解绑动机是"这个手机号/微信被盗了"。单纯换绑不必
+
+**将来可能值得做、但现在不要建的：**
+
+- **全局纪元**（`fp:epoch:global`，用于安全事件后强制全员重新登录）。机制上就是多比一个整数，五行代码。**但现在没有任何触发者，建了就是死代码**——等真有"全员下线"这个需求时再加
+
 **Files:**
 - Create: `internal/store/epoch.go`, `internal/store/epoch_test.go`
-- Create: `internal/service/session_epoch_test.go`
-- Modify: `internal/domain/session.go`（加 `Epoch` 字段）
-- Modify: `internal/service/session.go`（`Issue` 刻入、`Validate` 比对）
-- Modify: `internal/service/account.go`（冻结/改密/踢全部时递增）
+- Create: `internal/service/session_epoch_test.go`, `internal/service/session_batch_test.go`
+- Modify: `internal/domain/session.go`（`Session` 加 `Epoch`；`RevokeEvent.UserID` → `UserIDs []uuid.UUID`）
+- Modify: `internal/service/session.go`（`Issue` 刻入纪元、`Validate` 比对、`revokeMatching` 支持多用户与切片）
+- Modify: `internal/service/account.go`（递增纪元；批量方法）
+- Modify: `internal/grpcapi/watch.go`（`revokeEvent` 映射 `UserIDs`）
 - Modify: `cmd/fp/main.go`（装配 `EpochStore`）
 - Modify: 所有 `NewSessionService` / `NewAccountService` 的调用点（编译错误会全部指出来）
 
@@ -791,6 +847,11 @@ git commit -m "feat(proto): AuthService 契约与 buf 代码生成管线"
 - Produces: `service.NewSessionService(st *store.SessionStore, pub *store.RevokePublisher, ep service.EpochStore) *SessionService`（**三参数**，注意与第一阶段的两参数版本不同）
 - Produces: `service.NewSessionServiceWithClock(st, pub, ep, now func() int64) *SessionService`（**四参数**）
 - Produces: `service.NewAccountService(users, sessions, epochs, logs) *AccountService`（**四参数**）
+- Produces: `(*SessionService).RevokeUsers(ctx, userIDs []uuid.UUID, reason string) (int, error)`
+- Produces: `(*AccountService).RevokeUsersSessions(ctx, userIDs []uuid.UUID) (int, error)`
+- Changes: `(*SessionService).RevokeUser` 变成 `RevokeUsers` 的单元素包装
+- Changes: `domain.RevokeEvent.UserID uuid.UUID` → `UserIDs []uuid.UUID`
+- Produces: `service.maxTokensPerEvent = 1000`（包内常量）
 
 ---
 
@@ -1280,7 +1341,319 @@ func TestRevokeSingleSessionDoesNotBumpEpoch(t *testing.T) {
 > 本任务需要给它补上 `epochs` 字段、`newActiveUser` / `appWithPolicy` / `clock.Advance` 辅助（若尚不存在）。
 > 先读 `account_test.go` 与 `session_test.go` 看现有形状，**复用而不是重建**。
 
-- [ ] **Step 9: 修全部调用点并跑全量测试**
+- [ ] **Step 9: 写批量撤销的失败测试**
+
+`internal/service/session_batch_test.go`：
+
+```go
+package service_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+)
+
+// TestRevokeUsersEmitsOneEventForManyUsers 是批量的全部意义。
+//
+// 逐用户发的话，一次踢 500 个用户 = 500 条广播 × 扇出到每个 fp 实例 ×
+// 每个 SDK 处理 500 次。合并之后是 1 条。
+//
+// 断言"事件条数"而不是"token 都被撤销了"：一个内部 for 循环逐个调
+// RevokeUser 的实现，功能完全正确、所有会话也确实失效了，
+// 唯独没有减少任何广播——而减少广播正是本改动的唯一目的。
+func TestRevokeUsersEmitsOneEventForManyUsers(t *testing.T) {
+	env := newSessionEnv(t)
+	ctx := context.Background()
+
+	var userIDs []uuid.UUID
+	var tokens []string
+	for i := 0; i < 5; i++ {
+		u := env.newActiveUser(t)
+		userIDs = append(userIDs, u.ID)
+		sess, err := env.sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: env.app})
+		if err != nil {
+			t.Fatalf("Issue: %v", err)
+		}
+		tokens = append(tokens, sess.Token)
+	}
+
+	events := env.captureEvents(t) // 订阅撤销频道，收集广播
+
+	n, err := env.sessions.RevokeUsers(ctx, userIDs, domain.RevokeReasonKick)
+	if err != nil {
+		t.Fatalf("RevokeUsers: %v", err)
+	}
+	if n != len(tokens) {
+		t.Fatalf("撤销了 %d 个 token，期望 %d 个", n, len(tokens))
+	}
+
+	got := events.collect(t, 1) // 等最多 2 秒，收齐已到达的事件
+	if len(got) != 1 {
+		t.Fatalf("5 个用户产生了 %d 条广播，期望 1 条——"+
+			"实现多半是内部 for 循环逐个调 RevokeUser，功能对但没省下任何广播", len(got))
+	}
+	if len(got[0].Tokens) != len(tokens) {
+		t.Fatalf("事件里带了 %d 个 token，期望 %d 个", len(got[0].Tokens), len(tokens))
+	}
+	if len(got[0].UserIDs) != len(userIDs) {
+		t.Fatalf("事件里带了 %d 个 userID，期望 %d 个", len(got[0].UserIDs), len(userIDs))
+	}
+
+	// 所有会话都必须真的失效。
+	for _, tok := range tokens {
+		if _, err := env.sessions.Validate(ctx, tok, env.app); err == nil {
+			t.Fatalf("token %q 仍然有效", tok)
+		}
+	}
+}
+
+// TestRevokeUserDelegatesToBatch 守住"批量是唯一实现"。
+//
+// 单用户路径必须调批量方法传一个元素，而不是各写一套。两套实现意味着
+// 修一个 bug 要改两处，而漏改的那一处不会有任何测试变红——
+// 因为两条路径各有各的测试，都是绿的。
+//
+// 断言写成"单用户撤销产生的事件形状与批量一致"：
+// 独立实现的那一版多半还在用旧的单值 UserID 形状。
+func TestRevokeUserDelegatesToBatch(t *testing.T) {
+	env := newSessionEnv(t)
+	ctx := context.Background()
+	user := env.newActiveUser(t)
+
+	sess, err := env.sessions.Issue(ctx, service.IssueInput{UserID: user.ID, App: env.app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	events := env.captureEvents(t)
+
+	if _, err := env.sessions.RevokeUser(ctx, user.ID, domain.RevokeReasonKick); err != nil {
+		t.Fatalf("RevokeUser: %v", err)
+	}
+
+	got := events.collect(t, 1)
+	if len(got) != 1 {
+		t.Fatalf("单用户撤销产生了 %d 条事件", len(got))
+	}
+	if len(got[0].UserIDs) != 1 || got[0].UserIDs[0] != user.ID {
+		t.Fatalf("事件的 UserIDs 是 %v，期望恰好 [%v]", got[0].UserIDs, user.ID)
+	}
+}
+
+// TestLargeRevocationIsSplitIntoBoundedEvents 守住单条事件的体积上限。
+//
+// 一万个用户 × 每人 3 个会话 = 三万个 token，序列化后约 1 MB。广播给 20 个
+// fp 实例是 20 MB，SDK 侧还要吃一个逼近 gRPC 默认 4 MB 接收上限的消息。
+// 不切片的话，"批量"就从优化变成了新的故障源。
+//
+// 用 maxTokensPerEvent + 1 个 token 触发切片，断言产生 2 条且每条都不超上限。
+func TestLargeRevocationIsSplitIntoBoundedEvents(t *testing.T) {
+	env := newSessionEnv(t)
+	ctx := context.Background()
+
+	// 造出 maxTokensPerEvent + 1 个会话。用少量用户各开多个会话最省时间。
+	userIDs, total := env.seedSessions(t, service.MaxTokensPerEventForTest+1)
+
+	events := env.captureEvents(t)
+	if _, err := env.sessions.RevokeUsers(ctx, userIDs, domain.RevokeReasonKick); err != nil {
+		t.Fatalf("RevokeUsers: %v", err)
+	}
+
+	got := events.collect(t, 2)
+	if len(got) < 2 {
+		t.Fatalf("%d 个 token 只产生了 %d 条事件——没有切片，"+
+			"单条消息会随撤销规模无界增长", total, len(got))
+	}
+	sum := 0
+	for i, ev := range got {
+		if len(ev.Tokens) > service.MaxTokensPerEventForTest {
+			t.Fatalf("第 %d 条事件带了 %d 个 token，超过上限 %d",
+				i, len(ev.Tokens), service.MaxTokensPerEventForTest)
+		}
+		sum += len(ev.Tokens)
+	}
+	if sum != total {
+		t.Fatalf("切片后 token 总数为 %d，期望 %d——切片过程中丢了", sum, total)
+	}
+}
+
+// TestRevokeUsersSkipsUsersWithoutSessions 确认空用户不产生噪声。
+//
+// 批量踢 500 个用户，其中大多数本来就不在线是常态。给它们各发一条空事件
+// 等于把刚省下的广播又加回来。
+func TestRevokeUsersSkipsUsersWithoutSessions(t *testing.T) {
+	env := newSessionEnv(t)
+	ctx := context.Background()
+
+	online := env.newActiveUser(t)
+	if _, err := env.sessions.Issue(ctx, service.IssueInput{UserID: online.ID, App: env.app}); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	offline := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+
+	events := env.captureEvents(t)
+	if _, err := env.sessions.RevokeUsers(ctx, append(offline, online.ID), domain.RevokeReasonKick); err != nil {
+		t.Fatalf("RevokeUsers: %v", err)
+	}
+
+	got := events.collect(t, 1)
+	if len(got) != 1 {
+		t.Fatalf("产生了 %d 条事件，期望 1 条", len(got))
+	}
+	if len(got[0].UserIDs) != 1 || got[0].UserIDs[0] != online.ID {
+		t.Fatalf("事件的 UserIDs 是 %v，期望只含有会话的那一个用户", got[0].UserIDs)
+	}
+}
+
+// TestRevokeUsersIsAtomicPerUserForEpoch 确认批量也逐个递增纪元。
+//
+// 纪元是用户级的，批量撤销必须给**每个**用户都递增，不能只递增第一个
+// 或者引入一个"批次纪元"。漏递增的那些用户，正在签发路上的会话拦不住。
+func TestRevokeUsersIsAtomicPerUserForEpoch(t *testing.T) {
+	env := newAccountEnv(t)
+	ctx := context.Background()
+
+	var ids []uuid.UUID
+	before := map[uuid.UUID]int64{}
+	for i := 0; i < 3; i++ {
+		u := env.newActiveUser(t)
+		ids = append(ids, u.ID)
+		before[u.ID], _ = env.epochs.Current(ctx, u.ID)
+	}
+
+	if _, err := env.accounts.RevokeUsersSessions(ctx, ids); err != nil {
+		t.Fatalf("RevokeUsersSessions: %v", err)
+	}
+	for _, id := range ids {
+		after, _ := env.epochs.Current(ctx, id)
+		if after <= before[id] {
+			t.Fatalf("用户 %v 的纪元没有递增（%d → %d）", id, before[id], after)
+		}
+	}
+}
+```
+
+> **测试辅助：** `captureEvents` 订阅撤销频道并收集广播，`collect(t, want)`
+> 等到收满 `want` 条或超时（2 秒）后返回**已收到的全部**——注意不能收满就立刻返回，
+> 否则"多发了一条"这类错误检测不到。`seedSessions(t, n)` 造出至少 n 个会话并返回
+> 涉及的用户与实际会话数。`MaxTokensPerEventForTest` 是 `maxTokensPerEvent` 的
+> 导出别名，仅供测试引用——**不要为了测试把常量本身导出**。
+
+- [ ] **Step 10: 跑测试确认失败**
+
+```bash
+./scripts/test.sh ./internal/service/ -run 'TestRevokeUsers|TestRevokeUserDelegates|TestLargeRevocation'
+```
+
+期望：`undefined: RevokeUsers`。
+
+- [ ] **Step 11: 实现批量撤销**
+
+先改 `internal/domain/session.go` 的事件形状：
+
+```go
+// RevokeEvent 是一次撤销的广播消息。
+//
+// SDK 按 token 缓存校验结果，因此事件必须携带具体的 token 列表，
+// 而不能只给 userID——否则 SDK 无从知道该清哪些缓存条目。
+type RevokeEvent struct {
+	// Tokens 是本次被撤销的全部 token，可能跨多个用户。
+	Tokens []string `json:"tokens"`
+	// UserIDs 是这些 token 所属的用户，**仅用于日志与排障**。
+	//
+	// 是列表而非单值：批量撤销（一次踢 500 个用户）合并成一条事件，
+	// 否则 500 次操作会产生 500 条广播、每条都要扇出到全部实例。
+	UserIDs []uuid.UUID `json:"userIds"`
+	// AppID 为 uuid.Nil 表示跨全部应用的撤销。
+	//
+	// 一条事件只有一个 AppID：合并只在「相同 reason + 相同 app 范围」内进行。
+	// 把跨应用撤销（Nil）与限定应用的撤销混进同一条，必然有一半的过滤是错的。
+	AppID  uuid.UUID `json:"appId"`
+	Reason string    `json:"reason"`
+	At     int64     `json:"at"`
+}
+```
+
+`internal/service/session.go`：
+
+```go
+// maxTokensPerEvent 是单条撤销事件能携带的 token 上限。
+//
+// 一万个用户 × 每人 3 个会话 = 三万个 token，序列化后约 1 MB；广播给 20 个
+// fp 实例就是 20 MB，SDK 侧还要吃一个逼近 gRPC 默认 4 MB 接收上限的消息。
+// 超出就切成多条——"批量"是为了减少广播条数，不是为了把单条撑到无界。
+const maxTokensPerEvent = 1000
+
+// RevokeUsers 撤销一批用户的全部会话。
+//
+// 这是**唯一实现**，RevokeUser 是它的单元素包装。两套实现意味着修一个 bug
+// 要改两处，而漏改的那一处不会有任何测试变红——两条路径各有各的绿测试。
+func (s *SessionService) RevokeUsers(ctx context.Context, userIDs []uuid.UUID, reason string) (int, error) {
+	// …逐用户 ListUserTokens + 删除（复用现有的 revokeMatching 内部逻辑），
+	// 把结果累积到一个 (tokens, touchedUserIDs) 里，最后统一广播。
+	//
+	// 没有会话的用户不进 touchedUserIDs——批量踢 500 个用户时大多数本来就
+	// 不在线，给它们各发一条空事件等于把刚省下的广播又加回来。
+	//
+	// 广播用 announceBatch 切片发出。
+}
+
+// RevokeUser 撤销单个用户的全部会话。
+func (s *SessionService) RevokeUser(ctx context.Context, userID uuid.UUID, reason string) (int, error) {
+	return s.RevokeUsers(ctx, []uuid.UUID{userID}, reason)
+}
+
+// announceBatch 把一批 token 按 maxTokensPerEvent 切片广播。
+//
+// 切片时 UserIDs 原样带在每一条上：它只用于日志，精确对应哪一片没有意义，
+// 而"这批撤销涉及哪些用户"对排障是有意义的。
+func (s *SessionService) announceBatch(ctx context.Context, tokens []string, userIDs []uuid.UUID, appID uuid.UUID, reason string) {
+	for start := 0; start < len(tokens); start += maxTokensPerEvent {
+		end := min(start+maxTokensPerEvent, len(tokens))
+		s.announce(ctx, domain.RevokeEvent{
+			Tokens:  tokens[start:end],
+			UserIDs: userIDs,
+			AppID:   appID,
+			Reason:  reason,
+			At:      s.now(),
+		})
+	}
+}
+```
+
+`internal/service/account.go` 加批量入口，并保持 Step 7 定下的顺序（**状态/凭据写入 → 递增纪元 → 清扫**）：
+
+```go
+// RevokeUsersSessions 批量踢下线。逐个递增纪元——纪元是用户级的，
+// 不存在"批次纪元"，漏掉谁就拦不住谁正在签发路上的会话。
+func (s *AccountService) RevokeUsersSessions(ctx context.Context, userIDs []uuid.UUID) (int, error) {
+	for _, id := range userIDs {
+		if _, err := s.epochs.Bump(ctx, id); err != nil {
+			return 0, err
+		}
+	}
+	n, err := s.sessions.RevokeUsers(ctx, userIDs, domain.RevokeReasonKick)
+	if err != nil {
+		return n, err
+	}
+	for _, id := range userIDs {
+		s.writeRevokeLog(ctx, id, domain.RevokeReasonKick, "")
+	}
+	return n, nil
+}
+```
+
+`RevokeAllSessions`（单用户）改为 `return s.RevokeUsersSessions(ctx, []uuid.UUID{userID})`。
+
+> **本阶段不加批量的管理端 HTTP 接口。** 那是控制台的事（计划三）。
+> 服务层先就位，接口来了直接调——但 `RevokeUsersSessions` 现在就有真实调用者
+> （单用户路径），不是预留的空壳。
+
+- [ ] **Step 12: 修全部调用点并跑全量测试**
 
 ```bash
 go build ./... 2>&1 | head -40
@@ -1294,14 +1667,14 @@ go build ./... 2>&1 | head -40
 
 期望：全绿。
 
-- [ ] **Step 10: 提交**
+- [ ] **Step 13: 提交**
 
 ```bash
 git add -A
 ```
 
 ```bash
-git commit -m "feat(session): 撤销纪元，关掉冻结/改密与登录签发之间的竞态"
+git commit -m "feat(session): 撤销纪元与批量撤销"
 ```
 
 ---
@@ -3411,10 +3784,13 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 // revokeEvent 把领域事件转成传输对象。
 func revokeEvent(ev domain.RevokeEvent) *fpv1.RevokeEvent {
 	out := &fpv1.RevokeEvent{
-		Tokens: ev.Tokens,
-		UserId: ev.UserID.String(),
-		Reason: ev.Reason,
-		AtMs:   ev.At,
+		Tokens:  ev.Tokens,
+		UserIds: make([]string, 0, len(ev.UserIDs)),
+		Reason:  ev.Reason,
+		AtMs:    ev.At,
+	}
+	for _, id := range ev.UserIDs {
+		out.UserIds = append(out.UserIds, id.String())
 	}
 	// uuid.Nil 表示跨全部应用，映射成空串——绝不能写成 "00000000-0000-…"，
 	// SDK 那边会把它当成一个真实的应用 ID。
@@ -4928,7 +5304,7 @@ func TestRevokeEventDropsCachedToken(t *testing.T) {
 	if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
 		t.Fatalf("首次: %v", err)
 	}
-	env.pushRevoke(t, &fpv1.RevokeEvent{Tokens: []string{"tok"}, UserId: "u1"})
+	env.pushRevoke(t, &fpv1.RevokeEvent{Tokens: []string{"tok"}, UserIds: []string{"u1"}})
 
 	// 推送是异步的，等缓存被清掉。
 	env.waitUntil(t, func() bool {
@@ -6013,6 +6389,7 @@ git commit -m "docs: 可运行的接入示例与手工验收步骤"
 | 15 | **SDK 连任意实例结果一致（无需连接亲和）** | fp 对会话无状态 + Task 12（`TestSDKWorksAgainstAnyInstance`） |
 | 16 | **fp 扩容后存量连接会重新分摊** | Task 7 `MaxConnectionAge`（30 分钟 + 5 分钟宽限，自带 ±10% 抖动） |
 | 17 | **fp 的 Redis 订阅抖动不会静默丢撤销** | Task 6 重订阅检测 → `WatchPurge` + Task 8 SDK 消费 + Task 12（`TestRedisSubscriptionBlipDoesNotSilentlyLoseRevocations`） |
+| 18 | **批量撤销只发一条广播，且单条有体积上限** | Task 2（`TestRevokeUsersEmitsOneEventForManyUsers` / `TestLargeRevocationIsSplitIntoBoundedEvents`） |
 
 ---
 
