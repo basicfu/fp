@@ -860,3 +860,48 @@ Keycloak 用 master realm 提供这个隔离边界，但 **fp 砍掉了多用户
 | session 主存 Redis | 4.4 | 回源只查 Redis 不碰 PG；沿用 3s 成熟做法 |
 | fp 管理员用独立表 | 12.1 | 砍掉多用户池后没有天然隔离边界，安全边界不能靠纪律保证 |
 | 本地能力不做成远程调用 | 10.1 | fp 提供配置和数据，不提供每次请求的计算 |
+
+---
+
+## 附：第一阶段实施后的交接事项（写给计划二/三）
+
+第一阶段实现完毕（14 个任务、55+ 提交、222 个测试）。下面这些是实施过程中确定或发现的、
+**会直接影响后续阶段实现**的事实，不看会踩坑。
+
+### 计划二（gRPC + SDK）必须遵守的契约
+
+| 契约 | 后果 |
+|---|---|
+| **`cache_ttl == 0` 表示"不要缓存"，不是"未设置、用默认值"** | 会话剩余不足一毫秒时 fp 就返回 0。SDK 若当成缺省值去套配置，会缓存一个马上过期的判定 |
+| **`cache_ttl` 上线时必须向下取整，不能四舍五入** | 它是 `time.Duration`，可能是亚秒。把 800ms 进位成 1s 会重新引入 `min()` 要防的过度缓存 |
+| **`Rotated == true` 时必须把 `NewToken` 回传客户端** | 忘记回传的话，每个发生轮换的会话都会在过渡期（默认 30 秒）结束后被登出 |
+| **轮换的 `NewToken` 只会送达并发请求中的一个** | 其余并发请求返回 `Rotated=false` 且看起来完全正常。客户端若丢掉了那一个响应（请求取消、网络中断、后台请求忽略响应体），90 天的会话会在 30 秒后无声死亡。SDK 需要处理这个交接，或考虑把过渡期做成策略项 |
+| **`RevokePublisher.Subscribe` 的 ctx 与 `closeFn` 必须配对使用** | 已在 `Subscribe` 内部派生可取消子 ctx，`closeFn` 会 cancel。但仍应传可取消的 ctx |
+
+### 已知的、留给计划二解决的问题
+
+- **冻结/改密与登录之间仍有窄竞态。** `AuthService.Login` 在签发会话后会重查用户状态与密码哈希，
+  把「静默数天的失陷」收敛成一个窄窗口，但**不是围栏**。对密码登录还有一段更窄的缝：
+  connector 在 `resolveUser` 读快照**之前**校验凭据，此间的改密会让快照已持有新哈希。
+  真正的解法是撤销版本号（revocation epoch）在签发时比对——属于计划二。
+- **`Sender.rules` 是跨通道共用的一张表。** 只有短信通道时无害，**邮件通道上线前必须改成按通道分表**。
+- **`SetConnector` 不校验 connector 类型。** `PUT .../connectors/typo` 会返回 204 并写入一条永远不会被读的行，
+  运营会以为自己启用了一个不存在的登录方式。修复应放在 `ApplicationService`（构造器接 `*connector.Registry`），
+  **不要放在 handler 里**——那会重建 Task 13 花了整轮预算才拆掉的模式。
+- **未解析到账号的失败登录写得进、读不出。** `login_log` 刻意记录 `user_id` 为空的失败（这正是枚举探测的全部形态），
+  但唯一的读路径是 `GET /users/{id}/login-logs`，按 `user_id` 过滤。需要一个带时间范围的
+  `GET /admin/api/login-logs`。索引 `login_log_created_idx` 已经为它建好了。
+- **`ApplicationService` 没有任何更新方法**（只有 `Create` / `UpdateSessionPolicy` / `SetConnector`）。
+  控制台无法改应用名、无法编辑 `redirect_uris`。计划三若需要就得先加接口。
+- **会话列表的去重逻辑在 HTTP 层。** `SessionService.ListByUser` 返回的是每个存活 token 一条，
+  轮换过渡期内同一会话有两条。计划二若基于它做「我的设备」，需要自己去重，
+  且要留 `IdleExpiresAt` 更大的那条（`SMEMBERS` 返回插入顺序，陈旧的那条在前）。
+
+### 实施中确立的、与设计大纲有出入的决定
+
+- `identity` 是所有登录标识的唯一真相源，`app_user` **不含** `phone` / `email` 列。
+- 表名 `app_user`（`user` 是 PostgreSQL 保留字）。
+- 第一阶段用手写 pgx 查询，未引入 sqlc。
+- `identity(union_key)` 上的索引**不是** UNIQUE——同一 unionId 允许多条 identity 是归并规则 2 的前提。
+  「一个 union_key 只属于一个用户」由应用层的 `lockUnionKeyTx` + 归属校验维持。
+- 测试必须串行（`-p 1`，禁用 `t.Parallel()`）：所有包共用同一个 `fp_test` 库，而每次 `NewTestDB` 都会清空全表。

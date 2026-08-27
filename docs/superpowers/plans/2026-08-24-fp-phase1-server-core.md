@@ -2527,7 +2527,6 @@ git commit -m "feat: 应用领域模型、会话策略校验与应用管理服�
   - `type domain.User struct{ ID uuid.UUID; PasswordHash, Nickname, AvatarURL, Gender, Status string; DeleteSubmittedAt, CreatedAt, UpdatedAt int64 }`
   - `func (User) CanLogin() bool`
   - 常量 `domain.IdentityTypePhone/Username/Email/WechatMP = "phone"/"username"/"email"/"wechat_mp"`
-  - `func domain.IsMergeableIdentityType(t string) bool` — phone/username/email 属于本地标识，可按 subject 归并
   - `type domain.Identity struct{ ID, UserID uuid.UUID; Type, Subject, UnionKey, Credential string; LastLoginAt, CreatedAt int64 }`
   - `func service.NewUserService(pool *pgxpool.Pool) *UserService`
   - `func (*UserService) FindByIdentity(ctx context.Context, identityType, subject string) (*domain.User, *domain.Identity, error)`
@@ -2668,24 +2667,6 @@ func TestUserCanLogin(t *testing.T) {
 	}
 }
 
-func TestIsMergeableIdentityType(t *testing.T) {
-	tests := []struct {
-		typ  string
-		want bool
-	}{
-		{domain.IdentityTypePhone, true},
-		{domain.IdentityTypeUsername, true},
-		{domain.IdentityTypeEmail, true},
-		{domain.IdentityTypeWechatMP, false},
-		{"unknown", false},
-	}
-	for _, tt := range tests {
-		if got := domain.IsMergeableIdentityType(tt.typ); got != tt.want {
-			t.Errorf("IsMergeableIdentityType(%q) = %v, want %v", tt.typ, got, tt.want)
-		}
-	}
-}
-```
 
 - [ ] **Step 3: 运行测试确认失败**
 
@@ -2767,21 +2748,6 @@ const (
 	IdentityTypeEmail    = "email"
 	IdentityTypeWechatMP = "wechat_mp"
 )
-
-// mergeableIdentityTypes 是"本地标识"集合。
-// 这类标识由 fp 自己校验（短信验证码 / 密码），同一个 subject 必然是同一个人，
-// 因此可以直接按 (type, subject) 归并到同一个 User。
-// 第三方标识（微信等）的 subject 是对方系统的 openid，只能通过 union_key 归并。
-var mergeableIdentityTypes = map[string]bool{
-	IdentityTypePhone:    true,
-	IdentityTypeUsername: true,
-	IdentityTypeEmail:    true,
-}
-
-// IsMergeableIdentityType 报告该类型是否为可按 subject 归并的本地标识。
-func IsMergeableIdentityType(t string) bool {
-	return mergeableIdentityTypes[t]
-}
 
 // Identity 是一条登录凭据记录。一个 User 可以有多条。
 type Identity struct {
@@ -8980,7 +8946,6 @@ Expected: 编译失败，`undefined: service.MaskSubject`
 const (
 	LoginEventLogin  = "login"
 	LoginEventLogout = "logout"
-	LoginEventRotate = "rotate"
 	LoginEventRevoke = "revoke"
 )
 
@@ -12372,20 +12337,6 @@ func (e *env) createApp(name, slug string) (internalID, appID, secret string) {
 
 	return created.Application.ID, created.Application.AppID, created.AppSecret
 }
-
-// waitFor 每 20ms 检查一次 cond，直到成立或超时。
-func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("等待超时: %s", what)
-}
-```
 
 `env_test.go` 需要 `import "io"`。
 
