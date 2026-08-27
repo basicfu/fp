@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package fp.v1;
+
+import "fp/v1/common.proto";
+
+option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
+
+// AuthService 是 SDK 与 fp 之间的全部认证契约。
+//
+// 认证方式：每个 RPC 的 metadata 必须带 fp-app-id 与 fp-app-secret，
+// 由服务端拦截器校验（见 internal/grpcapi/auth_interceptor.go）。
+service AuthService {
+  // SendLoginCode 给手机号发送登录验证码。
+  rpc SendLoginCode(SendLoginCodeRequest) returns (SendLoginCodeResponse);
+
+  // Login 用某种登录方式的凭据换取会话 token。
+  rpc Login(LoginRequest) returns (LoginResponse);
+
+  // Logout 撤销一个 token。
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // ValidateToken 是 SDK 回源校验的入口。
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+
+  // Watch 是撤销事件的推送流。
+  //
+  // 它同时承担第二个职责：让这条 gRPC 连接**永不空闲**。
+  // 一元 RPC 与本流复用同一条 TCP/TLS 连接，流长期存在意味着
+  // 回源永远走热连接，不会付 2–5ms 的冷连接代价。
+  rpc Watch(stream WatchRequest) returns (stream WatchResponse);
+}
+
+// SendLoginCodeRequest 是一次发码请求。
+message SendLoginCodeRequest {
+  // phone 是接收验证码的手机号。
+  string phone = 1;
+}
+
+// SendLoginCodeResponse 是发码结果。成功即空响应，失败走 gRPC status。
+message SendLoginCodeResponse {}
+
+// LoginRequest 是一次登录请求。
+message LoginRequest {
+  // connector_type 是登录方式，例如 "password" / "sms_code"。
+  string connector_type = 1;
+  // credentials 是该登录方式所需的凭据，键名由各 connector 定义。
+  map<string, string> credentials = 2;
+  // ip / user_agent 写入登录审计，由业务方从自己的请求里取。
+  string ip = 3;
+  string user_agent = 4;
+  // mobile 决定适用哪一档空闲超时。
+  bool mobile = 5;
+}
+
+// LoginResponse 是登录成功的结果。
+message LoginResponse {
+  // token 是签发的 opaque token。
+  string token = 1;
+  // user 是登录用户的基本资料。
+  UserInfo user = 2;
+  // session_id 是会话标识，token 轮换时不变。
+  string session_id = 3;
+}
+
+// UserInfo 是用户的基本资料。
+//
+// 刻意不含手机号/邮箱：登录标识全部落在 identity 上，
+// 需要时通过独立接口按 user_id 查询，不在每次登录响应里携带。
+message UserInfo {
+  string id = 1;
+  string nickname = 2;
+  string avatar_url = 3;
+  string gender = 4;
+  // status 取值见服务端 domain.UserStatus*。
+  string status = 5;
+}
+
+// LogoutRequest 是一次登出请求。
+message LogoutRequest {
+  string token = 1;
+}
+
+// LogoutResponse 是登出结果。重复登出也返回成功。
+message LogoutResponse {}
+
+// ValidateTokenRequest 是一次回源校验。
+message ValidateTokenRequest {
+  string token = 1;
+}
+
+// ValidateTokenResponse 是校验结果。
+//
+// 刻意不返回过期时刻：SDK 永远不判断 token 是否过期，只遵守 cache_ttl_ms
+// （设计文档 4.5.1）。返回 expiry 会让"一处延期、另一处按旧 expiry 误判"
+// 的竞态重新出现。
+message ValidateTokenResponse {
+  string user_id = 1;
+  // session_id 是会话标识，token 轮换时不变。撤销以它为单位。
+  string session_id = 2;
+
+  // cache_ttl_ms 是 SDK 可以缓存本次判定的毫秒数，
+  // 等于 min(应用配置的 token_cache_ttl, token 剩余有效期)。
+  //
+  // 0 表示**不要缓存**，不是"未设置、用默认值"。会话剩余不足一毫秒时
+  // 服务端就会算出 0。proto3 的隐式存在性让"缺省"与"显式 0"在线上不可区分，
+  // 这恰好使"不缓存"成为唯一可表达的行为——任何"没给就套本地默认值"的
+  // 实现都是在无中生有。
+  //
+  // 用毫秒而非秒：它在服务端是 time.Duration，可能是亚秒。用秒会把 800ms
+  // 进位成 1s，重新引入 min() 本来要防的过度缓存。
+  int64 cache_ttl_ms = 3;
+
+  // rotated 为 true 时 new_token 非空，**必须**把它回传给客户端。
+  //
+  // 不回传的后果：该会话在过渡期（默认 30 秒）结束后被登出，
+  // 哪怕它的 max_lifetime 还有 90 天。
+  bool rotated = 4;
+  string new_token = 5;
+}
+
+// WatchRequest 是建流请求。
+//
+// 目前无字段：应用身份来自 metadata，不在消息体里重复。
+// 保留消息本身是为了将来能在同一条流上订阅更多事件类型。
+message WatchRequest {}
+
+// WatchResponse 是一条推送事件。
+//
+// 用 oneof 是为了将来加 ConfigChanged / PolicyChanged 时不破坏兼容：
+// 旧 SDK 遇到不认识的分支会落到 default，忽略即可。
+message WatchResponse {
+  oneof event {
+    // revoke 是一次撤销。
+    RevokeEvent revoke = 1;
+    // ready 表示服务端已完成订阅，此后的撤销不会漏推。
+    WatchReady ready = 2;
+    // purge 要求 SDK 丢弃全部缓存。
+    WatchPurge purge = 3;
+  }
+}
+
+// WatchReady 表示服务端已就绪。
+//
+// 它存在的意义：SDK 只有收到 ready 才能把"推送通道健康"置为 true。
+// 光靠"建流没报错"是不够的——流建立了但服务端还没订上 Redis 的那段时间里，
+// 撤销事件会丢，而 SDK 却以为推送可用，不会收紧缓存窗口。
+message WatchReady {}
+
+// WatchPurge 要求 SDK 丢弃**全部**缓存条目。
+//
+// fp 在确知自己漏读了撤销事件、却不知道漏了哪些时发出。目前唯一的触发源是
+// Redis 订阅重建（见 internal/store/revoke.go 的 RevokeSignalGap）：go-redis
+// 会静默重连并重发 SUBSCRIBE，那个窗口里发布的事件对本实例永久丢失。
+//
+// **这是悲观判断，不是确知。** 重建时未必真的丢了东西——那个窗口里可能压根
+// 没人发布过撤销。但 fp 无从分辨，只能按最坏情况处理。不要试图把它"优化"成
+// 条件触发：能让它变成条件的那个信息并不存在。
+message WatchPurge {
+  // reason 只用于日志与排障，SDK 的处理动作与它无关。
+  string reason = 1;
+}

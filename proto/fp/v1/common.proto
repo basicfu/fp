@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package fp.v1;
+
+option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
+
+// RevokeEvent 是一次撤销的广播，对应服务端的 domain.RevokeEvent。
+//
+// 必须携带具体的 token 列表而不能只给 user_id：SDK 是按 token 缓存校验结果的，
+// 只给 user_id 的话 SDK 无从知道该清哪些缓存条目。
+message RevokeEvent {
+  // tokens 是本次被撤销的全部 token，**可能跨多个用户**。
+  //
+  // SDK 只需要这一个字段：它的缓存按 token 键控，收到事件就是
+  // cache.drop(tokens...)。下面的 user_ids 只用于日志。
+  //
+  // 单条事件的 token 数有上限（服务端 maxTokensPerEvent，1000）。
+  // 超出的会被切成多条——一条携带三万个 token 的事件约 1 MB，
+  // 广播给 20 个实例就是 20 MB，SDK 侧还要吃一个逼近 gRPC 默认
+  // 4 MB 接收上限的消息。
+  repeated string tokens = 1;
+  // user_ids 是这些 token 所属的用户，**仅用于日志与排障**。
+  //
+  // 是列表而非单值：批量撤销（一次踢 500 个用户）合并成一条事件，
+  // 否则 500 次操作会产生 500 条广播、每条都要扇出到全部实例。
+  repeated string user_ids = 2;
+  // app_id 为空串表示跨全部应用的撤销（改密、冻结）。
+  // 对应服务端的 uuid.Nil，不要当成"某个应用"来过滤。
+  //
+  // 同一条事件里的所有 token 共享这一个 app_id——批量撤销只在
+  // 「相同 reason + 相同 app 范围」内合并，混合范围会被拆成多条。
+  string app_id = 3;
+  // reason 是撤销原因，取值见服务端 domain.RevokeReason*。
+  //
+  // 刻意用 string 而不是 enum：SDK 拿到 reason 只用于日志与可观测，
+  // 处理动作与原因无关（一律清缓存）。用 enum 的话，服务端将来新增一种原因，
+  // 旧 SDK 会把它解码成 UNSPECIFIED，日志里丢掉真实信息却换不来任何好处。
+  string reason = 4;
+  // at_ms 是撤销发生的毫秒时间戳。
+  int64 at_ms = 5;
+}
