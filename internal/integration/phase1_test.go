@@ -281,8 +281,8 @@ func TestRevocationIsBroadcast(t *testing.T) {
 
 	select {
 	case ev := <-events:
-		if ev.UserID != res.User.ID {
-			t.Fatalf("事件 UserID = %v, want %v", ev.UserID, res.User.ID)
+		if len(ev.UserIDs) != 1 || ev.UserIDs[0] != res.User.ID {
+			t.Fatalf("事件 UserIDs = %v, want [%v]", ev.UserIDs, res.User.ID)
 		}
 		if len(ev.Tokens) == 0 {
 			t.Fatal("事件未携带 token 列表，SDK 无从知道该清哪些缓存条目")

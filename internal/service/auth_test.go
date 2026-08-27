@@ -49,8 +49,9 @@ func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
 
 	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
+	epochs := store.NewEpochStore(rdb)
 	sessions := service.NewSessionServiceWithClock(
-		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), now)
+		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, now)
 	logs := service.NewLoginLogService(pool)
 	codes := notify.NewCodeService(rdb)
 
@@ -86,7 +87,7 @@ func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
 			Registry: reg, Notifier: sender, Codes: codes,
 		}),
 		apps: apps, users: users, sess: sessions, logs: logs,
-		accounts: service.NewAccountService(users, sessions, logs),
+		accounts: service.NewAccountService(users, sessions, epochs, logs),
 		sms:      sms, codes: codes, app: app, pool: pool,
 	}
 }
@@ -867,7 +868,7 @@ func TestRateLimitedResendDoesNotInvalidateDeliveredCode(t *testing.T) {
 	}
 	auth := service.NewAuthService(service.AuthDeps{
 		Apps: apps, Users: users,
-		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), store.NewEpochStore(rdb)),
 		Logs:     service.NewLoginLogService(pool),
 		Registry: reg, Notifier: sender, Codes: codes,
 	})
@@ -923,7 +924,7 @@ func TestSendLoginCodeIsRateLimitedPerPhone(t *testing.T) {
 
 	auth := service.NewAuthService(service.AuthDeps{
 		Apps: apps, Users: users,
-		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb)),
+		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), store.NewEpochStore(rdb)),
 		Logs:     service.NewLoginLogService(pool),
 		Registry: reg, Notifier: sender, Codes: codes,
 	})

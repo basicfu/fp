@@ -26,10 +26,10 @@ func TestRevokePublishSubscribe(t *testing.T) {
 
 	uid := uuid.New()
 	want := domain.RevokeEvent{
-		Tokens: []string{"tok-a", "tok-b"},
-		UserID: uid,
-		Reason: domain.RevokeReasonKick,
-		At:     time.Now().UnixMilli(),
+		Tokens:  []string{"tok-a", "tok-b"},
+		UserIDs: []uuid.UUID{uid},
+		Reason:  domain.RevokeReasonKick,
+		At:      time.Now().UnixMilli(),
 	}
 
 	// 订阅建立需要一个往返，重试几次直到收到。
@@ -40,8 +40,8 @@ func TestRevokePublishSubscribe(t *testing.T) {
 		}
 		select {
 		case got := <-events:
-			if got.UserID != uid {
-				t.Fatalf("UserID = %v, want %v", got.UserID, uid)
+			if len(got.UserIDs) != 1 || got.UserIDs[0] != uid {
+				t.Fatalf("UserIDs = %v, want [%v]", got.UserIDs, uid)
 			}
 			if len(got.Tokens) != 2 || got.Tokens[0] != "tok-a" {
 				t.Fatalf("Tokens = %v", got.Tokens)
@@ -61,7 +61,7 @@ func TestRevokePublishNoSubscriberIsNotAnError(t *testing.T) {
 	pub := store.NewRevokePublisher(testsupport.NewTestRedis(t))
 	// 没有订阅者时发布不应报错——推送只是加速手段，不能因此拖垮撤销本身。
 	if err := pub.Publish(context.Background(), domain.RevokeEvent{
-		Tokens: []string{"tok"}, UserID: uuid.New(), Reason: domain.RevokeReasonLogout,
+		Tokens: []string{"tok"}, UserIDs: []uuid.UUID{uuid.New()}, Reason: domain.RevokeReasonLogout,
 	}); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}

@@ -254,8 +254,9 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 	}
 
 	var nowMs int64 = 1_700_000_000_000
+	epochs := store.NewEpochStore(rdb)
 	sessions := service.NewSessionServiceWithClock(
-		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), func() int64 { return nowMs })
+		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, func() int64 { return nowMs })
 
 	users := service.NewUserService(pool)
 	logs := service.NewLoginLogService(pool)
@@ -263,7 +264,7 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 		Admin:    admin,
 		Apps:     service.NewApplicationService(pool),
 		Users:    users,
-		Accounts: service.NewAccountService(users, sessions, logs),
+		Accounts: service.NewAccountService(users, sessions, epochs, logs),
 		Sessions: sessions,
 		Logs:     logs,
 		Registry: connector.NewRegistry(),

@@ -54,7 +54,8 @@ func newEnv(t *testing.T) *env {
 
 	sessionStore := store.NewSessionStore(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
-	sessions := service.NewSessionService(sessionStore, revokePub)
+	epochs := store.NewEpochStore(rdb)
+	sessions := service.NewSessionService(sessionStore, revokePub, epochs)
 
 	registry := connector.NewRegistry()
 	if err := registry.Register(connector.NewPassword(users)); err != nil {
@@ -80,7 +81,7 @@ func newEnv(t *testing.T) *env {
 
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Admin: admin, Apps: apps, Users: users,
-		Accounts: service.NewAccountService(users, sessions, logs),
+		Accounts: service.NewAccountService(users, sessions, epochs, logs),
 		Sessions: sessions, Logs: logs, Registry: registry,
 	}))
 	t.Cleanup(srv.Close)

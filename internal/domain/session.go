@@ -29,6 +29,12 @@ type Session struct {
 	UA            string
 	// Mobile 决定适用哪一档空闲超时。
 	Mobile bool
+	// Epoch 是签发时该用户的撤销纪元。校验时与当前纪元比对，不一致即拒。
+	//
+	// 它关掉的是「管理员冻结/改密」与「登录签发」之间的竞态：撤销的清扫
+	// 只能扫到已存在的会话，扫不到正在签发路上的那一个。轮换时原样继承——
+	// 轮换只换 token 的值，不是新的一次认证。
+	Epoch int64
 }
 
 // MaxExpiresAt 返回绝对上限到期时刻（毫秒）。到达后必须重新认证，轮换无法延长它。
@@ -62,9 +68,17 @@ const (
 // SDK 按 token 缓存校验结果，因此事件必须携带具体的 token 列表，
 // 而不能只给 userID——否则 SDK 无从知道该清哪些缓存条目。
 type RevokeEvent struct {
-	Tokens []string  `json:"tokens"`
-	UserID uuid.UUID `json:"userId"`
+	// Tokens 是本次被撤销的全部 token，可能跨多个用户。
+	Tokens []string `json:"tokens"`
+	// UserIDs 是这些 token 所属的用户，**仅用于日志与排障**。
+	//
+	// 是列表而非单值：批量撤销（一次踢 500 个用户）合并成一条事件，
+	// 否则 500 次操作会产生 500 条广播、每条都要扇出到全部实例。
+	UserIDs []uuid.UUID `json:"userIds"`
 	// AppID 为 uuid.Nil 表示跨全部应用的撤销。
+	//
+	// 一条事件只有一个 AppID：合并只在「相同 reason + 相同 app 范围」内进行。
+	// 把跨应用撤销（Nil）与限定应用的撤销混进同一条，必然有一半的过滤是错的。
 	AppID  uuid.UUID `json:"appId"`
 	Reason string    `json:"reason"`
 	At     int64     `json:"at"`

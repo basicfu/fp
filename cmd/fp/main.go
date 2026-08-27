@@ -56,6 +56,7 @@ func run() error {
 
 	sessionStore := store.NewSessionStore(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
+	epochStore := store.NewEpochStore(rdb)
 
 	userSvc := service.NewUserService(pool)
 	codeSvc := notify.NewCodeService(rdb)
@@ -68,7 +69,7 @@ func run() error {
 		return err
 	}
 
-	sessionSvc := service.NewSessionService(sessionStore, revokePub)
+	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore)
 
 	adminSvc := service.NewAdminService(pool, rdb)
 	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdminUser, cfg.BootstrapAdminPassword); err != nil {
@@ -83,7 +84,7 @@ func run() error {
 			Admin:    adminSvc,
 			Apps:     service.NewApplicationService(pool),
 			Users:    userSvc,
-			Accounts: service.NewAccountService(userSvc, sessionSvc, logSvc),
+			Accounts: service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc),
 			Sessions: sessionSvc,
 			Logs:     logSvc,
 			Registry: registry,

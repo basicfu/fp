@@ -167,8 +167,8 @@ func TestRevokeSessionOfAnotherUserDoesNothing(t *testing.T) {
 
 // 撤销必须广播事件，计划二的 gRPC 流靠它把撤销推给 SDK。
 func TestRevokePublishesEvent(t *testing.T) {
-	st, pub, clk := newSessionParts(t)
-	svc := service.NewSessionServiceWithClock(st, pub, clk.Now)
+	st, pub, ep, clk := newSessionParts(t)
+	svc := service.NewSessionServiceWithClock(st, pub, ep, clk.Now)
 	app := testApp()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -227,7 +227,8 @@ func TestRevokeAnnouncesPartialProgressOnError(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
 	st := store.NewSessionStore(rdb)
 	pub := store.NewRevokePublisher(rdb)
-	svc := service.NewSessionServiceWithClock(st, pub, func() int64 { return time.Now().UnixMilli() })
+	ep := store.NewEpochStore(rdb)
+	svc := service.NewSessionServiceWithClock(st, pub, ep, func() int64 { return time.Now().UnixMilli() })
 	app := testApp()
 	uid := uuid.New()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -355,6 +356,7 @@ func TestRevokeAnnounceSurvivesCtxCancellation(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
 	st := store.NewSessionStore(rdb)
 	pub := store.NewRevokePublisher(rdb)
+	ep := store.NewEpochStore(rdb)
 	app := testApp()
 	uid := uuid.New()
 
@@ -369,7 +371,7 @@ func TestRevokeAnnounceSurvivesCtxCancellation(t *testing.T) {
 	defer closeFn()
 
 	// 签发用普通时钟，不触发取消。
-	issueSvc := service.NewSessionServiceWithClock(st, pub, func() int64 { return time.Now().UnixMilli() })
+	issueSvc := service.NewSessionServiceWithClock(st, pub, ep, func() int64 { return time.Now().UnixMilli() })
 	sess, err := issueSvc.Issue(context.Background(), service.IssueInput{UserID: uid, App: app})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -379,7 +381,7 @@ func TestRevokeAnnounceSurvivesCtxCancellation(t *testing.T) {
 	// 这个时钟只会在 revokeMatching 的 defer 里被调用那一次用到——
 	// 此时 Delete 已经成功、循环已经跑完，cancel() 在这里触发不会打断
 	// 任何一次 Redis 操作，只会让随后的 announce 拿到一个已取消的 ctx。
-	revokeSvc := service.NewSessionServiceWithClock(st, pub, func() int64 {
+	revokeSvc := service.NewSessionServiceWithClock(st, pub, ep, func() int64 {
 		cancel()
 		return time.Now().UnixMilli()
 	})

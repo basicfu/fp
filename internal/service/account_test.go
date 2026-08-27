@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -14,12 +15,21 @@ import (
 )
 
 // accountEnv 是 AccountService 的一套完整依赖，测试按需取用。
+//
+// sessions 用可控的假时钟驱动（而不是 newAccountEnv 早先版本里的真实时钟）：
+// 纪元相关的用例需要在"签发"与"校验"之间推进时间来触发轮换边界
+// （见 session_epoch_test.go 的 TestRotationInheritsEpoch），本包既有的
+// account_test.go 用例都不依赖真实时间流逝，切换到假时钟对它们零影响。
 type accountEnv struct {
 	accounts *service.AccountService
 	users    *service.UserService
 	sessions *service.SessionService
 	apps     *service.ApplicationService
 	logs     *service.LoginLogService
+	epochs   *store.EpochStore
+	// app 是一个不落库的测试应用，供不需要真实 DB 应用记录的用例直接用。
+	app   *domain.Application
+	clock *fakeClock
 }
 
 func newAccountEnv(t *testing.T) *accountEnv {
@@ -27,15 +37,49 @@ func newAccountEnv(t *testing.T) *accountEnv {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 	users := service.NewUserService(pool)
-	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb))
+	epochs := store.NewEpochStore(rdb)
+	clock := newFakeClock(time.Now().UnixMilli())
+	sessions := service.NewSessionServiceWithClock(
+		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, clock.Now)
 	logs := service.NewLoginLogService(pool)
 	return &accountEnv{
-		accounts: service.NewAccountService(users, sessions, logs),
+		accounts: service.NewAccountService(users, sessions, epochs, logs),
 		users:    users,
 		sessions: sessions,
 		apps:     service.NewApplicationService(pool),
 		logs:     logs,
+		epochs:   epochs,
+		app:      testApp(),
+		clock:    clock,
 	}
+}
+
+// newActiveUser 建一个状态为 ACTIVE 的新用户。每次调用用一个随机登录标识，
+// 这样测试里循环建多个用户不会因 identity 撞车而互相覆盖成同一行。
+func (e *accountEnv) newActiveUser(t *testing.T) *domain.User {
+	t.Helper()
+	return newActiveUserWith(t, e.users)
+}
+
+// appWithPolicy 造一个不落库的应用，套用给定的会话策略改动。
+// 与 e.app 的区别是每次调用都返回一个独立实例，互不干扰。
+func (e *accountEnv) appWithPolicy(t *testing.T, mutate func(*domain.SessionPolicy)) *domain.Application {
+	t.Helper()
+	return testApp(mutate)
+}
+
+// newActiveUserWith 是 accountEnv.newActiveUser 与 sessionEnv.newActiveUser
+// 共用的实现：两者都需要"每次调用给出一个全新的、状态 ACTIVE 的用户"，
+// 分别各写一份的话，一份改了行为另一份很容易忘记同步。
+func newActiveUserWith(t *testing.T, users *service.UserService) *domain.User {
+	t.Helper()
+	u, _, _, err := users.EnsureUserWithIdentity(context.Background(), service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: uuid.NewString(),
+	})
+	if err != nil {
+		t.Fatalf("newActiveUser: %v", err)
+	}
+	return u
 }
 
 // seedUserWithSession 建一个用户并给它签发一个会话，返回两者。

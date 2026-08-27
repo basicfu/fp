@@ -18,20 +18,28 @@ import (
 // SDK 只按 cache_ttl 缓存判定结果，永远不自己推断 token 是否过期，
 // 因此不存在「一处延期、另一处按旧 expiry 误判」的竞态。
 type SessionService struct {
-	store *store.SessionStore
-	pub   *store.RevokePublisher
+	store  *store.SessionStore
+	pub    *store.RevokePublisher
+	epochs EpochStore
 	// now 返回当前毫秒时间戳。可注入，便于测试过期与轮换边界。
 	now func() int64
 }
 
+// EpochStore 是 SessionService 需要的最小纪元能力。
+// 用窄接口而非直接依赖 *store.EpochStore，是为了让测试能注入桩，
+// 也让这层的意图一目了然：它只读写一个计数器。
+type EpochStore interface {
+	Current(ctx context.Context, userID uuid.UUID) (int64, error)
+}
+
 // NewSessionService 构造使用真实时钟的 SessionService。
-func NewSessionService(st *store.SessionStore, pub *store.RevokePublisher) *SessionService {
-	return NewSessionServiceWithClock(st, pub, func() int64 { return time.Now().UnixMilli() })
+func NewSessionService(st *store.SessionStore, pub *store.RevokePublisher, ep EpochStore) *SessionService {
+	return NewSessionServiceWithClock(st, pub, ep, func() int64 { return time.Now().UnixMilli() })
 }
 
 // NewSessionServiceWithClock 构造使用自定义时钟的 SessionService。
-func NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublisher, now func() int64) *SessionService {
-	return &SessionService{store: st, pub: pub, now: now}
+func NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublisher, ep EpochStore, now func() int64) *SessionService {
+	return &SessionService{store: st, pub: pub, epochs: ep, now: now}
 }
 
 // IssueInput 描述一次签发请求。
@@ -54,6 +62,13 @@ func (s *SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Sess
 		return nil, err
 	}
 
+	// 纪元在这里读、刻进会话。读得越早能拦住的撤销越多，但不能早于登录流程本身；
+	// 这个读之前发生的撤销由 AuthService.recheckLoginable 兜住（见本任务开头的论证）。
+	epoch, err := s.epochs.Current(ctx, in.UserID)
+	if err != nil {
+		return nil, err
+	}
+
 	now := s.now()
 	idle := in.App.Session.IdleTimeoutFor(in.Mobile)
 
@@ -69,6 +84,7 @@ func (s *SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Sess
 		IP:             in.IP,
 		UA:             in.UA,
 		Mobile:         in.Mobile,
+		Epoch:          epoch,
 	}
 	if err := s.store.Put(ctx, sess, idle); err != nil {
 		return nil, err
@@ -133,6 +149,21 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 	}
 	// token 与应用必须匹配：A 应用签发的 token 不能在 B 应用上使用。
 	if sess.AppID != app.ID {
+		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
+
+	// 纪元比对：会话刻的纪元与当前不一致，说明它是在一次撤销的竞态窗口里
+	// 签发的，撤销的清扫没扫到它。
+	epoch, err := s.epochs.Current(ctx, sess.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if epoch != sess.Epoch {
+		// 主动删掉：留着它只会让后续每次校验都白跑两趟 Redis，
+		// 而它永远不可能再通过。
+		if err := s.store.Delete(ctx, sess.Token); err != nil {
+			slog.Error("service: 删除纪元失配的会话失败", "err", err, "sessionId", sess.ID)
+		}
 		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
 	}
 
@@ -277,6 +308,13 @@ func (s *SessionService) ListByUser(ctx context.Context, userID uuid.UUID) ([]do
 	return out, nil
 }
 
+// maxTokensPerEvent 是单条撤销事件能携带的 token 上限。
+//
+// 一万个用户 × 每人 3 个会话 = 三万个 token，序列化后约 1 MB；广播给 20 个
+// fp 实例就是 20 MB，SDK 侧还要吃一个逼近 gRPC 默认 4 MB 接收上限的消息。
+// 超出就切成多条——"批量"是为了减少广播条数，不是为了把单条撑到无界。
+const maxTokensPerEvent = 1000
+
 // Revoke 作废单个 token 所属的**整个会话**，用于登出。
 //
 // 注意它撤销的是会话而不只是这一个 token：轮换过渡期内同一个会话有新旧
@@ -292,7 +330,7 @@ func (s *SessionService) Revoke(ctx context.Context, token, reason string) error
 	if err != nil {
 		return err
 	}
-	_, err = s.revokeMatching(ctx, sess.UserID, sess.AppID, reason, func(x *domain.Session) bool {
+	_, err = s.revokeMatching(ctx, []uuid.UUID{sess.UserID}, sess.AppID, reason, func(x *domain.Session) bool {
 		return x.ID == sess.ID
 	})
 	return err
@@ -300,49 +338,58 @@ func (s *SessionService) Revoke(ctx context.Context, token, reason string) error
 
 // RevokeSession 作废一个会话的全部 token，包括轮换过渡期内尚存的旧 token。
 // sessionID 不属于该用户时不做任何事，返回 0。
+//
+// 绝不能递增撤销纪元：纪元是用户级的，递增会把该用户全部设备一起踢下线，
+// 一次"踢掉这台平板"就会连累手机、电脑。这层压根不持有 EpochBumper
+// （只有 AccountService 持有），结构上就做不到误加。
 func (s *SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, sessionID, reason string) (int, error) {
-	return s.revokeMatching(ctx, userID, uuid.Nil, reason, func(sess *domain.Session) bool {
+	return s.revokeMatching(ctx, []uuid.UUID{userID}, uuid.Nil, reason, func(sess *domain.Session) bool {
 		return sess.ID == sessionID
 	})
 }
 
-// RevokeUser 作废该用户的全部会话。用于封号、改密。
+// RevokeUsers 撤销一批用户的全部会话。
 //
-// 这里不直接调用 store.DeleteUserTokens 做批量删除：撤销事件必须携带具体的
-// token 列表（SDK 按 token 缓存校验结果，只给 userID 无从得知该清哪些缓存
-// 条目），而 DeleteUserTokens 只返回删除的条数，不返回具体是哪些 token，
-// 所以这里走 revokeMatching 逐个 token 处理。
-//
-// 顺带记一笔 DeleteUserTokens 自身的契约，供以后想换成它做批量优化的人参考：
-// 它分批删除，中途某一批失败时会**同时**返回已经真实删除的条数和一个非
-// nil 错误——那些删除已经在 Redis 里真实发生了，"出错就当 0 个"会让管理员
-// 误以为撤销完全没生效。
+// 这是**唯一实现**：revokeMatching 本身就是按 userIDs 切片写的，Revoke /
+// RevokeSession / RevokeUser / RevokeUserInApp 全部只是它在不同参数下的
+// 特例，单用户路径永远传一个元素的切片。两套实现意味着修一个 bug 要改
+// 两处，而漏改的那一处不会有任何测试变红——两条路径各有各的绿测试。
+func (s *SessionService) RevokeUsers(ctx context.Context, userIDs []uuid.UUID, reason string) (int, error) {
+	return s.revokeMatching(ctx, userIDs, uuid.Nil, reason, func(*domain.Session) bool { return true })
+}
+
+// RevokeUser 撤销单个用户的全部会话。用于封号、改密。是 RevokeUsers 的单元素包装。
 func (s *SessionService) RevokeUser(ctx context.Context, userID uuid.UUID, reason string) (int, error) {
-	return s.revokeMatching(ctx, userID, uuid.Nil, reason, func(*domain.Session) bool { return true })
+	return s.RevokeUsers(ctx, []uuid.UUID{userID}, reason)
 }
 
 // RevokeUserInApp 只作废该用户在指定应用下的会话。
 // 多个应用共享同一套用户体系时，封禁某个应用的账号不应波及其他应用。
 func (s *SessionService) RevokeUserInApp(ctx context.Context, userID, appID uuid.UUID, reason string) (int, error) {
-	return s.revokeMatching(ctx, userID, appID, reason, func(sess *domain.Session) bool {
+	return s.revokeMatching(ctx, []uuid.UUID{userID}, appID, reason, func(sess *domain.Session) bool {
 		return sess.AppID == appID
 	})
 }
 
-// revokeMatching 遍历该用户的会话，删除满足 match 的那些，并广播一次事件。
+// revokeMatching 遍历这些用户的会话，删除满足 match 的那些，按 maxTokensPerEvent
+// 切片广播。
+//
+// userIDs 为多个元素时是 RevokeUsers 的批量路径；Revoke / RevokeSession /
+// RevokeUser / RevokeUserInApp 这些单用户入口都传一个元素的切片——这是全部
+// 撤销操作**唯一**的底层实现，不能有第二份（理由见 RevokeUsers 的注释）。
 //
 // eventAppID 直接写入事件而不从会话推断：会话删除后已无从查证，
 // 而调用方本来就知道这次撤销的作用域（uuid.Nil 表示跨全部应用）。
 func (s *SessionService) revokeMatching(
 	ctx context.Context,
-	userID, eventAppID uuid.UUID,
+	userIDs []uuid.UUID, eventAppID uuid.UUID,
 	reason string,
 	match func(*domain.Session) bool,
 ) (int, error) {
-	tokens, err := s.store.ListUserTokens(ctx, userID)
-	if err != nil {
-		return 0, err
-	}
+	var (
+		tokens  []string
+		touched []uuid.UUID
+	)
 
 	// 中途出错时，已经删掉的 token 必须照样广播出去。
 	//
@@ -350,45 +397,72 @@ func (s *SessionService) revokeMatching(
 	// announce，SDK 那边就收不到通知，会继续拿本地缓存放行最长一个 cache_ttl。
 	// 所以这里用 defer 兜住：无论正常返回还是中途返回，只要删过东西就广播，
 	// 并如实返回"已撤销的条数 + 错误"，而不是谎报 0。
-	var revoked []string
+	//
+	// 用 WithoutCancel 剥掉取消信号。
+	//
+	// 触发这个 defer 的失败里，最常见的一种恰恰就是 ctx 被取消——
+	// 管理员对大批用户执行撤销撞上 handler 超时、或客户端断开。那时
+	// store.Delete 因 ctx 报错退出，而 deferred 的 announce 若沿用
+	// 同一个已死的 ctx，go-redis 会在取连接阶段直接拒掉 PUBLISH——
+	// token 已经从 Redis 删了，事件却发不出去，SDK 继续用缓存放行
+	// 一整个 cache_ttl。这正是 defer 要堵的洞，不剥掉取消信号就等于没堵。
 	defer func() {
-		if len(revoked) == 0 {
+		if len(tokens) == 0 {
 			return
 		}
-		// 用 WithoutCancel 剥掉取消信号。
-		//
-		// 触发这个 defer 的失败里，最常见的一种恰恰就是 ctx 被取消——
-		// 管理员对上千个会话执行 RevokeUser 撞上 handler 超时、或客户端断开。
-		// 那时 store.Delete 因 ctx 报错退出，而 deferred 的 announce 若沿用
-		// 同一个已死的 ctx，go-redis 会在取连接阶段直接拒掉 PUBLISH——
-		// token 已经从 Redis 删了，事件却发不出去，SDK 继续用缓存放行
-		// 一整个 cache_ttl。这正是 defer 要堵的洞，不剥掉取消信号就等于没堵。
-		s.announce(context.WithoutCancel(ctx), domain.RevokeEvent{
-			Tokens: revoked,
-			UserID: userID,
-			AppID:  eventAppID,
-			Reason: reason,
-			At:     s.now(),
-		})
+		s.announceBatch(context.WithoutCancel(ctx), tokens, touched, eventAppID, reason)
 	}()
 
-	for _, tok := range tokens {
+	for _, uid := range userIDs {
+		before := len(tokens)
+		err := s.revokeUserTokens(ctx, uid, match, &tokens)
+		// 没有贡献 token 的用户不进 touched——批量踢 500 个用户时大多数本来
+		// 就不在线，给它们各发一条空事件等于把刚省下的广播又加回来。即使
+		// 这个用户处理到一半出错，只要它已经贡献过 token，也要算进
+		// touched，否则事件里的 Tokens 与 UserIDs 会对不上。
+		if len(tokens) > before {
+			touched = append(touched, uid)
+		}
+		if err != nil {
+			return len(tokens), err
+		}
+	}
+	return len(tokens), nil
+}
+
+// revokeUserTokens 删除单个用户满足 match 的会话，把被删的 token 追加进 *tokens。
+//
+// 这里不直接调用 store.DeleteUserTokens 做批量删除：撤销事件必须携带具体的
+// token 列表（SDK 按 token 缓存校验结果，只给 userID 无从得知该清哪些缓存
+// 条目），而 DeleteUserTokens 只返回删除的条数，不返回具体是哪些 token，
+// 所以这里逐个 token 处理。
+//
+// 顺带记一笔 DeleteUserTokens 自身的契约，供以后想换成它做批量优化的人参考：
+// 它分批删除，中途某一批失败时会**同时**返回已经真实删除的条数和一个非
+// nil 错误——那些删除已经在 Redis 里真实发生了，"出错就当 0 个"会让管理员
+// 误以为撤销完全没生效。
+func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID, match func(*domain.Session) bool, tokens *[]string) error {
+	toks, err := s.store.ListUserTokens(ctx, userID)
+	if err != nil {
+		return err
+	}
+	for _, tok := range toks {
 		sess, err := s.store.Get(ctx, tok)
 		if errors.Is(err, domain.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return len(revoked), err
+			return err
 		}
 		if !match(sess) {
 			continue
 		}
 		if err := s.store.Delete(ctx, tok); err != nil {
-			return len(revoked), err
+			return err
 		}
-		revoked = append(revoked, tok)
+		*tokens = append(*tokens, tok)
 	}
-	return len(revoked), nil
+	return nil
 }
 
 // announce 广播撤销事件。发布失败只记日志不返回错误——
@@ -399,7 +473,24 @@ func (s *SessionService) announce(ctx context.Context, ev domain.RevokeEvent) {
 		return
 	}
 	if err := s.pub.Publish(ctx, ev); err != nil {
-		slog.Error("service: 广播撤销事件失败", "err", err, "userId", ev.UserID)
+		slog.Error("service: 广播撤销事件失败", "err", err, "userIds", ev.UserIDs)
+	}
+}
+
+// announceBatch 把一批 token 按 maxTokensPerEvent 切片广播。
+//
+// 切片时 UserIDs 原样带在每一条上：它只用于日志，精确对应哪一片没有意义，
+// 而"这批撤销涉及哪些用户"对排障是有意义的。
+func (s *SessionService) announceBatch(ctx context.Context, tokens []string, userIDs []uuid.UUID, appID uuid.UUID, reason string) {
+	for start := 0; start < len(tokens); start += maxTokensPerEvent {
+		end := min(start+maxTokensPerEvent, len(tokens))
+		s.announce(ctx, domain.RevokeEvent{
+			Tokens:  tokens[start:end],
+			UserIDs: userIDs,
+			AppID:   appID,
+			Reason:  reason,
+			At:      s.now(),
+		})
 	}
 }
 
