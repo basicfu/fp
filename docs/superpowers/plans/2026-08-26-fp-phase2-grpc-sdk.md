@@ -610,12 +610,33 @@ go get google.golang.org/protobuf@v1.36.12
 
 测试放 `sdk/contract_test.go`，**不能**放在 `sdk/gen/` 下——`buf.gen.yaml` 的 `clean: true` 会在每次生成时删掉整个 `sdk/gen` 目录，手写测试放进去会被无声删除。
 
-同时创建 `sdk/doc.go` 声明包（Task 8 会往里填内容）。只有测试文件、没有任何非测试文件的目录，`go test` 无法确定包名：
+同时创建 `sdk/doc.go`。只有测试文件、没有任何非测试文件的目录，`go test` 无法确定包名。
+
+**包注释只放这一个文件里**——一个包写两份包注释是 lint 问题，而后续任务还会往 `sdk/` 加好几个文件：
 
 ```go
 // Package fpsdk 是 fp 的 Go 接入 SDK。
+//
+// 最小用法：
+//
+//	client, err := fpsdk.New(fpsdk.Options{
+//	    Addr:      "fp.internal:9090",
+//	    AppID:     os.Getenv("FP_APP_ID"),
+//	    AppSecret: os.Getenv("FP_APP_SECRET"),
+//	})
+//	defer client.Close()
+//	http.Handle("/api/", client.Auth().Middleware(apiHandler))
+//
+// SDK 跑在业务方进程里，**任何一处 panic 都等于业务方崩溃**，
+// 因此本包内不使用 panic，参数错误一律经 error 返回。
+//
+// 本包不得 import internal/ 下的任何包。Go 的 internal 规则不会拦住
+// 同 module 内的引用，编译能过——这条只能靠纪律和评审维持。
 package fpsdk
 ```
+
+> 上面的示例里 `New` / `Auth()` / `Middleware` 要到 Task 8、10、11 才存在。
+> 包注释是文档，不参与编译，先写完整版即可。
 
 `sdk/contract_test.go`：
 
@@ -838,7 +859,6 @@ git commit -m "feat(proto): AuthService 契约与 buf 代码生成管线"
 - Modify: `internal/domain/session.go`（`Session` 加 `Epoch`；`RevokeEvent.UserID` → `UserIDs []uuid.UUID`）
 - Modify: `internal/service/session.go`（`Issue` 刻入纪元、`Validate` 比对、`revokeMatching` 支持多用户与切片）
 - Modify: `internal/service/account.go`（递增纪元；批量方法）
-- Modify: `internal/grpcapi/watch.go`（`revokeEvent` 映射 `UserIDs`）
 - Modify: `cmd/fp/main.go`（装配 `EpochStore`）
 - Modify: 所有 `NewSessionService` / `NewAccountService` 的调用点（编译错误会全部指出来）
 
@@ -4227,34 +4247,11 @@ func TestOptionsFillDefaults(t *testing.T) {
 	o := Options{Addr: "x:9090", AppID: "a", AppSecret: "s"}
 	o.applyDefaults()
 
-	if o.CacheSize <= 0 {
-		t.Errorf("CacheSize 默认值为 %d", o.CacheSize)
-	}
-	if o.DegradedCacheTTL <= 0 {
-		t.Errorf("DegradedCacheTTL 默认值为 %v", o.DegradedCacheTTL)
-	}
 	if o.ValidateTimeout <= 0 {
 		t.Errorf("ValidateTimeout 默认值为 %v", o.ValidateTimeout)
 	}
 	if o.Logger == nil {
 		t.Error("Logger 默认值为 nil，SDK 内部日志会 panic")
-	}
-}
-
-// TestStaleFallbackIsOffByDefault 钉住降级方向的默认值。
-//
-// AllowStaleOnOutage 零值 false = fp 不可达且缓存已过期时拒绝。
-// 字段刻意命名为"允许用陈旧数据"而不是它的反面，是为了让放宽的那个方向
-// 必须被显式写出来——没人会主动去关掉一项他不知道存在的开关，
-// 所以零值必须落在安全的一侧。
-func TestStaleFallbackIsOffByDefault(t *testing.T) {
-	var o Options
-	o.applyDefaults()
-	if o.AllowStaleOnOutage {
-		t.Fatal("默认允许使用陈旧缓存——fp 一挂，已被撤销的会话会继续通行")
-	}
-	if o.MaxStaleness <= 0 {
-		t.Fatalf("MaxStaleness 默认值为 %v——陈旧兜底必须有上限，否则 fp 长时间不可用时会无限延用", o.MaxStaleness)
 	}
 }
 
@@ -4293,33 +4290,23 @@ func TestValidateRejectsNegativeDurations(t *testing.T) {
 
 `sdk/options.go`：
 
+**包注释在 `sdk/doc.go`（Task 1 已建），本文件不要再写一份**——一个包只该有一个包注释。
+
 ```go
-// Package fpsdk 是 fp 的 Go 接入 SDK。
-//
-// 最小用法：
-//
-//	client, err := fpsdk.New(fpsdk.Options{
-//	    Addr:      "fp.internal:9090",
-//	    AppID:     os.Getenv("FP_APP_ID"),
-//	    AppSecret: os.Getenv("FP_APP_SECRET"),
-//	})
-//	defer client.Close()
-//	http.Handle("/api/", client.Auth().Middleware(apiHandler))
-//
-// SDK 跑在业务方进程里，**任何一处 panic 都等于业务方崩溃**，
-// 因此本包内不使用 panic，参数错误一律经 error 返回。
 package fpsdk
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"time"
-
-	"github.com/basicfu/fp/internal/domain" // ← 禁止！见下方说明
 )
 
 // Options 是 SDK 的全部配置。
+//
+// 本任务只定义连接层用得到的字段；缓存与降级相关的选项由 Task 9、Task 10
+// 各自随其读取方一起加入，避免出现"字段存在但没人读"的悬空配置。
 type Options struct {
 	// Addr 是 fp 的 gRPC 地址，形如 "fp.internal:9090"。
 	Addr string
@@ -4335,66 +4322,27 @@ type Options struct {
 	// TLSConfig 自定义 TLS 配置。为 nil 且 Insecure 为 false 时用系统根证书。
 	TLSConfig *tls.Config
 
-	// CacheSize 是本地校验结果缓存的容量上限（条）。默认 10000。
-	CacheSize int
-	// DegradedCacheTTL 是**推送流断开时**的缓存时长上限。默认 5 秒。
-	//
-	// 推送断开意味着撤销的"加速"能力消失，只剩 TTL 兜底。主动收紧窗口
-	// 把安全性拉回来——这是 gRPC 流状态可感知才做得了的事。
-	DegradedCacheTTL time.Duration
 	// ValidateTimeout 是单次回源的超时。默认 2 秒。
 	ValidateTimeout time.Duration
-
-	// AllowStaleOnOutage 决定 fp 不可达时能否继续使用**已过期**的缓存条目。
-	//
-	// 注意它不是通常意义上的 "fail-open"。鉴权中间件放行却拿不出用户身份是
-	// 讲不通的——那等于接受一个无法验证的 token。真正有意义的降级是
-	// "继续用刚才验过的那个身份"：身份是已知的，只是刷新不了。
-	// 完全没有缓存条目时，无论本开关如何都必须拒绝，因为根本没有身份可用。
-	//
-	// 零值 false = 不允许。字段命名为"允许"而非它的反面，是为了让放宽的
-	// 方向必须被显式写出来——零值必须落在安全的一侧。
-	AllowStaleOnOutage bool
-	// MaxStaleness 是 AllowStaleOnOutage 生效时，缓存条目最多能被延用多久
-	// （从它本该过期的时刻起算）。默认 5 分钟。
-	//
-	// 必须有上限：没有上限的话，fp 停机一整天，一个早已被踢下线的会话
-	// 就能畅通一整天。它是"可用性"与"撤销及时性"之间的显式取舍旋钮。
-	MaxStaleness time.Duration
 
 	// Logger 是 SDK 内部日志。为 nil 时用 slog.Default()。
 	Logger *slog.Logger
 }
 ```
 
-> **⚠️ 上面的 import 块里那行 `internal/domain` 是反例，实现时必须删掉。**
-> Global Constraints 明确禁止 `sdk/` 依赖 `internal/`。Go 的 internal 规则
-> 不会拦住同 module 内的引用，编译能过——所以这条只能靠纪律和评审。
-> SDK 需要的类型（用户信息、撤销原因）一律用 `sdk/gen/fp/v1` 里的生成类型，
-> 或在 `sdk/` 内自定义。
+> **`sdk/` 包不得 import `internal/` 下的任何包**（Global Constraints）。
+> Go 的 internal 规则不会拦住同 module 内的引用，编译能过——所以这条
+> 只能靠纪律和评审。SDK 需要的类型（用户信息、撤销原因）一律取自
+> `sdk/gen/fp/v1` 的生成类型，或在 `sdk/` 内自定义。
 
 `applyDefaults` / `validate` / `newAppCredentials`：
 
 ```go
-const (
-	defaultCacheSize        = 10000
-	defaultDegradedCacheTTL = 5 * time.Second
-	defaultValidateTimeout  = 2 * time.Second
-	defaultMaxStaleness     = 5 * time.Minute
-)
+const defaultValidateTimeout = 2 * time.Second
 
 func (o *Options) applyDefaults() {
-	if o.CacheSize <= 0 {
-		o.CacheSize = defaultCacheSize
-	}
-	if o.DegradedCacheTTL <= 0 {
-		o.DegradedCacheTTL = defaultDegradedCacheTTL
-	}
 	if o.ValidateTimeout <= 0 {
 		o.ValidateTimeout = defaultValidateTimeout
-	}
-	if o.MaxStaleness <= 0 {
-		o.MaxStaleness = defaultMaxStaleness
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -4409,14 +4357,8 @@ func (o Options) validate() error {
 		return errors.New("fpsdk: Options.AppID 不能为空")
 	case o.AppSecret == "":
 		return errors.New("fpsdk: Options.AppSecret 不能为空")
-	case o.CacheSize < 0:
-		return errors.New("fpsdk: Options.CacheSize 不能为负")
-	case o.DegradedCacheTTL < 0:
-		return errors.New("fpsdk: Options.DegradedCacheTTL 不能为负")
 	case o.ValidateTimeout < 0:
 		return errors.New("fpsdk: Options.ValidateTimeout 不能为负")
-	case o.MaxStaleness < 0:
-		return errors.New("fpsdk: Options.MaxStaleness 不能为负")
 	}
 	return nil
 }
@@ -4507,8 +4449,6 @@ func (s *stubServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 type stubEnv struct {
 	stub   *stubServer
 	client *Client
-	// auth 在 Task 10 加上（= client.Auth()）。Task 8 阶段还没有 Auth 类型。
-	auth *Auth
 	// addr 是桩服务端的真实监听地址，重连测试要用它在原端口重启。
 	addr string
 	// stop 停掉桩服务端，模拟 fp 宕机。
@@ -4651,10 +4591,6 @@ type Client struct {
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
 	streamUp atomic.Bool
 
-	// auth 在 New 里构造一次，之后不再替换，因此无需同步保护。
-	// Watch 循环直接调用 c.auth.onRevoke 消费撤销事件。
-	auth *Auth
-
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -4757,18 +4693,16 @@ func (c *Client) watchOnce(ctx context.Context) error {
 		case msg.GetReady() != nil:
 			// 只有收到 ready 才置为健康：此前服务端可能还没订上撤销频道，
 			// 那段时间的事件会丢，而 SDK 若已认为健康就不会收紧缓存窗口。
-			//
-			// 同时清空缓存（Task 10 补上）：断开期间发生的撤销一条都没收到，
-			// 缓存里的任何条目都可能是已被撤销的会话。
 			c.streamUp.Store(true)
 		case msg.GetRevoke() != nil:
-			c.auth.onRevoke(msg.GetRevoke())
+			// 本任务只有连接层，还没有缓存可清。Task 10 会把这里换成
+			// 真正的缓存失效，并在 ready 分支补上重连后的整体清空。
+			c.opts.Logger.Debug("fpsdk: 收到撤销事件",
+				"tokens", len(msg.GetRevoke().GetTokens()),
+				"reason", msg.GetRevoke().GetReason())
 		case msg.GetPurge() != nil:
-			// 服务端确知自己漏读了撤销事件，但不知道漏了哪些。
-			// 唯一安全的动作是把本地缓存整个丢掉。
-			c.opts.Logger.Warn("fpsdk: 按服务端要求清空校验缓存",
+			c.opts.Logger.Warn("fpsdk: 收到服务端的缓存清空指令",
 				"reason", msg.GetPurge().GetReason())
-			c.auth.onPurge()
 		default:
 			// 未知事件类型（将来的 ConfigChanged / PolicyChanged）。
 			// 忽略，不要报错——oneof 的向前兼容就靠这里。
@@ -4806,7 +4740,23 @@ git commit -m "feat(sdk): 连接层——应用凭据、keepalive、推送流重
 **Files:**
 - Create: `sdk/cache.go`
 - Test: `sdk/cache_test.go`
+- Modify: `sdk/options.go`（加 `CacheSize` 及其默认值——**本任务是它的第一个读者**）
+- Modify: `sdk/options_test.go`（补 `CacheSize` 的默认值断言）
 - Modify: `go.mod`（引入 `github.com/hashicorp/golang-lru/v2`）
+
+> **选项字段随读取方一起加入。** Task 8 只声明了连接层用到的字段；
+> `CacheSize` 在本任务才有读者，所以在本任务加。反过来先把整个 Options
+> 声明完整、留一堆没人读的字段，正是第一阶段反复出现的那类问题。
+>
+> 本任务要加的：
+>
+> ```go
+> // CacheSize 是本地校验结果缓存的容量上限（条）。默认 10000。
+> CacheSize int
+> ```
+>
+> `applyDefaults` 补 `if o.CacheSize <= 0 { o.CacheSize = defaultCacheSize }`
+> （`defaultCacheSize = 10000`），`validate` 补 `case o.CacheSize < 0:` 分支。
 
 **Interfaces:**
 - Produces: `newCache(size int, now func() time.Time) (*cache, error)`
@@ -5162,8 +5112,62 @@ git commit -m "feat(sdk): LRU+TTL 校验结果缓存，收紧窗口在读取时�
 **Files:**
 - Create: `sdk/auth.go`
 - Test: `sdk/auth_test.go`
-- Modify: `sdk/client.go`（`Auth()` 访问器、注册 `onRevoke`）
+- Modify: `sdk/client.go`（加 `auth *Auth` 字段与 `Auth()` 访问器；把 `watchOnce` 里 Task 8 留下的日志换成真正的缓存失效）
+- Modify: `sdk/options.go`、`sdk/options_test.go`（加降级相关的三个字段——**本任务是它们的第一个读者**）
+- Modify: `sdk/client_test.go`（`stubEnv` 加 `auth` 字段 = `client.Auth()`）
 - Modify: `go.mod`（引入 `golang.org/x/sync`）
+
+> **本任务要加的选项字段**（连同默认值与校验分支）：
+>
+> ```go
+> // DegradedCacheTTL 是**推送流断开时**的缓存时长上限。默认 5 秒。
+> //
+> // 推送断开意味着撤销的"加速"能力消失，只剩 TTL 兜底。主动收紧窗口
+> // 把安全性拉回来——这是 gRPC 流状态可感知才做得了的事。
+> DegradedCacheTTL time.Duration
+>
+> // AllowStaleOnOutage 决定 fp 不可达时能否继续使用**已过期**的缓存条目。
+> //
+> // 它不是通常意义上的 "fail-open"。鉴权中间件放行却拿不出用户身份是
+> // 讲不通的——那等于接受一个无法验证的 token。真正有意义的降级是
+> // "继续用刚才验过的那个身份"：身份已知，只是刷新不了。
+> // 完全没有缓存条目时，无论本开关如何都必须拒绝。
+> //
+> // 零值 false = 不允许。命名为"允许"而非它的反面，是为了让放宽的方向
+> // 必须被显式写出来——零值必须落在安全的一侧。
+> AllowStaleOnOutage bool
+>
+> // MaxStaleness 是 AllowStaleOnOutage 生效时，缓存条目最多能被延用多久
+> // （从它本该过期的时刻起算）。默认 5 分钟。
+> //
+> // 必须有上限：没有上限的话，fp 停机一整天，一个早已被踢下线的会话
+> // 就能畅通一整天。
+> MaxStaleness time.Duration
+> ```
+>
+> `sdk/options_test.go` 补一条：
+>
+> ```go
+> // TestStaleFallbackIsOffByDefault 钉住降级方向的默认值。
+> //
+> // 字段命名为"允许用陈旧数据"而非它的反面，是为了让放宽的那个方向必须被
+> // 显式写出来——没人会主动去关掉一项他不知道存在的开关，零值必须落在
+> // 安全的一侧。
+> func TestStaleFallbackIsOffByDefault(t *testing.T) {
+> 	var o Options
+> 	o.applyDefaults()
+> 	if o.AllowStaleOnOutage {
+> 		t.Fatal("默认允许使用陈旧缓存——fp 一挂，已被撤销的会话会继续通行")
+> 	}
+> 	if o.MaxStaleness <= 0 {
+> 		t.Fatalf("MaxStaleness 默认值为 %v——陈旧兜底必须有上限，"+
+> 			"否则 fp 长时间不可用时会无限延用", o.MaxStaleness)
+> 	}
+> 	if o.DegradedCacheTTL <= 0 {
+> 		t.Fatalf("DegradedCacheTTL 默认值为 %v", o.DegradedCacheTTL)
+> 	}
+> }
+> ```
 
 **Interfaces:**
 - Produces: `(*Client).Auth() *Auth`
@@ -5647,23 +5651,38 @@ func translate(err error) error {
 }
 ```
 
-`sdk/client.go` 补上：
+`sdk/client.go` 的三处改动：
 
 ```go
+// Client 结构体加字段：
+	// auth 在 New 里构造一次，之后不再替换，因此无需同步保护。
+	auth *Auth
+
+// 访问器：
 // Auth 返回认证能力。多次调用返回同一个实例。
 func (c *Client) Auth() *Auth { return c.auth }
 ```
 
-并在 `New` 里构造 `auth` 并注册 `onRevoke` 回调。
+`New` 里在**启动 watch goroutine 之前**构造 `auth`（含缓存）——goroutine 一跑起来就可能调 `c.auth`，构造顺序反了就是 nil 解引用，而它只在恰好有事件到达时才崩，本地测试多半复现不出来。
 
-> **重连后必须清空缓存。** 流断开期间发生的撤销一条都没收到，缓存里的
-> 任何条目都可能是已被撤销的会话。`watchOnce` 收到 `ready` 时（即确认
-> 服务端已重新订上）调用 `cache.purge()`。
-> **首次连接也会走这条路径**，此时缓存本来就是空的，purge 无害。
-> 不清的话，一次网络抖动就会留下一批"推送期间被撤销、SDK 却一无所知"
-> 的条目，它们会一直有效到各自的 TTL 到期。
->
-> **为什么明明有降级收紧还要 purge：** 流断开期间 `StreamHealthy()` 为 false，
+`watchOnce` 把 Task 8 留下的三处日志换成真正的动作：
+
+```go
+		case msg.GetReady() != nil:
+			c.streamUp.Store(true)
+			// 重连后必须清空缓存：断开期间发生的撤销一条都没收到，
+			// 缓存里的任何条目都可能是已被撤销的会话。
+			// 首次连接也走这条路径，此时缓存本来就是空的，无害。
+			c.auth.onPurge()
+		case msg.GetRevoke() != nil:
+			c.auth.onRevoke(msg.GetRevoke())
+		case msg.GetPurge() != nil:
+			c.opts.Logger.Warn("fpsdk: 按服务端要求清空校验缓存",
+				"reason", msg.GetPurge().GetReason())
+			c.auth.onPurge()
+```
+
+> **为什么明明有降级收紧、还要在 ready 时 purge：** 流断开期间 `StreamHealthy()` 为 false，
 > 校验窗口已被收紧到 `DegradedCacheTTL`，绝大部分暴露已经被这一层挡住了。
 > purge 补的是**检测延迟那一段**——从连接实际断掉到 `streamUp` 翻成 false，
 > 硬断开是立即的，但静默黑洞要等满 keepalive `Timeout`（10 秒）。
