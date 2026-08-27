@@ -178,14 +178,23 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 
 	// 轮换优先于延期：轮换本身就会给新会话一个完整的空闲窗口。
 	if now-sess.IssuedAt >= app.Session.RotateInterval().Milliseconds() {
-		rotated, newSess, err := s.tryRotate(ctx, sess, app, now)
+		newToken, newSess, err := s.tryRotate(ctx, sess, app, now)
 		if err != nil {
 			return nil, err
 		}
-		if rotated {
-			res.Session = newSess
+		if newToken != "" {
 			res.Rotated = true
-			res.NewToken = newSess.Token
+			res.NewToken = newToken
+			// newSess 为 nil 时保持 res.Session 为旧会话——这是过渡期内的
+			// 重复告知路径。两者算出的 cache_ttl 恒等：
+			//   GraceDuration = max(15s, cfg)          ⇒ grace ≥ cfg
+			//   SessionPolicy.Validate 保证 cfg ≤ idle ⇒ idle  ≥ cfg
+			//   旧：min(cfg, min(grace, maxRemain)) = min(cfg, maxRemain)
+			//   新：min(cfg, min(idle,  maxRemain)) = min(cfg, maxRemain)
+			// 这个等式依赖 GraceDuration 的定义；改了它必须回来重新验算。
+			if newSess != nil {
+				res.Session = newSess
+			}
 		}
 	} else if now-sess.LastExtendedAt >= app.Session.ExtendInterval().Milliseconds() {
 		extended, err := s.tryExtend(ctx, sess, app, now)
@@ -229,23 +238,38 @@ func (s *SessionService) tryExtend(ctx context.Context, sess *domain.Session, ap
 
 // tryRotate 在拿到去重锁时换发新 token，并把旧 token 缩短到过渡期。
 //
-// 新会话继承 ID 与 FirstAuthAt：轮换只换 token 的值，会话本身没有变。
-// 特别是 FirstAuthAt 绝不能重置，否则 max_lifetime 会被活跃用户无限续命。
-func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, app *domain.Application, now int64) (bool, *domain.Session, error) {
+// 返回值 newToken 为空串表示本次没有轮换。newSess 仅在本请求**亲自完成**
+// 轮换时非空；过渡期内的"重复告知"路径手里只有旧会话，这不影响正确性——
+// 新旧会话算出的 cache_ttl 恒等，证明见本函数下方 Validate 的注释。
+//
+// 新会话继承 ID、FirstAuthAt 与 Epoch：轮换只换 token 的值，会话本身没有变，
+// 也不是新的一次认证。特别是 FirstAuthAt 绝不能重置，否则 max_lifetime 会被
+// 活跃用户无限续命；Epoch 同理，重读会让轮换成为洗白撤销纪元的途径。
+func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, app *domain.Application, now int64) (string, *domain.Session, error) {
 	grace := GraceDuration(app.Session)
 
 	// 锁的 TTL 取过渡期：过渡期内旧 token 仍可用，但不应再次触发轮换。
 	ok, err := s.store.TryLock(ctx, "rot:"+sess.ID, grace)
 	if err != nil {
-		return false, nil, err
+		return "", nil, err
 	}
 	if !ok {
-		return false, nil, nil
+		// 锁被占：本会话刚被另一个并发请求轮换过。取出当时写下的映射，
+		// 把新 token 再告知这一个请求一次。
+		//
+		// 这是本函数存在的第二个理由，也是交接不再依赖"某一个响应必须送达"
+		// 的全部原因。读到空串说明对方还没写完映射（窄空隙），当作未轮换
+		// 返回即可——调用方手里的旧 token 至少还能活一个过渡期。
+		newToken, err := s.store.RotatedTo(ctx, sess.Token)
+		if err != nil {
+			return "", nil, err
+		}
+		return newToken, nil, nil
 	}
 
 	newToken, err := randomToken()
 	if err != nil {
-		return false, nil, err
+		return "", nil, err
 	}
 	idle := app.Session.IdleTimeoutFor(sess.Mobile)
 
@@ -255,7 +279,13 @@ func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, ap
 	newSess.LastExtendedAt = now
 	newSess.IdleExpiresAt = now + idle.Milliseconds()
 	if err := s.store.Put(ctx, &newSess, newSess.RemainingAt(now, app.Session)); err != nil {
-		return false, nil, err
+		return "", nil, err
+	}
+
+	// 写映射必须在新会话落地**之后**：反过来的话，新会话写失败会留下一条
+	// 指向不存在 token 的映射，客户端照着切过去会立刻登出——比不告知更糟。
+	if err := s.store.PutRotation(ctx, sess.Token, newToken, grace); err != nil {
+		return "", nil, err
 	}
 
 	// 旧 token 缩短到过渡期。
@@ -265,18 +295,16 @@ func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, ap
 	//
 	// 特意不改 IssuedAt：过渡期内旧 token 再次被校验时，(now-IssuedAt) 依旧
 	// 越过 rotate_interval，会继续走 Validate 的 if 分支进入 tryRotate——
-	// 但 "rot:"+sess.ID 锁此时仍握着（TTL 正是 grace），会直接把它拦下，
-	// 函数原样返回。这一步真正的作用是把控制流留在 if 分支，不落到
-	// else if 的延期分支：一旦落到延期分支，LastExtendedAt 早已陈旧，会被
-	// 判定为"该延期"，从而把刚缩短的 IdleExpiresAt 重新拉回一整个空闲窗口，
-	// 过渡期形同虚设。
+	// 这正是"重复告知"生效的前提。一旦落到 else if 的延期分支，
+	// LastExtendedAt 早已陈旧，会被判定为"该延期"，从而把刚缩短的
+	// IdleExpiresAt 重新拉回一整个空闲窗口，过渡期形同虚设。
 	oldSess := *sess
 	oldSess.IdleExpiresAt = now + grace.Milliseconds()
 	if err := s.store.Put(ctx, &oldSess, grace); err != nil {
-		return false, nil, err
+		return "", nil, err
 	}
 
-	return true, &newSess, nil
+	return newToken, &newSess, nil
 }
 
 // SessionByToken 按 token 读取会话，不做任何过期判定，也不产生副作用。

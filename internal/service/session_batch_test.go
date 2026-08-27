@@ -17,13 +17,28 @@ import (
 // 不落库的测试应用，以及建号与抓事件的辅助方法。
 //
 // 与 accountEnv 的区别：这里的测试只关心"发了几条事件、每条带了什么"，
-// 不涉及 AccountService 的账号状态耦合，也不需要可控时钟——批量撤销本身
-// 不依赖会话过期/轮换的时间边界。
+// 不涉及 AccountService 的账号状态耦合。
+//
+// clock 用可控假时钟驱动（而不是真实时钟）：轮换交接的测试
+// （session_handoff_test.go）需要在"签发"与"校验"之间精确推进时间来
+// 越过 rotate_interval，本文件既有的批量撤销用例都不依赖真实时间流逝，
+// 切换到假时钟对它们零影响——这与 accountEnv 当初做同样切换时的理由一致。
+//
+// store 是 sessions 内部使用的同一个 *store.SessionStore：轮换交接的测试
+// 需要绕过 SessionService 直接摆弄 Redis 状态（比如显式删除会话模拟 TTL
+// 清理后的状态），光拿到 *service.SessionService 做不到这一点。
+//
+// userID 是一个合成的 UUID：会话相关的测试不要求 userID 对应真实的
+// app_user 行（SessionStore 只认 Redis 里的 token/索引），不必每个用例
+// 都经过 UserService/Postgres 建号。
 type sessionEnv struct {
 	sessions *service.SessionService
 	users    *service.UserService
 	pub      *store.RevokePublisher
+	store    *store.SessionStore
 	app      *domain.Application
+	userID   uuid.UUID
+	clock    *fakeClock
 }
 
 func newSessionEnv(t *testing.T) *sessionEnv {
@@ -31,11 +46,16 @@ func newSessionEnv(t *testing.T) *sessionEnv {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 	pub := store.NewRevokePublisher(rdb)
+	sessStore := store.NewSessionStore(rdb)
+	clock := newFakeClock(time.Now().UnixMilli())
 	return &sessionEnv{
-		sessions: service.NewSessionService(store.NewSessionStore(rdb), pub, store.NewEpochStore(rdb)),
+		sessions: service.NewSessionServiceWithClock(sessStore, pub, store.NewEpochStore(rdb), clock.Now),
 		users:    service.NewUserService(pool),
 		pub:      pub,
+		store:    sessStore,
 		app:      testApp(),
+		userID:   uuid.New(),
+		clock:    clock,
 	}
 }
 
@@ -44,6 +64,16 @@ func newSessionEnv(t *testing.T) *sessionEnv {
 func (e *sessionEnv) newActiveUser(t *testing.T) *domain.User {
 	t.Helper()
 	return newActiveUserWith(t, e.users)
+}
+
+// appWithPolicy 造一个不落库的应用，套用给定的会话策略改动。
+// 与 e.app 的区别是每次调用都返回一个独立实例，互不干扰。
+//
+// 实现与 accountEnv.appWithPolicy 相同（见 account_test.go），两份 env
+// 各自持有一份是因为它们服务不同的测试文件分组，而不是行为有分歧。
+func (e *sessionEnv) appWithPolicy(t *testing.T, mutate func(*domain.SessionPolicy)) *domain.Application {
+	t.Helper()
+	return testApp(mutate)
 }
 
 // seedSessions 造出至少 n 个会话，用少量用户各开多个会话——比逐个建 DB 用户

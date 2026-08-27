@@ -22,6 +22,8 @@ const (
 	sessionKeyPrefix   = "fp:sess:"
 	userSessionsPrefix = "fp:usess:"
 	sessionLockPrefix  = "fp:lock:"
+	// rotationPrefix 是「旧 token → 新 token」映射的键前缀。
+	rotationPrefix = "fp:rot:"
 )
 
 // SessionStore 用 Redis 存放会话。
@@ -220,4 +222,38 @@ func (s *SessionStore) TryLock(ctx context.Context, key string, ttl time.Duratio
 		return false, fmt.Errorf("store: 获取锁: %w", err)
 	}
 	return ok, nil
+}
+
+// PutRotation 记下一次轮换的去向：旧 token 换成了哪个新 token。
+//
+// ttl 必须与轮换过渡期一致。过渡期内每一次带旧 token 的校验都会读这条映射，
+// 把新 token 再告知一次——轮换的交接因此从"一次性投递"变成"重复告知"，
+// 不再依赖某一个响应必须送达。
+//
+// 拒绝非正的 ttl：go-redis 在 ttl <= 0 时不发 EX 参数，写进去的是永不过期的键。
+// 一条不朽的轮换映射会在旧 token 早已死透之后，继续把客户端指向一个同样
+// 不存在的新 token。
+func (s *SessionStore) PutRotation(ctx context.Context, oldToken, newToken string, ttl time.Duration) error {
+	if ttl <= 0 {
+		return domain.Errorf(domain.ErrInvalidArgument, "轮换映射的 ttl 必须为正，得到 %v", ttl)
+	}
+	if err := s.rdb.Set(ctx, rotationPrefix+oldToken, newToken, ttl).Err(); err != nil {
+		return fmt.Errorf("store: 写入轮换映射: %w", err)
+	}
+	return nil
+}
+
+// RotatedTo 返回旧 token 轮换后的新 token。
+//
+// 没有记录时返回空串与 nil error，而不是 ErrNotFound：调用方问的是
+// "这个 token 轮换过吗"，"没有"是一个正常答案，不是异常。
+func (s *SessionStore) RotatedTo(ctx context.Context, oldToken string) (string, error) {
+	v, err := s.rdb.Get(ctx, rotationPrefix+oldToken).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: 读取轮换映射: %w", err)
+	}
+	return v, nil
 }

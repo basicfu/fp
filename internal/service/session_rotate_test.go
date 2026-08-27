@@ -311,6 +311,12 @@ func TestRotationDoesNotResetMaxLifetime(t *testing.T) {
 }
 
 // 过渡期内旧 token 必须继续有效：并发请求与 SDK 本地缓存里都可能还有它。
+//
+// Task 3 之前：拿不到轮换锁时静默返回"未轮换"，本测试原先断言的正是这个
+// 行为（oldRes.Rotated 应为 false）。Task 3 之后：过渡期内每一次旧 token
+// 校验都会被再次告知同一个新 token（见 session_handoff_test.go），这是
+// 修复的核心目的——所以这里改为断言"告知的是同一个 token，不是又轮换出
+// 一个新的"，而不是"没有被告知"。
 func TestOldTokenValidDuringGrace(t *testing.T) {
 	svc, clk := newSessionService(t)
 	app := rotateApp() // 过渡期 = max(15s, 20s) = 20s
@@ -329,14 +335,16 @@ func TestOldTokenValidDuringGrace(t *testing.T) {
 	}
 	newToken := res.NewToken
 
-	// 过渡期内旧 token 仍可用，但不应再次触发轮换
+	// 过渡期内旧 token 仍可用，且应被重复告知同一个新 token（不是新轮换出
+	// 第二个不同的 token）。
 	clk.Advance(10 * time.Second)
 	oldRes, err := svc.Validate(ctx, oldToken, app)
 	if err != nil {
 		t.Fatalf("过渡期内旧 token 校验失败: %v", err)
 	}
-	if oldRes.Rotated {
-		t.Fatal("旧 token 不应再次触发轮换")
+	if !oldRes.Rotated || oldRes.NewToken != newToken {
+		t.Fatalf("过渡期内重复校验应被再次告知同一个新 token: rotated=%v newToken=%q, want %q",
+			oldRes.Rotated, oldRes.NewToken, newToken)
 	}
 	// 旧 token 的缓存时长必须被过渡期约束，不能按完整窗口下发
 	if oldRes.CacheTTL > 10*time.Second {
