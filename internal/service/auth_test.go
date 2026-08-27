@@ -378,6 +378,153 @@ func TestLoginRejectsFreezeCommittedBetweenCheckAndSessionWrite(t *testing.T) {
 	}
 }
 
+// 在"凭据校验通过"和"会话写入"之间提交的改密，同样必须把这次登录拦下来。
+//
+// 这是与冻结完全同形状的另一半竞态，而且**光看用户状态是看不见它的**——
+// 改密不改 status，CanLogin() 照样为真：
+//
+//	T1（登录）                        T2（管理员改密）
+//	resolveUser -> U{ACTIVE, hash=旧}
+//	CanLogin() -> true
+//	                                  SetPassword -> hash=新，已提交
+//	                                  RevokeUser -> 此刻一个 token 都枚举不到
+//	Sessions.Issue -> 写入新 token
+//
+// "密码泄露了赶紧改密码"这个动作的全部意义就是把已经落在攻击者手里的会话作废掉。
+// 一次校验过**旧密码**的登录在 RevokeUser 之后落地，等于让改密对这个正在飞的
+// 请求完全失效——恰恰是最该拦住的那一个。
+//
+// 两种登录方式都要覆盖：password 是最直观的场景，而 sms_code 压根没碰过密码，
+// 它能被拦住靠的完全是 password_hash 比对这条通用规则——注释里既然写了
+// "对每一种登录方式都成立"，就必须有用例钉住它，不能只留一句断言在注释里。
+func TestLoginRejectsPasswordResetCommittedBetweenCheckAndSessionWrite(t *testing.T) {
+	const (
+		oldPassword = "hunter2hunter2"
+		newPassword = "newpassword123"
+	)
+
+	tests := []struct {
+		name  string
+		login func(t *testing.T, e *authEnv) error
+	}{
+		{
+			name: "密码登录_校验的是旧密码",
+			login: func(t *testing.T, e *authEnv) error {
+				_, err := e.auth.Login(context.Background(), service.LoginInput{
+					AppID:         e.app.AppID,
+					ConnectorType: connector.TypePassword,
+					Credentials:   connector.Credentials{"account": "13800138000", "password": oldPassword},
+					IP:            "6.6.6.6", UA: "go-test",
+				})
+				return err
+			},
+		},
+		{
+			name: "短信登录_压根没碰密码",
+			login: func(t *testing.T, e *authEnv) error {
+				ctx := context.Background()
+				if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
+					t.Fatalf("SendLoginCode: %v", err)
+				}
+				_, err := e.auth.Login(ctx, service.LoginInput{
+					AppID:         e.app.AppID,
+					ConnectorType: connector.TypeSMSCode,
+					Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
+					IP:            "6.6.6.6", UA: "go-test",
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 与冻结那条用例同一手法：SessionService 的时钟可注入，而 Issue 里
+			// s.now() 恰好在写 Redis 之前被调用一次，把改密挂上去就严格落在
+			// 凭据校验与会话写入之间。钩子触发前先置空——改密内部的 RevokeUser
+			// （revokeMatching 的 defer 同样调 s.now()）否则会再次触发它。
+			var hook func()
+			e := newAuthEnvWithClock(t, func() int64 {
+				if hook != nil {
+					f := hook
+					hook = nil
+					f()
+				}
+				return time.Now().UnixMilli()
+			})
+			ctx := context.Background()
+
+			// 直接建号，不走登录——这样后面数在线会话时，只会数到这次登录签发的那一个。
+			u, _, _, err := e.users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+				Type: domain.IdentityTypePhone, Subject: "13800138000",
+			})
+			if err != nil {
+				t.Fatalf("建号: %v", err)
+			}
+			if err := e.users.SetPassword(ctx, u.ID, oldPassword); err != nil {
+				t.Fatalf("设初始密码: %v", err)
+			}
+
+			// 走 AccountService 而不是 UserService：要复现的是管理员那条完整路径
+			// （改密 + 撤销全部会话），而不只是把 password_hash 列改掉。
+			hook = func() {
+				if err := e.accounts.ResetPassword(ctx, u.ID, newPassword); err != nil {
+					t.Errorf("改密: %v", err)
+				}
+			}
+
+			err = tt.login(t, e)
+
+			if hook != nil {
+				t.Fatal("钩子没有触发——测试构造已失效，下面的断言不再有意义")
+			}
+			if !errors.Is(err, domain.ErrForbidden) {
+				t.Fatalf("err = %v, want ErrForbidden——改密与签发之间的竞态没有被拦住", err)
+			}
+
+			// 最关键的一条：那个已经写进 Redis 的 token 必须被撤销掉。
+			// 只断言返回错误是不够的——Login 出错时不给调用方 token，
+			// 但会话仍然躺在 Redis 里，攻击者那一侧照样握着它。
+			live, err := e.sess.ListByUser(ctx, u.ID)
+			if err != nil {
+				t.Fatalf("ListByUser: %v", err)
+			}
+			if len(live) != 0 {
+				t.Fatalf("改密后仍有 %d 个存活会话——被拒绝的那次登录留下了一个可用 token", len(live))
+			}
+
+			// 失败也要留痕，和其他认证后失败路径一致。
+			logs, err := e.logs.ListByUser(ctx, u.ID, 10)
+			if err != nil {
+				t.Fatalf("ListByUser(logs): %v", err)
+			}
+			var found bool
+			for _, l := range logs {
+				if l.Event == domain.LoginEventLogin && !l.Success && l.IP == "6.6.6.6" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("竞态被拦下时没有写失败审计: %+v", logs)
+			}
+
+			// 账号没有被弄坏：用**新**密码可以正常登录。
+			// 这条把"我们因为哈希变了而拒绝"和"我们把登录整个搞挂了"区分开。
+			res, err := e.auth.Login(ctx, service.LoginInput{
+				AppID:         e.app.AppID,
+				ConnectorType: connector.TypePassword,
+				Credentials:   connector.Credentials{"account": "13800138000", "password": newPassword},
+			})
+			if err != nil {
+				t.Fatalf("改密后用新密码登录失败: %v", err)
+			}
+			if res.Session.Token == "" {
+				t.Fatal("新密码登录没有拿到 token")
+			}
+		})
+	}
+}
+
 // 注销保护期内登录会撤销注销申请——沿用 3s 的行为。
 func TestLoginCancelsPendingDeletion(t *testing.T) {
 	e := newAuthEnv(t)

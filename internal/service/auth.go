@@ -150,8 +150,8 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		return nil, err
 	}
 
-	// 签发之后再读一次用户状态，不可登录就把刚发的会话撤掉。
-	if err := s.recheckLoginable(ctx, user.ID, sess); err != nil {
+	// 签发之后再读一次用户：冻结或改密都要把刚发的会话撤掉。
+	if err := s.recheckLoginable(ctx, user, sess); err != nil {
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
@@ -167,54 +167,73 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	return &LoginResult{User: user, Session: sess}, nil
 }
 
-// recheckLoginable 在会话写入之后复查用户状态，不可登录就撤销这次签发。
+// recheckLoginable 在会话写入之后复查用户，发现账号在这期间被改动过就撤销这次签发。
 //
 // 为什么需要它：上面那次 CanLogin() 和这里的 Sessions.Issue 之间隔着三次
 // 数据库往返（EnsureRegistration、TouchIdentityLogin，以及读用户本身），
 // 而 SessionService.Validate 是**刻意不看用户状态**的。于是存在这样的交错：
 //
-//	T1（登录）                        T2（管理员冻结）
+//	T1（登录）                        T2（管理员冻结 / 改密）
 //	resolveUser -> U{ACTIVE}
 //	CanLogin() -> true
-//	                                  users.SetStatus -> FROZEN 已提交
+//	                                  users.SetStatus / SetPassword 已提交
 //	                                  sessions.RevokeUser -> 枚举到 0 个 token
 //	EnsureRegistration
 //	TouchIdentityLogin
 //	Sessions.Issue -> 写入新 token
 //
-// 冻结返回 200、管理员以为生效了，login_log 里还记着一次成功登录，而攻击者
+// 管理动作返回 200、管理员以为生效了，login_log 里还记着一次成功登录，而攻击者
 // 手上那个 token 在整个空闲窗口内（默认 7 天，移动端 30 天）一直有效。
 //
-// **这不是一道完整的栅栏，别把它当成一道。** 它把出问题所需的条件收窄成：
-// 状态读取严格早于 FROZEN 提交，**并且** RevokeUser 的枚举严格早于 Issue 的写入。
-// 两个条件同时成立的窗口仍然存在——真正的栅栏需要把状态检查和会话写入放进
-// 同一个事务边界里（例如给用户加一个撤销版本号，随状态一起递增，签发时带上、
-// 校验时比对），那是计划二的事。这里做的只是把"静默失守好几天"换成一个窄得多的
-// 竞态，而且它自愈：管理员下一次操作、或者任何一次后续的撤销都会把它清掉。
+// 复查两件事：
 //
-// 读不到用户时按不可登录处理：宁可让一次合法登录失败，也不放行一个可能
-// 已经被冻结的会话。
+//  1. CanLogin()——盖住冻结/注销。
+//  2. password_hash 是否变过——盖住改密。改密**不改变用户状态**，
+//     CanLogin() 照样为真，光看状态是看不见它的。
 //
-// 注意它**盖不住改密**那条同形状的竞态：AccountService.ResetPassword 也会先
-// SetPassword 再 RevokeUser，一次校验过旧密码的登录同样可能在 RevokeUser 之后
-// 落地。但改密不改变用户状态，CanLogin() 照样为真，这里的复查看不见它。
-func (s *AuthService) recheckLoginable(ctx context.Context, userID uuid.UUID, sess *domain.Session) error {
-	fresh, err := s.deps.Users.GetByID(ctx, userID)
+// 第 2 条为什么用哈希比对而不是时间戳：bcrypt 每次都用新的随机盐，
+// 所以哪怕把密码改成和原来一模一样的字符串，产出的哈希串也必然不同。
+// 于是"哈希不相等"精确等价于"这中间跑过一次 SetPassword"——不会漏、也不会误报。
+// **别把它"优化"成比较 updated_at 之类的时间戳**：那既会被其他更新列的操作
+// 误触发，又依赖数据库时钟精度，两头都不如直接比哈希准。
+//
+// 这一条对**每一种登录方式**都成立，包括压根没碰过密码的 sms_code：
+// ResetPassword 的语义是"把这个账号现有的会话全部作废"，一次恰好在
+// RevokeUser 枚举之后落地的短信登录同样绕过了它，没有理由放行。
+//
+// 读不到用户时按不可登录处理：宁可让一次合法登录失败，也不放行一个
+// 可能已经被冻结、或凭据已经换掉的会话。
+//
+// **这仍然不是一道完整的栅栏，别把它当成一道。** 它把出问题所需的条件收窄成：
+// 快照读取严格早于管理动作提交，**并且** RevokeUser 的枚举严格早于 Issue 的写入。
+// 两个条件同时成立的窗口仍然存在。另外还剩一小段它够不着的区间：密码登录时，
+// connector 自己校验口令发生在 resolveUser 读快照**之前**，改密若恰好落在这两步
+// 之间，快照拿到的已经是新哈希，比对就看不出差异了（短信登录没有这一段，
+// 因为它的凭据校验与 password_hash 无关）。真正的栅栏需要把校验和会话写入放进
+// 同一个事务边界里——例如给用户加一个撤销版本号，随状态和密码一起递增，
+// 签发时带上、校验时比对——那是计划二的事。这里做的只是把"静默失守好几天"
+// 换成一个窄得多的竞态，而且它自愈：管理员下一次操作、或任何一次后续撤销都会清掉它。
+func (s *AuthService) recheckLoginable(ctx context.Context, user *domain.User, sess *domain.Session) error {
+	fresh, err := s.deps.Users.GetByID(ctx, user.ID)
 	if err != nil {
-		s.revokeIssued(ctx, sess)
+		s.revokeIssued(ctx, sess, domain.RevokeReasonFreeze)
 		return err
 	}
-	if fresh.CanLogin() {
-		return nil
+	if !fresh.CanLogin() {
+		s.revokeIssued(ctx, sess, domain.RevokeReasonFreeze)
+		return domain.Errorf(domain.ErrForbidden, "账号已被冻结或注销")
 	}
-	s.revokeIssued(ctx, sess)
-	return domain.Errorf(domain.ErrForbidden, "账号已被冻结或注销")
+	if fresh.PasswordHash != user.PasswordHash {
+		s.revokeIssued(ctx, sess, domain.RevokeReasonPasswordChanged)
+		return domain.Errorf(domain.ErrForbidden, "账号凭据已变更，请重新登录")
+	}
+	return nil
 }
 
 // revokeIssued 撤销刚刚签发、随后发现不该签发的会话。
 // 撤销失败只记日志：这里已经在返回错误的路上，会话最终也会随空闲超时消失。
-func (s *AuthService) revokeIssued(ctx context.Context, sess *domain.Session) {
-	if err := s.deps.Sessions.Revoke(ctx, sess.Token, domain.RevokeReasonFreeze); err != nil {
+func (s *AuthService) revokeIssued(ctx context.Context, sess *domain.Session, reason string) {
+	if err := s.deps.Sessions.Revoke(ctx, sess.Token, reason); err != nil {
 		slog.Error("service: 撤销刚签发的会话失败", "err", err, "sessionId", sess.ID)
 	}
 }
