@@ -33,13 +33,14 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 	}
 
 	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb))
+	logs := service.NewLoginLogService(pool)
 	deps := httpapi.Deps{
 		Admin:    service.NewAdminService(pool, rdb),
 		Apps:     service.NewApplicationService(pool),
 		Users:    users,
-		Accounts: service.NewAccountService(users, sessions),
+		Accounts: service.NewAccountService(users, sessions, logs),
 		Sessions: sessions,
-		Logs:     service.NewLoginLogService(pool),
+		Logs:     logs,
 		Registry: reg,
 	}
 

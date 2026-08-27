@@ -8,6 +8,24 @@ import (
 
 type adminHandler struct {
 	svc *service.AdminService
+	// secureCookies 见 Deps.SecureCookies。
+	secureCookies bool
+}
+
+// sessionCookie 组装管理端会话 cookie。
+//
+// 登录写入和登出清除必须走同一个构造函数：属性（尤其是 Secure）在两处写歪了，
+// 就会出现"设的是 Secure cookie、清的是非 Secure cookie"这类只在生产才复现的怪事。
+func (h *adminHandler) sessionCookie(value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     adminTokenCookie,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   h.secureCookies,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	}
 }
 
 type adminLoginRequest struct {
@@ -31,13 +49,7 @@ func (h *adminHandler) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     adminTokenCookie,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, h.sessionCookie(token, 0))
 	writeJSON(w, http.StatusOK, adminLoginResponse{Token: token, Username: req.Username})
 }
 
@@ -46,9 +58,7 @@ func (h *adminHandler) logout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: adminTokenCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1,
-	})
+	http.SetCookie(w, h.sessionCookie("", -1))
 	writeJSON(w, http.StatusNoContent, nil)
 }
 

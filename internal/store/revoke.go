@@ -49,6 +49,16 @@ func (p *RevokePublisher) Publish(ctx context.Context, ev domain.RevokeEvent) er
 // goroutine 会一直阻塞在 range sub.Channel() 上，out 永不关闭，
 // Redis 那条订阅连接也一直挂着。计划二的 gRPC 中继正是这里的调用方，
 // 每条中继泄漏一个连接是实打实的泄漏。
+//
+// 关键在于：那个等 ctx.Done() 的看门狗 goroutine 必须**也能被 closeFn 叫醒**。
+// 直接监听调用方传进来的 ctx 的话，调用方若传 context.Background() 再靠 closeFn
+// 清理（对一个返回了 close 函数的 API 来说是完全合理的用法），看门狗就永远等不到
+// Done，一路阻塞到进程退出——泄漏从"连接"变成"goroutine"，一条 gRPC 中继一个。
+// 所以这里派生一个可取消的子 ctx，closeFn 里先 cancel 再 Close：两种清理途径
+// （取消父 ctx / 调 closeFn）都能让看门狗退出。
+//
+// 派生子 ctx 不影响订阅本身：redis.Client.Subscribe 只在最初那次 SUBSCRIBE
+// 往返里用 ctx，之后的消息读取跑在 PubSub 自己的 goroutine 上。
 func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan domain.RevokeEvent, func(), error) {
 	sub := p.rdb.Subscribe(ctx, revokeChannel)
 	// Receive 会阻塞到订阅确认返回，确保这之后发布的消息不会丢。
@@ -56,6 +66,8 @@ func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan domain.RevokeEv
 		_ = sub.Close()
 		return nil, nil, fmt.Errorf("store: 订阅撤销频道: %w", err)
 	}
+
+	ctx, cancel := context.WithCancel(ctx)
 
 	// ctx 取消时主动关掉底层订阅，这才是让 reader goroutine 退出的唯一途径。
 	go func() {
@@ -80,5 +92,5 @@ func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan domain.RevokeEv
 		}
 	}()
 
-	return out, func() { _ = sub.Close() }, nil
+	return out, func() { cancel(); _ = sub.Close() }, nil
 }

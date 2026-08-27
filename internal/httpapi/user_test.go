@@ -209,6 +209,25 @@ func TestListAndRevokeSessionsOverHTTP(t *testing.T) {
 	if len(sessions) != 0 {
 		t.Fatalf("剩余会话数 = %d, want 0", len(sessions))
 	}
+
+	// 两次踢下线都必须留下审计记录。
+	//
+	// 这条断言盯的是分层：handler 若绕过 AccountService 直接调 SessionService
+	// （改回去只要一行），撤销照样生效、上面每一条断言都还是绿的，
+	// 只有审计会静静地消失。计划二的 gRPC 管理入口正是同一个坑。
+	logs, err := deps.Logs.ListByUser(ctx, u.ID, 50)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	var kicks int
+	for _, l := range logs {
+		if l.Event == domain.LoginEventRevoke && l.Reason == domain.RevokeReasonKick {
+			kicks++
+		}
+	}
+	if kicks != 2 {
+		t.Fatalf("踢下线审计记录数 = %d, want 2（单台一条 + 全部一条）: %+v", kicks, logs)
+	}
 }
 
 // service.SessionService.ListByUser 故意不按会话 ID 去重（轮换过渡期内新旧
@@ -238,12 +257,15 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 	sessions := service.NewSessionServiceWithClock(
 		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), func() int64 { return nowMs })
 
+	users := service.NewUserService(pool)
+	logs := service.NewLoginLogService(pool)
 	deps := httpapi.Deps{
 		Admin:    admin,
 		Apps:     service.NewApplicationService(pool),
-		Users:    service.NewUserService(pool),
+		Users:    users,
+		Accounts: service.NewAccountService(users, sessions, logs),
 		Sessions: sessions,
-		Logs:     service.NewLoginLogService(pool),
+		Logs:     logs,
 		Registry: connector.NewRegistry(),
 	}
 	h := httpapi.NewRouter(deps)

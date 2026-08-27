@@ -87,13 +87,13 @@ func TestUpdateSessionPolicyValidation(t *testing.T) {
 	path := "/admin/api/applications/" + created.Application.ID + "/session"
 
 	// extend_interval 不小于 idle_timeout：非法
-	rec = do(t, h, token, http.MethodPatch, path,
+	rec = do(t, h, token, http.MethodPut, path,
 		`{"idleTimeoutSeconds":604800,"idleTimeoutMobileSeconds":2592000,"maxLifetimeSeconds":7776000,"rotateIntervalSeconds":86400,"extendIntervalSeconds":604800,"tokenCacheTtlSeconds":30}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("非法策略 status = %d, want 400, body = %s", rec.Code, rec.Body.String())
 	}
 
-	rec = do(t, h, token, http.MethodPatch, path,
+	rec = do(t, h, token, http.MethodPut, path,
 		`{"idleTimeoutSeconds":604800,"idleTimeoutMobileSeconds":2592000,"maxLifetimeSeconds":7776000,"rotateIntervalSeconds":86400,"extendIntervalSeconds":600,"tokenCacheTtlSeconds":60}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("合法策略 status = %d, body = %s", rec.Code, rec.Body.String())
@@ -146,7 +146,7 @@ func TestAdminAPIRequiresAuth(t *testing.T) {
 		{http.MethodGet, "/admin/api/applications"},
 		{http.MethodPost, "/admin/api/applications"},
 		{http.MethodGet, "/admin/api/applications/" + someUUID},
-		{http.MethodPatch, "/admin/api/applications/" + someUUID + "/session"},
+		{http.MethodPut, "/admin/api/applications/" + someUUID + "/session"},
 		{http.MethodGet, "/admin/api/applications/" + someUUID + "/connectors"},
 		{http.MethodPut, "/admin/api/applications/" + someUUID + "/connectors/password"},
 		{http.MethodGet, "/admin/api/users"},

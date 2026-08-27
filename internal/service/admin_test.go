@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -76,7 +78,9 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	if username != "admin" {
 		t.Fatalf("username = %q, want admin", username)
 	}
-	if id.String() == "" {
+	// 必须比 uuid.Nil，不能比 id.String() == ""：零值 uuid.UUID 会被
+	// 格式化成一串全零（00000000-0000-...），永远不是空串，那个断言恒为真。
+	if id == uuid.Nil {
 		t.Fatal("adminID 为空")
 	}
 }

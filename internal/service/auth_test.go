@@ -18,14 +18,15 @@ import (
 
 // authEnv 是一套完整装配好的登录环境，测试用它跑端到端流程。
 type authEnv struct {
-	auth  *service.AuthService
-	apps  *service.ApplicationService
-	users *service.UserService
-	sess  *service.SessionService
-	logs  *service.LoginLogService
-	sms   *notify.FakeProvider
-	codes *notify.CodeService
-	app   *domain.Application
+	auth     *service.AuthService
+	apps     *service.ApplicationService
+	users    *service.UserService
+	accounts *service.AccountService
+	sess     *service.SessionService
+	logs     *service.LoginLogService
+	sms      *notify.FakeProvider
+	codes    *notify.CodeService
+	app      *domain.Application
 	// pool 用于少数需要绕过 service 层直接改库的用例（例如制造"应用已停用"这种
 	// 第一阶段还没有管理接口可以到达的状态）。
 	pool *pgxpool.Pool
@@ -33,12 +34,23 @@ type authEnv struct {
 
 func newAuthEnv(t *testing.T) *authEnv {
 	t.Helper()
+	return newAuthEnvWithClock(t, func() int64 { return time.Now().UnixMilli() })
+}
+
+// newAuthEnvWithClock 用给定的时钟构造 SessionService。
+//
+// 时钟是这套代码里唯一一个"能精确插在某个内部步骤上"的可注入依赖，
+// 用它当同步点可以确定地复现并发交错，不必去赌真实 goroutine 的时序——
+// session_revoke_test.go 的 TestRevokeAnnounceSurvivesCtxCancellation 是同一手法。
+func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
+	t.Helper()
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
 	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
-	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb))
+	sessions := service.NewSessionServiceWithClock(
+		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), now)
 	logs := service.NewLoginLogService(pool)
 	codes := notify.NewCodeService(rdb)
 
@@ -51,7 +63,10 @@ func newAuthEnv(t *testing.T) *authEnv {
 	}
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
+	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的
+	// "30 秒 1 条"）：下面好几个用例要对同一个手机号连发几次验证码，
+	// 真实限制会把它们卡死。要测限制本身的用例自己传规则进来。
+	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), []notify.RateRule{})
 	sender.AddProvider(sms)
 
 	app, _, err := apps.Create(context.Background(), "测试应用", "test-app")
@@ -71,7 +86,8 @@ func newAuthEnv(t *testing.T) *authEnv {
 			Registry: reg, Notifier: sender, Codes: codes,
 		}),
 		apps: apps, users: users, sess: sessions, logs: logs,
-		sms: sms, codes: codes, app: app, pool: pool,
+		accounts: service.NewAccountService(users, sessions, logs),
+		sms:      sms, codes: codes, app: app, pool: pool,
 	}
 }
 
@@ -269,6 +285,96 @@ func TestLoginRejectsFrozenUser(t *testing.T) {
 	})
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+// 在"状态检查通过"和"会话写入"之间提交的冻结，必须把这次登录拦下来。
+//
+// 这是 TestLoginRejectsFrozenUser 盖不到的那一半：那条用例是严格串行的，
+// 冻结发生在登录开始之前。真正危险的是下面这个交错——
+//
+//	T1（登录）                        T2（管理员冻结）
+//	CanLogin() -> true
+//	                                  SetStatus -> FROZEN 已提交
+//	                                  RevokeUser -> 此刻一个 token 都枚举不到
+//	Sessions.Issue -> 写入新 token
+//
+// 冻结接口返回 200，管理员以为生效了，而攻击者手上那个 token 在整个空闲窗口
+// （默认 7 天）内一直有效，Validate 又刻意不看用户状态，没有任何东西会拦它。
+//
+// 用真实 goroutine 去撞这个时间点是不可复现的。这里改用确定的构造：
+// SessionService 的时钟是可注入的，而 Issue 里 s.now() 恰好在写 Redis 之前
+// 被调用一次——把冻结挂到那一次调用上，它就严格落在检查与写入之间。
+// 钩子只触发一次（触发前先置空），否则冻结内部的 RevokeUser 会再次调到它。
+func TestLoginRejectsFreezeCommittedBetweenCheckAndSessionWrite(t *testing.T) {
+	var hook func()
+	e := newAuthEnvWithClock(t, func() int64 {
+		if hook != nil {
+			f := hook
+			hook = nil
+			f()
+		}
+		return time.Now().UnixMilli()
+	})
+	ctx := context.Background()
+
+	// 直接建号，不走登录——这样后面数在线会话时，只会数到这次登录签发的那一个。
+	u, _, _, err := e.users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: "13800138000",
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
+	}
+
+	// 用 AccountService 而不是 UserService：要复现的是管理员那条完整路径
+	// （改状态 + 撤销全部会话），而不只是把状态列改掉。
+	hook = func() {
+		if _, err := e.accounts.SetStatus(ctx, u.ID, domain.UserStatusFrozen); err != nil {
+			t.Errorf("冻结: %v", err)
+		}
+	}
+
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	_, err = e.auth.Login(ctx, service.LoginInput{
+		AppID:         e.app.AppID,
+		ConnectorType: connector.TypeSMSCode,
+		Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
+		IP:            "5.5.5.5", UA: "go-test",
+	})
+
+	if hook != nil {
+		t.Fatal("钩子没有触发——测试构造已失效，下面的断言不再有意义")
+	}
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden——冻结与签发之间的竞态没有被拦住", err)
+	}
+
+	// 最关键的一条：那个已经写进 Redis 的 token 必须被撤销掉。
+	// 只断言返回错误是不够的——Login 返回 error 时不给调用方 token，但
+	// 会话仍然躺在 Redis 里，攻击者那一侧照样握着它。
+	live, err := e.sess.ListByUser(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("冻结后仍有 %d 个存活会话——被拒绝的那次登录留下了一个可用 token", len(live))
+	}
+
+	// 失败也要留痕，和其他认证后失败路径一致。
+	list, err := e.logs.ListByUser(ctx, u.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByUser(logs): %v", err)
+	}
+	var found bool
+	for _, l := range list {
+		if l.Event == domain.LoginEventLogin && !l.Success && l.IP == "5.5.5.5" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("竞态被拦下时没有写失败审计: %+v", list)
 	}
 }
 

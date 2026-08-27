@@ -16,6 +16,15 @@ import (
 // defaultAliyunEndpoint 是阿里云短信服务的默认接入点。
 const defaultAliyunEndpoint = "dysmsapi.aliyuncs.com"
 
+// 阿里云 SDK 的超时（毫秒）。**必须显式设置**：SDK 默认不带超时，
+// 一个吊死的接入点会把调用它的那个 goroutine 永久挂住。而 Send 拿不到 ctx
+// （见下），fp 自己的请求截止时间救不了它，Sender 的降级也就永远轮不到下一家——
+// 一家供应商的网络故障会直接变成"所有短信都发不出去"。
+const (
+	aliyunConnectTimeoutMS = 5_000
+	aliyunReadTimeoutMS    = 10_000
+)
+
 // AliyunConfig 是阿里云短信供应商的配置。
 type AliyunConfig struct {
 	AccessKeyID     string
@@ -49,6 +58,8 @@ func NewAliyunSMS(cfg AliyunConfig) (*AliyunSMS, error) {
 		AccessKeyId:     tea.String(cfg.AccessKeyID),
 		AccessKeySecret: tea.String(cfg.AccessKeySecret),
 		Endpoint:        tea.String(cfg.Endpoint),
+		ConnectTimeout:  tea.Int(aliyunConnectTimeoutMS),
+		ReadTimeout:     tea.Int(aliyunReadTimeoutMS),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("notify: 创建阿里云短信客户端: %w", err)
@@ -73,6 +84,12 @@ func (p *AliyunSMS) ConfigSchema() []domain.Field {
 }
 
 // Send 实现 Provider。
+//
+// ctx 被刻意丢弃：阿里云的 dysmsapi SDK（v2.0.16）的 SendSms 不接受
+// context.Context，没有任何办法把调用方的取消或截止时间传下去。参数写成 `_`
+// 是对这个限制的如实交代，不是疏忽——真正兜底的是构造客户端时设的
+// aliyunConnectTimeoutMS / aliyunReadTimeoutMS，它们保证这次调用最坏也会在
+// 有限时间内返回，从而让 Sender 有机会降级到下一家供应商。
 func (p *AliyunSMS) Send(_ context.Context, msg Message) error {
 	phone, signName, templateCode, templateParam, err := BuildAliyunRequest(p.cfg, msg)
 	if err != nil {

@@ -205,13 +205,18 @@ type revokeResponse struct {
 	Revoked int `json:"revoked"`
 }
 
+// revokeAllSessions 踢掉该用户的全部设备。
+//
+// 走 AccountService 而不是直接调 SessionService：撤销要连带写审计，
+// 那条耦合和"冻结必须撤销会话"是同一类东西，属于 service 层。
+// 放在这里的话，计划二的 gRPC 管理入口会漏掉审计而没有任何测试变红。
 func (h *userHandler) revokeAllSessions(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	n, err := h.sessions.RevokeUser(r.Context(), id, domain.RevokeReasonKick)
+	n, err := h.accounts.RevokeAllSessions(r.Context(), id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -225,7 +230,7 @@ func (h *userHandler) revokeSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	n, err := h.sessions.RevokeSession(r.Context(), id, chi.URLParam(r, "sid"), domain.RevokeReasonKick)
+	n, err := h.accounts.RevokeSession(r.Context(), id, chi.URLParam(r, "sid"))
 	if err != nil {
 		writeError(w, err)
 		return

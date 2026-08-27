@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/google/uuid"
@@ -41,6 +42,8 @@ func (c *PasswordConnector) ConfigSchema() []domain.Field {
 //
 // 账号不存在、账号类型未开放、密码错误三种情况**返回同一个错误**，
 // 避免攻击者据此枚举已注册账号。
+//
+// 但只有这三种。数据库不可用之类的真实故障会原样上报，不伪装成凭据错误。
 func (c *PasswordConnector) Authenticate(ctx context.Context, cfg map[string]any, creds Credentials) (*Result, error) {
 	account := creds.Get("account")
 	password := creds.Get("password")
@@ -66,11 +69,30 @@ func (c *PasswordConnector) Authenticate(ctx context.Context, cfg map[string]any
 	// 只掐表，就能把"哪些手机号注册过"问出来，上面 invalid 那套同错误设计
 	// 也就形同虚设。VerifyPassword 对不存在的用户会跑一次哑哈希比对来抹平时序。
 	user, _, lookupErr := c.lookup.FindByIdentity(ctx, identityType, account)
+
+	// 只有"确实查不到这个登录标识"才等价于凭据错误。
+	//
+	// 把查询的**任何**错误都折成 invalid，等于让一次 Postgres 抖动表现成
+	// "全站所有人的密码都错了"：调用方拿到 401 而不是 5xx，监控看不出是故障，
+	// 而审计表会被灌满一批凭据失败记录——事后排查时它们与真正的爆破尝试
+	// 无法区分。故障要如实上报，靠错误链上的哨兵区分，而不是靠"反正都是失败"。
+	//
+	// 这不削弱防枚举：抹平时序的哑哈希在 VerifyPassword 里，而数据库故障
+	// 对所有账号一视同仁，攻击者无法用它区分某个账号存不存在。
+	if lookupErr != nil && !errors.Is(lookupErr, domain.ErrNotFound) {
+		return nil, lookupErr
+	}
+
 	userID := uuid.Nil
 	if lookupErr == nil {
 		userID = user.ID
 	}
+
+	// 同理：VerifyPassword 也可能因为读不到库而失败，那同样是故障不是密码错。
 	verifyErr := c.lookup.VerifyPassword(ctx, userID, password)
+	if verifyErr != nil && !errors.Is(verifyErr, domain.ErrInvalidCredential) {
+		return nil, verifyErr
+	}
 	if lookupErr != nil || verifyErr != nil {
 		return nil, invalid
 	}

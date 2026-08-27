@@ -19,6 +19,14 @@ type Deps struct {
 	Sessions *service.SessionService
 	Logs     *service.LoginLogService
 	Registry *connector.Registry
+
+	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
+	//
+	// 生产必须为 true（cmd/fp 用 config.Config.IsProd() 填），否则那个有效期
+	// 两小时、能开关应用/冻结账号/重置密码的平台管理员凭据会在任何一段明文
+	// HTTP 上原样出现——反代前面掉了 TLS、内网跳板、有人手滑访问 http:// 都算。
+	// 本地开发拿不到 TLS，所以不能无脑写死 true，只能由启动配置决定。
+	SecureCookies bool
 }
 
 // NewRouter 装配管理 UI 的 HTTP 路由。
@@ -30,7 +38,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 
-	ah := &adminHandler{svc: d.Admin}
+	ah := &adminHandler{svc: d.Admin, secureCookies: d.SecureCookies}
 	appH := &applicationHandler{svc: d.Apps}
 	userH := &userHandler{users: d.Users, accounts: d.Accounts, sessions: d.Sessions, logs: d.Logs}
 	connH := &connectorHandler{registry: d.Registry}
@@ -53,7 +61,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/applications", appH.list)
 			r.Post("/applications", appH.create)
 			r.Get("/applications/{id}", appH.get)
-			r.Patch("/applications/{id}/session", appH.updateSession)
+			// PUT 而不是 PATCH：这个接口是整份会话策略的**全量替换**。
+			// decodeJSON 开了 DisallowUnknownFields、sessionPolicyDTO 六个字段
+			// 都是非指针、SessionPolicy.Validate 又要求六项全部有值——只发其中
+			// 一两项的"局部更新"必然 400。用 PATCH 命名等于承诺了一个做不到的
+			// 语义。趁还没有任何消费方，先把动词改对。
+			r.Put("/applications/{id}/session", appH.updateSession)
 			r.Get("/applications/{id}/connectors", appH.listConnectors)
 			r.Put("/applications/{id}/connectors/{type}", appH.putConnector)
 

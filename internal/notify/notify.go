@@ -70,8 +70,26 @@ type Sender struct {
 	providers map[Channel][]Provider
 }
 
-// NewSender 构造 Sender。rules 为 nil 表示不做频率限制。
+// NewSender 构造 Sender。
+//
+// rules 的三种取值是有区别的，别把 nil 和空切片当成一回事：
+//
+//	nil            → 套用 DefaultSMSRateRules()（安全默认）
+//	[]RateRule{}   → 显式关闭频率限制
+//	非空            → 用给定的规则
+//
+// nil 之所以是"套默认"而不是"不限制"，是因为**忘记传**和**明确不要**在
+// 零值上长得一模一样，而这两者的代价差了一个量级：短信是花钱的外部资源，
+// 没有限制意味着一个手机号可以被无限刷验证码，账单和骚扰都是真的。
+// 让"什么都没想"落在有保护的一侧，想关掉的人必须把 []RateRule{} 写出来——
+// 那时它在代码里是一个看得见、能在评审里被质问的决定。
+//
+// 注意 rules 目前对所有通道一视同仁（见 Send），只是第一阶段唯一有供应商的
+// 通道就是短信。等邮件通道真的落地时，这里要换成按通道分组的规则表。
 func NewSender(pool *pgxpool.Pool, limiter *store.RateLimiter, rules []RateRule) *Sender {
+	if rules == nil {
+		rules = DefaultSMSRateRules()
+	}
 	return &Sender{
 		pool:      pool,
 		limiter:   limiter,

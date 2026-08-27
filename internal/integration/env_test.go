@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/httpapi"
@@ -66,7 +65,12 @@ func newEnv(t *testing.T) *env {
 	}
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
+	// 这里传 []RateRule{} 是**显式关闭**频率限制，不是"没配"：
+	// 多个用例会对同一个手机号连发验证码，默认的"30 秒 1 条"会把它们卡死。
+	//
+	// 生产装配千万别照抄这一行。NewSender 的 rules 传 nil 才是安全默认
+	// （自动套用 DefaultSMSRateRules），只有测试才该把它关掉。
+	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), []notify.RateRule{})
 	sender.AddProvider(sms)
 
 	admin := service.NewAdminService(pool, rdb)
@@ -76,7 +80,7 @@ func newEnv(t *testing.T) *env {
 
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Admin: admin, Apps: apps, Users: users,
-		Accounts: service.NewAccountService(users, sessions),
+		Accounts: service.NewAccountService(users, sessions, logs),
 		Sessions: sessions, Logs: logs, Registry: registry,
 	}))
 	t.Cleanup(srv.Close)
@@ -193,17 +197,4 @@ func (e *env) createApp(name, slug string) (internalID, appID, secret string) {
 	e.request(http.MethodPut, base+"/sms_code", `{"enabled":true,"config":{}}`, http.StatusNoContent, nil)
 
 	return created.Application.ID, created.Application.AppID, created.AppSecret
-}
-
-// waitFor 每 20ms 检查一次 cond，直到成立或超时。
-func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("等待超时: %s", what)
 }

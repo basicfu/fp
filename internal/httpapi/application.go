@@ -106,6 +106,8 @@ func (h *applicationHandler) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
 }
 
+// updateSession 全量替换应用的会话策略。六个字段必须全部给出——
+// 少给任何一项都会被 SessionPolicy.Validate 拒绝，所以路由用的是 PUT 而非 PATCH。
 func (h *applicationHandler) updateSession(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {

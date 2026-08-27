@@ -54,10 +54,16 @@ func (u User) CanLogin() bool {
 }
 
 // 登录日志事件类型。
+//
+// 这里**只登记真正会被写入的事件**。曾经还有一个 LoginEventRotate，已删除：
+// token 轮换是纯粹的令牌保鲜机制，不是账号生命周期事件，而且频率按
+// rotate_interval 算——每个活跃会话每天若干条，会把一条 Redis 上的热路径
+// 变成一次 Postgres 写，审计表也会被这些无人查询的行淹没。真要排查轮换问题，
+// 撤销事件流（domain.RevokeEvent）比审计表合适得多。
 const (
 	LoginEventLogin  = "login"
 	LoginEventLogout = "logout"
-	LoginEventRotate = "rotate"
+	// LoginEventRevoke 是管理员发起的撤销：冻结、改密、踢下线。
 	LoginEventRevoke = "revoke"
 )
 

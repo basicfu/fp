@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -13,6 +14,7 @@ import (
 // 它只需要"把某个用户踢下线"，不需要会话管理的其余部分。
 type SessionRevoker interface {
 	RevokeUser(ctx context.Context, userID uuid.UUID, reason string) (int, error)
+	RevokeSession(ctx context.Context, userID uuid.UUID, sessionID, reason string) (int, error)
 }
 
 // AccountService 承载那些"改完账号状态必须同时作废会话"的操作。
@@ -21,14 +23,18 @@ type SessionRevoker interface {
 // 所以撤销调用本身就是冻结/改密唯一的执行点。放在 handler 里意味着
 // 每新增一个传输层（计划二的 gRPC、将来的自助改密）都要重新实现一遍，
 // 漏掉一次就静默失去保护，且没有任何测试会因此变红。
+//
+// 同一条理由适用于审计：每一次撤销都必须留痕，所以写审计也在这一层，
+// 不在 handler 里。
 type AccountService struct {
 	users    *UserService
 	sessions SessionRevoker
+	logs     *LoginLogService
 }
 
 // NewAccountService 构造 AccountService。
-func NewAccountService(users *UserService, sessions SessionRevoker) *AccountService {
-	return &AccountService{users: users, sessions: sessions}
+func NewAccountService(users *UserService, sessions SessionRevoker, logs *LoginLogService) *AccountService {
+	return &AccountService{users: users, sessions: sessions, logs: logs}
 }
 
 // SetStatus 迁移用户状态；迁移到不可登录的状态时连带撤销其全部会话。
@@ -46,6 +52,7 @@ func (s *AccountService) SetStatus(ctx context.Context, userID uuid.UUID, status
 		if _, err := s.sessions.RevokeUser(ctx, userID, domain.RevokeReasonFreeze); err != nil {
 			return nil, err
 		}
+		s.writeRevokeLog(ctx, userID, domain.RevokeReasonFreeze, "")
 	}
 	return u, nil
 }
@@ -58,6 +65,63 @@ func (s *AccountService) ResetPassword(ctx context.Context, userID uuid.UUID, pl
 	if err := s.users.SetPassword(ctx, userID, plain); err != nil {
 		return err
 	}
-	_, err := s.sessions.RevokeUser(ctx, userID, domain.RevokeReasonPasswordChanged)
-	return err
+	if _, err := s.sessions.RevokeUser(ctx, userID, domain.RevokeReasonPasswordChanged); err != nil {
+		return err
+	}
+	s.writeRevokeLog(ctx, userID, domain.RevokeReasonPasswordChanged, "")
+	return nil
+}
+
+// RevokeAllSessions 是管理员手动"踢下线全部设备"。
+//
+// 它不改账号状态，纯粹是把当前的会话清掉；用户下次照样能登录。
+func (s *AccountService) RevokeAllSessions(ctx context.Context, userID uuid.UUID) (int, error) {
+	n, err := s.sessions.RevokeUser(ctx, userID, domain.RevokeReasonKick)
+	if err != nil {
+		return n, err
+	}
+	s.writeRevokeLog(ctx, userID, domain.RevokeReasonKick, "")
+	return n, nil
+}
+
+// RevokeSession 是管理员手动踢掉某一台设备。
+// sessionID 不属于该用户时返回 0，此时不写审计——什么都没发生。
+func (s *AccountService) RevokeSession(ctx context.Context, userID uuid.UUID, sessionID string) (int, error) {
+	n, err := s.sessions.RevokeSession(ctx, userID, sessionID, domain.RevokeReasonKick)
+	if err != nil {
+		return n, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	s.writeRevokeLog(ctx, userID, domain.RevokeReasonKick, sessionID)
+	return n, nil
+}
+
+// writeRevokeLog 记一条撤销审计。
+//
+// 没有它的话，审计表在"最后一次登录"和"下一次登录"之间是完全空白的：
+// 管理员冻结了账号、重置了密码、踢掉了全部设备，事后一条都查不到。
+// 而这三件事恰恰是账号生命周期里最需要追责的操作。
+//
+// Reason 写的是 domain.RevokeReason* 常量本身而不是一句人话，这样
+// "查出所有因改密而触发的撤销"是一次等值匹配，不用去 LIKE 一段中文。
+// ApplicationID 留空：撤销跨全部应用，硬塞一个应用 ID 反而是假信息。
+//
+// 写失败只记日志，不回传错误——撤销已经真实发生了，让管理员看到一个
+// 失败结果去重试一个已经成功的操作，比丢一条审计更糟。
+func (s *AccountService) writeRevokeLog(ctx context.Context, userID uuid.UUID, reason, sessionID string) {
+	if s.logs == nil {
+		return
+	}
+	err := s.logs.Write(ctx, domain.LoginLog{
+		UserID:    &userID,
+		Event:     domain.LoginEventRevoke,
+		Success:   true,
+		Reason:    reason,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		slog.Error("service: 写入撤销审计失败", "err", err, "userId", userID, "reason", reason)
+	}
 }

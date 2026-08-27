@@ -82,6 +82,42 @@ func TestSenderEnforcesRateRules(t *testing.T) {
 	}
 }
 
+// rules 传 nil 必须落到 DefaultSMSRateRules()，而不是"什么都不限"。
+//
+// 这条断言盯的是一个纯配置事故：仓库里唯一一份 Sender 的装配示例长期写着
+// NewSender(pool, limiter, nil)，DefaultSMSRateRules 一个调用方都没有。
+// 照着抄一份上线，就是一个手机号可以无限刷验证码——账单和骚扰都是真的。
+func TestNilRulesFallsBackToDefaultSMSLimits(t *testing.T) {
+	s, p := newSender(t, nil)
+	ctx := context.Background()
+
+	// 默认规则最紧的一档是"30 秒 1 条"
+	if err := s.Send(ctx, msg("13800138000")); err != nil {
+		t.Fatalf("首次 Send: %v", err)
+	}
+	if err := s.Send(ctx, msg("13800138000")); !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("第二次 Send err = %v, want ErrRateLimited——nil rules 没有套用默认限制", err)
+	}
+	if len(p.Sent()) != 1 {
+		t.Fatalf("被限流的请求不应到达 provider, sent = %d", len(p.Sent()))
+	}
+}
+
+// 空切片才是"显式关掉限制"的写法，必须与 nil 区分开——测试装配依赖它。
+func TestEmptyRulesDisablesRateLimiting(t *testing.T) {
+	s, p := newSender(t, []notify.RateRule{})
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		if err := s.Send(ctx, msg("13800138000")); err != nil {
+			t.Fatalf("第 %d 次 Send: %v", i, err)
+		}
+	}
+	if len(p.Sent()) != 3 {
+		t.Fatalf("sent = %d, want 3（空切片应当完全不限流）", len(p.Sent()))
+	}
+}
+
 // 主供应商失败时自动降级到下一个——对症 3s 靠改注释切供应商的问题。
 func TestSenderFallsBackToNextProvider(t *testing.T) {
 	pool := testsupport.NewTestDB(t)

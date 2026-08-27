@@ -19,6 +19,9 @@ type fakeLookup struct {
 	statuses   map[uuid.UUID]string
 	// verifyCalls 记录 VerifyPassword 被调用的次数，用于验证时序抹平。
 	verifyCalls int
+	// findErr / verifyErr 非 nil 时由对应方法直接返回，用来模拟数据库故障。
+	findErr   error
+	verifyErr error
 }
 
 func newFakeLookup() *fakeLookup {
@@ -38,6 +41,9 @@ func (f *fakeLookup) add(identityType, subject, password, status string) uuid.UU
 }
 
 func (f *fakeLookup) FindByIdentity(_ context.Context, identityType, subject string) (*domain.User, *domain.Identity, error) {
+	if f.findErr != nil {
+		return nil, nil, f.findErr
+	}
 	id, ok := f.byIdentity[identityType+"|"+subject]
 	if !ok {
 		return nil, nil, domain.Errorf(domain.ErrNotFound, "登录标识不存在")
@@ -48,6 +54,9 @@ func (f *fakeLookup) FindByIdentity(_ context.Context, identityType, subject str
 
 func (f *fakeLookup) VerifyPassword(_ context.Context, userID uuid.UUID, plain string) error {
 	f.verifyCalls++
+	if f.verifyErr != nil {
+		return f.verifyErr
+	}
 	want, ok := f.passwords[userID]
 	if !ok || want == "" || want != plain {
 		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
@@ -159,6 +168,67 @@ func TestPasswordAlwaysVerifiesToEqualizeTiming(t *testing.T) {
 	}
 	if lookup2.verifyCalls != 1 {
 		t.Fatalf("账号存在时 VerifyPassword 调用次数 = %d, want 1", lookup2.verifyCalls)
+	}
+}
+
+// 数据库故障不能被伪装成"密码错误"。
+//
+// 把 FindByIdentity 的任何错误都折成 invalid 的话，一次 Postgres 抖动会让每一次
+// 密码登录都返回 401：调用方看到的是"凭据不对"而不是 5xx，监控上看不出故障，
+// 审计表还会被灌进一批凭据失败记录，事后跟真正的爆破尝试混在一起分不开。
+func TestPasswordAuthenticateSurfacesLookupOutage(t *testing.T) {
+	outage := errors.New("connection refused")
+	lookup := newFakeLookup()
+	lookup.findErr = outage
+	c := connector.NewPassword(lookup)
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "hunter2hunter2",
+	})
+	if !errors.Is(err, outage) {
+		t.Fatalf("err = %v, want 原样上报的 %v", err, outage)
+	}
+	if errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatal("数据库故障被伪装成了凭据错误")
+	}
+}
+
+// 同一条规则对 VerifyPassword 也成立：读不到密码哈希是故障，不是密码错。
+func TestPasswordAuthenticateSurfacesVerifyOutage(t *testing.T) {
+	outage := errors.New("connection refused")
+	lookup := newFakeLookup()
+	lookup.add(domain.IdentityTypePhone, "13800138000", "hunter2hunter2", domain.UserStatusActive)
+	lookup.verifyErr = outage
+	c := connector.NewPassword(lookup)
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "hunter2hunter2",
+	})
+	if !errors.Is(err, outage) {
+		t.Fatalf("err = %v, want 原样上报的 %v", err, outage)
+	}
+	if errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatal("数据库故障被伪装成了凭据错误")
+	}
+}
+
+// 账号不存在必须仍然走"同错误"那条路，不能被上面那条故障分支顺手改掉。
+func TestPasswordAuthenticateNotFoundStillLooksLikeWrongPassword(t *testing.T) {
+	lookup := newFakeLookup()
+	c := connector.NewPassword(lookup)
+
+	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{
+		"account": "13800138000", "password": "whatever",
+	})
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+	if errors.Is(err, domain.ErrNotFound) {
+		t.Fatal("ErrNotFound 泄露到了调用方——账号是否存在被暴露了")
+	}
+	// 时序抹平仍然生效
+	if lookup.verifyCalls != 1 {
+		t.Fatalf("VerifyPassword 调用次数 = %d, want 1", lookup.verifyCalls)
 	}
 }
 

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -64,6 +65,71 @@ func TestRevokePublishNoSubscriberIsNotAnError(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
+}
+
+// closeFn 必须能独立完成清理，不依赖调用方去取消那个传进来的 ctx。
+//
+// 一个既返回 channel 又返回 close 函数的 API，调用方传 context.Background()
+// 再用 closeFn 收尾是完全合理的用法。但 Subscribe 内部那个「等 ctx.Done() 再
+// sub.Close()」的看门狗 goroutine 如果直接盯着调用方的 ctx，这种用法下它就
+// 永远等不到 Done，一路阻塞到进程退出。out 关不关得掉是看不出问题的——
+// closeFn 里的 sub.Close() 会让 reader 那条 goroutine 正常退出，channel 照样关闭，
+// 泄漏的是另一条。所以这里必须直接数 goroutine：
+//
+//	20 轮 subscribe→closeFn，看门狗若泄漏就是 20 条常驻 goroutine。
+//
+// 先做一轮热身再取基线，把 go-redis 连接池那些一次性创建的 goroutine 排除在外。
+func TestSubscribeCloseFnReleasesWatchdogWithNonCancellableCtx(t *testing.T) {
+	pub := store.NewRevokePublisher(testsupport.NewTestRedis(t))
+
+	subscribeAndClose := func() {
+		// 刻意用不可取消的 ctx：清理只能靠 closeFn。
+		events, closeFn, err := pub.Subscribe(context.Background())
+		if err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+		closeFn()
+		select {
+		case _, ok := <-events:
+			if ok {
+				t.Fatal("closeFn 之后收到了一个值，预期 channel 应该关闭且为空")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("closeFn 之后 2 秒内 channel 仍未关闭")
+		}
+	}
+
+	subscribeAndClose() // 热身：让连接池等一次性 goroutine 先建好
+	baseline := settledGoroutines()
+
+	const rounds = 20
+	for i := 0; i < rounds; i++ {
+		subscribeAndClose()
+	}
+
+	// 留一点余量给 go-redis 自己的收尾 goroutine，但远小于 rounds：
+	// 看门狗泄漏时增量必然 >= 20。
+	const slack = 5
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := settledGoroutines()
+		if got <= baseline+slack {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d 轮 subscribe/closeFn 之后 goroutine 数 = %d，基线 %d——"+
+				"closeFn 没能叫醒等 ctx.Done() 的看门狗，每次订阅泄漏一条 goroutine",
+				rounds, got, baseline)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// settledGoroutines 给已经在退出路上的 goroutine 一点时间，再报当前数量。
+func settledGoroutines() int {
+	time.Sleep(200 * time.Millisecond)
+	runtime.GC()
+	return runtime.NumGoroutine()
 }
 
 // ctx 取消必须真正关掉底层订阅，而不是只在有消息流入时才顺带生效。

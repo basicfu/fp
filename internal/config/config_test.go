@@ -44,6 +44,28 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
+// IsProd 决定管理端 cookie 带不带 Secure，是个真正有安全后果的判定，
+// 必须钉住它的大小写不敏感与默认值。
+func TestIsProd(t *testing.T) {
+	tests := []struct {
+		env  string
+		want bool
+	}{
+		{"PROD", true},
+		{"prod", true},
+		{"Prod", true},
+		{"DEV", false},
+		{"", false},
+		{"PRODUCTION", false}, // 只认 PROD，不做前缀匹配
+	}
+	for _, tt := range tests {
+		c := &Config{Env: tt.env}
+		if got := c.IsProd(); got != tt.want {
+			t.Errorf("Env=%q IsProd() = %v, want %v", tt.env, got, tt.want)
+		}
+	}
+}
+
 func TestLoadMissingRequired(t *testing.T) {
 	t.Setenv("FP_POSTGRES_URL", "")
 	t.Setenv("FP_REDIS_URL", "redis://localhost:6379/0")

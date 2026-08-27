@@ -334,7 +334,7 @@ func TestCacheTTLGuidesSDKBehaviour(t *testing.T) {
 	ctx := context.Background()
 
 	// 把缓存窗口调成 60 秒、空闲超时调成 120 秒
-	e.request(http.MethodPatch, "/admin/api/applications/"+internalID+"/session",
+	e.request(http.MethodPut, "/admin/api/applications/"+internalID+"/session",
 		`{"idleTimeoutSeconds":120,"idleTimeoutMobileSeconds":120,"maxLifetimeSeconds":3600,`+
 			`"rotateIntervalSeconds":3600,"extendIntervalSeconds":30,"tokenCacheTtlSeconds":60}`,
 		http.StatusOK, nil)

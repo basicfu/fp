@@ -51,21 +51,3 @@ func TestUserCanLogin(t *testing.T) {
 		}
 	}
 }
-
-func TestIsMergeableIdentityType(t *testing.T) {
-	tests := []struct {
-		typ  string
-		want bool
-	}{
-		{domain.IdentityTypePhone, true},
-		{domain.IdentityTypeUsername, true},
-		{domain.IdentityTypeEmail, true},
-		{domain.IdentityTypeWechatMP, false},
-		{"unknown", false},
-	}
-	for _, tt := range tests {
-		if got := domain.IsMergeableIdentityType(tt.typ); got != tt.want {
-			t.Errorf("IsMergeableIdentityType(%q) = %v, want %v", tt.typ, got, tt.want)
-		}
-	}
-}

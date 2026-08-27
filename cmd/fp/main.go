@@ -75,16 +75,20 @@ func run() error {
 		return err
 	}
 
+	logSvc := service.NewLoginLogService(pool)
+
 	httpSrv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Admin:    adminSvc,
 			Apps:     service.NewApplicationService(pool),
 			Users:    userSvc,
-			Accounts: service.NewAccountService(userSvc, sessionSvc),
+			Accounts: service.NewAccountService(userSvc, sessionSvc, logSvc),
 			Sessions: sessionSvc,
-			Logs:     service.NewLoginLogService(pool),
+			Logs:     logSvc,
 			Registry: registry,
+			// 生产环境的管理端 cookie 必须带 Secure。
+			SecureCookies: cfg.IsProd(),
 		}),
 	}
 	go func() {
