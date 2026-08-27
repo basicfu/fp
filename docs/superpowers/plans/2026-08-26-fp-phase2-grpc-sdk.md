@@ -176,20 +176,39 @@ fp 会部署多个实例挂在 LB 后面。SDK 的 `Watch` 流只落在**其中�
 
 **Task 6 的 `RevokeHub` 就是每个实例的那一份订阅**：一个进程一份 Redis 订阅，扇出给本进程持有的全部 `Watch` 流。绝不能做成"每条流一份订阅"——那会让 Redis 连接数等于全平台 SDK 实例数。
 
-#### 这套机制的诚实边界
+#### 丢事件本身有兜底，但"丢得无声无息"不行
 
-**Redis pub/sub 是 fire-and-forget，没有缓冲、没有重放。** 某个 fp 实例的订阅连接在抖动中重连时，那一瞬间发布的事件对这台实例是**永久丢失**的——go-redis 内部会自动重连并重新订阅，但既不会关闭 channel 也不会报错，所以 `RevokeHub.Run` 察觉不到，SDK 那边看到的流也一直是健康的。
+**Redis pub/sub 是 fire-and-forget，没有缓冲、没有重放。** 某个 fp 实例的订阅连接在抖动中重连时，那一瞬间发布的事件对这台实例是**永久丢失**的。
 
-**这不是缺陷，是设计上已经接受的取舍**：推送只是把撤销延迟从 `cache_ttl` 压到近乎实时的**加速手段**，权威撤销早已通过删除 Redis 会话完成。丢一条事件的后果是那个 SDK 最长 `cache_ttl` 之后回源被拒——正好退化成没有推送时的行为。
+丢事件本身是可接受的——推送只是把撤销延迟从 `cache_ttl` 压到近乎实时的**加速手段**，权威撤销早已通过删除 Redis 会话完成。丢一条的后果是那个 SDK 最长 `cache_ttl` 之后回源被拒，正好退化成没有推送时的行为。
 
-所以撤销的实际保证是两段，**上限由后者兜底**：
+**真正不可接受的是它不可观测。** go-redis 内部自动重连并重发 `SUBSCRIBE`，既不关闭 channel 也不返回错误：`RevokeHub.Run` 一无所知，SDK 那边看到的流也一直健康——**所有人都以为推送在正常工作。** 一个有兜底的故障不要紧，一个查不出来的故障要紧。
+
+所以 Task 6 做了一件小事：把 `Channel()` 换成 `ChannelWithSubscriptions()`，数 `SUBSCRIBE` 确认回包。**第一条是初次订阅，第二条起必然是重连**，也就意味着中间有缺口。检测到就给本实例下所有 SDK 广播一条 `WatchPurge`，让它们清空缓存。
+
+这是**悲观判断**：重连时未必真丢了东西，但 fp 无从分辨，只能按最坏情况处理。代价是一波回源，而且只有真正被使用的 token 才回源。
+
+于是撤销的实际保证变成三段：
 
 | | 机制 | 延迟 |
 |---|---|---|
-| 正常 | Redis 广播 → 流推送 → SDK 清缓存 | 毫秒级 |
-| 推送丢失/流断开 | SDK 缓存到期回源 → fp 查 Redis 查不到 → 拒 | ≤ `cache_ttl`（流断开时收紧到 `DegradedCacheTTL`） |
+| 正常 | Redis 广播 → 流推送 → SDK 清对应条目 | 毫秒级 |
+| **fp 的订阅抖动** | **检测到重订阅 → 广播 Purge → SDK 清全部** | **毫秒级（新增）** |
+| SDK↔fp 流断开 | SDK 重连后自行 purge（Task 10） | 重连即恢复 |
+| 兜底 | SDK 缓存到期回源 → fp 查 Redis 查不到 → 拒 | ≤ `cache_ttl`（流断开时收紧到 `DegradedCacheTTL`） |
 
-需要"绝不丢"的话得换成 Redis Stream 加消费组，或给每个实例做事件序号与补拉。**本阶段不做**——它把一个"加速手段"升级成了需要维护偏移量、消费组与补偿逻辑的有状态组件，而收益仅仅是把一个已有兜底的窗口从 30 秒缩到 0。
+##### 为什么不上 Redis Stream
+
+Stream + 每实例一个消费组能**精准补齐**丢掉的那几条事件，而不是粗暴清空。但衡量下来不划算：
+
+- 它要解决的窗口**本来就被 `cache_ttl` 兜住了**，且触发条件是月级的 Redis 故障转移
+- 消费组的唯一额外收益是"跨进程重启的 offset 持久化"，而这里价值为零——fp 进程重启时它持有的 SDK 流全断了，SDK 重连后按 Task 10 会 purge，重放那段历史没有任何意义
+- 消费组要求清理死实例遗留的组，而"哪些实例死了"就是**成员管理**——正是选择 Redis 而非 gRPC mesh 时刻意避开的东西
+- 代价是新增 `MAXLEN` 调参、`XINFO` 间隙检测、启动顺序约束（`$` 必须在服务开始接受连接前解析）、以及滚动发布期间的双写迁移
+
+重订阅检测关闭的是同一个洞（静默丢失），约 30 行，不新增任何运维项。**两者的差别只在恢复精度：精准补齐 vs 全量清空。** 对一个月级发生的事件，粗暴恢复完全够用。
+
+**什么情况下该改回 Stream：** 撤销频率涨到"一次全量 Purge 的回源浪潮会打疼 fp"的量级（比如常态每秒几十次撤销）。按现在约 0.1 次/秒的量级，差得远。
 
 #### 对 LB 的三条要求
 
@@ -524,6 +543,8 @@ message WatchResponse {
     RevokeEvent revoke = 1;
     // ready 表示服务端已完成订阅，此后的撤销不会漏推。
     WatchReady ready = 2;
+    // purge 要求 SDK 丢弃全部缓存。
+    WatchPurge purge = 3;
   }
 }
 
@@ -533,6 +554,20 @@ message WatchResponse {
 // 光靠"建流没报错"是不够的——流建立了但服务端还没订上 Redis 的那段时间里，
 // 撤销事件会丢，而 SDK 却以为推送可用，不会收紧缓存窗口。
 message WatchReady {}
+
+// WatchPurge 要求 SDK 丢弃**全部**缓存条目。
+//
+// fp 在确知自己漏读了撤销事件、却不知道漏了哪些时发出。目前唯一的触发源是
+// Redis 订阅重建（见 internal/store/revoke.go 的 RevokeSignalGap）：go-redis
+// 会静默重连并重发 SUBSCRIBE，那个窗口里发布的事件对本实例永久丢失。
+//
+// **这是悲观判断，不是确知。** 重建时未必真的丢了东西——那个窗口里可能压根
+// 没人发布过撤销。但 fp 无从分辨，只能按最坏情况处理。不要试图把它"优化"成
+// 条件触发：能让它变成条件的那个信息并不存在。
+message WatchPurge {
+  // reason 只用于日志与排障，SDK 的处理动作与它无关。
+  string reason = 1;
+}
 ```
 
 - [ ] **Step 5: 引入依赖并生成**
@@ -2738,25 +2773,145 @@ git commit -m "feat(grpcapi): 发码/登录/登出/校验四个一元 RPC"
 **Files:**
 - Create: `internal/grpcapi/watch.go`
 - Create: `internal/grpcapi/watch_test.go`
+- Modify: `internal/store/revoke.go`（`Subscribe` 改为投递 `RevokeSignal`）
+- Modify: `internal/store/revoke_test.go`
 
 **Interfaces:**
-- Consumes: `store.RevokePublisher.Subscribe(ctx) (<-chan domain.RevokeEvent, func(), error)`
+- Changes: `store.RevokePublisher.Subscribe(ctx) (<-chan store.RevokeSignal, func(), error)`
+- Produces: `store.RevokeSignal{Kind, Event}` 与 `store.RevokeSignalEvent` / `store.RevokeSignalGap`
 - Produces: `grpcapi.NewRevokeHub(pub *store.RevokePublisher) *RevokeHub`
 - Produces: `(*RevokeHub).Run(ctx) error`——阻塞式，进程生命周期内运行一次
-- Produces: `(*RevokeHub).Subscribe(appID uuid.UUID) (<-chan domain.RevokeEvent, func())`
+- Produces: `(*RevokeHub).Subscribe(appID uuid.UUID) (<-chan HubEvent, func())`
+- Produces: `grpcapi.HubEvent{Purge bool, Reason string, Revoke domain.RevokeEvent}`
 - Changes: `AuthServerDeps` 增加 `Hub *RevokeHub`、`Apps AppLookup`
 
 ---
 
-- [ ] **Step 1: 明确三条规则**
+- [ ] **Step 1: 明确四条规则**
 
 实现前先记住，它们各自对应一类静默失效：
 
 1. **`AppID == uuid.Nil` 的事件必须推给所有订阅者。** 改密和冻结是跨应用撤销，服务端把 `Nil` 当成"某个应用 ID"去做等值过滤的话，这两类撤销**一条也推不出去**——而按应用过滤的单点踢下线照常工作，所以测试很容易只覆盖后者
 2. **订阅者的 channel 必须有缓冲，且满了要丢弃而不是阻塞。** 一条卡住的 gRPC 流会把整个中继堵死，进而拖垮所有其他流的推送。丢弃是安全的：推送只是**加速**，丢了最长 `cache_ttl` 后回源照样会拒
 3. **每条流退出时必须注销。** 漏掉的话 hub 的订阅者表只增不减，每条断开的流永久占一个 channel
+4. **Redis 订阅重建必须转成一次全量 `Purge`。** 见下一步——这是本任务里唯一一处"修的不是丢事件本身，而是丢事件不可观测"
 
-- [ ] **Step 2: 写失败测试**
+- [ ] **Step 2: 把订阅重建变成可观测的信号**
+
+### 问题
+
+`RevokePublisher.Subscribe` 目前用 go-redis 的 `Channel()`。连接抖动时 go-redis 会**静默重连并重发 `SUBSCRIBE`**：既不关闭 channel，也不返回错误。那个窗口里发布的撤销事件对本实例**永久丢失**，而 `RevokeHub.Run` 一无所知，SDK 那边看到的流也一直是健康的——**所有人都以为推送在正常工作。**
+
+丢事件本身有兜底（最长 `cache_ttl` 后回源被拒），真正的问题是**它不可观测**。
+
+### 方案
+
+`Channel()` 换成 `ChannelWithSubscriptions()`，它除了 `*Message` 还会投递 `*Subscription`。go-redis 的 `resubscribe()` 在每次重连时重发 `SUBSCRIBE`，Redis 的回包会被解析成一条 `*Subscription{Kind:"subscribe"}` 送上来。
+
+**第一条 `subscribe` 是初次订阅，第二条起就是重连。**
+
+`internal/store/revoke.go` 改动：
+
+```go
+// RevokeSignalKind 区分事件流上的两类信号。
+type RevokeSignalKind int
+
+const (
+	// RevokeSignalEvent 是一条撤销事件。
+	RevokeSignalEvent RevokeSignalKind = iota
+	// RevokeSignalGap 表示事件流出现了缺口：订阅刚刚重建，
+	// 期间发布的事件已永久丢失，且无法知道丢了哪些。
+	RevokeSignalGap
+)
+
+// RevokeSignal 是订阅流上的一条信号。
+//
+// 命名取"缺口"而非"重订阅"，是因为消费方关心的是**后果**不是成因。
+// 将来若换成 Redis Stream 等别的承载方式，这个信号的含义原样成立。
+type RevokeSignal struct {
+	Kind RevokeSignalKind
+	// Event 仅在 Kind == RevokeSignalEvent 时有效。
+	Event domain.RevokeEvent
+}
+
+func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan RevokeSignal, func(), error) {
+	sub := p.rdb.Subscribe(ctx, revokeChannel)
+	if _, err := sub.Receive(ctx); err != nil {
+		_ = sub.Close()
+		return nil, nil, fmt.Errorf("store: 订阅撤销频道: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		<-ctx.Done()
+		_ = sub.Close()
+	}()
+
+	out := make(chan RevokeSignal, 64)
+	go func() {
+		defer close(out)
+
+		// subscribeCount 数的是 SUBSCRIBE 确认回包。
+		// 第一条是本次订阅本身；**第二条起一定是 go-redis 重连后重发的**，
+		// 也就意味着两次之间的事件已经丢了。这是察觉这件事的唯一途径——
+		// 没有错误、没有关闭的 channel，只有这一个计数。
+		subscribeCount := 0
+
+		for msg := range sub.ChannelWithSubscriptions() {
+			var sig RevokeSignal
+			switch m := msg.(type) {
+			case *redis.Subscription:
+				if m.Kind != "subscribe" {
+					continue
+				}
+				subscribeCount++
+				if subscribeCount == 1 {
+					continue // 初次订阅，没有缺口
+				}
+				slog.Warn("store: Redis 订阅已重建，期间的撤销事件已丢失",
+					"resubscribeCount", subscribeCount-1)
+				sig = RevokeSignal{Kind: RevokeSignalGap}
+			case *redis.Message:
+				var ev domain.RevokeEvent
+				if err := json.Unmarshal([]byte(m.Payload), &ev); err != nil {
+					slog.Error("store: 解析撤销事件失败", "err", err)
+					continue
+				}
+				sig = RevokeSignal{Kind: RevokeSignalEvent, Event: ev}
+			default:
+				continue
+			}
+
+			select {
+			case out <- sig:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return out, func() { cancel(); _ = sub.Close() }, nil
+}
+```
+
+> **`ChannelWithSubscriptions()` 与 `Channel()` 互斥**——go-redis 里先调 `Channel()` 再调它会 panic。确保没有别处还在用 `Channel()`。
+
+对应的 `internal/store/revoke_test.go` 要加一条：
+
+```go
+// TestSubscribeSurfacesResubscribeAsGap 守住"丢事件必须可观测"。
+//
+// go-redis 会在连接抖动时静默重连并重发 SUBSCRIBE，既不报错也不关 channel。
+// 没有这个信号的话，丢事件这件事在整个系统里不留任何痕迹——
+// 日志里没有、监控里没有、SDK 看到的流状态也一切正常。
+//
+// 制造重连的方式：用 CLIENT KILL 掐掉订阅连接（拿 CLIENT LIST 找到它），
+// 或用一个可控的中间代理断开底层 TCP。断开后必须在合理时间内收到一条
+// Kind == RevokeSignalGap。
+func TestSubscribeSurfacesResubscribeAsGap(t *testing.T) { … }
+```
+
+- [ ] **Step 3: 写 hub 的失败测试**
 
 `internal/grpcapi/watch_test.go`：
 
@@ -2795,11 +2950,11 @@ func TestGlobalRevokeReachesEveryApp(t *testing.T) {
 		Reason: domain.RevokeReasonPasswordChanged,
 	})
 
-	for name, ch := range map[string]<-chan domain.RevokeEvent{"A": chA, "B": chB} {
+	for name, ch := range map[string]<-chan HubEvent{"A": chA, "B": chB} {
 		select {
 		case ev := <-ch:
-			if len(ev.Tokens) != 1 {
-				t.Fatalf("应用 %s 收到的事件 token 数为 %d", name, len(ev.Tokens))
+			if len(ev.Revoke.Tokens) != 1 {
+				t.Fatalf("应用 %s 收到的事件 token 数为 %d", name, len(ev.Revoke.Tokens))
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("应用 %s 没有收到跨应用撤销事件", name)
@@ -2832,7 +2987,7 @@ func TestScopedRevokeDoesNotLeakToOtherApps(t *testing.T) {
 	}
 	select {
 	case ev := <-chB:
-		t.Fatalf("其他应用收到了不属于它的撤销事件，泄露了 token: %v", ev.Tokens)
+		t.Fatalf("其他应用收到了不属于它的撤销事件，泄露了 token: %v", ev.Revoke.Tokens)
 	case <-time.After(200 * time.Millisecond):
 	}
 }
@@ -2867,8 +3022,8 @@ func TestSlowSubscriberDoesNotBlockOthers(t *testing.T) {
 
 	select {
 	case ev := <-fast:
-		if ev.Tokens[0] != "live" {
-			t.Fatalf("快订阅者收到的是 %v", ev.Tokens)
+		if ev.Revoke.Tokens[0] != "live" {
+			t.Fatalf("快订阅者收到的是 %v", ev.Revoke.Tokens)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("一个卡住的订阅者把整个中继堵死了")
@@ -2896,6 +3051,78 @@ func TestUnsubscribeRemovesSubscriber(t *testing.T) {
 	}
 }
 
+// TestGapBecomesPurgeForEverySubscriber 守住 Step 2 的整条链路。
+//
+// Redis 订阅重建 → store 发出 RevokeSignalGap → hub 转成 Purge → 推给
+// **所有**订阅者。少了最后一环，前面检测到重连也白搭。
+//
+// 断言"所有订阅者"而不是"某个订阅者"：触发 purge 的前提是不知道丢了
+// 哪些事件，因而也不知道涉及哪些应用。按 appID 过滤 purge 是在没有依据的
+// 情况下缩小范围——那种实现只测一个订阅者时完全看不出问题。
+func TestGapBecomesPurgeForEverySubscriber(t *testing.T) {
+	hub, signals := newTestHubWithFakeSignals(t) // 直接投喂信号，不依赖真实 Redis 断连
+	appA, appB := uuid.New(), uuid.New()
+
+	chA, closeA := hub.Subscribe(appA)
+	defer closeA()
+	chB, closeB := hub.Subscribe(appB)
+	defer closeB()
+
+	signals <- store.RevokeSignal{Kind: store.RevokeSignalGap}
+
+	for name, ch := range map[string]<-chan HubEvent{"A": chA, "B": chB} {
+		select {
+		case ev := <-ch:
+			if !ev.Purge {
+				t.Fatalf("订阅者 %s 收到的不是 purge：%+v", name, ev)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("订阅者 %s 没有收到 purge——"+
+				"订阅重建被检测到了，但没转成对 SDK 的指令", name)
+		}
+	}
+}
+
+// TestPurgeClosesStreamWhenBufferFull 守住"purge 不能被静默丢弃"。
+//
+// fanout 丢一条撤销是安全的（那个 token 最多多活一个 cache_ttl），
+// 但丢一条 purge 会让 SDK 的缓存停在一个**已知不可信**的状态，
+// 而且没有任何后续机制会纠正它。所以缓冲满时必须关掉这条流，
+// 逼 SDK 重连并自行 purge。
+//
+// 复用 fanout 的 default 分支（直接丢弃）能让上一条测试通过，
+// 却在这里失败——这正是两者代价不对等的地方。
+func TestPurgeClosesStreamWhenBufferFull(t *testing.T) {
+	hub, signals := newTestHubWithFakeSignals(t)
+	appID := uuid.New()
+
+	ch, cancel := hub.Subscribe(appID)
+	defer cancel()
+
+	// 不读，把缓冲灌满。
+	for i := 0; i < revokeBufferSize+10; i++ {
+		signals <- store.RevokeSignal{Kind: store.RevokeSignalEvent, Event: domain.RevokeEvent{
+			Tokens: []string{"tok"}, UserID: uuid.New(), AppID: appID,
+			Reason: domain.RevokeReasonKick,
+		}}
+	}
+	signals <- store.RevokeSignal{Kind: store.RevokeSignalGap}
+
+	// 排空缓冲，最终必须读到 channel 关闭，而不是一直读到耗尽后阻塞。
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return // channel 已关闭，符合预期
+			}
+		case <-deadline:
+			t.Fatal("缓冲满时 purge 被静默丢弃了——" +
+				"SDK 的缓存会停在一个已知不可信的状态，且不会有任何机制纠正")
+		}
+	}
+}
+
 // TestHubUsesExactlyOneRedisSubscription 守住"只开一份订阅"。
 //
 // 每条流一份 Redis 订阅在功能上完全正确，只是把连接数变成流数的倍数。
@@ -2912,17 +3139,32 @@ func TestHubUsesExactlyOneRedisSubscription(t *testing.T) {
 }
 ```
 
-> `newTestHub` 返回一个已 `Run` 起来的 hub 与它背后的 `*store.RevokePublisher`；
-> 用 `t.Cleanup` 取消 hub 的 ctx。`subscriberCount` / `redisSubscribeCalls` 是包内测试辅助
-> （小写，仅测试用），后者用一个计数装饰器包住 `Subscribe`。
+> **两个装配辅助，用途不同，都要有：**
+>
+> - `newTestHub(t)` 返回一个已 `Run` 起来的 hub 与它背后的**真实** `*store.RevokePublisher`。
+>   验证"事件真的经过 Redis 走了一遭"的测试用它。
+> - `newTestHubWithFakeSignals(t)` 返回 hub 与一个可以直接投喂 `store.RevokeSignal`
+>   的 channel，**绕开 Redis**。验证 hub 自身分发逻辑（尤其是 Gap → Purge）的测试用它——
+>   靠真实断连来制造 `RevokeSignalGap` 既慢又不稳定，而这里要测的是 hub 收到信号之后
+>   做了什么，不是信号怎么产生的。信号怎么产生由 Step 2 的
+>   `TestSubscribeSurfacesResubscribeAsGap` 单独验证。
+>
+> 为此 `RevokeHub` 需要一个包内的构造入口，能接一个现成的 signal channel 而不是
+> 自己去 `pub.Subscribe`。把 `Run` 拆成 `Run(ctx)`（真订阅）与
+> `run(ctx, <-chan store.RevokeSignal)`（纯分发循环）即可，前者调后者。
+>
+> `subscriberCount` / `redisSubscribeCalls` 也是包内测试辅助（小写，仅测试用），
+> 后者用一个计数装饰器包住 `Subscribe`。
+>
+> 两个辅助都用 `t.Cleanup` 取消 hub 的 ctx。
 
-- [ ] **Step 3: 跑测试确认失败**
+- [ ] **Step 4: 跑测试确认失败**
 
 ```bash
 ./scripts/test.sh ./internal/grpcapi/ -run 'TestGlobalRevoke|TestScopedRevoke|TestSlowSubscriber|TestUnsubscribe|TestHubUses'
 ```
 
-- [ ] **Step 4: 实现 RevokeHub**
+- [ ] **Step 5: 实现 RevokeHub**
 
 `internal/grpcapi/watch.go`：
 
@@ -2959,9 +3201,17 @@ type RevokeHub struct {
 	subs map[uint64]*revokeSub
 }
 
+// HubEvent 是推给一条 Watch 流的消息。
+type HubEvent struct {
+	// Purge 为 true 时要求 SDK 丢弃**全部**缓存，此时 Revoke 字段无意义。
+	Purge  bool
+	Reason string
+	Revoke domain.RevokeEvent
+}
+
 type revokeSub struct {
 	appID uuid.UUID
-	ch    chan domain.RevokeEvent
+	ch    chan HubEvent
 }
 
 // NewRevokeHub 构造 RevokeHub。
@@ -2974,7 +3224,7 @@ func NewRevokeHub(pub *store.RevokePublisher) *RevokeHub {
 // ctx 必须是可取消的：Subscribe 内部虽已派生子 ctx 并由 closeFn 兜底，
 // 但这里的 defer 是唯一保证进程退出时那条 Redis 连接被关掉的地方。
 func (h *RevokeHub) Run(ctx context.Context) error {
-	events, closeFn, err := h.pub.Subscribe(ctx)
+	signals, closeFn, err := h.pub.Subscribe(ctx)
 	if err != nil {
 		return err
 	}
@@ -2984,11 +3234,18 @@ func (h *RevokeHub) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case ev, ok := <-events:
+		case sig, ok := <-signals:
 			if !ok {
 				return nil
 			}
-			h.fanout(ev)
+			switch sig.Kind {
+			case store.RevokeSignalGap:
+				// 订阅刚刚重建，期间的事件已永久丢失，且不知道丢了哪些。
+				// 唯一安全的动作是让本实例下所有 SDK 清空缓存。
+				h.broadcastPurge("redis 订阅重建")
+			default:
+				h.fanout(sig.Event)
+			}
 		}
 	}
 }
@@ -3013,7 +3270,7 @@ func (h *RevokeHub) fanout(ev domain.RevokeEvent) {
 			continue
 		}
 		select {
-		case sub.ch <- ev:
+		case sub.ch <- HubEvent{Revoke: ev}:
 		default:
 			slog.Warn("grpcapi: 撤销事件被丢弃，订阅者缓冲已满",
 				"appId", sub.appID, "reason", ev.Reason)
@@ -3021,9 +3278,44 @@ func (h *RevokeHub) fanout(ev domain.RevokeEvent) {
 	}
 }
 
+// broadcastPurge 让本实例下的**全部**订阅者清空缓存。
+//
+// 刻意不按 appID 过滤：触发它的前提正是"不知道丢了哪些事件"，
+// 自然也不知道涉及哪些应用。按应用过滤等于在没有依据的情况下缩小范围。
+//
+// 范围仅限本实例：其他 fp 实例的订阅没有中断过，它们的 SDK 不需要清缓存。
+// 爆炸半径就是真正丢了事件的那一台。
+//
+// 缓冲满时**不能**像 fanout 那样直接丢弃。两者的代价不对等：丢一条撤销
+// 只让一个 token 多活一个 cache_ttl，丢一条 purge 会让整个 SDK 的缓存
+// 停在一个**已知不可信**的状态，而且没有任何后续机制会纠正它。
+//
+// 所以改为关掉那条流。这不激进——撤销频率约每秒 0.1 次，填满 64 格缓冲
+// 需要十分钟不读，而 keepalive 十秒就该把这样的连接判死了。关流之后 SDK
+// 会重连并 purge（Task 10 已有），复用现成机制，不必新造一套补发逻辑。
+func (h *RevokeHub) broadcastPurge(reason string) {
+	// 写锁：下面可能要删订阅者。purge 罕见，锁的粒度不重要。
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	slog.Warn("grpcapi: 广播缓存清空指令", "reason", reason, "subscribers", len(h.subs))
+	for id, sub := range h.subs {
+		select {
+		case sub.ch <- HubEvent{Purge: true, Reason: reason}:
+		default:
+			// Go 允许 range 期间 delete。关掉 channel 会让 Watch 走到
+			// !ok 分支正常返回；它 deferred 的注销函数再 delete 一次是空操作。
+			// 这里先从 map 摘掉，Close() 就不会二次关闭同一个 channel。
+			slog.Warn("grpcapi: 订阅者缓冲已满且需要 purge，关闭该流", "appId", sub.appID)
+			close(sub.ch)
+			delete(h.subs, id)
+		}
+	}
+}
+
 // Subscribe 登记一个订阅者。返回的函数必须被调用，否则订阅者永久驻留。
-func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan domain.RevokeEvent, func()) {
-	sub := &revokeSub{appID: appID, ch: make(chan domain.RevokeEvent, revokeBufferSize)}
+func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan HubEvent, func()) {
+	sub := &revokeSub{appID: appID, ch: make(chan HubEvent, revokeBufferSize)}
 
 	h.mu.Lock()
 	h.next++
@@ -3044,7 +3336,7 @@ func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan domain.RevokeEvent, func(
 
 **注意 `once`：** 注销函数会被 `defer` 调用，也可能在错误分支里再调一次。没有 `once` 的话，第二次 `delete` 虽然无害，但如果将来改成"关闭 channel"就会 panic。这里花一行把它做成幂等。
 
-- [ ] **Step 5: 实现 Watch RPC**
+- [ ] **Step 6: 实现 Watch RPC**
 
 在 `auth_service.go` 里给 `authServer` 加 `hub` 与 `apps` 字段（`AppLookup` 是取应用内部 UUID 的窄接口），并实现：
 
@@ -3085,11 +3377,24 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 			return nil
 		case ev, ok := <-events:
 			if !ok {
+				// hub 关闭（进程退出），或本订阅者因缓冲满且需要 purge
+				// 而被摘掉。两种情况都是正常结束——SDK 会重连，
+				// 重连后按 Task 10 的设计自行 purge。
 				return nil
 			}
-			if err := stream.Send(&fpv1.WatchResponse{
-				Event: &fpv1.WatchResponse_Revoke{Revoke: revokeEvent(ev)},
-			}); err != nil {
+			var msg *fpv1.WatchResponse
+			if ev.Purge {
+				msg = &fpv1.WatchResponse{
+					Event: &fpv1.WatchResponse_Purge{
+						Purge: &fpv1.WatchPurge{Reason: ev.Reason},
+					},
+				}
+			} else {
+				msg = &fpv1.WatchResponse{
+					Event: &fpv1.WatchResponse_Revoke{Revoke: revokeEvent(ev.Revoke)},
+				}
+			}
+			if err := stream.Send(msg); err != nil {
 				return err
 			}
 		}
@@ -3115,7 +3420,7 @@ func revokeEvent(ev domain.RevokeEvent) *fpv1.RevokeEvent {
 
 **上行方向刻意不读。** `WatchRequest` 目前没有任何字段，服务端不需要 `stream.Recv()`。双向流保留上行是为将来订阅更多事件类型预留——现在读它只会多一个 goroutine 和一份退出协调。
 
-- [ ] **Step 6: 补一条流式的端到端测试**
+- [ ] **Step 7: 补一条流式的端到端测试**
 
 在 `auth_service_test.go` 追加：
 
@@ -3163,20 +3468,20 @@ func TestWatchDeliversRevokeToClient(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: 跑测试**
+- [ ] **Step 8: 跑测试**
 
 ```bash
 ./scripts/test.sh ./internal/grpcapi/
 ```
 
-- [ ] **Step 8: 提交**
+- [ ] **Step 9: 提交**
 
 ```bash
-git add internal/grpcapi
+git add internal/grpcapi internal/store
 ```
 
 ```bash
-git commit -m "feat(grpcapi): Watch 双向流与进程内撤销事件中继"
+git commit -m "feat(grpcapi): Watch 双向流、撤销中继与订阅重建检测"
 ```
 
 ---
@@ -3239,7 +3544,7 @@ func (h *RevokeHub) Close() {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		ch := make(chan domain.RevokeEvent)
+		ch := make(chan HubEvent)
 		close(ch)
 		return ch, func() {}
 	}
@@ -3849,6 +4154,14 @@ func (e *stubEnv) pushRevoke(t *testing.T, ev *fpv1.RevokeEvent) {
 	e.stub.events <- &fpv1.WatchResponse{Event: &fpv1.WatchResponse_Revoke{Revoke: ev}}
 }
 
+// pushPurge 让桩服务端往流里推一条清空指令。
+func (e *stubEnv) pushPurge(t *testing.T, reason string) {
+	t.Helper()
+	e.stub.events <- &fpv1.WatchResponse{
+		Event: &fpv1.WatchResponse_Purge{Purge: &fpv1.WatchPurge{Reason: reason}},
+	}
+}
+
 // waitUntil 轮询到 cond 为真，超时则以 msg 失败。
 //
 // 推送是异步的，断言必须轮询而不是 sleep 一个固定时长——固定 sleep 要么
@@ -4067,6 +4380,12 @@ func (c *Client) watchOnce(ctx context.Context) error {
 			c.streamUp.Store(true)
 		case msg.GetRevoke() != nil:
 			c.auth.onRevoke(msg.GetRevoke())
+		case msg.GetPurge() != nil:
+			// 服务端确知自己漏读了撤销事件，但不知道漏了哪些。
+			// 唯一安全的动作是把本地缓存整个丢掉。
+			c.opts.Logger.Warn("fpsdk: 按服务端要求清空校验缓存",
+				"reason", msg.GetPurge().GetReason())
+			c.auth.onPurge()
 		default:
 			// 未知事件类型（将来的 ConfigChanged / PolicyChanged）。
 			// 忽略，不要报错——oneof 的向前兼容就靠这里。
@@ -4611,6 +4930,44 @@ func TestRevokeEventDropsCachedToken(t *testing.T) {
 	}, "撤销事件到达后缓存未被清除——被踢下线的用户会继续通行整整一个 cache_ttl")
 }
 
+// TestPurgeDropsEverything 守住 SDK 侧对 WatchPurge 的处理。
+//
+// 服务端在确知漏读了撤销事件、却不知道漏了哪些时发这条指令。SDK 必须清掉
+// **全部**条目——只清某一部分（比如按 appID）没有任何依据，因为服务端
+// 恰恰是因为"不知道涉及谁"才发的它。
+//
+// 断言写成"多个不同 token 都要重新回源"：只清一条的实现能让单 token
+// 的测试通过，而线上表现是缓存里绝大多数条目仍停在不可信状态。
+func TestPurgeDropsEverything(t *testing.T) {
+	var calls atomic.Int32
+	env := newStubEnv(t, func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+		calls.Add(1)
+		return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 300_000}, nil
+	})
+
+	tokens := []string{"tok-a", "tok-b", "tok-c"}
+	for _, tok := range tokens {
+		if _, err := env.auth.Validate(context.Background(), tok); err != nil {
+			t.Fatalf("预热 %s: %v", tok, err)
+		}
+	}
+	if got := calls.Load(); got != int32(len(tokens)) {
+		t.Fatalf("预热阶段回源 %d 次，期望 %d 次", got, len(tokens))
+	}
+
+	env.pushPurge(t, "redis 订阅重建")
+
+	env.waitUntil(t, func() bool {
+		for _, tok := range tokens {
+			if _, err := env.auth.Validate(context.Background(), tok); err != nil {
+				return false
+			}
+		}
+		// 三个 token 全部重新回源过，总次数应为 2 × len(tokens)。
+		return calls.Load() == int32(2*len(tokens))
+	}, "收到 purge 后缓存没有被全部清空——部分条目仍停在已知不可信的状态")
+}
+
 // TestStreamDownTightensCacheWindow 守住降级策略。
 //
 // 推送断开意味着撤销的"加速"能力消失，只剩 TTL 兜底。SDK 主动把窗口
@@ -4828,6 +5185,16 @@ func identityFrom(e entry, stale bool) *Identity {
 // onRevoke 是撤销事件的处理入口，由 Client 的 Watch 循环调用。
 func (a *Auth) onRevoke(ev *fpv1.RevokeEvent) {
 	a.cache.drop(ev.GetTokens()...)
+}
+
+// onPurge 丢弃全部缓存，由 Client 的 Watch 循环在收到 WatchPurge 时调用。
+//
+// 服务端只在"确知漏读了撤销事件、却不知道漏了哪些"时发这条指令
+// （目前唯一触发源是 fp 那侧的 Redis 订阅重建）。代价是一波回源——
+// 但只有真正被使用的 token 才会回源，相当于把一个 cache_ttl 周期的
+// 回源压缩到更短的窗口里，而不是一次性尖峰。
+func (a *Auth) onPurge() {
+	a.cache.purge()
 }
 ```
 
@@ -5428,6 +5795,43 @@ func TestStreamOutageTightensCacheWindow(t *testing.T) {
 	// 这条测试证明收紧对**存量条目**生效——它是 Task 9 那条设计的端到端体现。
 }
 
+// TestRedisSubscriptionBlipDoesNotSilentlyLoseRevocations 是"丢事件必须可观测"
+// 这条改动的验收标准。**在改造之前它必然失败。**
+//
+// 复现的是生产上真实会发生的一幕：Redis 故障转移或网络抖动打断了 fp 的
+// 订阅连接。go-redis 会静默重连并重发 SUBSCRIBE——不报错、不关 channel——
+// 那个窗口里发布的撤销事件对这台 fp 永久丢失，而 SDK 看到的流一直是健康的。
+//
+// 改造前：SDK 在整个 cache_ttl 内继续放行一个已被踢下线的用户，
+//        且日志、监控、流状态里没有任何异常痕迹。
+// 改造后：fp 从"第二次 SUBSCRIBE 确认"察觉到缺口，广播 Purge，SDK 清空缓存，
+//        下一次请求回源被拒。
+func TestRedisSubscriptionBlipDoesNotSilentlyLoseRevocations(t *testing.T) {
+	// 装配要点：
+	//
+	// 1. cache_ttl 配成很长（比如 600 秒）。这是本测试成立的关键——
+	//    只有让 TTL 兜底彻底来不及，才能证明失效是 Purge 带来的。
+	//    TTL 配短的话，一个"什么都没做"的实现也会通过。
+	//
+	// 2. 登录并校验一次，确认条目已进 SDK 本地缓存
+	//    （再校验一次，断言没有产生新的回源）。
+	//
+	// 3. 掐掉 fp 的那条订阅连接，而不是整个 Redis：
+	//       CLIENT LIST TYPE pubsub   → 找到订阅连接的 id
+	//       CLIENT KILL ID <id>       → 只杀它
+	//    用 TYPE pubsub 过滤很重要——杀错连接会把会话存储也一起断掉，
+	//    那样测出来的是"Redis 挂了"，不是"订阅抖动了"。
+	//
+	// 4. **在 go-redis 重连之前**触发撤销（accounts.RevokeAllSessions）。
+	//    这一步是整个测试的核心：这条事件注定送不到 fp。
+	//    时序不好控，所以断开后立刻撤销，并接受偶发的"其实没丢"——
+	//    因为即便没丢，Purge 也会照常发出（重连本身就是触发条件），
+	//    断言依然成立。这是悲观策略带来的好处：测试不依赖精确时序。
+	//
+	// 5. 断言 SDK 在数秒内开始拒绝该 token。
+	//    数秒 << 600 秒的 cache_ttl，所以失效只可能来自 Purge。
+}
+
 // TestRevokeCrossesFpInstances 是多实例部署的核心验证（设计决策 4.5）。
 //
 // 生产上 fp 是多实例挂在 LB 后面：SDK 的 Watch 流只落在其中一台，而管理员
@@ -5601,6 +6005,7 @@ git commit -m "docs: 可运行的接入示例与手工验收步骤"
 | 14 | **多实例下撤销能跨实例送达** | 设计决策 4.5 + Task 6 每实例一份 Redis 订阅 + Task 12（`TestRevokeCrossesFpInstances`） |
 | 15 | **SDK 连任意实例结果一致（无需连接亲和）** | fp 对会话无状态 + Task 12（`TestSDKWorksAgainstAnyInstance`） |
 | 16 | **fp 扩容后存量连接会重新分摊** | Task 7 `MaxConnectionAge`（30 分钟 + 5 分钟宽限，自带 ±10% 抖动） |
+| 17 | **fp 的 Redis 订阅抖动不会静默丢撤销** | Task 6 重订阅检测 → `WatchPurge` + Task 8 SDK 消费 + Task 12（`TestRedisSubscriptionBlipDoesNotSilentlyLoseRevocations`） |
 
 ---
 
