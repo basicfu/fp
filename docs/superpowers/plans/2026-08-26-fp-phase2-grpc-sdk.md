@@ -1747,21 +1747,32 @@ git commit -m "feat(session): 撤销纪元与批量撤销"
 
 于是交接从"一次性投递"变成"过渡期内每次请求都重复告知"。
 
-### 一条需要记录的不变式：新旧会话算出的 `cache_ttl` 恒等
+### 两条路径的 `cache_ttl` 不相等，但都安全
 
-改完之后，"重复告知"这条路径手里只有旧会话对象，而"亲自轮换"那条路径手里是新会话。会不会两条路径下发不同的 `cache_ttl`？**不会，可以证明它们恒等：**
+改完之后，"重复告知"这条路径手里只有旧会话对象，而"亲自轮换"那条路径手里是新会话。会不会两条路径下发不同的 `cache_ttl`？**会。**
 
 ```
-GraceDuration = max(15s, cfg)                    ⇒ grace ≥ cfg
-SessionPolicy.Validate 保证 cfg ≤ idle_timeout   ⇒ idle  ≥ cfg
+grace = max(15s, cfg)                        ⇒ grace ≥ cfg
 
-旧会话：cacheTTL = min(cfg, min(grace, maxRemain)) = min(cfg, maxRemain)
-新会话：cacheTTL = min(cfg, min(idle,  maxRemain)) = min(cfg, maxRemain)
+重复告知：cacheTTL = min(cfg, min(grace, maxRemain)) = min(cfg, maxRemain)
+亲自轮换：cacheTTL = min(cfg, min(idle,  maxRemain))
 ```
 
-两者都塌缩成 `min(cfg, maxRemain)`。所以本任务**不需要**为此改动 `Validate` 里 `res.Session` 的赋值——保持第一阶段的行为即可。
+两者仅在 `idle ≥ cfg` 时相等。而 `idle` 取自 `IdleTimeoutFor(sess.Mobile)`——
+`SessionPolicy.Validate` 只约束了 `TokenCacheTTLSeconds ≤ IdleTimeoutSeconds`（桌面档），
+**从未约束 `IdleTimeoutMobileSeconds`**。所以 `idle_mobile=10s、cfg=60s` 是一组合法配置，
+此时移动端会话在两条路径下拿到 10 秒与 60 秒两个不同的值。
 
-记下来是因为这个等式不显然，下一个读代码的人会怀疑这里有 bug，而"看起来该改却不用改"的地方最容易被人改坏。**它依赖 `GraceDuration = max(15s, cfg)`；谁改了 `GraceDuration` 的定义，必须回来重新验算。**
+**但安全性不依赖这个等式：** 调用方手里是**旧 token**，它的剩余寿命是 `grace`；
+而两条路径给出的 `cache_ttl` 都是 `min(cfg, …) ≤ cfg ≤ grace`，都不会让 SDK 缓存
+超过旧 token 的实际存活时间。不等只意味着移动端在轮换路径下会多回源几次，
+是效率问题不是安全问题。
+
+所以本任务**不需要**为此改动 `Validate` 里 `res.Session` 的赋值——保持第一阶段的行为即可。
+
+> 这一节最初写的是"两者恒等"，理由是"`SessionPolicy.Validate` 保证 `cfg ≤ idle`"。
+> 那句话只对桌面档成立，Task 3 的评审查出了移动档这个缺口。**证明是假的，结论侥幸是真的。**
+> 记在这里当作提醒：把"某处校验保证了 X"写进证明之前，去把那处校验读一遍。
 
 ### 一个残留的窄窗口（可接受，但要知道）
 
@@ -2171,12 +2182,20 @@ func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, ap
 			res.Rotated = true
 			res.NewToken = newToken
 			// newSess 为 nil 时保持 res.Session 为旧会话——这是过渡期内的
-			// 重复告知路径。两者算出的 cache_ttl 恒等：
-			//   GraceDuration = max(15s, cfg)          ⇒ grace ≥ cfg
-			//   SessionPolicy.Validate 保证 cfg ≤ idle ⇒ idle  ≥ cfg
-			//   旧：min(cfg, min(grace, maxRemain)) = min(cfg, maxRemain)
-			//   新：min(cfg, min(idle,  maxRemain)) = min(cfg, maxRemain)
-			// 这个等式依赖 GraceDuration 的定义；改了它必须回来重新验算。
+			// 重复告知路径。两条路径算出的 cache_ttl **不保证相等**，但都是安全的：
+			//
+			//   grace = max(15s, cfg)                      ⇒ grace ≥ cfg
+			//   重复告知：min(cfg, min(grace, maxRemain)) = min(cfg, maxRemain)
+			//   亲自轮换：min(cfg, min(idle,  maxRemain))
+			//
+			// 两者仅在 idle ≥ cfg 时相等。idle 取自 IdleTimeoutFor(sess.Mobile)，
+			// 而 SessionPolicy.Validate 只约束了 IdleTimeoutSeconds ≥ cfg，
+			// **没有约束 IdleTimeoutMobileSeconds**——所以移动端存在 idle < cfg 的
+			// 合法配置（例如 idle_mobile=10s、cfg=60s），此时轮换路径给出的值更小。
+			//
+			// 安全性不依赖这个等式：调用方手里是旧 token，它的剩余寿命是 grace，
+			// 而两条路径给出的 cache_ttl 都 ≤ cfg ≤ grace，都不会让 SDK 缓存超过
+			// 旧 token 的实际存活时间。不等只意味着移动端在轮换路径下多回源几次。
 			if newSess != nil {
 				res.Session = newSess
 			}
