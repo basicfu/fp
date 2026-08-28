@@ -4049,7 +4049,11 @@ func TestShutdownCompletesWithOpenWatchStream(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		// 这里**不能**设一个短于外层断言的超时。设 5 秒的话，顺序反了时
+		// Shutdown 自己的超时兜底会调 Stop() 强行推平，done 在 5 秒左右就关闭，
+		// 远早于外层 10 秒的上限——顺序错误被掩盖成"慢一点但成功"，测试照常绿。
+		// 实测对照：超时设 5 秒时反序变异 5.27s 通过；改成不设超时后 10.22s 失败。
+		shutdownCtx, c := context.WithCancel(context.Background())
 		defer c()
 		env.server.Shutdown(shutdownCtx)
 		close(done)
@@ -4241,6 +4245,18 @@ func (s *Server) Shutdown(ctx context.Context) {
 > 本步骤需要把它们提成具名变量并补上 `authSvc` 的装配——
 > 参照 `internal/service/auth_test.go` 里 `authEnv` 的依赖清单：
 > `Apps` / `Users` / `Sessions` / `Logs` / `Registry` / `Notifier` / `Codes`。
+> **短信供应商按环境分级，不要一刀切。** 早期版本这里写的是"未配置时启动失败"，
+> 没有限定环境，结果是任何人本机跑 `./scripts/run.sh`、任何 CI 跑 `cmd/fp`，
+> 都得先备齐哪怕是假的阿里云凭据。那与 `internal/notify/fake.go` 文档注释里
+> "用于测试与本地开发"的既有意图冲突。正确的分级是（照抄库里 `SecureCookies: cfg.IsProd()`
+> 的现成范式）：
+>
+> - **生产（`FP_ENV=PROD`）**：四项阿里云配置缺任何一项 → **启动失败**
+> - **非生产且四项留空**：注册 `notify.NewFakeProvider`，并打一条**醒目的 WARN**
+>   说明"短信走假供应商，验证码不会真的送达"。不能静默——静默降级正是这条约束要防的
+> - **非生产但四项齐全**：仍用真实供应商（有人就是想在本机对着真通道调试）
+>
+> 另外，`Serve` 必须等撤销中继就绪后才开始监听（见下方 `ServeWhenReady`）。
 > **通知供应商在生产不能用 `notify.NewFakeProvider`**——它只把短信留在内存里。
 > 按 `internal/notify/aliyun.go` 装配真实供应商，未配置时启动失败而不是静默降级。
 
