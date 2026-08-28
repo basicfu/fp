@@ -18,7 +18,7 @@ import (
 //
 // sessions 用可控的假时钟驱动（而不是 newAccountEnv 早先版本里的真实时钟）：
 // 纪元相关的用例需要在"签发"与"校验"之间推进时间来触发轮换边界
-// （见 session_epoch_test.go 的 TestRotationInheritsEpoch），本包既有的
+// （见 session_epoch_test.go 的 TestRotationCarriesEpochForward），本包既有的
 // account_test.go 用例都不依赖真实时间流逝，切换到假时钟对它们零影响。
 type accountEnv struct {
 	accounts *service.AccountService
