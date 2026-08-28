@@ -200,6 +200,29 @@ func TestSDKSurvivesFpOutage(t *testing.T) {
 	if !id.Stale {
 		t.Fatal("陈旧兜底返回的 Identity 未标记 Stale——业务方无法据此拒绝高危操作")
 	}
+
+	// (d) fp 恢复之后，SDK 必须回到完全实时校验，而不是停在降级状态。
+	// 前面三段验证的是"挂了还能活"，这一段验证"活过来了还能好"——一个
+	// 只会降级、不会恢复的 SDK 在生产上等于每次 fp 抖动都留下永久伤疤。
+	e.restartFp(t)
+	waitUntil(t, e.sdk.StreamHealthy, "fp 恢复后，默认客户端的推送流应重新变为健康")
+
+	// 用一个全新的、从未缓存过的 token：拿旧 token 断言的话，命中的可能
+	// 是某条缓存（哪怕此前已经回源过，也无法排除"其实是命中了缓存"这种
+	// 解释），证明不了"回到了实时校验"。全新 token 在任何客户端的本地
+	// 缓存里都不可能有条目，校验成功只能来自一次真正打到已恢复的 fp 的
+	// 回源。
+	freshToken, freshUserID, _ := e.login(t)
+	freshID, err := e.sdk.Auth().Validate(ctx, freshToken)
+	if err != nil {
+		t.Fatalf("fp 恢复后，全新 token 的校验失败: %v", err)
+	}
+	if freshID.UserID != freshUserID.String() {
+		t.Fatalf("fp 恢复后校验返回的 UserID = %q, want %q", freshID.UserID, freshUserID.String())
+	}
+	if freshID.Stale {
+		t.Fatal("fp 已恢复，但校验结果仍标记 Stale——SDK 停在了降级状态，没有回到实时校验")
+	}
 }
 
 // TestRotationHandoffSurvivesLostResponse 是 Task 3 + Task 10 + Task 11 的
