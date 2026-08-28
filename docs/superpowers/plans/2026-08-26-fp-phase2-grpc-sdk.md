@@ -3302,11 +3302,20 @@ func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan RevokeSignal, f
 	go func() {
 		defer close(out)
 
-		// subscribeCount 数的是 SUBSCRIBE 确认回包。
-		// 第一条是本次订阅本身；**第二条起一定是 go-redis 重连后重发的**，
-		// 也就意味着两次之间的事件已经丢了。这是察觉这件事的唯一途径——
-		// 没有错误、没有关闭的 channel，只有这一个计数。
-		subscribeCount := 0
+		// resubscribeCount 数的是本循环观察到的 SUBSCRIBE 确认回包，
+		// 也就是 go-redis 重连的次数。
+		//
+		// **这里能看到的每一条都必然来自重连。** 真正"初次订阅"的那一条确认
+		// 已经被上面 sub.Receive(ctx) 那次同步调用读走了——那正是它存在的
+		// 意义：阻塞到订阅被确认，Subscribe 才能安全返回。它不会再流到这个
+		// channel 里。
+		//
+		// 所以**不要**在这里写"第一条是初次订阅、跳过"。那样会把第一次真实
+		// 重连当成初次订阅放过，一条 Gap 都不发——恰好是本机制要防的那类失效，
+		// 而且只在第一次抖动时发作，之后又"恢复正常"，极难归因。
+		//
+		// 这是察觉订阅重建的唯一途径：没有错误、没有关闭的 channel，只有这个计数。
+		resubscribeCount := 0
 
 		for msg := range sub.ChannelWithSubscriptions() {
 			var sig RevokeSignal
@@ -3315,12 +3324,9 @@ func (p *RevokePublisher) Subscribe(ctx context.Context) (<-chan RevokeSignal, f
 				if m.Kind != "subscribe" {
 					continue
 				}
-				subscribeCount++
-				if subscribeCount == 1 {
-					continue // 初次订阅，没有缺口
-				}
+				resubscribeCount++
 				slog.Warn("store: Redis 订阅已重建，期间的撤销事件已丢失",
-					"resubscribeCount", subscribeCount-1)
+					"resubscribeCount", resubscribeCount)
 				sig = RevokeSignal{Kind: RevokeSignalGap}
 			case *redis.Message:
 				var ev domain.RevokeEvent
