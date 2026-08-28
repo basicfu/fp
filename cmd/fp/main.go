@@ -143,9 +143,22 @@ func run() error {
 			SecureCookies: cfg.IsProd(),
 		}),
 	}
+
+	// fatalErr 收后台服务（HTTP、gRPC）的致命错误。带缓冲，保证两个
+	// goroutine 都不会因为没人接收而卡在发送上；容量给到二者各投一次。
+	//
+	// 存在的理由：下面两个 goroutine 失败时都只是 stop() 触发关闭流程，
+	// 不会让 run() 直接返回错误——如果只记日志、不让退出码也反映这类
+	// 失败，"fp 重启时 Redis 恰好抖动导致 gRPC 撤销中继一直连不上"这种
+	// 场景，从进程管理器的角度看会和一次干净的 SIGTERM 优雅关闭没有任何
+	// 区别（都是退出码 0）。systemd/k8s 之类只看退出码决定要不要告警、
+	// 要不要重启，这正是"等 Ready 再 Serve"这整套设计要防的场景里最容易
+	// 被漏判的一种。
+	fatalErr := make(chan error, 2)
+
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("HTTP 服务异常退出", "err", err)
+			fatalErr <- fmt.Errorf("HTTP 服务异常退出: %w", err)
 			stop()
 		}
 	}()
@@ -163,11 +176,10 @@ func run() error {
 
 	// ServeWhenReady 内部会先等撤销中继订阅上 Redis 才开始接受连接——这条
 	// 编排本身连同"为什么顺序不能反"的完整推导见 grpcapi.Server.ServeWhenReady
-	// 的注释。main.go 这一层只负责调用它、并在它返回错误时按现有惯例
-	// （与 httpSrv 的 ListenAndServe 一致）记日志、触发关闭。
+	// 的注释。
 	go func() {
 		if err := grpcSrv.ServeWhenReady(ctx, grpcLis, 10*time.Second); err != nil {
-			log.Error("gRPC 服务异常退出", "err", err)
+			fatalErr <- fmt.Errorf("gRPC 服务异常退出: %w", err)
 			stop()
 		}
 	}()
@@ -182,5 +194,15 @@ func run() error {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("HTTP 优雅关闭超时", "err", err)
 	}
-	return nil
+
+	// 区分"收到外部信号的正常退出"与"后台服务把自己搞挂了、靠 stop()
+	// 间接触发的退出"：前者返回 nil（退出码 0），后者把错误传出去，
+	// main() 会打印"fp 启动失败"并以退出码 1 结束。不能让这两种情况在
+	// 退出码上无法区分——那正是本次要修的问题。
+	select {
+	case err := <-fatalErr:
+		return err
+	default:
+		return nil
+	}
 }

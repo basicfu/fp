@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,5 +249,66 @@ func TestServeWhenReadyDoesNotAcceptBeforeReady(t *testing.T) {
 	case <-serveDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Shutdown 之后 ServeWhenReady 没有返回")
+	}
+}
+
+// TestServeWhenReadyReportsSubscribeFailure 补上 ServeWhenReady 的
+// runFailed 分支，钉住"订阅失败时返回的错误确实来自订阅失败这条路径"，
+// 不是随便一个非 nil 错误。
+//
+// 把编排搬进 grpcapi 的初衷就是让这类分支能被 bufconn 覆盖到——搬完了
+// 却只测 happy path（TestServeWhenReadyDoesNotAcceptBeforeReady）等于
+// 没搬。这条测试现在还直接关系到 cmd/fp/main.go 的退出码修复能不能被
+// 信任：main.go 靠 ServeWhenReady 返回非 nil 错误来判断要不要把进程的
+// 退出码改成非零，错误得先被这里正确产出，main.go 那边的传播才有意义。
+//
+// 用 errors.Is 而不是只判 err != nil：即使把 ServeWhenReady 实现改成
+// "任何分支都返回同一个固定错误"，只判 err != nil 也会通过，测不出走的
+// 是不是这条分支。
+func TestServeWhenReadyReportsSubscribeFailure(t *testing.T) {
+	wantErr := errors.New("boom：模拟 redis 不可达")
+	hub := newRevokeHub()
+	hub.pub = failingSubscriber{err: wantErr}
+	srv := &Server{grpc: grpc.NewServer(), hub: hub}
+
+	lis := bufconn.Listen(1 << 20)
+	err := srv.ServeWhenReady(context.Background(), lis, 5*time.Second)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ServeWhenReady() = %v，期望包装了 %v", err, wantErr)
+	}
+}
+
+// TestServeWhenReadyReportsTimeout 补上 ServeWhenReady 的超时分支：
+// hub 订阅迟迟不完成时，必须在 timeout 之后返回一个能让调用方分辨
+// "是超时、不是别的失败"的错误，而不是一直卡着或者返回订阅失败那条
+// 分支的错误。理由同上一条：main.go 的退出码修复要能被信任，这条分支
+// 得先被证明真的会触发、返回的确实是超时错误。
+//
+// 用极短的 timeout（50ms）而不是等一个真实场景量级的超时：fake.Subscribe
+// 靠 f.proceed 卡住不返回，只要 timeout 比测试进程的调度抖动大得多就够
+// 了，不需要真的等到接近生产用的 10 秒——那样会把这条测试拖慢一万倍，
+// 换不来任何额外的确定性。
+func TestServeWhenReadyReportsTimeout(t *testing.T) {
+	fake := &fakeSubscriber{proceed: make(chan struct{})}
+	hub := newRevokeHub()
+	hub.pub = fake
+	srv := &Server{grpc: grpc.NewServer(), hub: hub}
+
+	lis := bufconn.Listen(1 << 20)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // 让还卡在 fake.Subscribe 里的后台 goroutine 能退出，不泄漏
+
+	start := time.Now()
+	err := srv.ServeWhenReady(ctx, lis, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("ServeWhenReady() 返回 nil，期望超时错误")
+	}
+	if !strings.Contains(err.Error(), "超时") {
+		t.Fatalf("ServeWhenReady() = %v，期望是超时错误，不是别的分支", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("ServeWhenReady() 用了 %v 才返回，超时分支不该等这么久", elapsed)
 	}
 }
