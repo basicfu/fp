@@ -95,10 +95,11 @@ func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.L
 }
 
 func (s *authServer) Logout(ctx context.Context, req *fpv1.LogoutRequest) (*fpv1.LogoutResponse, error) {
-	if _, err := callerAppID(ctx); err != nil {
+	appID, err := callerAppID(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.auth.Logout(ctx, req.GetToken()); err != nil {
+	if err := s.auth.Logout(ctx, appID, req.GetToken()); err != nil {
 		return nil, statusFrom(err)
 	}
 	return &fpv1.LogoutResponse{}, nil

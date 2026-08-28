@@ -248,9 +248,27 @@ func (s *AuthService) revokeIssued(ctx context.Context, sess *domain.Session, re
 // 排查"这个账号什么时候在哪台设备上退出的"要靠它。domain 里已经定义了
 // LoginEventLogout 常量——定义了却从不写入，就是那种"字段存在但没人用"
 // 的死代码，而这个任务本身就在别处反对它。
-func (s *AuthService) Logout(ctx context.Context, token string) error {
+//
+// appID 归属校验与 Validate 是同一等级的安全性质，不是可选项：不比对的话，
+// 同一个 token 在 ValidateToken 上跨应用被拒、在 Logout 上却跨应用畅通——
+// A 应用的 token 只要能被 B 应用收到（例如两个接入方共享 CookieDomain 时
+// 浏览器会把 cookie 一并发给 B），B 就能单方面撤销 A 的会话。
+func (s *AuthService) Logout(ctx context.Context, appID, token string) error {
+	app, err := s.activeApp(ctx, appID)
+	if err != nil {
+		return err
+	}
+
 	// 先取会话，拿到 user/app 归属再撤销；撤销之后就查不到了。
 	sess, lookupErr := s.deps.Sessions.SessionByToken(ctx, token)
+
+	// 查到了但不属于调用方应用：按 Validate 同一套"不区分失败原因"的语义
+	// 拒绝——不能提前用 Revoke 之外的错误分支泄露"这个 token 存在，只是
+	// 不归你"。必须在调用 Revoke 之前拦下来：Revoke 不认应用归属，一旦
+	// 放过去就会把别的应用的会话真的删掉。
+	if lookupErr == nil && sess != nil && sess.AppID != app.ID {
+		return domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+	}
 
 	if err := s.deps.Sessions.Revoke(ctx, token, domain.RevokeReasonLogout); err != nil {
 		return err

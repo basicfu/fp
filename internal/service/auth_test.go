@@ -732,7 +732,7 @@ func TestLogoutWritesAuditLog(t *testing.T) {
 	ctx := context.Background()
 
 	res := e.smsLogin(t, "13800138000")
-	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+	if err := e.auth.Logout(ctx, e.app.AppID, res.Session.Token); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 
@@ -751,7 +751,7 @@ func TestLogoutWritesAuditLog(t *testing.T) {
 	}
 
 	// 重复登出不应报错，也不该再记一条
-	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+	if err := e.auth.Logout(ctx, e.app.AppID, res.Session.Token); err != nil {
 		t.Fatalf("重复 Logout: %v", err)
 	}
 }
@@ -814,7 +814,7 @@ func TestAuthServiceLogoutInvalidatesToken(t *testing.T) {
 	ctx := context.Background()
 
 	res := e.smsLogin(t, "13800138000")
-	if err := e.auth.Logout(ctx, res.Session.Token); err != nil {
+	if err := e.auth.Logout(ctx, e.app.AppID, res.Session.Token); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 	if _, err := e.auth.ValidateToken(ctx, e.app.AppID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {

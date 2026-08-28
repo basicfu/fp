@@ -75,6 +75,37 @@ func TestTokenFromAnotherAppIsRejected(t *testing.T) {
 	}
 }
 
+// TestLogoutFromAnotherAppIsRejected 是 TestTokenFromAnotherAppIsRejected 在
+// Logout 上的对称版本。
+//
+// service.AuthService.Logout 在这条分支之前不比对 sess.AppID，于是 A 应用
+// 签发的 token，只要落到了 B 应用的 gRPC 调用里（比如两个接入方共享
+// CookieDomain 时浏览器把 A 的 cookie 一并发给了 B），B 就能单方面撤销
+// A 的会话——ValidateToken 上严格的跨应用隔离，在 Logout 上完全不设防。
+//
+// 断言分两部分，且后一部分是关键：只断言"Logout 返回了错误"，一个
+// "报错但仍然把会话删了"的实现照样能通过——必须紧接着用 A 自己的凭据
+// 重新校验一次这个 token，确认会话真的还活着，才真正验证了"没有被撤销"
+// 而不只是"调用方看到了一个错误"。
+func TestLogoutFromAnotherAppIsRejected(t *testing.T) {
+	env := newGRPCEnv(t)
+	other := env.newApplication(t) // 同一个 fp，另一个应用
+
+	token := env.loginWithPassword(t, env.authed(context.Background()))
+
+	otherCtx := metadata.AppendToOutgoingContext(context.Background(),
+		mdAppID, other.appID, mdAppSecret, other.secret)
+	if _, err := env.client.Logout(otherCtx, &fpv1.LogoutRequest{Token: token}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("跨应用登出返回 %v，期望 Unauthenticated", status.Code(err))
+	}
+
+	// 关键断言：A 的会话必须仍然有效。只查"Logout 报错了"查不出一个
+	// "报错但仍然调用了 Revoke"的实现。
+	if _, err := env.client.ValidateToken(env.authed(context.Background()), &fpv1.ValidateTokenRequest{Token: token}); err != nil {
+		t.Fatalf("跨应用登出被拒之后，A 应用自己的会话却失效了: %v", err)
+	}
+}
+
 func TestRPCsRequireCredentials(t *testing.T) {
 	env := newGRPCEnv(t)
 	bare := context.Background()
