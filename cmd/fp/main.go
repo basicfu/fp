@@ -87,11 +87,15 @@ func run() error {
 	//   - 生产环境：config.Load 已经把这四项收进必填校验，走不到这里；
 	//     留着下面这个分支纯属防御性代码，防的是"以后有人绕开 Load 直接
 	//     构造 Config"这种理论情况。
-	//   - 非生产环境：退化成 notify.NewFakeProvider（验证码只进内存，不会
-	//     真的发短信）并打一条 WARN——不能悄悄降级，那正是这条约束最初
+	//   - 非生产环境：退化成 notify.NewLoggingFakeProvider（验证码只进内存，
+	//     不会真的发短信，但发送成功后会以 WARN 级别把整条消息——含验证码
+	//     ——打进日志）并打一条 WARN——不能悄悄降级，那正是这条约束最初
 	//     要防的事，只是"未配置就不允许启动"这个更严格的要求只该套在
 	//     生产环境头上，逼所有本机开发和 CI 都先备齐（哪怕是假的）阿里云
-	//     凭据才能起服务是过度的。
+	//     凭据才能起服务是过度的。验证码打日志的门控条件同样是"用的是假
+	//     供应商"而非"非生产环境"：真实供应商在用时（哪怕是非生产环境）
+	//     走的是上面 aliyunConfigured 分支，代码路径上根本不会碰到
+	//     LoggingFakeProvider，日志里也就不会出现真实验证码。
 	smsSender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
 	aliyunConfigured := cfg.AliyunAccessKeyID != "" && cfg.AliyunAccessKeySecret != "" &&
 		cfg.AliyunSMSSignName != "" && cfg.AliyunSMSTemplateLoginCode != ""
@@ -115,8 +119,9 @@ func run() error {
 		// 必为 true。留作防御性兜底，见上面的注释。
 		return errors.New("生产环境缺少阿里云短信凭据")
 	default:
-		log.Warn("阿里云短信未配置，短信通道使用内存假供应商——验证码不会真的发送，仅限本地开发/测试使用")
-		smsSender.AddProvider(notify.NewFakeProvider(notify.ChannelSMS, "fake"))
+		log.Warn("阿里云短信未配置，短信通道使用内存假供应商——验证码不会真的发送，" +
+			"仅限本地开发/测试使用；发送成功的验证码会以 WARN 级别打进本进程日志")
+		smsSender.AddProvider(notify.NewLoggingFakeProvider(notify.ChannelSMS, "fake"))
 	}
 
 	authSvc := service.NewAuthService(service.AuthDeps{
