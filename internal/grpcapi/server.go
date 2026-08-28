@@ -107,8 +107,8 @@ func (s *Server) Serve(lis net.Listener) error {
 	return s.grpc.Serve(lis)
 }
 
-// ServeWhenReady 等撤销中继就绪（或提前失败、或超时）之后再开始接受
-// 连接，阻塞到服务停止。
+// ServeWhenReady 等撤销中继就绪（或提前失败、或超时、或 ctx 被取消）
+// 之后再开始接受连接，阻塞到服务停止。
 //
 // 顺序不能反：Serve 一旦开始接受连接，Watch 就会给新连上来的 SDK 发
 // ready，而 ready 是"此后的撤销不会漏推"的承诺（见 Ready 的注释）。这个
@@ -118,24 +118,32 @@ func (s *Server) Serve(lis net.Listener) error {
 // 撞上。
 //
 // 这段编排原本直接写在 cmd/fp/main.go 里（起 Run 的 goroutine、等
-// Ready()、再起 Serve 的 goroutine），但 cmd/fp 是 package main，这个
-// 仓库里没有任何测试基础设施覆盖它——把它改回"两个 goroutine 各自起、
-// 谁都不等谁"，build/vet/全量测试依然全绿，没有任何信号能告诉任何人
-// 这条本任务新增的关键安全性质被静默破坏了。挪进 grpcapi.Server 之后，
-// 这段编排落进了已经有完整 bufconn 测试设施的包里：
+// Ready()/Run 失败/超时三选一、再起 Serve 的 goroutine），但 cmd/fp 是
+// package main，这个仓库里没有任何测试基础设施覆盖它——把它改回"两个
+// goroutine 各自起、谁都不等谁"，build/vet/全量测试依然全绿，没有任何
+// 信号能告诉任何人这条本任务新增的关键安全性质被静默破坏了。挪进
+// grpcapi.Server 之后，这段编排落进了已经有完整 bufconn 测试设施的包里：
 // TestServeWhenReadyDoesNotAcceptBeforeReady 用 fakeSubscriber 卡住
 // Subscribe，确定性地断言 Ready() 关闭之前 lis 不会被 Accept。
 //
-// timeout 只保护"等 Ready"这一段：Redis 不可达时 Run 会带着错误尽快
-// 返回，下面的 select 直接从 runFailed 收到、不必等满超时；timeout 是
-// 给"迟迟没有错误也没有 ready"这种不该发生、但不能没有兜底的情况兜底，
-// 避免调用方永远卡在这里、日志里却什么也不说。
+// case <-ctx.Done() 必须和 Ready()/runFailed/超时同级放在 select 里，
+// 不能省略：main.go 传进来的 ctx 是进程级的可取消 ctx（signal.NotifyContext
+// 来的），如果没有这一条，SIGTERM 恰好落在"订阅确认还没收到"这个窗口内
+// （网络慢、Redis 抖动时能拉长到接近 timeout 前的任意时刻）就会有两个
+// 后果：一是 Run 的 ctx 取消会经 h.subscribe 的失败分支被当成"订阅失败"
+// 报给 runFailed（RevokeHub.Run 已经把这类失败统一成返回 nil，但如果
+// 调用方自己不等 ctx.Done()，这个"nil"跟"ctx 还没到超时前一直没收到
+// 任何信号"没有区别，只能傻等到 timeout 才返回），二是即使 Run 已经在
+// ctx 取消后返回了 nil（不往 runFailed 送任何东西），ServeWhenReady
+// 还是会一直卡到 timeout 才返回——一次本该毫秒级的关闭被拖成 10 秒。
+// 加上这一条，两个问题一起解决：ctx 一旦结束就立刻返回 nil，不等
+// timeout，也不会被误判成失败。
 func (s *Server) ServeWhenReady(ctx context.Context, lis net.Listener, timeout time.Duration) error {
 	// runFailed 只在 Run 未能撑到 ctx 取消、提前带错误退出时才会收到一个
-	// 值（缓冲为 1，不会阻塞这个 goroutine）。Run 正常结束（ctx 取消）
-	// 永远返回 nil，什么都不会往这个 channel 里送——"一切正常"这件事已经
-	// 由 Ready() 表达了，不需要 runFailed 重复表达一遍，下面的 select 也
-	// 就不必费力区分"收到 nil"和"收到真错误"两种情况。
+	// 值（缓冲为 1，不会阻塞这个 goroutine）。Run 正常结束（ctx 取消，
+	// 或 ctx 在订阅确认之前就被取消）永远返回 nil，什么都不会往这个
+	// channel 里送——"一切正常"这件事已经由 Ready() 或者上面新加的
+	// ctx.Done() 分支表达了，不需要 runFailed 重复表达一遍。
 	runFailed := make(chan error, 1)
 	go func() {
 		if err := s.Run(ctx); err != nil {
@@ -144,6 +152,8 @@ func (s *Server) ServeWhenReady(ctx context.Context, lis net.Listener, timeout t
 	}()
 
 	select {
+	case <-ctx.Done():
+		return nil
 	case <-s.Ready():
 	case err := <-runFailed:
 		return fmt.Errorf("撤销事件中继启动失败: %w", err)

@@ -157,7 +157,68 @@ func TestReadyWaitsForSubscriptionToComplete(t *testing.T) {
 
 	cancel()
 	select {
-	case <-runDone:
+	case err := <-runDone:
+		// 这条断言本身不是 RevokeHub.Run 里"ctx 在订阅确认之前被取消"
+		// 那条分支的回归测试——到这里 fake.Subscribe 早就已经成功返回
+		// 过了（上面已经等到 Ready() 关闭），cancel() 触发的是 h.run
+		// 分发循环里本来就有的 <-ctx.Done(): return nil 分支，跟
+		// h.subscribe 失败时的处理是两码事。但既然测都测到这里了，
+		// 顺手把这个不变量也钉死：Run 的契约是"ctx 结束就返回 nil"，
+		// 不该在这个分支上走漏。真正验证"ctx 在订阅确认之前被取消"
+		// 这条分支的是 TestRunReturnsNilWhenCanceledDuringSubscribe。
+		if err != nil {
+			t.Fatalf("ctx 取消后 Run 返回了非 nil 错误: %v，期望 nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 取消后 Run 没有返回")
+	}
+}
+
+// TestRunReturnsNilWhenCanceledDuringSubscribe 守住 Run 的返回值契约：
+// ctx 在 h.subscribe 成功返回之前就被取消，Run 必须返回 nil，不能把
+// 这次取消当成订阅失败往上报。
+//
+// 和上面 TestReadyWaitsForSubscriptionToComplete 的区别：那条测试的
+// cancel() 发生在 fake.Subscribe 已经成功返回之后（先等到 Ready()
+// 关闭），命中的是 h.run 分发循环里早就存在、从未有问题的
+// <-ctx.Done(): return nil 分支；这条测试的 cancel() 发生在
+// fake.Subscribe 还卡着的时候（不放行 f.proceed，只取消 ctx），
+// 命中的是 h.subscribe 失败分支——正是本任务要修的那条路径。两条
+// 测试都需要，缺了这条，"ctx 取消不能被当成订阅失败"这条契约在
+// fake.Subscribe 真正被取消时到底成不成立，从未被验证过。
+//
+// 这条断言直接关系到 cmd/fp/main.go 的退出码正确性：main.go 靠
+// ServeWhenReady（继而 Run）返回的是不是 nil 来判断这次退出该不该
+// 算作故障。如果 Run 在这个分支上把 ctx.Canceled 原样透传，一次操作员
+// 或编排系统发起的、完全正常的 SIGTERM，只要恰好落在"订阅确认还没
+// 收到"这个窗口内，就会被上报成致命错误，进程以非零退出码结束——这正是
+// K8s 滚动发布/驱逐时最容易撞上、也最容易被误判成崩溃重启的场景。
+func TestRunReturnsNilWhenCanceledDuringSubscribe(t *testing.T) {
+	fake := &fakeSubscriber{proceed: make(chan struct{})}
+	hub := newRevokeHub()
+	hub.pub = fake
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- hub.Run(ctx) }()
+
+	// 确认 fake.Subscribe 确实还卡着、Run 还没走到订阅成功那一步，
+	// 再取消——否则这条测试可能"侥幸"绕过 subscribe 阶段，跟上面那条
+	// 测试测的是同一件事。
+	select {
+	case <-hub.Ready():
+		t.Fatal("fake.Subscribe 还没放行，Ready() 就已经关闭了")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel() // 在 fake.Subscribe 还卡着的时候取消 ctx，而不是先放行它。
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("ctx 在订阅确认之前被取消，Run() 返回了 %v，期望 nil", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("ctx 取消后 Run 没有返回")
 	}
@@ -310,5 +371,54 @@ func TestServeWhenReadyReportsTimeout(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("ServeWhenReady() 用了 %v 才返回，超时分支不该等这么久", elapsed)
+	}
+}
+
+// TestServeWhenReadyReturnsNilOnContextCancellation 直接钉住 ServeWhenReady
+// 新加的 case <-ctx.Done()：Ready() 还没关闭时 ctx 被取消（一次正常的
+// SIGTERM/Ctrl-C），必须返回 nil，不能是超时错误、也不能是别的什么
+// 错误，而且必须很快返回，不能傻等到 timeout。
+//
+// 用 fakeSubscriber 卡住 Subscribe（永远不放行，模拟"订阅确认迟迟没
+// 收到"这个最容易被 SIGTERM 撞上的窗口），给 timeout 一个远大于测试
+// 本身应该花的时间的值（5 秒），然后立刻取消 ctx——如果 ServeWhenReady
+// 走的是超时分支而不是 ctx.Done() 分支，这条测试会等 5 秒才收到一个
+// "超时"错误而不是 nil，下面的 1 秒上限会让它正确失败，而不是"反正
+// 最后还是返回了、只是慢"就当作通过。
+func TestServeWhenReadyReturnsNilOnContextCancellation(t *testing.T) {
+	fake := &fakeSubscriber{proceed: make(chan struct{})}
+	hub := newRevokeHub()
+	hub.pub = fake
+	srv := &Server{grpc: grpc.NewServer(), hub: hub}
+
+	lis := bufconn.Listen(1 << 20)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- srv.ServeWhenReady(ctx, lis, 5*time.Second) }()
+
+	// 确认 Ready() 确实还没关闭（fake.Subscribe 还卡着），再取消——
+	// 否则可能"侥幸"绕过要测的那个窗口。
+	select {
+	case <-hub.Ready():
+		t.Fatal("fake.Subscribe 还没放行，Ready() 就已经关闭了")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	start := time.Now()
+	cancel()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("ctx 取消后 ServeWhenReady() = %v，期望 nil", err)
+		}
+		if elapsed > 1*time.Second {
+			t.Fatalf("ServeWhenReady() 用了 %v 才返回 nil，"+
+				"远超预期——大概率是掉进了超时分支而不是 ctx.Done() 分支", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 取消后 ServeWhenReady 没有返回")
 	}
 }

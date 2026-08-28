@@ -98,11 +98,33 @@ func (h *RevokeHub) subscribe(ctx context.Context) (<-chan store.RevokeSignal, f
 // 订阅确认建立后、开始分发之前关闭 h.ready（见 Ready 的注释）。顺序刻意
 // 写死在这两步之间：关早了，Ready() 就是一句假承诺；关晚了（比如挪到
 // h.run 返回之后）就等同于永不 ready，调用方会一直卡在启动阶段。
-// h.subscribe 失败时直接返回错误、h.ready 保持不关——调用方（grpcapi.Server
-// 进而 main.go）不应该在这种情况下继续等 ready，而应该让启动失败。
+//
+// Run 的返回值契约是"ctx 结束就返回 nil，非 nil 只代表订阅本身真的失败
+// 了"——h.run 分发循环早就是这么做的（ctx.Done() 时 return nil），这里
+// 让 h.subscribe 失败的分支跟它保持一致：如果失败是因为 ctx 在订阅确认
+// 之前就被取消（ctx.Err() != nil），说明这不是订阅出了问题，是调用方
+// 主动要求关闭（一次正常的 SIGTERM/Ctrl-C），照样返回 nil。
+//
+// 这条统一契约不是装饰性的一致性追求：调用方（grpcapi.Server.ServeWhenReady
+// 进而 cmd/fp/main.go）用 Run 的返回值是不是 nil 来判断"这次退出算不算
+// 故障"，进而决定进程退出码是 0 还是 1。如果这里对 ctx 取消导致的失败
+// 也原样透传错误，一次操作员或编排系统发起的、完全正常的关闭信号，只要
+// 恰好落在"订阅确认还没收到"这个窗口内（网络慢、Redis 抖动时能拉长到
+// 接近超时前的任意时刻），就会被上报成致命错误——K8s 滚动发布或驱逐撞
+// 上这个窗口，会把一次干净关闭误计成一次崩溃重启。
+//
+// 用 ctx.Err() != nil 判断，而不是 errors.Is(err, context.Canceled)：
+// 前者直接问"我自己这个 ctx 是不是已经结束了"，不依赖底层订阅实现
+// （真实 Redis 客户端、还是测试用的假实现）具体怎么包装 ctx 被取消时
+// 返回的错误——只要是因为我方 ctx 结束导致的失败，不管错误值长什么样，
+// 都不该当成真失败上报；顺带也覆盖了 ctx 带截止时间时的
+// context.DeadlineExceeded，而不只是 context.Canceled 这一种。
 func (h *RevokeHub) Run(ctx context.Context) error {
 	signals, closeFn, err := h.subscribe(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	defer closeFn()

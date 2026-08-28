@@ -198,11 +198,35 @@ func run() error {
 	// 区分"收到外部信号的正常退出"与"后台服务把自己搞挂了、靠 stop()
 	// 间接触发的退出"：前者返回 nil（退出码 0），后者把错误传出去，
 	// main() 会打印"fp 启动失败"并以退出码 1 结束。不能让这两种情况在
-	// 退出码上无法区分——那正是本次要修的问题。
-	select {
-	case err := <-fatalErr:
-		return err
-	default:
-		return nil
+	// 退出码上无法区分。
+	//
+	// 排空而不是只读一次：HTTP 与 gRPC 若同时失败（比如系统性资源耗尽
+	// 同时打到两个监听），只读一次会让先写入之外的另一个错误永久丢失——
+	// 退出码依然正确，但双重故障恰恰是最需要完整诊断信息的场景。
+	//
+	// 用非阻塞 select 排空，而不是 close(fatalErr) 再 range：想 close 得
+	// 先确定两个 goroutine 都不可能再往里写了——直觉上"两个 Shutdown 都
+	// 已经返回"应该意味着这一点，但 grpc-go 的 Serve() 返回与 Shutdown()
+	// 内部 GracefulStop()/Stop() 返回，是被同一个内部信号唤醒的两个独立
+	// goroutine，彼此谁先返回到自己的调用方没有保证；虽然两者的公开契约
+	// 都保证优雅停止后 Serve 返回 nil（这条路径根本不会往 fatalErr 发送，
+	// 所以实践中不会真的因为这个时序问题丢错误或 panic），但没有任何
+	// 机制能让这里 100% 确信"此刻两个 goroutine 都已经执行过它们的发送
+	// 语句"。贸然 close 一个理论上可能还有人在发送的 channel，代价是
+	// panic（send on closed channel）——用非阻塞 select 排空，即使真的
+	// 漏读了一个理论上极罕见的迟发错误，后果也只是"少了一条诊断信息"，
+	// 比"关闭阶段直接 panic 整个进程"安全得多。
+	//
+	// errors.Join 对空切片返回 nil，正常退出路径的返回值不受影响。
+	var errs []error
+drain:
+	for {
+		select {
+		case err := <-fatalErr:
+			errs = append(errs, err)
+		default:
+			break drain
+		}
 	}
+	return errors.Join(errs...)
 }
