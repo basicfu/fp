@@ -4708,11 +4708,6 @@ type Client struct {
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
 	streamUp atomic.Bool
 
-	// everReady 区分"首次连接"与"重连"。Task 10 的 onPurge 只在重连后触发：
-	// New() 在第一个 ready 到达前就返回了，调用方的第一次 Validate() 可能
-	// 与首个 ready 撞上，无条件 purge 会把它刚写入的条目抹掉。
-	everReady atomic.Bool
-
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -5823,19 +5818,10 @@ func (c *Client) Auth() *Auth { return c.auth }
 ```go
 		case msg.GetReady() != nil:
 			c.streamUp.Store(true)
-			// **只在真正的重连后清空缓存，首次连接不清。**
-			//
-			// 重连要清是因为：断开期间发生的撤销一条都没收到，缓存里的任何
-			// 条目都可能是已被撤销的会话。
-			//
-			// 首次连接**不能**清，尽管"那时缓存本来就是空的"听起来成立——
-			// 它不成立。New() 在第一个 ready 到达之前就已经返回给调用方了，
-			// 所以调用方的第一次 Validate() 完全可能与首个 ready 撞上：
-			// 刚写进缓存的条目转头就被这句 purge 抹掉。压测下约五分之一的
-			// 概率复现，表现是"第一个请求莫名其妙多回源一次"。
-			if c.everReady.Swap(true) {
-				c.auth.onPurge()
-			}
+			// 重连后必须清空缓存：断开期间发生的撤销一条都没收到，
+			// 缓存里的任何条目都可能是已被撤销的会话。
+			// 首次连接也走这条路径，此时缓存本来就是空的，无害。
+			c.auth.onPurge()
 		case msg.GetRevoke() != nil:
 			c.auth.onRevoke(msg.GetRevoke())
 		case msg.GetPurge() != nil:
