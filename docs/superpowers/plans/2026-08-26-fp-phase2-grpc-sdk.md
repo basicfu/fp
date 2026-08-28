@@ -4058,8 +4058,33 @@ func TestShutdownCompletesWithOpenWatchStream(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("有 Watch 流打开时关闭挂死了——关闭顺序反了")
+		t.Fatal("有 Watch 流打开时关闭挂死了")
 	}
+}
+```
+
+> **这条测试守不住关闭顺序，别指望它。** 把 `hub.Close()` 与 `GracefulStop()`
+> 调换之后它**不会红**：`Shutdown` 自己的超时兜底会调 `Stop()` 强行推平，
+> `done` 仍然在 5 秒左右关闭，远早于这里 10 秒的上限。顺序错误于是被掩盖成
+> "慢一点但成功"，而不是"挂死"。
+>
+> 它仍然有价值——它验证的是"关闭有上界"这个契约。但**顺序必须由下面这条
+> 单独的测试来守**，它绕开超时兜底那条路径：
+
+```go
+// TestHubCloseUnblocksOpenWatchStream 守住关闭顺序本身。
+//
+// 上一条测试守不住顺序：Shutdown 的超时兜底会调 Stop() 强行推平，
+// 顺序反了也只是慢，不是挂。这条测试直接验证那个因果——
+// **单独调用 hub.Close()，不碰 GracefulStop**，断言已打开的 Watch handler
+// 会因此返回。这正是"先关 hub，GracefulStop 才可能结束"所依赖的前提。
+//
+// 少了它，"关闭顺序"这条约束在整个测试套件里没有任何护栏。
+func TestHubCloseUnblocksOpenWatchStream(t *testing.T) {
+	// …建流并等到 ready；
+	// 只调 hub.Close()（不调 Shutdown / GracefulStop）；
+	// 断言客户端侧的 Recv 在合理时间内返回（流被服务端正常结束），
+	// 即 Watch handler 确实因为订阅者 channel 关闭而退出了。
 }
 ```
 
