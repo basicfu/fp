@@ -1,0 +1,208 @@
+package grpcapi
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/store"
+)
+
+// revokeBufferSize 是每个订阅者的缓冲深度。
+//
+// 撤销是低频事件（管理员操作、用户登出），缓冲主要用来吸收 gRPC 写入的
+// 瞬时抖动，不需要很深。满了就丢——见 fanout 的说明。
+const revokeBufferSize = 64
+
+// RevokeHub 把一份 Redis 撤销订阅扇出给进程内所有 Watch 流。
+//
+// 只开一份订阅：每条流各订一份的话，连接数与反序列化开销都随流数线性增长，
+// 而它们收到的是完全相同的消息。
+type RevokeHub struct {
+	pub *store.RevokePublisher
+
+	mu   sync.RWMutex
+	next uint64
+	subs map[uint64]*revokeSub
+
+	// subscribeCalls 数的是 h.pub.Subscribe 被调用的次数。
+	// 生产路径（Run）只会调用一次，恒为 1；测试用它验证"N 个 hub.Subscribe(appID)
+	// 注册不会触发额外的 Redis 订阅"（见 redisSubscribeCalls）。
+	subscribeCalls atomic.Int64
+}
+
+// HubEvent 是推给一条 Watch 流的消息。
+type HubEvent struct {
+	// Purge 为 true 时要求 SDK 丢弃**全部**缓存，此时 Revoke 字段无意义。
+	Purge  bool
+	Reason string
+	Revoke domain.RevokeEvent
+}
+
+type revokeSub struct {
+	appID uuid.UUID
+	ch    chan HubEvent
+}
+
+// newRevokeHub 构造一个还没接上任何信号源的 RevokeHub。
+//
+// 拆出这个不接 pub 的内部入口，是为了测试能完全绕开 Redis：
+// newTestHubWithFakeSignals 用它拼出一个只喂 run(ctx, 假 channel) 的 hub，
+// 直接测分发逻辑本身（尤其 Gap → Purge），不依赖真实 Redis 订阅/断连——
+// 那既慢又不稳定，而且测的根本不是分发逻辑，是 Redis 客户端的重连行为。
+func newRevokeHub() *RevokeHub {
+	return &RevokeHub{subs: make(map[uint64]*revokeSub)}
+}
+
+// NewRevokeHub 构造 RevokeHub。
+func NewRevokeHub(pub *store.RevokePublisher) *RevokeHub {
+	h := newRevokeHub()
+	h.pub = pub
+	return h
+}
+
+// subscribe 是 h.pub.Subscribe 的计数包装。
+//
+// 计数本身只有测试关心，但生产路径 Run 也经过这个方法，而不是绕开它直接
+// 调 h.pub.Subscribe——这样测试断言的是 Run 实际会执行的代码，不是另一份
+// 平行实现。
+func (h *RevokeHub) subscribe(ctx context.Context) (<-chan store.RevokeSignal, func(), error) {
+	h.subscribeCalls.Add(1)
+	return h.pub.Subscribe(ctx)
+}
+
+// Run 订阅 Redis 并持续扇出，直到 ctx 取消。整个进程只调用一次。
+//
+// ctx 必须是可取消的：Subscribe 内部虽已派生子 ctx 并由 closeFn 兜底，
+// 但这里的 defer 是唯一保证进程退出时那条 Redis 连接被关掉的地方。
+func (h *RevokeHub) Run(ctx context.Context) error {
+	signals, closeFn, err := h.subscribe(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	return h.run(ctx, signals)
+}
+
+// run 是纯分发循环：不关心 signals 从哪来（真实 Redis 订阅，还是测试直接
+// 投喂的 fake channel），只负责把信号翻译成对订阅者的动作。Run 自己就是
+// 靠这个方法实现的；拆出来纯粹是为了测试能绕开 Redis 单独验证这部分逻辑。
+func (h *RevokeHub) run(ctx context.Context, signals <-chan store.RevokeSignal) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case sig, ok := <-signals:
+			if !ok {
+				return nil
+			}
+			switch sig.Kind {
+			case store.RevokeSignalGap:
+				// 订阅刚刚重建，期间的事件已永久丢失，且不知道丢了哪些。
+				// 唯一安全的动作是让本实例下所有 SDK 清空缓存。
+				h.broadcastPurge("redis 订阅重建")
+			default:
+				h.fanout(sig.Event)
+			}
+		}
+	}
+}
+
+// fanout 把一条事件分发给匹配的订阅者。
+//
+// 写入用非阻塞 select：一条卡住的 gRPC 流（客户端被 SIGSTOP、网络黑洞、
+// 对端不读）会让写入永久阻塞，同步写就会把整个中继堵死——一个客户端的
+// 故障演变成全平台推送失效。
+//
+// 丢弃是安全的：推送只是把撤销延迟从 cache_ttl 压到近乎实时的**加速手段**，
+// 权威撤销早已通过删除 Redis 会话完成。丢一条的后果是那个 SDK 最长
+// cache_ttl 之后回源被拒——正是没有推送时的行为。
+func (h *RevokeHub) fanout(ev domain.RevokeEvent) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, sub := range h.subs {
+		// AppID 为 Nil 表示跨全部应用（改密、冻结）——必须推给所有人。
+		// 把 Nil 当成一个具体应用 ID 去等值比较，这两类撤销一条也推不出去。
+		if ev.AppID != uuid.Nil && ev.AppID != sub.appID {
+			continue
+		}
+		select {
+		case sub.ch <- HubEvent{Revoke: ev}:
+		default:
+			slog.Warn("grpcapi: 撤销事件被丢弃，订阅者缓冲已满",
+				"appId", sub.appID, "reason", ev.Reason)
+		}
+	}
+}
+
+// broadcastPurge 让本实例下的**全部**订阅者清空缓存。
+//
+// 刻意不按 appID 过滤：触发它的前提正是"不知道丢了哪些事件"，
+// 自然也不知道涉及哪些应用。按应用过滤等于在没有依据的情况下缩小范围。
+//
+// 范围仅限本实例：其他 fp 实例的订阅没有中断过，它们的 SDK 不需要清缓存。
+// 爆炸半径就是真正丢了事件的那一台。
+//
+// 缓冲满时**不能**像 fanout 那样直接丢弃。两者的代价不对等：丢一条撤销
+// 只让一个 token 多活一个 cache_ttl，丢一条 purge 会让整个 SDK 的缓存
+// 停在一个**已知不可信**的状态，而且没有任何后续机制会纠正它。
+//
+// 所以改为关掉那条流。这不激进——撤销频率约每秒 0.1 次，填满 64 格缓冲
+// 需要十分钟不读，而 keepalive 十秒就该把这样的连接判死了。关流之后 SDK
+// 会重连并 purge（Task 10 已有），复用现成机制，不必新造一套补发逻辑。
+func (h *RevokeHub) broadcastPurge(reason string) {
+	// 写锁：下面可能要删订阅者。purge 罕见，锁的粒度不重要。
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	slog.Warn("grpcapi: 广播缓存清空指令", "reason", reason, "subscribers", len(h.subs))
+	for id, sub := range h.subs {
+		select {
+		case sub.ch <- HubEvent{Purge: true, Reason: reason}:
+		default:
+			// Go 允许 range 期间 delete。关掉 channel 会让 Watch 走到
+			// !ok 分支正常返回；它 deferred 的注销函数再 delete 一次是空操作。
+			// 这里先从 map 摘掉，Close() 就不会二次关闭同一个 channel。
+			slog.Warn("grpcapi: 订阅者缓冲已满且需要 purge，关闭该流", "appId", sub.appID)
+			close(sub.ch)
+			delete(h.subs, id)
+		}
+	}
+}
+
+// Subscribe 登记一个订阅者。返回的函数必须被调用，否则订阅者永久驻留。
+func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan HubEvent, func()) {
+	sub := &revokeSub{appID: appID, ch: make(chan HubEvent, revokeBufferSize)}
+
+	h.mu.Lock()
+	h.next++
+	id := h.next
+	h.subs[id] = sub
+	h.mu.Unlock()
+
+	var once sync.Once
+	return sub.ch, func() {
+		once.Do(func() {
+			h.mu.Lock()
+			delete(h.subs, id)
+			h.mu.Unlock()
+		})
+	}
+}
+
+// subscriberCount 是测试辅助：当前登记的订阅者数。
+func (h *RevokeHub) subscriberCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.subs)
+}
+
+// redisSubscribeCalls 是测试辅助：h.pub.Subscribe 被调用过多少次。
+func (h *RevokeHub) redisSubscribeCalls() int64 {
+	return h.subscribeCalls.Load()
+}

@@ -202,3 +202,45 @@ func TestDisabledApplicationIsRejected(t *testing.T) {
 		t.Fatalf("停用应用后校验返回 %v，期望 PermissionDenied", status.Code(err))
 	}
 }
+
+// TestWatchDeliversRevokeToClient 走一遍真实的流。
+//
+// 前面的 hub 测试都在进程内直接读 channel，绕过了 gRPC 编解码与
+// oneof 的封装。这条测试确认 ready 与 revoke 两种事件都能正确到达对端。
+func TestWatchDeliversRevokeToClient(t *testing.T) {
+	env := newGRPCEnv(t)
+	ctx, cancel := context.WithTimeout(env.authed(context.Background()), 10*time.Second)
+	defer cancel()
+
+	token := env.loginWithPassword(t, ctx)
+
+	stream, err := env.client.Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("首条消息: %v", err)
+	}
+	if first.GetReady() == nil {
+		t.Fatalf("首条消息不是 ready: %+v", first)
+	}
+
+	// ready 之后再触发撤销，确保不是靠时序侥幸。
+	if _, err := env.client.Logout(ctx, &fpv1.LogoutRequest{Token: token}); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+
+	msg, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("撤销消息: %v", err)
+	}
+	rev := msg.GetRevoke()
+	if rev == nil {
+		t.Fatalf("第二条消息不是 revoke: %+v", msg)
+	}
+	if len(rev.GetTokens()) == 0 || rev.GetTokens()[0] != token {
+		t.Fatalf("撤销事件里的 token 是 %v，期望包含 %q", rev.GetTokens(), token)
+	}
+}

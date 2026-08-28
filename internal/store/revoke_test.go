@@ -3,10 +3,12 @@ package store_test
 import (
 	"context"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/store"
@@ -18,7 +20,7 @@ func TestRevokePublishSubscribe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	events, closeFn, err := pub.Subscribe(ctx)
+	signals, closeFn, err := pub.Subscribe(ctx)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -39,7 +41,11 @@ func TestRevokePublishSubscribe(t *testing.T) {
 			t.Fatalf("Publish: %v", err)
 		}
 		select {
-		case got := <-events:
+		case sig := <-signals:
+			if sig.Kind != store.RevokeSignalEvent {
+				t.Fatalf("Kind = %v, want RevokeSignalEvent", sig.Kind)
+			}
+			got := sig.Event
 			if len(got.UserIDs) != 1 || got.UserIDs[0] != uid {
 				t.Fatalf("UserIDs = %v, want [%v]", got.UserIDs, uid)
 			}
@@ -135,9 +141,9 @@ func settledGoroutines() int {
 // ctx 取消必须真正关掉底层订阅，而不是只在有消息流入时才顺带生效。
 //
 // Subscribe 返回的 out channel 由内部 reader goroutine 在
-// `for msg := range sub.Channel()` 上驱动；这个 range 只在 sub.Channel()
-// 关闭（即 sub.Close() 被调用）时才退出。之前的实现只在 select 里放了一个
-// <-ctx.Done() 分支去争抢一次发送，完全没有消息流入时 goroutine 根本走不到
+// `for msg := range sub.ChannelWithSubscriptions()` 上驱动；这个 range 只在
+// 该 channel 关闭（即 sub.Close() 被调用）时才退出。之前的实现只在 select 里放了
+// 一个 <-ctx.Done() 分支去争抢一次发送，完全没有消息流入时 goroutine 根本走不到
 // 那个 select——必须有一个专门等 ctx.Done() 再调用 sub.Close() 的 goroutine，
 // 这才是让订阅连接真正释放的唯一途径。这里刻意不发布任何消息，只验证
 // "no message traffic" 这条最容易被忽略的路径：cancel 之后 out 必须关闭。
@@ -160,5 +166,97 @@ func TestSubscribeClosesOnContextCancellation(t *testing.T) {
 		// ok == false：channel 已关闭，符合预期。
 	case <-time.After(2 * time.Second):
 		t.Fatal("ctx 取消后 2 秒内 channel 仍未关闭——订阅连接被泄漏了")
+	}
+}
+
+// TestSubscribeSurfacesResubscribeAsGap 守住"丢事件必须可观测"。
+//
+// go-redis 会在连接抖动时静默重连并重发 SUBSCRIBE，既不报错也不关 channel。
+// 没有这个信号的话，丢事件这件事在整个系统里不留任何痕迹——
+// 日志里没有、监控里没有、SDK 看到的流状态也一切正常。
+//
+// 制造重连的方式：用 CLIENT KILL 掐掉订阅连接（拿 CLIENT LIST TYPE pubsub 找到它）。
+// 断开后必须在合理时间内收到一条 Kind == RevokeSignalGap。
+func TestSubscribeSurfacesResubscribeAsGap(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	pub := store.NewRevokePublisher(rdb)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 先拍一张"订阅前"的 pubsub 连接快照，subscribe 之后用差集找出新出现的
+	// 那一条——而不是假设列表里只有一条。前一个测试的连接如果还没被服务端
+	// 完全回收，"只取唯一一条"就可能抓错、杀错连接。
+	before := pubsubClientIDs(t, rdb)
+
+	signals, closeFn, err := pub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer closeFn()
+
+	id := waitForNewPubsubClientID(t, rdb, before)
+
+	// 用 ID 过滤的新式 CLIENT KILL：即使因为时序问题 0 条匹配也不报错，
+	// 但这里显式检查杀掉的连接数，确保我们真的打中了目标。
+	killed, err := rdb.ClientKillByFilter(ctx, "ID", id).Result()
+	if err != nil {
+		t.Fatalf("CLIENT KILL ID %s: %v", id, err)
+	}
+	if killed == 0 {
+		t.Fatalf("CLIENT KILL ID %s 没有杀掉任何连接", id)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case sig := <-signals:
+			if sig.Kind == store.RevokeSignalGap {
+				return // 收到缺口信号，符合预期
+			}
+			// 理论上此时不该收到别的信号；忽略并继续等待，避免测试因为
+			// 无关消息的到达顺序而误判。
+		case <-deadline:
+			t.Fatal("5 秒内没有收到 RevokeSignalGap——订阅重建没有被检测到，" +
+				"丢事件这件事在整个系统里将不留任何痕迹")
+		}
+	}
+}
+
+// pubsubClientIDs 返回 rdb 当前所有 pubsub 类型连接的 client id 集合。
+//
+// 只看 TYPE pubsub：不加这个过滤会把会话存储用的普通连接也列进来，
+// waitForNewPubsubClientID 万一算错差集，CLIENT KILL 就可能连带把它也杀了。
+func pubsubClientIDs(t *testing.T, rdb *redis.Client) map[string]bool {
+	t.Helper()
+	out, err := rdb.Do(context.Background(), "CLIENT", "LIST", "TYPE", "pubsub").Text()
+	if err != nil {
+		t.Fatalf("CLIENT LIST TYPE pubsub: %v", err)
+	}
+	ids := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		for _, field := range strings.Fields(line) {
+			if id, ok := strings.CutPrefix(field, "id="); ok {
+				ids[id] = true
+			}
+		}
+	}
+	return ids
+}
+
+// waitForNewPubsubClientID 轮询直到出现一个不在 before 里的 pubsub 连接 id，
+// 即本次 pub.Subscribe 刚建立的那一条。
+func waitForNewPubsubClientID(t *testing.T, rdb *redis.Client, before map[string]bool) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for id := range pubsubClientIDs(t, rdb) {
+			if !before[id] {
+				return id
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("2 秒内没有出现新的 pubsub 连接——订阅可能没有成功建立")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

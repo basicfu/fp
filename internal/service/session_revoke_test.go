@@ -190,7 +190,11 @@ func TestRevokePublishesEvent(t *testing.T) {
 			t.Fatalf("Revoke: %v", err)
 		}
 		select {
-		case ev := <-events:
+		case sig := <-events:
+			if sig.Kind != store.RevokeSignalEvent {
+				t.Fatalf("Kind = %v, want RevokeSignalEvent", sig.Kind)
+			}
+			ev := sig.Event
 			if len(ev.Tokens) == 0 || ev.Tokens[0] != sess.Token {
 				t.Fatalf("事件 Tokens = %v, want [%s]", ev.Tokens, sess.Token)
 			}
@@ -277,7 +281,11 @@ func TestRevokeAnnouncesPartialProgressOnError(t *testing.T) {
 
 	deadline := time.After(3 * time.Second)
 	select {
-	case ev := <-events:
+	case sig := <-events:
+		if sig.Kind != store.RevokeSignalEvent {
+			t.Fatalf("Kind = %v, want RevokeSignalEvent", sig.Kind)
+		}
+		ev := sig.Event
 		if len(ev.Tokens) != len(goodTokens) {
 			t.Fatalf("事件 Tokens 数 = %d, want %d", len(ev.Tokens), len(goodTokens))
 		}
@@ -396,7 +404,11 @@ func TestRevokeAnnounceSurvivesCtxCancellation(t *testing.T) {
 
 	deadline := time.After(3 * time.Second)
 	select {
-	case ev := <-events:
+	case sig := <-events:
+		if sig.Kind != store.RevokeSignalEvent {
+			t.Fatalf("Kind = %v, want RevokeSignalEvent", sig.Kind)
+		}
+		ev := sig.Event
 		if len(ev.Tokens) != 1 || ev.Tokens[0] != sess.Token {
 			t.Fatalf("事件 Tokens = %v, want [%s]", ev.Tokens, sess.Token)
 		}

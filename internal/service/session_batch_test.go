@@ -102,7 +102,7 @@ func (e *sessionEnv) seedSessions(t *testing.T, n int) ([]uuid.UUID, int) {
 
 // eventCapture 收集一次测试期间到达的撤销事件。
 type eventCapture struct {
-	events <-chan domain.RevokeEvent
+	events <-chan store.RevokeSignal
 }
 
 // captureEvents 订阅撤销频道。清理交给 t.Cleanup，测试本身不用管收尾。
@@ -145,11 +145,19 @@ func (c *eventCapture) collect(t *testing.T, want int) []domain.RevokeEvent {
 			wait = collectSettle
 		}
 		select {
-		case ev, ok := <-c.events:
+		case sig, ok := <-c.events:
 			if !ok {
 				return got
 			}
-			got = append(got, ev)
+			// 批量撤销测试期间不该出现订阅重建（Gap）；出现的话说明测试
+			// 跑在一个不稳定的 Redis 连接上，静默吞掉只会让下面的条数断言
+			// 变得难以解释，所以这里直接跳过、不计入——它不是本文件要测的
+			// 内容（Gap → Purge 的行为由 internal/grpcapi 的 watch_test.go
+			// 专门覆盖）。
+			if sig.Kind != store.RevokeSignalEvent {
+				continue
+			}
+			got = append(got, sig.Event)
 		case <-time.After(wait):
 			return got
 		}

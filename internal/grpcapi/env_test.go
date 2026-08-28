@@ -79,8 +79,11 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	users := service.NewUserService(pool)
 	epochs := store.NewEpochStore(rdb)
 	clk := newFakeClock(time.Now().UnixMilli())
+	// revokePub 同时喂给 sessions（发布撤销）和 hub（订阅撤销）——两个方向
+	// 共用同一个 *store.RevokePublisher，与生产环境的 cmd/fp/main.go 装配一致。
+	revokePub := store.NewRevokePublisher(rdb)
 	sessions := service.NewSessionServiceWithClock(
-		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, clk.Now)
+		store.NewSessionStore(rdb), revokePub, epochs, clk.Now)
 	logs := service.NewLoginLogService(pool)
 	codes := notify.NewCodeService(rdb)
 
@@ -120,12 +123,18 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	primary := env.newApplication(t)
 	env.app, env.appID, env.secret = primary.app, primary.appID, primary.secret
 
+	// hub 起在这里而不是懒加载：startTestHub 会同步等 Redis 订阅确认建立
+	// 才返回（见 watch_test.go 的注释），所以 newGRPCEnv 返回之后，任何
+	// 测试紧接着触发的撤销（比如 Logout）都保证能被 Watch 流收到，
+	// 不会因为"服务端到底订上了没"而变得不确定。
+	hub := startTestHub(t, revokePub)
+
 	verifier := newAppVerifier(apps, 5*time.Minute)
 	srv := grpc.NewServer(
 		grpc.UnaryInterceptor(verifier.UnaryInterceptor),
 		grpc.StreamInterceptor(verifier.StreamInterceptor),
 	)
-	fpv1.RegisterAuthServiceServer(srv, NewAuthServer(AuthServerDeps{Auth: authSvc}))
+	fpv1.RegisterAuthServiceServer(srv, NewAuthServer(AuthServerDeps{Auth: authSvc, Hub: hub, Apps: apps}))
 
 	lis := bufconn.Listen(1 << 20)
 	go func() { _ = srv.Serve(lis) }()

@@ -10,6 +10,7 @@ import (
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
 )
 
 // TestPhase1EndToEnd 按验收清单从头走一遍。
@@ -280,7 +281,11 @@ func TestRevocationIsBroadcast(t *testing.T) {
 	e.request(http.MethodDelete, userPath+"/sessions", "", http.StatusOK, nil)
 
 	select {
-	case ev := <-events:
+	case sig := <-events:
+		if sig.Kind != store.RevokeSignalEvent {
+			t.Fatalf("Kind = %v, want RevokeSignalEvent", sig.Kind)
+		}
+		ev := sig.Event
 		if len(ev.UserIDs) != 1 || ev.UserIDs[0] != res.User.ID {
 			t.Fatalf("事件 UserIDs = %v, want [%v]", ev.UserIDs, res.User.ID)
 		}
