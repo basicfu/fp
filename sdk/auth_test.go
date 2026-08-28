@@ -543,3 +543,75 @@ func TestLogoutForcesRefetchOnSameToken(t *testing.T) {
 			"cache.drop(token) 没有生效，用户点了退出、下一个请求还是登录态", got)
 	}
 }
+
+// TestFlightResponseDoesNotResurrectConcurrentlyDroppedToken 守住必修 2：
+// 一次仍在飞行中的回源响应不能在落地时复活一个刚被 drop 的 token。
+//
+// TestLogoutForcesRefetchOnSameToken 与 TestRevokeEventDropsCachedToken
+// 都是严格串行的——drop 发生在回源之前或之后，永远不会与飞行中的回源
+// 重叠。而真实场景恰恰是并发的：singleflight 的领导者已经把 RPC 发出去
+// （fp 侧看到的是"会话还在"），响应还在网络上飞，这时另一个 goroutine
+// 的 Logout（或撤销推送）先一步完成，领导者的响应才姗姗来迟落地——按
+// cache.put 的旧实现，这次回填会把一条 fp 已经不认的判定重新写回缓存，
+// 且带着完整 cache_ttl（demo 里是 600 秒）。用户点了退出，之后十分钟
+// 仍是登录态。
+//
+// 装配：validate 回调只在第一次调用时卡住（用 calls 计数区分第几次），
+// 卡住期间执行一次真实的 Logout（同步 drop("tok")，抢在飞行中的响应
+// 之前完成），再放行。断言该 token 之后仍然需要回源——如果那次迟到的
+// put 生效了，第二次 Validate 会直接命中缓存，回源次数不会再涨到 2。
+//
+// 变异验证：删掉 cache.putIfGen 里的代际核对（`if c.gen.Load() != gen {
+// return }`），本测试必须变红（已手工验证，见 final-fix-report.md）。
+func TestFlightResponseDoesNotResurrectConcurrentlyDroppedToken(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	env := newStubEnvFull(t, &stubServer{
+		validate: func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+			if calls.Add(1) == 1 {
+				// 只让第一次回源卡住，模拟"响应还在路上"。
+				entered <- struct{}{}
+				<-release
+			}
+			return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 300_000}, nil
+		},
+		logout: func(*fpv1.LogoutRequest) (*fpv1.LogoutResponse, error) {
+			return &fpv1.LogoutResponse{}, nil
+		},
+	})
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := env.auth.Validate(context.Background(), "tok")
+		firstDone <- err
+	}()
+	<-entered // 第一次回源已经在飞行中、卡在服务端回调里，gen 已经在此之前被抓取
+
+	// 飞行期间执行 Logout：同步调用 RPC 并 drop("tok")，保证在第一次
+	// Validate 的响应落地之前完成——不依赖 sleep，靠 entered/release 两个
+	// channel 严格排出这个顺序。
+	if err := env.auth.Logout(context.Background(), "tok"); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+
+	close(release) // 放行卡住的第一次回源，让它的（陈旧）响应落地
+
+	if err := <-firstDone; err != nil {
+		t.Fatalf("首次 Validate: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("首次 Validate 回源 %d 次，期望 1 次", got)
+	}
+
+	if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
+		t.Fatalf("Logout 之后再次校验: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("Logout 之后紧接着的校验命中了缓存（回源 %d 次，期望 2 次）——"+
+			"一次与 drop 并发、飞行中的回源响应在 drop 之后落地，"+
+			"把已撤销的判定重新写回了缓存，用户点了退出、之后一整个 "+
+			"cache_ttl 仍是登录态", got)
+	}
+}

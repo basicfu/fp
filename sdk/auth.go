@@ -66,6 +66,12 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 	// 不合并的话，一个热门用户的 N 个并发请求会同时打到 fp——正是缓存
 	// 要防的惊群。功能上完全正常，只有 fp 的负载会被放大 N 倍。
 	v, err, _ := a.sf.Do(token, func() (any, error) {
+		// 必须在发 RPC 之前抓这个代际：RPC 在飞行途中，同一个 token 可能被
+		// drop（撤销推送、或另一个 goroutine 的 Logout）或 purge，那样这次
+		// 回源带回的判定已经不可信，回填时必须能识别出"代际变过"并放弃
+		// 写入——见 cache.putIfGen 与 gen 字段的注释。
+		gen := a.cache.generation()
+
 		callCtx, cancel := context.WithTimeout(ctx, a.c.opts.ValidateTimeout)
 		defer cancel()
 
@@ -80,7 +86,7 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 		}
 		// cache_ttl_ms == 0 表示"不要缓存"。put 内部会原样忽略，
 		// 这里不做任何"没给就用默认值"的兜底——那正是契约禁止的事。
-		a.cache.put(token, e, time.Duration(res.GetCacheTtlMs())*time.Millisecond)
+		a.cache.putIfGen(token, e, time.Duration(res.GetCacheTtlMs())*time.Millisecond, gen)
 		return e, nil
 	})
 	if err == nil {

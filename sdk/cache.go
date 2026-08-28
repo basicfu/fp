@@ -1,6 +1,7 @@
 package fpsdk
 
 import (
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -40,6 +41,14 @@ const (
 type cache struct {
 	lru *lru.Cache[string, entry]
 	now func() time.Time
+
+	// gen 是缓存的代际。drop/purge 递增它。
+	//
+	// 它防的是一次时序竞态：一个回源响应可能在飞行途中被 drop/purge 越过，
+	// 落地时把一条服务端已经不认的判定重新写回缓存。put 若发现代际已变，
+	// 就丢弃这次写入——最坏代价是多一次回源，而反过来的代价是
+	// "用户点了退出，之后一整个 cache_ttl 仍是登录态"。
+	gen atomic.Uint64
 }
 
 func newCache(size int, now func() time.Time) (*cache, error) {
@@ -48,6 +57,12 @@ func newCache(size int, now func() time.Time) (*cache, error) {
 		return nil, err
 	}
 	return &cache{lru: l, now: now}, nil
+}
+
+// generation 返回当前代际，供回源前抓取一个基准点，回源完成后传给
+// putIfGen 核对。
+func (c *cache) generation() uint64 {
+	return c.gen.Load()
 }
 
 // put 写入一条校验结果。
@@ -62,6 +77,19 @@ func (c *cache) put(token string, e entry, ttl time.Duration) {
 	e.cachedAt = c.now()
 	e.ttl = ttl
 	c.lru.Add(token, e)
+}
+
+// putIfGen 只在代际仍等于调用方发起回源之前记下的 gen 时才写入，否则
+// 原样丢弃——中途发生过 drop/purge，说明这条判定可能已经过期，把它写
+// 进缓存反而会复活一个服务端已经不认的 token（见 gen 字段的注释）。
+//
+// Validate 必须用这个方法而不是 put 来回填 singleflight 的回源结果：
+// put 本身不知道"这次回源是什么时候发起的"，没有能力做这个核对。
+func (c *cache) putIfGen(token string, e entry, ttl time.Duration, gen uint64) {
+	if c.gen.Load() != gen {
+		return
+	}
+	c.put(token, e, ttl)
 }
 
 // get 查询一条缓存结果。
@@ -102,7 +130,11 @@ func (c *cache) get(token string, maxTTL, maxStale time.Duration) (entry, cacheS
 }
 
 // drop 删除若干条目。撤销事件到达时调用。
+//
+// 递增 gen 在前还是在后不影响正确性（Remove 本身已经把这些 token 从缓存
+// 里拿掉了），放在前面只是让"代际已变"尽早对并发的 putIfGen 可见。
 func (c *cache) drop(tokens ...string) {
+	c.gen.Add(1)
 	for _, t := range tokens {
 		c.lru.Remove(t)
 	}
@@ -110,4 +142,7 @@ func (c *cache) drop(tokens ...string) {
 
 // purge 清空缓存。连接长时间断开后重连时调用——断开期间发生的撤销
 // 一条都没收到，缓存里的任何条目都不再可信。
-func (c *cache) purge() { c.lru.Purge() }
+func (c *cache) purge() {
+	c.gen.Add(1)
+	c.lru.Purge()
+}
