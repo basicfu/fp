@@ -279,22 +279,10 @@ func (s *AuthService) ValidateToken(ctx context.Context, appID, token string) (*
 
 // activeApp 取应用并要求它处于启用状态。
 //
-// 应用被停用后，登录、发码、token 校验三条入口都必须立即失效，否则
-// "停用应用"只是个不生效的标记位——`status` 列有值、有常量，却没人读取，
-// 是最容易在后续阶段酿成事故的一类死字段。
-//
-// 注意：第一阶段还没有把应用置为 DISABLED 的管理接口，因此这条分支目前
-// 只能由直接改库触发。这是刻意的：先让字段有意义，再在后续阶段补上开关，
-// 而不是反过来先做开关再发现没人校验。
+// 单一执行点在 ApplicationService.GetActiveByAppID：那条判断的完整理由
+// （为什么必须存在、为什么不能散在各调用点）写在那边，这里不重复。
 func (s *AuthService) activeApp(ctx context.Context, appID string) (*domain.Application, error) {
-	app, err := s.deps.Apps.GetByAppID(ctx, appID)
-	if err != nil {
-		return nil, err
-	}
-	if app.Status != domain.ApplicationStatusActive {
-		return nil, domain.Errorf(domain.ErrForbidden, "应用已停用")
-	}
-	return app, nil
+	return s.deps.Apps.GetActiveByAppID(ctx, appID)
 }
 
 // connectorFor 取出该应用启用的登录方式及其配置。

@@ -14,10 +14,16 @@ import (
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
 
-// AppLookup 按对外 appId 取应用。用于把 metadata 里的 appId 换成内部 UUID。
-// *service.ApplicationService 满足它。
+// AppLookup 按对外 appId 取一个处于启用状态的应用，用于把 metadata 里的
+// appId 换成内部 UUID。
+//
+// 要求"启用状态"（GetActiveByAppID）而不是单纯的 GetByAppID：Watch 与
+// 一元 RPC（经 service.AuthService.activeApp）必须共用同一个执行点判定
+// "这个应用现在能不能用"，否则停用应用会在 Watch 这条路径上继续生效——
+// status 字段变成又一个没人读的死开关。*service.ApplicationService 天然
+// 满足它（方法名对得上）。
 type AppLookup interface {
-	GetByAppID(ctx context.Context, appID string) (*domain.Application, error)
+	GetActiveByAppID(ctx context.Context, appID string) (*domain.Application, error)
 }
 
 // AuthServerDeps 是 gRPC 认证服务的依赖。
@@ -142,7 +148,7 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	if err != nil {
 		return err
 	}
-	app, err := s.apps.GetByAppID(ctx, appIDStr)
+	app, err := s.apps.GetActiveByAppID(ctx, appIDStr)
 	if err != nil {
 		return statusFrom(err)
 	}

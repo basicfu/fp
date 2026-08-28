@@ -244,3 +244,29 @@ func TestWatchDeliversRevokeToClient(t *testing.T) {
 		t.Fatalf("撤销事件里的 token 是 %v，期望包含 %q", rev.GetTokens(), token)
 	}
 }
+
+// TestWatchRejectsDisabledApplication 守住"停用即全面停用"。
+//
+// ValidateToken 那条路径由 activeApp 拦下了，但 Watch 曾经直接用
+// GetByAppID 绕过去——停用的应用仍能开流、继续收自己应用的撤销事件。
+// 实际危害小（它的 token 本来就校验不过），但"停用了却还有一半功能在跑"
+// 会让运营以为自己关掉了某个接入方，而它其实还连着——第一阶段
+// Application.Status 就吃过这个亏（字段有、常量有，就是没人读）。
+func TestWatchRejectsDisabledApplication(t *testing.T) {
+	env := newGRPCEnv(t)
+	ctx := env.authed(context.Background())
+
+	env.disableApplication(t)
+
+	stream, err := env.client.Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	// gRPC 的流是惰性建立的：Watch(ctx) 本身多半不会返回错误，服务端
+	// handler 要到第一次 Recv 才真正跑起来，错误也要在这里才会浮现。
+	// 断言写在 Watch 的返回值上会永远通过——又是一条"绿着但什么都没测"的测试。
+	if _, err := stream.Recv(); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("停用应用后 Watch 首次 Recv 返回 %v，期望 PermissionDenied", status.Code(err))
+	}
+}

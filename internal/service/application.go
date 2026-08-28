@@ -127,6 +127,31 @@ func (s *ApplicationService) GetByAppID(ctx context.Context, appID string) (*dom
 	return app, nil
 }
 
+// GetActiveByAppID 按对外 appId 取应用，并要求它处于启用状态。
+//
+// 应用被停用后，登录、发码、token 校验、Watch 撤销流——所有入口都必须
+// 立即失效，否则"停用应用"只是个不生效的标记位：`status` 列有值、有
+// 常量，却没人读取，是最容易在后续阶段酿成事故的一类死字段（第一阶段
+// 就吃过这个亏）。
+//
+// 把这条判断收在这里而不是散在各调用点，是为了让它只有一个执行点：
+// 状态语义将来若有变化（比如多出一种"只读"状态），改这里就够了，
+// 不需要去找"到底还有哪条路径没检查"。
+//
+// 注意：目前还没有把应用置为 DISABLED 的管理接口，这条分支只能由
+// 直接改库触发。这是刻意的：先让字段有意义，再在后续阶段补上开关，
+// 而不是反过来先做开关再发现没人校验。
+func (s *ApplicationService) GetActiveByAppID(ctx context.Context, appID string) (*domain.Application, error) {
+	app, err := s.GetByAppID(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	if app.Status != domain.ApplicationStatusActive {
+		return nil, domain.Errorf(domain.ErrForbidden, "应用已停用")
+	}
+	return app, nil
+}
+
 // VerifySecret 校验 appId + appSecret，成功返回对应应用。
 // appId 不存在与 secret 错误返回同一错误，避免 appId 枚举。
 func (s *ApplicationService) VerifySecret(ctx context.Context, appID, plainSecret string) (*domain.Application, error) {
