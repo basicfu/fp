@@ -33,6 +33,33 @@ type Server struct {
 	hub  *RevokeHub
 }
 
+// KeepaliveMinTime 是服务端能容忍的最短客户端 ping 间隔。
+//
+// 必须**小于** SDK 客户端的 fpsdk.KeepaliveTime（30 秒），否则服务端会
+// 认为客户端 ping 过频，回一个 ENHANCE_YOUR_CALM 的 GOAWAY 把连接掐掉。
+// 这是 gRPC 最经典的自伤配置：双方都"配了 keepalive"，结果连接反而被
+// 周期性掐断。这条配对关系由 internal/integration 里的
+// TestKeepaliveTimingIsCompatible 守护——sdk 不得 import internal/，
+// 两边只能在能同时看到彼此的地方核对。
+const KeepaliveMinTime = 10 * time.Second
+
+// MaxConnectionAge 让每条连接活满这么久后被优雅回收（先 GOAWAY，给
+// MaxConnectionAgeGrace 的宽限期收尾进行中的 RPC），客户端随即重连。
+//
+// 没有它的话，**fp 扩容等于白扩**：gRPC 连接是长连接，L4 LB 按连接分流，
+// 存量 SDK 连接会永远钉在老实例上。新加的实例只能接到新启动的 SDK
+// 进程——而 SDK 进程的重启频率是按周算的。老实例继续过载、新实例长期
+// 空转，且没有任何报错。为 0 意味着这条回收机制被整个关掉。
+//
+// grpc-go 会自动给 MaxConnectionAge 加 ±10% 抖动，避免所有连接同时到期
+// 造成重连风暴。
+const MaxConnectionAge = 30 * time.Minute
+
+// MaxConnectionAgeGrace 是 MaxConnectionAge 触发 GOAWAY 之后，允许进行中
+// 的 RPC 继续跑多久才被强制切断。为 0 意味着到龄的连接会立刻被切断，
+// 长流（Watch）在途请求会被硬中断而不是优雅收尾。
+const MaxConnectionAgeGrace = 5 * time.Minute
+
 // New 装配 gRPC 服务。
 func New(d Deps) *Server {
 	ttl := d.AppSecretCacheTTL
@@ -48,28 +75,18 @@ func New(d Deps) *Server {
 
 		// MinTime 必须**小于**客户端的 keepalive Time，否则服务端会认为
 		// 客户端 ping 过频，回一个 ENHANCE_YOUR_CALM 的 GOAWAY 把连接掐掉。
-		// SDK 侧用 30 秒，这里留 10 秒余量。这是 gRPC 最经典的自伤配置：
-		// 双方都"配了 keepalive"，结果连接反而被周期性掐断。
+		// 配对关系与为什么必须靠测试守护，见 KeepaliveMinTime 的注释。
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             10 * time.Second,
+			MinTime:             KeepaliveMinTime,
 			PermitWithoutStream: true,
 		}),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    30 * time.Second,
 			Timeout: 10 * time.Second,
 
-			// MaxConnectionAge 让每条连接活满 30 分钟后被优雅回收（先 GOAWAY，
-			// 给 5 分钟宽限期收尾进行中的 RPC），客户端随即重连。
-			//
-			// 没有它的话，**fp 扩容等于白扩**：gRPC 连接是长连接，L4 LB 按连接
-			// 分流，存量 SDK 连接会永远钉在老实例上。新加的实例只能接到新启动的
-			// SDK 进程——而 SDK 进程的重启频率是按周算的。老实例继续过载、
-			// 新实例长期空转，且没有任何报错。
-			//
-			// grpc-go 会自动给 MaxConnectionAge 加 ±10% 抖动，避免所有连接
-			// 同时到期造成重连风暴。
-			MaxConnectionAge:      30 * time.Minute,
-			MaxConnectionAgeGrace: 5 * time.Minute,
+			// 见 MaxConnectionAge / MaxConnectionAgeGrace 的注释。
+			MaxConnectionAge:      MaxConnectionAge,
+			MaxConnectionAgeGrace: MaxConnectionAgeGrace,
 		}),
 	)
 	fpv1.RegisterAuthServiceServer(srv, NewAuthServer(AuthServerDeps{

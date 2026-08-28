@@ -14,6 +14,20 @@ import (
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
 
+// KeepaliveTime 是客户端向 fp 发送 keepalive ping 的间隔。
+//
+// 必须**大于** internal/grpcapi 服务端的 KeepaliveMinTime（10 秒），否则
+// 服务端会认为客户端 ping 过频，回一个 ENHANCE_YOUR_CALM 的 GOAWAY 把
+// 连接掐掉——双方都"配了 keepalive"，结果连接反而被周期性掐断，是这套
+// 机制最经典的自伤方式。
+//
+// 这条配对关系分处两个包（sdk 不得 import internal/，internal/grpcapi
+// 也不该反过来依赖 sdk 的实现细节），任何一边单独看都只是一个孤立的
+// 时长常量，改错了 go build/vet/全量测试照样全绿。两者的配对由
+// internal/integration 里的 TestKeepaliveTimingIsCompatible 守护——那是
+// 唯一能同时看到这两个包的地方。
+const KeepaliveTime = 30 * time.Second
+
 // Client 是与 fp 的连接。它是并发安全的，一个进程建一个即可。
 type Client struct {
 	opts Options
@@ -52,12 +66,11 @@ func New(opts Options) (*Client, error) {
 		grpc.WithPerRPCCredentials(newAppCredentials(opts)),
 
 		// keepalive 是"连接永不空闲"的第二道保险（第一道是 Watch 长流本身）。
-		// Time 必须**大于**服务端的 EnforcementPolicy.MinTime（fp 设的是 10 秒），
-		// 否则服务端会认为客户端 ping 过频，回 ENHANCE_YOUR_CALM 的 GOAWAY
-		// 把连接掐掉——双方都"配了 keepalive"却导致连接被周期性掐断，
-		// 是这套机制最经典的自伤方式。
+		// Time 必须**大于**服务端的 EnforcementPolicy.MinTime——配对关系与
+		// 为什么必须靠 internal/integration 里的测试守护，见 KeepaliveTime
+		// 的注释。
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
+			Time:                KeepaliveTime,
 			Timeout:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
