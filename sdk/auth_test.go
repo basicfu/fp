@@ -615,3 +615,65 @@ func TestFlightResponseDoesNotResurrectConcurrentlyDroppedToken(t *testing.T) {
 			"cache_ttl 仍是登录态", got)
 	}
 }
+
+// TestFollowerUnaffectedByLeaderCtxCancellation 守住必修 3。
+//
+// singleflight 把并发 miss 合并成一次 RPC，闭包里发那次 RPC 用的 ctx
+// 只来自"领导者"（第一个进入 sf.Do 的调用方）——其余调用方是"跟随者"，
+// 它们自己的 ctx 从未参与这次 RPC。领导者的 HTTP 请求被取消（浏览器
+// 导航、用户点停止）不代表 fp 不可达，更不该连累同一时刻在等同一个
+// token 的其他健康请求。
+//
+// 装配：先单独发起一个用可取消 ctx 的调用，等它的 RPC 真正进入飞行状态
+// （此时它必然是 singleflight 选中的领导者，因为此刻它是这个 token 唯一
+// 在飞的调用），再追加若干个用 context.Background() 发起的并发调用——
+// 它们必然合并成跟随者，不会各自另起一次执行。取消领导者的 ctx、放行
+// RPC，断言全部调用（含领导者自己）都拿到成功结果。
+//
+// 领导者自己的结果也必须成功：共享调用只应该受 ValidateTimeout 支配，
+// "领导者"只是 singleflight 内部的选举结果，不是一个调用方主动接受的
+// 语义约定，取消自己的 ctx 不该让共享的 RPC 提前失败。
+func TestFollowerUnaffectedByLeaderCtxCancellation(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	env := newStubEnv(t, func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 30_000}, nil
+	})
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := env.auth.Validate(leaderCtx, "tok")
+		leaderDone <- err
+	}()
+	<-entered // 领导者的 RPC 已经在飞行中：此刻它是这个 token 唯一在飞的调用。
+
+	const followers = 5
+	followerDone := make(chan error, followers)
+	for i := 0; i < followers; i++ {
+		go func() {
+			_, err := env.auth.Validate(context.Background(), "tok")
+			followerDone <- err
+		}()
+	}
+	time.Sleep(100 * time.Millisecond) // 让 followers 都排进 singleflight 的等待队列（同 TestConcurrentMissesCollapseToOneCall 的手法）。
+
+	cancelLeader() // 领导者自己的 ctx 死了——共享的 RPC 不该受此影响。
+
+	close(release) // 放行飞行中的 RPC。
+
+	if err := <-leaderDone; err != nil {
+		t.Fatalf("领导者返回 %v，期望成功——领导者自己取消 ctx 不该影响共享的 RPC 结果", err)
+	}
+	for i := 0; i < followers; i++ {
+		if err := <-followerDone; err != nil {
+			t.Fatalf("跟随者返回 %v，期望成功——fp 完全健康，"+
+				"不该因为领导者的 ctx 被取消就拿到 ErrUnavailable", err)
+		}
+	}
+}
