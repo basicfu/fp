@@ -6026,6 +6026,22 @@ func TestSecureCookieIsOptIn(t *testing.T) {
 	// 断言 cookie 的 Secure 属性符合配置。
 }
 
+// TestMiddlewareUnavailableReturns503 守住"认证服务不可用 ≠ 你没通过认证"。
+//
+// **上面那几条测试都测不到这一条**——把 503 分支删掉（让它落到 default 的
+// 401），它们依然全绿。因为它们验证的是"该拒的拒了"，而 401 和 503 都是拒。
+//
+// 但两者对客户端的含义完全相反：401 的语义是"你的凭据无效"，客户端据此
+// 会清掉 cookie 让用户重新登录。fp 抖动一下就把全体用户踢下线——
+// 一次几秒的服务端故障被放大成一场登录风暴，而那些 token 其实完全有效。
+//
+// 断言必须落在**状态码**上（503），不能只断言"没放行"。
+func TestMiddlewareUnavailableReturns503(t *testing.T) {
+	// …让桩服务端返回 codes.Unavailable，且该 token 没有任何缓存条目
+	//（有缓存的话会走陈旧兜底或直接命中，到不了这条分支）。
+	// 断言 rec.Code == http.StatusServiceUnavailable。
+}
+
 // TestMiddlewareDoesNotEchoToken 守住不把凭据写进响应体。
 //
 // 把 token 拼进错误信息（"token xxx 无效"）会让它进入前端日志、
