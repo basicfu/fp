@@ -5059,6 +5059,33 @@ func TestCacheEvictsByCapacity(t *testing.T) {
 	}
 }
 
+// TestZeroTTLPutDoesNotEvictOtherEntries 守住 put 的 ttl<=0 提前返回。
+//
+// **上面的 TestZeroTTLIsNotCached 测不到这一条**——把那个 guard 整个删掉，
+// 它依然通过。因为 get 里 `age < effective` 的严格比较在 age==0 时就已经
+//把 ttl<=0 的条目读成 miss 了，无论它有没有真的进过 LRU。
+//
+// guard 真正防的是：一个"不要缓存"的 token 白占一个 LRU 槽位，
+// 把一个合法有效的条目挤出去。所以断言要落在**别的条目还在不在**上。
+func TestZeroTTLPutDoesNotEvictOtherEntries(t *testing.T) {
+	// 容量设 2，先放两条 60 秒的有效条目，再 put 一条 ttl=0 的，
+	// 断言那两条都还在。
+}
+
+// TestExpiredEntryDoesNotCrowdOutFreshEntry 守住 get 里的 Remove。
+//
+// 删掉那行 Remove，上面所有给定的测试都还是绿的——因为它们只看
+// 某个 token 自己读回来是什么，不看它对**别的条目**的影响。
+//
+// 而 hashicorp/golang-lru 的 Get 会把命中的键提升为最近使用，
+// 哪怕紧接着就被判成过期。少了 Remove，过期条目就成了 LRU 眼里最新鲜的，
+// 它留下、新鲜条目被挤走——缓存开始优先淘汰有用的东西。
+func TestExpiredEntryDoesNotCrowdOutFreshEntry(t *testing.T) {
+	// 容量设 2，放一条短 TTL 的，推进时钟让它过期，
+	// get 一次（触发提升 + 应有的 Remove），再放两条新的，
+	// 断言两条新的都还在。
+}
+
 // TestDropRemovesEntries 确认撤销事件能清掉缓存。
 func TestDropRemovesEntries(t *testing.T) {
 	c, _ := newTestCache(t, 16)
@@ -5188,7 +5215,11 @@ func (c *cache) get(token string, maxTTL, maxStale time.Duration) (entry, cacheS
 	case maxStale > 0 && age < effective+maxStale:
 		return e, cacheStale
 	default:
-		// 顺手清掉：留着它只会占一个 LRU 槽位，把还有用的条目挤出去。
+		// 必须显式清掉，而且后果比"占一个槽位"严重得多：
+		// hashicorp/golang-lru 的 Get **会把命中的键提升为最近使用**——
+		// 哪怕我们下一行就要把它判成过期。不 Remove 的话，过期条目反而
+		// 成了 LRU 眼里最新鲜的那个，它活下来，而真正新鲜的条目被挤掉。
+		// 也就是说：漏掉这一行不是"少清理一点"，是让缓存优先淘汰有用的东西。
 		c.lru.Remove(token)
 		return entry{}, cacheMiss
 	}
