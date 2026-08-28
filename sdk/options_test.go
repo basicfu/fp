@@ -26,6 +26,9 @@ func TestOptionsFillDefaults(t *testing.T) {
 	if o.ValidateTimeout <= 0 {
 		t.Errorf("ValidateTimeout 默认值为 %v", o.ValidateTimeout)
 	}
+	if o.CacheSize != defaultCacheSize {
+		t.Errorf("CacheSize 默认值为 %d，期望 %d", o.CacheSize, defaultCacheSize)
+	}
 	if o.Logger == nil {
 		t.Error("Logger 默认值为 nil，SDK 内部日志会 panic")
 	}
@@ -58,5 +61,15 @@ func TestValidateRejectsNegativeDurations(t *testing.T) {
 	err := o.validate()
 	if err == nil || !strings.Contains(err.Error(), "ValidateTimeout") {
 		t.Fatalf("负的 ValidateTimeout 未被拒绝: %v", err)
+	}
+}
+
+// TestValidateRejectsNegativeCacheSize 确认 CacheSize < 0 这一分支真的被
+// validate 拒绝，而不只是声明了却没人调用到。
+func TestValidateRejectsNegativeCacheSize(t *testing.T) {
+	o := Options{Addr: "x:9090", AppID: "a", AppSecret: "s", CacheSize: -1}
+	err := o.validate()
+	if err == nil || !strings.Contains(err.Error(), "CacheSize") {
+		t.Fatalf("负的 CacheSize 未被拒绝: %v", err)
 	}
 }

@@ -10,8 +10,8 @@ import (
 
 // Options 是 SDK 的全部配置。
 //
-// 本任务只定义连接层用得到的字段；缓存与降级相关的选项由 Task 9、Task 10
-// 各自随其读取方一起加入，避免出现"字段存在但没人读"的悬空配置。
+// 本任务只定义连接层与缓存层用得到的字段；降级相关的选项由 Task 10
+// 随其读取方一起加入，避免出现"字段存在但没人读"的悬空配置。
 type Options struct {
 	// Addr 是 fp 的 gRPC 地址，形如 "fp.internal:9090"。
 	Addr string
@@ -30,15 +30,24 @@ type Options struct {
 	// ValidateTimeout 是单次回源的超时。默认 2 秒。
 	ValidateTimeout time.Duration
 
+	// CacheSize 是本地校验结果缓存的容量上限（条）。默认 10000。
+	CacheSize int
+
 	// Logger 是 SDK 内部日志。为 nil 时用 slog.Default()。
 	Logger *slog.Logger
 }
 
-const defaultValidateTimeout = 2 * time.Second
+const (
+	defaultValidateTimeout = 2 * time.Second
+	defaultCacheSize       = 10000
+)
 
 func (o *Options) applyDefaults() {
 	if o.ValidateTimeout <= 0 {
 		o.ValidateTimeout = defaultValidateTimeout
+	}
+	if o.CacheSize <= 0 {
+		o.CacheSize = defaultCacheSize
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -55,6 +64,8 @@ func (o Options) validate() error {
 		return errors.New("fpsdk: Options.AppSecret 不能为空")
 	case o.ValidateTimeout < 0:
 		return errors.New("fpsdk: Options.ValidateTimeout 不能为负")
+	case o.CacheSize < 0:
+		return errors.New("fpsdk: Options.CacheSize 不能为负")
 	}
 	return nil
 }
