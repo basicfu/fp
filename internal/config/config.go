@@ -20,11 +20,18 @@ type Config struct {
 	BootstrapAdminUser     string
 	BootstrapAdminPassword string
 
-	// 阿里云短信是生产环境唯一的短信供应商（见 cmd/fp/main.go）。
-	// AliyunEndpoint 可以留空，notify.NewAliyunSMS 会套用它自己的默认接入点；
-	// 其余四项没有安全的默认值，缺任何一项都会在下面的 Load 里让启动失败——
-	// 不能悄悄退化成 notify.NewFakeProvider，那样验证码只会进内存，
-	// 谁也收不到短信，而且不会有任何报错。
+	// 阿里云短信供应商配置（见 cmd/fp/main.go）。
+	//
+	// 只在生产环境（IsProd）强制要求这四项非空——notify.FakeProvider 的
+	// 文档注释本身就写着"用于测试与本地开发"，逼所有人在本机跑
+	// ./scripts/run.sh 或 CI 跑 cmd/fp 二进制都先备齐（哪怕是假的）阿里云
+	// 凭据，是把一条只该管生产的约束错误地套到了所有环境头上。非生产环境
+	// 缺任何一项时，cmd/fp/main.go 会退化成 notify.NewFakeProvider 并打一条
+	// 醒目的 WARN——不静默，只是不强制。四项在非生产环境下也齐全时仍然
+	// 装配真实供应商，方便有人就是想在本机联调真实短信通道。
+	//
+	// AliyunEndpoint 任何环境下都可以留空，notify.NewAliyunSMS 会套用它
+	// 自己的默认接入点，不参与下面的必填校验。
 	AliyunAccessKeyID          string
 	AliyunAccessKeySecret      string
 	AliyunEndpoint             string
@@ -60,17 +67,21 @@ func Load() (*Config, error) {
 	if c.RedisURL == "" {
 		missing = append(missing, "FP_REDIS_URL")
 	}
-	if c.AliyunAccessKeyID == "" {
-		missing = append(missing, "FP_ALIYUN_ACCESS_KEY_ID")
-	}
-	if c.AliyunAccessKeySecret == "" {
-		missing = append(missing, "FP_ALIYUN_ACCESS_KEY_SECRET")
-	}
-	if c.AliyunSMSSignName == "" {
-		missing = append(missing, "FP_ALIYUN_SMS_SIGN_NAME")
-	}
-	if c.AliyunSMSTemplateLoginCode == "" {
-		missing = append(missing, "FP_ALIYUN_SMS_TEMPLATE_LOGIN_CODE")
+	// 阿里云短信凭据只在生产环境强制必填，理由见 Config 里 Aliyun* 字段
+	// 上方的注释。
+	if c.IsProd() {
+		if c.AliyunAccessKeyID == "" {
+			missing = append(missing, "FP_ALIYUN_ACCESS_KEY_ID")
+		}
+		if c.AliyunAccessKeySecret == "" {
+			missing = append(missing, "FP_ALIYUN_ACCESS_KEY_SECRET")
+		}
+		if c.AliyunSMSSignName == "" {
+			missing = append(missing, "FP_ALIYUN_SMS_SIGN_NAME")
+		}
+		if c.AliyunSMSTemplateLoginCode == "" {
+			missing = append(missing, "FP_ALIYUN_SMS_TEMPLATE_LOGIN_CODE")
+		}
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("config: 缺少必填环境变量 %s", strings.Join(missing, ", "))

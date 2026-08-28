@@ -126,30 +126,29 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	primary := env.newApplication(t)
 	env.app, env.appID, env.secret = primary.app, primary.appID, primary.secret
 
-	// server 起在这里而不是懒加载，且先等 Ready() 才起 bufconn 的 Serve：
-	// Server.Run 只有在 hub 真正订阅上 Redis 之后才关闭 Ready()（见
-	// RevokeHub.Ready 的注释），这里照抄 cmd/fp/main.go 的编排顺序，
-	// 保证 newGRPCEnv 返回之后，任何测试紧接着触发的撤销（比如 Logout）
-	// 都能被 Watch 流收到，不会因为"服务端到底订上了没"而变得不确定。
+	// server 起在这里而不是懒加载，且先等 Ready() 才让测试继续：
+	// ServeWhenReady 内部只有在 hub 真正订阅上 Redis 之后才会关闭 Ready()
+	// 并开始接受连接（见 RevokeHub.Ready 的注释），这里等它，保证
+	// newGRPCEnv 返回之后，任何测试紧接着触发的撤销（比如 Logout）都能被
+	// Watch 流收到，不会因为"服务端到底订上了没"而变得不确定。
 	//
-	// runCtx 单独控制 Run（进而那条 Redis 订阅）的生命周期，与下面
-	// srv.Shutdown 管的 gRPC 服务生命周期分开：Shutdown 只负责关 hub 与
-	// GracefulStop，并不会让 Run 返回，不单独取消 runCtx 的话每个用例
-	// 都会在测试进程里永久多留一条 Redis 订阅连接。
+	// runCtx 单独控制 ServeWhenReady 内部那条 Redis 订阅的生命周期，与
+	// 下面 srv.Shutdown 管的 gRPC 服务生命周期分开：Shutdown 只负责关
+	// hub 与 GracefulStop，并不会让内部的 Run 返回，不单独取消 runCtx
+	// 的话每个用例都会在测试进程里永久多留一条 Redis 订阅连接。
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	t.Cleanup(cancelRun)
 
 	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub})
-	go func() { _ = srv.Run(runCtx) }()
+	env.server = srv
+
+	lis := bufconn.Listen(1 << 20)
+	go func() { _ = srv.ServeWhenReady(runCtx, lis, 5*time.Second) }()
 	select {
 	case <-srv.Ready():
 	case <-time.After(5 * time.Second):
 		t.Fatal("等待 gRPC 服务的撤销中继就绪超时")
 	}
-	env.server = srv
-
-	lis := bufconn.Listen(1 << 20)
-	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

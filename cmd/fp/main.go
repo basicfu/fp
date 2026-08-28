@@ -82,25 +82,42 @@ func run() error {
 
 	logSvc := service.NewLoginLogService(pool)
 
-	// 短信供应商：生产环境唯一走阿里云，绝不能用 notify.NewFakeProvider——
-	// 那只会把验证码留在内存里，谁也收不到短信，而且不会有任何报错。
-	// config.Load 已经校验过下面四个字段非空；NewAliyunSMS 这里的错误
-	// 只会来自它自己额外的校验（目前没有，未来如果加了新的必填项，
-	// 这里同样会让启动失败，而不是带着一个半残的供应商跑起来）。
+	// 短信供应商：四项阿里云凭据齐全就用真实供应商——不管是不是生产环境，
+	// 有人就是想在本机联调真实短信通道。凭据不全时：
+	//   - 生产环境：config.Load 已经把这四项收进必填校验，走不到这里；
+	//     留着下面这个分支纯属防御性代码，防的是"以后有人绕开 Load 直接
+	//     构造 Config"这种理论情况。
+	//   - 非生产环境：退化成 notify.NewFakeProvider（验证码只进内存，不会
+	//     真的发短信）并打一条 WARN——不能悄悄降级，那正是这条约束最初
+	//     要防的事，只是"未配置就不允许启动"这个更严格的要求只该套在
+	//     生产环境头上，逼所有本机开发和 CI 都先备齐（哪怕是假的）阿里云
+	//     凭据才能起服务是过度的。
 	smsSender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
-	aliyunSMS, err := notify.NewAliyunSMS(notify.AliyunConfig{
-		AccessKeyID:     cfg.AliyunAccessKeyID,
-		AccessKeySecret: cfg.AliyunAccessKeySecret,
-		Endpoint:        cfg.AliyunEndpoint,
-		SignName:        cfg.AliyunSMSSignName,
-		Templates: map[string]string{
-			service.LoginCodeTemplate: cfg.AliyunSMSTemplateLoginCode,
-		},
-	})
-	if err != nil {
-		return err
+	aliyunConfigured := cfg.AliyunAccessKeyID != "" && cfg.AliyunAccessKeySecret != "" &&
+		cfg.AliyunSMSSignName != "" && cfg.AliyunSMSTemplateLoginCode != ""
+	switch {
+	case aliyunConfigured:
+		aliyunSMS, err := notify.NewAliyunSMS(notify.AliyunConfig{
+			AccessKeyID:     cfg.AliyunAccessKeyID,
+			AccessKeySecret: cfg.AliyunAccessKeySecret,
+			Endpoint:        cfg.AliyunEndpoint,
+			SignName:        cfg.AliyunSMSSignName,
+			Templates: map[string]string{
+				service.LoginCodeTemplate: cfg.AliyunSMSTemplateLoginCode,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		smsSender.AddProvider(aliyunSMS)
+	case cfg.IsProd():
+		// 理论上到不了这里：config.Load 已经保证生产环境下 aliyunConfigured
+		// 必为 true。留作防御性兜底，见上面的注释。
+		return errors.New("生产环境缺少阿里云短信凭据")
+	default:
+		log.Warn("阿里云短信未配置，短信通道使用内存假供应商——验证码不会真的发送，仅限本地开发/测试使用")
+		smsSender.AddProvider(notify.NewFakeProvider(notify.ChannelSMS, "fake"))
 	}
-	smsSender.AddProvider(aliyunSMS)
 
 	authSvc := service.NewAuthService(service.AuthDeps{
 		Apps:     appSvc,
@@ -144,41 +161,12 @@ func run() error {
 		return fmt.Errorf("监听 gRPC 地址 %s: %w", cfg.GRPCAddr, err)
 	}
 
-	// grpcRunFailed 只在 Run 未能撑到 ctx 取消、提前带错误退出时才会收到
-	// 一个值（缓冲为 1，不会阻塞这里的 goroutine）。Run 正常结束（ctx 取消）
-	// 永远返回 nil，什么都不会往这个 channel 里送——"一切正常"这件事已经
-	// 由 grpcSrv.Ready() 表达了，不需要 grpcRunFailed 重复表达一遍，这样
-	// 下面的 select 也就不必费力区分"收到 nil"和"收到真错误"两种情况。
-	grpcRunFailed := make(chan error, 1)
+	// ServeWhenReady 内部会先等撤销中继订阅上 Redis 才开始接受连接——这条
+	// 编排本身连同"为什么顺序不能反"的完整推导见 grpcapi.Server.ServeWhenReady
+	// 的注释。main.go 这一层只负责调用它、并在它返回错误时按现有惯例
+	// （与 httpSrv 的 ListenAndServe 一致）记日志、触发关闭。
 	go func() {
-		if err := grpcSrv.Run(ctx); err != nil {
-			log.Error("撤销事件中继异常退出", "err", err)
-			stop()
-			grpcRunFailed <- err
-		}
-	}()
-
-	// Serve 必须等 hub 真正订阅上 Redis 才能开始接受连接：Watch 一连上就会
-	// 发 ready，SDK 把 ready 当作"此后的撤销不会漏推"的承诺（proto
-	// WatchReady 的注释）。hub 还没订阅时提前 Serve，恰好撞在这段窗口里的
-	// 撤销事件就会无声丢失，SDK 却毫不知情、不会收紧本地缓存窗口——fp
-	// 重启时全部 SDK 同时重连，这个窗口最容易被撞上。完整推导见
-	// grpcapi.RevokeHub.Ready 的注释。
-	//
-	// 带超时：Redis 不可达时 Run 会带着错误尽快返回，上面的 goroutine
-	// 立刻转发到 grpcRunFailed，这里不必等满超时；10 秒超时是给"迟迟
-	// 没有错误也没有 ready"这种不该发生、但不能没有兜底的情况兜底，
-	// 避免进程静默挂在启动阶段、日志里却什么也不说。
-	select {
-	case <-grpcSrv.Ready():
-	case err := <-grpcRunFailed:
-		return fmt.Errorf("gRPC 撤销事件中继未能就绪: %w", err)
-	case <-time.After(10 * time.Second):
-		return errors.New("等待 gRPC 撤销事件中继就绪超时")
-	}
-
-	go func() {
-		if err := grpcSrv.Serve(grpcLis); err != nil {
+		if err := grpcSrv.ServeWhenReady(ctx, grpcLis, 10*time.Second); err != nil {
 			log.Error("gRPC 服务异常退出", "err", err)
 			stop()
 		}

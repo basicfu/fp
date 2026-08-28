@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/test/bufconn"
+
 	"github.com/basicfu/fp/internal/store"
 )
 
@@ -15,6 +18,18 @@ import (
 // GracefulStop 会等一条永远不返回的 RPC——进程在收到 SIGTERM 后
 // 永远停不下来，只能被 SIGKILL。容器环境里表现为每次滚动更新都要
 // 等满终止宽限期，且旧实例在此期间仍持有连接。
+//
+// 内层 Shutdown 故意不给超时（context.Background()）：如果 hub.Close()
+// 与 GracefulStop() 的调用顺序被改坏，Shutdown 内部就没有任何 ctx-based
+// 兜底能把它救回来，只靠下面外层的 time.After(10s) 兜底判定失败。这里
+// 原本给了内层 5 秒超时，手工变异验证发现那样测不出问题：grpc-go 的
+// GracefulStop/Stop 内部共享同一把锁（server.go 的 s.mu），GracefulStop
+// 卡在 sync.Cond.Wait 等待连接排空时会释放这把锁，Stop 能抢到锁强行推平
+// 连接、顺带唤醒卡住的 GracefulStop——Shutdown 自带的"优雅超时后强制
+// Stop"兜底，会把"顺序反了"这个 bug 的后果从"挂死"降级成"变慢
+// （5 秒多）+ 强制断开客户端连接"，10 秒内还是能返回，这条测试测不出来。
+// 去掉内层超时后，顺序反了就真的没有任何东西能让 Shutdown 返回，只能
+// 靠外层的 t.Fatal 兜底。
 func TestShutdownCompletesWithOpenWatchStream(t *testing.T) {
 	env := newGRPCEnv(t)
 	ctx, cancel := context.WithCancel(env.authed(context.Background()))
@@ -30,9 +45,7 @@ func TestShutdownCompletesWithOpenWatchStream(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
-		defer c()
-		env.server.Shutdown(shutdownCtx)
+		env.server.Shutdown(context.Background())
 		close(done)
 	}()
 
@@ -43,24 +56,13 @@ func TestShutdownCompletesWithOpenWatchStream(t *testing.T) {
 	}
 }
 
-// TestHubCloseUnblocksOpenWatchStream 更直接地守住关闭顺序背后真正依赖的
-// 那份保证，绕开 Server.Shutdown 自己的超时兜底。
-//
-// 手工变异验证发现一个值得记录的坑：把 Server.Shutdown 里 hub.Close() 和
-// GracefulStop() 的调用顺序反过来之后，TestShutdownCompletesWithOpenWatchStream
-// 仍然会在 5 秒多之后通过——不是顺序其实无所谓，而是 grpc-go 的
-// GracefulStop 与 Stop 内部共享同一把锁，Stop 在 GracefulStop 卡在
-// sync.Cond.Wait 等待连接排空时能拿到锁、强制关掉连接，反过来把卡住的
-// GracefulStop 也唤醒了——Shutdown 自带的"优雅超时后强制 Stop"兜底，
-// 无意中把"顺序反了"这个 bug 的后果从"挂死"降级成了"变慢+强制断开"，
-// 而给定测试的断言（10 秒内返回）并不区分这两者，于是测不出问题。
-//
-// 这条测试不给兜底任何介入机会：不经过 Server.Shutdown / GracefulStop /
-// Stop，只调用 hub.Close() 本身，直接断言它足以让客户端已经打开的 Watch
-// 流收到结束——这才是 Shutdown 之所以能快速返回、GracefulStop 之所以
-// 不会永远卡住所依赖的那个底层机制。Close() 被改坏（比如变成空函数）时，
-// 这条测试会因为客户端 Recv() 永远收不到结束而超时失败；上面那条给定
-// 测试在同样的改坏下则可能因为兜底介入而继续通过。
+// TestHubCloseUnblocksOpenWatchStream 补强上面那条测试，单独钉住关闭顺序
+// 真正依赖的底层机制，绕开 Server.Shutdown 自己的 GracefulStop/Stop
+// 编排——即使 Shutdown 内部的编排以后又出现类似 GracefulStop/Stop 共享锁
+// 那样的意外互相掩盖，这条测试也不受影响：它只调用 hub.Close() 本身，
+// 直接断言它足以让客户端已经打开的 Watch 流收到结束。Close() 被改坏
+// （比如变成空函数）时，这条测试会因为客户端 Recv() 永远收不到结束而
+// 超时失败。
 func TestHubCloseUnblocksOpenWatchStream(t *testing.T) {
 	env := newGRPCEnv(t)
 	ctx, cancel := context.WithCancel(env.authed(context.Background()))
@@ -91,8 +93,8 @@ func TestHubCloseUnblocksOpenWatchStream(t *testing.T) {
 }
 
 // fakeSubscriber 是 revokeSubscriber 的测试替身，让测试能精确控制"订阅
-// 几时完成"，用于证明 RevokeHub.Ready()（进而 Server.Ready、main.go 依赖
-// 的就绪信号）确实等订阅真正建立才关闭。
+// 几时完成"，用于证明 RevokeHub.Ready()（进而 Server.Ready、
+// ServeWhenReady 依赖的就绪信号）确实等订阅真正建立才关闭。
 //
 // 不用真实 Redis 做这件事：局域网内一次 SUBSCRIBE 确认通常只要个位数
 // 毫秒，测试没办法可靠地在它完成前后各观测一次状态——真做的话，
@@ -114,8 +116,10 @@ func (f *fakeSubscriber) Subscribe(ctx context.Context) (<-chan store.RevokeSign
 }
 
 // TestReadyWaitsForSubscriptionToComplete 守住 Task 7 补的那条启动顺序
-// 保证：Ready() 必须等 hub 真正订阅上 Redis 才关闭，main.go 据此决定
-// 何时才能开始 Serve（接受 SDK 连接）。
+// 保证在 RevokeHub 这一层的原语：Ready() 必须等 hub 真正订阅上 Redis 才
+// 关闭。ServeWhenReady（进而 main.go）就是靠这个信号决定何时才能开始
+// 接受连接，见 TestServeWhenReadyDoesNotAcceptBeforeReady——这条测试守
+// 的是更底层的因果关系本身。
 //
 // 用 fakeSubscriber 卡住 Subscribe 不返回，先证明"订阅没完成时 Ready()
 // 不会关闭"，再放行证明"订阅一完成 Ready() 立刻关闭"。变异验证：把
@@ -169,10 +173,11 @@ func (f failingSubscriber) Subscribe(context.Context) (<-chan store.RevokeSignal
 // TestReadyNeverClosesWhenSubscriptionFails 守住启动顺序要求的另一半：
 // 订阅失败必须让启动失败，而不是带着一个永远收不到事件的中继继续跑。
 //
-// main.go 靠 Ready() 与 Run 的返回错误二选一来判断能不能开始 Serve
-// （见 cmd/fp/main.go 的 select）。如果 Ready() 在订阅失败之后还是被
-// 误关闭，main.go 会误以为中继健康、正常开始接受连接——推送从此对
-// 本实例永久失效，且没有任何报错，是比启动直接失败更难排查的故障模式。
+// ServeWhenReady 靠 Ready() 与 Run 的返回错误二选一来判断能不能开始
+// Serve（见 grpcapi/server.go 的 ServeWhenReady）。如果 Ready() 在订阅
+// 失败之后还是被误关闭，ServeWhenReady 会误以为中继健康、正常开始接受
+// 连接——推送从此对本实例永久失效，且没有任何报错，是比启动直接失败
+// 更难排查的故障模式。
 func TestReadyNeverClosesWhenSubscriptionFails(t *testing.T) {
 	wantErr := errors.New("boom：模拟 redis 不可达")
 	hub := newRevokeHub()
@@ -187,5 +192,61 @@ func TestReadyNeverClosesWhenSubscriptionFails(t *testing.T) {
 	case <-hub.Ready():
 		t.Fatal("订阅失败后 Ready() 仍被关闭了")
 	default:
+	}
+}
+
+// TestServeWhenReadyDoesNotAcceptBeforeReady 把启动顺序这条保证钉在它
+// 实际生效的位置：main.go 现在只调用 Server.ServeWhenReady，不再自己
+// 编排 Run/Ready/Serve 三个方法——这段编排本身没有任何测试覆盖它在
+// main.go 里的调用方式（cmd/fp 是 package main，这个仓库没有它的测试
+// 基础设施），所以必须在这里、也就是编排代码实际所在的地方钉死它。
+//
+// 用 fakeSubscriber 卡住 Subscribe，断言这期间往 lis 拨号会超时——
+// bufconn.Listener 的 Accept 与 Dial 之间是一个无缓冲 channel 的握手
+// （见 google.golang.org/grpc/test/bufconn 的实现），Serve 没有开始跑
+// Accept 循环，Dial 就永远等不到对端，会在 ctx 到期时返回超时错误而不是
+// 连上。放行订阅之后，同一个监听器应该很快能被拨通，证明 Serve 确实是
+// 在 Ready() 关闭之后才开始接受连接的。
+//
+// 变异验证：把 ServeWhenReady 改成不等 Ready、直接调 Serve，第一次拨号
+// 会连上（err == nil），断言失败。
+func TestServeWhenReadyDoesNotAcceptBeforeReady(t *testing.T) {
+	fake := &fakeSubscriber{proceed: make(chan struct{})}
+	hub := newRevokeHub()
+	hub.pub = fake
+	srv := &Server{grpc: grpc.NewServer(), hub: hub}
+
+	lis := bufconn.Listen(1 << 20)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.ServeWhenReady(ctx, lis, 5*time.Second) }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	_, dialErr := lis.DialContext(dialCtx)
+	dialCancel()
+	if dialErr == nil {
+		t.Fatal("hub 还没订阅上 Redis，ServeWhenReady 却已经开始接受连接了——启动顺序反了")
+	}
+
+	close(fake.proceed) // 放行订阅，模拟 Redis 的 SUBSCRIBE 确认刚刚返回。
+
+	dialCtx2, dialCancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	conn, dialErr2 := lis.DialContext(dialCtx2)
+	dialCancel2()
+	if dialErr2 != nil {
+		t.Fatalf("订阅就绪后仍然连不上: %v", dialErr2)
+	}
+	_ = conn.Close()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	srv.Shutdown(shutdownCtx)
+
+	select {
+	case <-serveDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown 之后 ServeWhenReady 没有返回")
 	}
 }
