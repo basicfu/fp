@@ -6346,7 +6346,11 @@ func TestSDKSurvivesFpOutage(t *testing.T) {
 // （请求取消 / 页面忽略响应体）。客户端仍握着旧 token 继续请求——
 // 必须能重新拿到新 token，而不是在过渡期结束时静默登出。
 func TestRotationHandoffSurvivesLostResponse(t *testing.T) {
-	// …rotate_interval 配 1 秒、cache_ttl 配 0（强制每次回源，
+	// …rotate_interval 配 1 秒、cache_ttl 配**允许的最小值**（1 秒）。
+	// 注意 cache_ttl **不能配 0**——domain.SessionPolicy.Validate() 要求它为正。
+	// 配最小值加上请求之间 >1 秒的间隔即可强制每次回源；
+	// GraceDuration = max(15s, cfg) 不受影响，本测试依赖的 15 秒过渡窗口不变。
+	// （原意是强制每次回源，
 	// 以隔离出 fp 侧的重复告知能力）；
 	// 登录、等过 rotate_interval、
 	// 第一次校验拿到 newToken 后**丢弃它**，
@@ -6388,14 +6392,31 @@ func TestRedisSubscriptionBlipDoesNotSilentlyLoseRevocations(t *testing.T) {
 	//    用 TYPE pubsub 过滤很重要——杀错连接会把会话存储也一起断掉，
 	//    那样测出来的是"Redis 挂了"，不是"订阅抖动了"。
 	//
-	// 4. **在 go-redis 重连之前**触发撤销（accounts.RevokeAllSessions）。
-	//    这一步是整个测试的核心：这条事件注定送不到 fp。
-	//    时序不好控，所以断开后立刻撤销，并接受偶发的"其实没丢"——
-	//    因为即便没丢，Purge 也会照常发出（重连本身就是触发条件），
-	//    断言依然成立。这是悲观策略带来的好处：测试不依赖精确时序。
+	// 4. 触发撤销（accounts.RevokeAllSessions）。
 	//
 	// 5. 断言 SDK 在数秒内开始拒绝该 token。
 	//    数秒 << 600 秒的 cache_ttl，所以失效只可能来自 Purge。
+	//
+	// ⚠️ **上面这个写法是错的，它检测不到 Purge 的缺失。** 实测：把
+	// broadcastPurge 整个废掉，这条测试仍然 100% 通过。原因是 go-redis 的
+	// 自动重订阅往往快到目标 token 的撤销事件仍会经**正常扇出路径**送达——
+	// 与 Purge 有没有触发完全无关。也就是说，它验证的是"撤销最终生效了"，
+	// 而不是"缺口被检测到并转成了 Purge"。
+	//
+	// **正确写法：引入一个 canary token。**
+	//
+	// 除了要被撤销的那个 token，再登录第二个会话拿到 canary token，
+	// 同样预热进 SDK 缓存。然后**直接在 store 层删掉 canary 的会话**
+	// （SessionStore.Delete，绕开 SessionService.Revoke → announce → Publish
+	// 这条链路），使它**根本没有对应的撤销事件存在**。
+	//
+	// 于是 canary 的缓存条目只有一条失效途径：一次全量 Purge。
+	// 它不可能被任何巧合送达的事件命中。
+	//
+	// 断言写在 canary 上：掐掉订阅连接后，断言**canary token** 在数秒内
+	// 开始被拒。这才是"缺口被检测到并转成了 Purge"的唯一证据。
+	//
+	// 变异验证（必做）：废掉 broadcastPurge，这条测试必须变红。
 }
 
 // TestRevokeCrossesFpInstances 是多实例部署的核心验证（设计决策 4.5）。
