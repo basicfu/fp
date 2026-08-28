@@ -1,5 +1,7 @@
 /fp
 /fp.exe
+/demo
+/demo.exe
 /tmp/
 .env
 .env.local
