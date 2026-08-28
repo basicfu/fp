@@ -4,9 +4,22 @@ import (
 	"testing"
 )
 
-func TestLoadDefaults(t *testing.T) {
+// setRequiredEnv 把 Load 校验的全部必填环境变量设成占位值，供不关心这些
+// 字段本身的测试复用。各测试按需用 t.Setenv 覆盖它真正要测的那一个，
+// 其余保持有效——不然每加一项必填校验，所有走成功路径的测试都要跟着
+// 补一行，重复且容易漏改。
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
 	t.Setenv("FP_POSTGRES_URL", "postgres://x/y")
 	t.Setenv("FP_REDIS_URL", "redis://localhost:6379/0")
+	t.Setenv("FP_ALIYUN_ACCESS_KEY_ID", "test-key-id")
+	t.Setenv("FP_ALIYUN_ACCESS_KEY_SECRET", "test-key-secret")
+	t.Setenv("FP_ALIYUN_SMS_SIGN_NAME", "测试签名")
+	t.Setenv("FP_ALIYUN_SMS_TEMPLATE_LOGIN_CODE", "SMS_TEST0001")
+}
+
+func TestLoadDefaults(t *testing.T) {
+	setRequiredEnv(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -27,10 +40,9 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadOverrides(t *testing.T) {
+	setRequiredEnv(t)
 	t.Setenv("FP_ENV", "PROD")
 	t.Setenv("FP_HTTP_ADDR", ":18080")
-	t.Setenv("FP_POSTGRES_URL", "postgres://x/y")
-	t.Setenv("FP_REDIS_URL", "redis://localhost:6379/0")
 
 	cfg, err := Load()
 	if err != nil {
@@ -67,10 +79,26 @@ func TestIsProd(t *testing.T) {
 }
 
 func TestLoadMissingRequired(t *testing.T) {
+	setRequiredEnv(t)
 	t.Setenv("FP_POSTGRES_URL", "")
-	t.Setenv("FP_REDIS_URL", "redis://localhost:6379/0")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error for missing FP_POSTGRES_URL")
+	}
+}
+
+// TestLoadMissingAliyunRequired 钉住阿里云短信凭据同样是必填项。
+//
+// 没有它的话，config.Load() 允许阿里云凭据全部留空——cmd/fp/main.go 会
+// 拿着空的 AccessKeyID/AccessKeySecret/SignName 去构造 notify.AliyunSMS，
+// 这一步确实会在 NewAliyunSMS 里失败并让启动失败，效果上"凑巧"正确；
+// 但错误信息会指向 notify 包深处而不是"少配了哪个环境变量"，且如果
+// NewAliyunSMS 未来放宽校验，这里就是唯一还在守住"不能没配置就启动"的地方。
+func TestLoadMissingAliyunRequired(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FP_ALIYUN_ACCESS_KEY_ID", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error for missing FP_ALIYUN_ACCESS_KEY_ID")
 	}
 }

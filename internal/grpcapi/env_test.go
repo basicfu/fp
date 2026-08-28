@@ -31,6 +31,9 @@ import (
 // 因为 metadata 认证、错误码映射这些恰恰只在真实链路上才会被执行到。
 type grpcEnv struct {
 	client fpv1.AuthServiceClient
+	// server 是跑在 bufconn 上的 *Server 本身，测试用它直接触发关闭
+	// （见 TestShutdownCompletesWithOpenWatchStream），不必另起一套装配。
+	server *Server
 	app    *domain.Application
 	appID  string
 	secret string
@@ -123,22 +126,35 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	primary := env.newApplication(t)
 	env.app, env.appID, env.secret = primary.app, primary.appID, primary.secret
 
-	// hub 起在这里而不是懒加载：startTestHub 会同步等 Redis 订阅确认建立
-	// 才返回（见 watch_test.go 的注释），所以 newGRPCEnv 返回之后，任何
-	// 测试紧接着触发的撤销（比如 Logout）都保证能被 Watch 流收到，
-	// 不会因为"服务端到底订上了没"而变得不确定。
-	hub := startTestHub(t, revokePub)
+	// server 起在这里而不是懒加载，且先等 Ready() 才起 bufconn 的 Serve：
+	// Server.Run 只有在 hub 真正订阅上 Redis 之后才关闭 Ready()（见
+	// RevokeHub.Ready 的注释），这里照抄 cmd/fp/main.go 的编排顺序，
+	// 保证 newGRPCEnv 返回之后，任何测试紧接着触发的撤销（比如 Logout）
+	// 都能被 Watch 流收到，不会因为"服务端到底订上了没"而变得不确定。
+	//
+	// runCtx 单独控制 Run（进而那条 Redis 订阅）的生命周期，与下面
+	// srv.Shutdown 管的 gRPC 服务生命周期分开：Shutdown 只负责关 hub 与
+	// GracefulStop，并不会让 Run 返回，不单独取消 runCtx 的话每个用例
+	// 都会在测试进程里永久多留一条 Redis 订阅连接。
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(cancelRun)
 
-	verifier := newAppVerifier(apps, 5*time.Minute)
-	srv := grpc.NewServer(
-		grpc.UnaryInterceptor(verifier.UnaryInterceptor),
-		grpc.StreamInterceptor(verifier.StreamInterceptor),
-	)
-	fpv1.RegisterAuthServiceServer(srv, NewAuthServer(AuthServerDeps{Auth: authSvc, Hub: hub, Apps: apps}))
+	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub})
+	go func() { _ = srv.Run(runCtx) }()
+	select {
+	case <-srv.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待 gRPC 服务的撤销中继就绪超时")
+	}
+	env.server = srv
 
 	lis := bufconn.Listen(1 << 20)
 	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdownCtx)
+	})
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {

@@ -12,9 +12,13 @@ import (
 	"github.com/basicfu/fp/internal/notify"
 )
 
-// loginCodeTemplate 是登录验证码使用的 fp 内部模板 key。
+// LoginCodeTemplate 是登录验证码使用的 fp 内部模板 key。
 // 各供应商把它映射到自己的模板 ID（见 notify.AliyunConfig.Templates）。
-const loginCodeTemplate = "login_code"
+// 导出它是为了 cmd/fp/main.go 装配 notify.AliyunConfig.Templates 时可以
+// 直接引用这个常量，而不是重复写一遍 "login_code" 字面量——两处一旦
+// 打字不一致，SendLoginCode 会在第一次真实发送时才报"模板未映射"，
+// 而不是在装配阶段就暴露出来。
+const LoginCodeTemplate = "login_code"
 
 // AuthDeps 是 AuthService 的依赖集合。
 type AuthDeps struct {
@@ -78,7 +82,7 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 	return s.deps.Notifier.Send(ctx, notify.Message{
 		Channel:  notify.ChannelSMS,
 		To:       phone,
-		Template: loginCodeTemplate,
+		Template: LoginCodeTemplate,
 		Params:   map[string]string{"code": code},
 	})
 }

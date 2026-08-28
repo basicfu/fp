@@ -18,21 +18,36 @@ import (
 // 瞬时抖动，不需要很深。满了就丢——见 fanout 的说明。
 const revokeBufferSize = 64
 
+// revokeSubscriber 是 RevokeHub 对撤销信号源的全部依赖。生产环境唯一的
+// 实现是 *store.RevokePublisher；拆出这个接口纯粹是为了测试能换上一个
+// 可以精确控制"订阅几时完成"的假实现，证明 Ready()（见其注释）确实等
+// 订阅真正建立才关闭，而不是在发起订阅的同时就关闭——真实 Redis 在局域网
+// 内的订阅确认通常只要个位数毫秒，光靠时序观测"关闭前"这件事并不可靠，
+// 哪怕重新引入这个任务要防的 bug，观测窗口也大概率照样通过。
+// 见 server_test.go 的 TestReadyWaitsForSubscriptionToComplete。
+type revokeSubscriber interface {
+	Subscribe(ctx context.Context) (<-chan store.RevokeSignal, func(), error)
+}
+
 // RevokeHub 把一份 Redis 撤销订阅扇出给进程内所有 Watch 流。
 //
 // 只开一份订阅：每条流各订一份的话，连接数与反序列化开销都随流数线性增长，
 // 而它们收到的是完全相同的消息。
 type RevokeHub struct {
-	pub *store.RevokePublisher
+	pub revokeSubscriber
 
-	mu   sync.RWMutex
-	next uint64
-	subs map[uint64]*revokeSub
+	mu     sync.RWMutex
+	next   uint64
+	subs   map[uint64]*revokeSub
+	closed bool
 
 	// subscribeCalls 数的是 h.pub.Subscribe 被调用的次数。
 	// 生产路径（Run）只会调用一次，恒为 1；测试用它验证"N 个 hub.Subscribe(appID)
 	// 注册不会触发额外的 Redis 订阅"（见 redisSubscribeCalls）。
 	subscribeCalls atomic.Int64
+
+	// ready 在 h.pub.Subscribe 确认订阅建立后关闭，见 Run 与 Ready 的注释。
+	ready chan struct{}
 }
 
 // HubEvent 是推给一条 Watch 流的消息。
@@ -55,7 +70,7 @@ type revokeSub struct {
 // 直接测分发逻辑本身（尤其 Gap → Purge），不依赖真实 Redis 订阅/断连——
 // 那既慢又不稳定，而且测的根本不是分发逻辑，是 Redis 客户端的重连行为。
 func newRevokeHub() *RevokeHub {
-	return &RevokeHub{subs: make(map[uint64]*revokeSub)}
+	return &RevokeHub{subs: make(map[uint64]*revokeSub), ready: make(chan struct{})}
 }
 
 // NewRevokeHub 构造 RevokeHub。
@@ -79,13 +94,39 @@ func (h *RevokeHub) subscribe(ctx context.Context) (<-chan store.RevokeSignal, f
 //
 // ctx 必须是可取消的：Subscribe 内部虽已派生子 ctx 并由 closeFn 兜底，
 // 但这里的 defer 是唯一保证进程退出时那条 Redis 连接被关掉的地方。
+//
+// 订阅确认建立后、开始分发之前关闭 h.ready（见 Ready 的注释）。顺序刻意
+// 写死在这两步之间：关早了，Ready() 就是一句假承诺；关晚了（比如挪到
+// h.run 返回之后）就等同于永不 ready，调用方会一直卡在启动阶段。
+// h.subscribe 失败时直接返回错误、h.ready 保持不关——调用方（grpcapi.Server
+// 进而 main.go）不应该在这种情况下继续等 ready，而应该让启动失败。
 func (h *RevokeHub) Run(ctx context.Context) error {
 	signals, closeFn, err := h.subscribe(ctx)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
+	close(h.ready)
 	return h.run(ctx, signals)
+}
+
+// Ready 在 Redis 订阅确认建立后关闭。
+//
+// 只有经 Run 驱动的订阅才会关闭它；测试里绕开 Run、直接给 run(ctx, signals)
+// 喂假信号的路径（newTestHubWithFakeSignals）不会关闭 ready——那些测试
+// 验证的是分发逻辑本身，不关心订阅是否就绪。
+//
+// 调用方必须在开始接受 gRPC 连接之前等待它（grpcapi.Server.Ready 转发
+// 的就是这个 channel，main.go 带超时地等它）：Watch 一旦被处理就会给
+// 客户端发 ready，SDK 把 ready 当作"此后的撤销不会漏推"的承诺（proto
+// WatchReady 的注释）。这份承诺只有在本 hub 已经真正订阅上 Redis 之后
+// 才成立——没订阅上时，Watch 仍能正常走完自己的"注册到 hub → 发 ready"
+// 这一步（那只是进程内的 map 操作，不依赖 Redis），但期间发布的撤销
+// 事件在 Redis 侧根本没有本实例的订阅去接收，永久丢失，SDK 却毫不知情、
+// 不会收紧本地缓存窗口。fp 重启时全部 SDK 同时重连，这个窗口正好撞在
+// 进程刚起、订阅还没建好的那一刻，是最容易触发的时候。
+func (h *RevokeHub) Ready() <-chan struct{} {
+	return h.ready
 }
 
 // run 是纯分发循环：不关心 signals 从哪来（真实 Redis 订阅，还是测试直接
@@ -177,9 +218,15 @@ func (h *RevokeHub) broadcastPurge(reason string) {
 
 // Subscribe 登记一个订阅者。返回的函数必须被调用，否则订阅者永久驻留。
 func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan HubEvent, func()) {
-	sub := &revokeSub{appID: appID, ch: make(chan HubEvent, revokeBufferSize)}
-
 	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		ch := make(chan HubEvent)
+		close(ch)
+		return ch, func() {}
+	}
+
+	sub := &revokeSub{appID: appID, ch: make(chan HubEvent, revokeBufferSize)}
 	h.next++
 	id := h.next
 	h.subs[id] = sub
@@ -193,6 +240,25 @@ func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan HubEvent, func()) {
 			h.mu.Unlock()
 		})
 	}
+}
+
+// Close 关闭全部订阅者 channel，让所有 Watch handler 返回。
+//
+// 它存在的唯一理由是让 grpc.Server.GracefulStop 能够返回：Watch 是永不
+// 主动结束的长流，不关掉订阅就没有任何机制能让那些 handler 退出，
+// 进程会在关闭阶段永远挂住。
+//
+// 关闭在写锁下进行，与 fanout 的读锁互斥，因此不会出现"向已关闭的
+// channel 发送"。之后 Subscribe 返回一个已关闭的 channel，调用方
+// （Watch）会立刻走到 !ok 分支正常返回。
+func (h *RevokeHub) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, sub := range h.subs {
+		close(sub.ch)
+	}
+	h.subs = nil
+	h.closed = true
 }
 
 // subscriberCount 是测试辅助：当前登记的订阅者数。
