@@ -23,6 +23,14 @@ func TestValidateCachesAndAvoidsRefetch(t *testing.T) {
 		calls.Add(1)
 		return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 30_000}, nil
 	})
+	// 等首条 ready 到达之后再暖缓存：watchOnce 收到首条 ready 时会
+	// 无条件 purge 一次缓存（首次连接也走这条路径），而 New() 在
+	// watch goroutine 收到这条 ready 之前就已经返回给调用方——不等
+	// StreamHealthy() 的话，这次预热可能落在 purge 之前，被那次
+	// purge 冲掉，让下面的回源次数断言变得不确定。
+	// Go 的内存模型保证：观察到 StreamHealthy()==true 时，那次 purge
+	// 必然已经完成（同一 goroutine 内 purge 先于 streamUp.Store(true)）。
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
 
 	for i := 0; i < 10; i++ {
 		if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
@@ -115,6 +123,11 @@ func TestRevokeEventDropsCachedToken(t *testing.T) {
 		calls.Add(1)
 		return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 300_000}, nil
 	})
+	// 等首条 ready 到达之后再缓存：理由同 TestPurgeDropsEverything——
+	// 迟到的首条 ready 会无条件 purge 掉刚写入的条目，让下面的等值
+	// 断言（calls==2）在某次迟到的 purge 之后被后续的额外回源越过、
+	// 永远等不到。
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
 
 	if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
 		t.Fatalf("首次: %v", err)
@@ -142,6 +155,12 @@ func TestPurgeDropsEverything(t *testing.T) {
 		calls.Add(1)
 		return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 300_000}, nil
 	})
+	// 等首条 ready 到达之后再预热三个 token：watchOnce 的 Ready 分支对
+	// 每次 ready（含首次连接）都无条件 purge，不等 StreamHealthy() 的话，
+	// 这次预热可能落在首条 ready 之后才完成——那次迟到的 purge 会把刚
+	// 预热好的三个条目全部冲掉，之后 calls 会被迫再多涨一轮，
+	// 永远追不上下面这个等值断言（复现过，压力跑 25 次里出现 2 次）。
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
 
 	tokens := []string{"tok-a", "tok-b", "tok-c"}
 	for _, tok := range tokens {
@@ -175,11 +194,10 @@ func TestPurgeDropsEverything(t *testing.T) {
 // 却没有任何给定测试真正走到"先健康、再断开、再重连"这个序列，
 // 补上。
 //
-// 顺带钉住我在实现阶段发现并修的一个问题：Ready 分支现在只在"曾经
-// 收到过 ready"时才 purge（跳过首次连接），本测试通过 env.stop() 之后
-// 在原地址重启，制造一次真正的"曾经健康"之后的重连，走的正是需要
-// purge 的那一分支——用以确认收紧到"只在重连时 purge"之后，重连该做
-// 的事没有被连带跳过。
+// watchOnce 的 Ready 分支对每一次 ready（含首次连接）都无条件 purge，
+// 本测试通过 env.stop() 之后在原地址重启，制造一次真正的"曾经健康"
+// 之后的重连，确认这条无条件 purge 在重连场景下确实按预期清空了
+// 断开前写入的存量条目——而不是只在理论上"应该"这样做。
 func TestReconnectPurgesCacheWrittenBeforeDisconnect(t *testing.T) {
 	var calls atomic.Int32
 	env := newStubEnv(t, func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
@@ -365,5 +383,163 @@ func TestRotationIsSurfacedOnCacheHit(t *testing.T) {
 			t.Fatalf("第 %d 次命中缓存后 RotatedTo 为 %q——"+
 				"轮换交接在 SDK 缓存层被截断了", i, id.RotatedTo)
 		}
+	}
+}
+
+// newStubEnvFull 和 newStubEnv 一样起一个连着桩服务端的 Client，但接受
+// 一个已经配好全部回调（含 login/logout）的 *stubServer，而不是只接受
+// validate 一个回调。
+//
+// 不能用"newStubEnv 建完之后再给 env.stub.login 赋值"这种写法：newStubEnv
+// 返回前 grpcServer.Serve(lis) 已经在跑，处理请求的 goroutine 随时可能
+// 已经在飞。这之后再对 *stubServer 的字段普通赋值，赋值所在的 goroutine
+// （测试主 goroutine）与读取字段的 goroutine（grpc-go 的请求处理循环）
+// 之间没有任何 happens-before 关系，是一次真正的数据竞争——即使网络
+// 往返在实践中几乎总能让它"凑巧"不出错。validate 字段之所以安全，是
+// 因为它在 startStub 启动 Serve 的 go 语句**之前**就已经写进了完整的
+// struct 字面量，受"go 语句先于新 goroutine 内代码执行"这条 Go 内存
+// 模型保证的保护。本函数把 login/logout 也纳入这条安全路径：调用方在
+// 传进来之前就把整个 *stubServer 配好，本函数才调用 startStub。
+func newStubEnvFull(t *testing.T, stub *stubServer, opt ...func(*Options)) *stubEnv {
+	t.Helper()
+	if stub.watchReady == nil {
+		stub.watchReady = make(chan struct{}, 1)
+	}
+	if stub.events == nil {
+		stub.events = make(chan *fpv1.WatchResponse, 16)
+	}
+	addr, stop := startStub(t, "", stub)
+
+	opts := Options{
+		Addr:      addr,
+		AppID:     "t",
+		AppSecret: "t",
+		Insecure:  true,
+	}
+	for _, o := range opt {
+		o(&opts)
+	}
+
+	client, err := New(opts)
+	if err != nil {
+		stop()
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+		stop()
+	})
+
+	return &stubEnv{stub: stub, client: client, auth: client.Auth(), addr: addr, stop: stop}
+}
+
+// TestLoginSucceeds 确认 Login 成功路径把响应字段搬进 LoginResult，
+// 且不经过 translate（该函数只在 err != nil 时才被调用）。
+func TestLoginSucceeds(t *testing.T) {
+	var gotConnectorType atomic.Value
+	env := newStubEnvFull(t, &stubServer{
+		validate: okValidate("u1", 1000),
+		login: func(req *fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
+			gotConnectorType.Store(req.GetConnectorType())
+			return &fpv1.LoginResponse{
+				Token:     "new-session-token",
+				SessionId: "s1",
+				User:      &fpv1.UserInfo{Id: "u1", Nickname: "alice"},
+			}, nil
+		},
+	})
+
+	res, err := env.auth.Login(context.Background(), LoginInput{ConnectorType: "password"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if got, _ := gotConnectorType.Load().(string); got != "password" {
+		t.Fatalf("ConnectorType 传到服务端变成了 %q", got)
+	}
+	if res.Token != "new-session-token" {
+		t.Errorf("Token = %q，期望 new-session-token", res.Token)
+	}
+	if res.SessionID != "s1" {
+		t.Errorf("SessionID = %q，期望 s1", res.SessionID)
+	}
+	if res.User.GetId() != "u1" {
+		t.Errorf("User.Id = %q，期望 u1", res.User.GetId())
+	}
+}
+
+// TestLoginRejectedCredentialsReturnErrUnauthorized 钉住 translate 把
+// Unauthenticated 映射成 ErrUnauthorized 这一分支，经 Login 这条路径——
+// 这条路径此前零测试覆盖：删掉 translate 里的整个 switch 不会让任何
+// 已有测试变红。
+func TestLoginRejectedCredentialsReturnErrUnauthorized(t *testing.T) {
+	env := newStubEnvFull(t, &stubServer{
+		validate: okValidate("u1", 1000),
+		login: func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
+			return nil, status.Error(codes.Unauthenticated, "密码错误")
+		},
+	})
+
+	_, err := env.auth.Login(context.Background(), LoginInput{ConnectorType: "password"})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("凭据被拒绝时 Login 返回 %v，期望 ErrUnauthorized", err)
+	}
+}
+
+// TestLoginUnavailableReturnsErrUnavailable 钉住 translate 把 Unavailable
+// 映射成 ErrUnavailable 这一分支，经 Login 这条路径。
+func TestLoginUnavailableReturnsErrUnavailable(t *testing.T) {
+	env := newStubEnvFull(t, &stubServer{
+		validate: okValidate("u1", 1000),
+		login: func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
+			return nil, status.Error(codes.Unavailable, "fp 挂了")
+		},
+	})
+
+	_, err := env.auth.Login(context.Background(), LoginInput{ConnectorType: "password"})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("fp 不可达时 Login 返回 %v，期望 ErrUnavailable", err)
+	}
+}
+
+// TestLogoutForcesRefetchOnSameToken 盯住 Logout 里的 cache.drop(token)。
+//
+// 撤销推送会异步到达，但同一进程内紧接着的请求可能在事件到达前就命中了
+// 那条缓存——用户点了退出，下一个请求还是登录态。Logout 必须立即、
+// 同步地清掉本地缓存，不能靠等撤销推送。
+//
+// 用直接断言而不是 waitUntil 轮询：cache.drop(token) 在给定实现里是
+// Logout 返回前就同步执行的，不像撤销推送那样存在真正的异步间隙。用
+// 轮询反而会掩盖"清缓存被做成异步/延迟"这类回归——那种实现在 5 秒的
+// 轮询窗口内一样能让断言最终通过。
+func TestLogoutForcesRefetchOnSameToken(t *testing.T) {
+	var calls atomic.Int32
+	env := newStubEnvFull(t, &stubServer{
+		validate: func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+			calls.Add(1)
+			return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 300_000}, nil
+		},
+		logout: func(*fpv1.LogoutRequest) (*fpv1.LogoutResponse, error) {
+			return &fpv1.LogoutResponse{}, nil
+		},
+	})
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
+
+	if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
+		t.Fatalf("首次校验: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("首次校验回源 %d 次，期望 1 次", got)
+	}
+
+	if err := env.auth.Logout(context.Background(), "tok"); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+
+	if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
+		t.Fatalf("Logout 后再次校验: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("Logout 之后紧接着的校验命中了旧缓存（回源 %d 次，期望 2 次）——"+
+			"cache.drop(token) 没有生效，用户点了退出、下一个请求还是登录态", got)
 	}
 }

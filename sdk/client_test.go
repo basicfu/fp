@@ -20,12 +20,31 @@ type stubServer struct {
 	fpv1.UnimplementedAuthServiceServer
 
 	validate   func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error)
+	login      func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error)
+	logout     func(*fpv1.LogoutRequest) (*fpv1.LogoutResponse, error)
 	watchReady chan struct{}            // 每次有流建立就发一个信号
 	events     chan *fpv1.WatchResponse // 测试往这里塞事件
 }
 
 func (s *stubServer) ValidateToken(_ context.Context, req *fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
 	return s.validate(req)
+}
+
+// Login/Logout 未被赋值时按 UnimplementedAuthServiceServer 处理
+// （返回 codes.Unimplemented）——只有明确需要这两个 RPC 的测试才配置它们，
+// 其余测试的桩服务端保持和之前完全一样的行为。
+func (s *stubServer) Login(_ context.Context, req *fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
+	if s.login == nil {
+		return s.UnimplementedAuthServiceServer.Login(context.Background(), req)
+	}
+	return s.login(req)
+}
+
+func (s *stubServer) Logout(_ context.Context, req *fpv1.LogoutRequest) (*fpv1.LogoutResponse, error) {
+	if s.logout == nil {
+		return s.UnimplementedAuthServiceServer.Logout(context.Background(), req)
+	}
+	return s.logout(req)
 }
 
 func (s *stubServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fpv1.WatchResponse]) error {

@@ -27,11 +27,6 @@ type Client struct {
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
 	streamUp atomic.Bool
 
-	// everReady 记录是否已经收到过至少一次 ready。用于区分"首次连接"
-	// 与"重连"：只有重连才需要清空缓存（断开期间的撤销可能漏收）。
-	// 见 watchOnce 里 Ready 分支的说明。
-	everReady atomic.Bool
-
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -162,31 +157,35 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 		}
 		switch {
 		case msg.GetReady() != nil:
-			// 只有"重连"（曾经收到过 ready，这次是再收到一次）才需要清空
-			// 缓存：断开期间发生的撤销一条都没收到，缓存里在断开前写入的
-			// 任何条目都可能是已被撤销的会话。
+			// 重连后必须清空缓存：断开期间发生的撤销一条都没收到，缓存里
+			// 的任何条目都可能是已被撤销的会话。首次连接也走这条路径，
+			// 此时缓存本来就是空的，无害——**除非**调用方在 New() 返回
+			// 之后、这条首条 ready 到达之前就已经发起了请求并写入了
+			// 缓存；这种情况下无条件 purge 的代价只是那一次请求被迫再
+			// 多打一次回源（下一次请求会立刻重新命中缓存），是一次性、
+			// 自愈的性能成本。
 			//
-			// 首次连接不 purge：New() 在启动本 goroutine 之前才构造
-			// c.auth（含空缓存），但 New() 会在本 goroutine 收到首条
-			// ready 之前就返回给调用方——调用方的第一个请求与这里的首条
-			// ready 谁先发生并无顺序保证。若首次也无条件 purge，一旦
-			// 调用方的请求先把结果写入缓存，这里会把它冲掉，造成一次
-			// 本可避免的额外回源（这不是理论风险：靠反复运行给定测试
-			// TestValidateCachesAndAvoidsRefetch 复现过，约几十分之一的
-			// 概率失败）。首次连接时缓存天然是空的，跳过 purge 无损。
+			// 这个代价必须承受，不能靠跳过首次 purge 来省：跳过会打开
+			// 一个更贵的窗口——服务端订阅撤销频道之前收到的撤销事件本来
+			// 就会漏掉（这正是本分支要清空缓存的原因），如果 fp 恰好在
+			// "SDK 已建立连接、尚未收到首条 ready"这段时间里撤销了一个
+			// 刚被首次请求缓存下来的 token，跳过首次 purge 会让这条
+			// 已被撤销的缓存条目按其未收紧的原始 TTL 一直被信任，直到
+			// 自然过期或者一次真正的重连——不确定性远大于"一次可避免的
+			// 回源"。两害相权，无条件 purge 的代价更小、更好界定。
 			//
-			// 顺序很重要（重连分支内）：先 purge、再把 streamUp 置为
-			// 健康。反过来的话，两次调用之间有一条极窄但真实存在的
-			// 竞态窗口——并发的 Validate() 一旦观察到 streamUp==true
-			// 就不再收紧查询窗口（maxTTL 归零），如果此时 purge 还没
-			// 跑完，它可能读到一条断连检测延迟期间（连接实际已断但
-			// streamUp 尚未翻 false 那段时间，最长一个 keepalive
-			// Timeout）写入的满 TTL 存量条目，把它当新鲜数据放行。
-			// 先 purge 后置位，保证任何观察到 streamUp==true 的调用，
-			// 看到的都已经是清空之后的缓存。
-			if c.everReady.Swap(true) {
-				c.auth.onPurge()
-			}
+			// 顺序很重要：先 purge、再把 streamUp 置为健康。反过来的话，
+			// 两次调用之间有一条极窄但真实存在的竞态窗口——并发的
+			// Validate() 一旦观察到 streamUp==true 就不再收紧查询窗口
+			// （maxTTL 归零），如果此时 purge 还没跑完，它可能读到一条
+			// 断连检测延迟期间（连接实际已断但 streamUp 尚未翻 false
+			// 那段时间，最长一个 keepalive Timeout）写入的满 TTL 存量
+			// 条目，把它当新鲜数据放行。先 purge 后置位，保证任何观察到
+			// streamUp==true 的调用，看到的都已经是清空之后的缓存——
+			// 这一顺序同时也是 Go 内存模型下的一次同步点：任何观察到
+			// streamUp==true 的 goroutine，都保证能看到这次 purge
+			// 已经完成（同一 goroutine 内 purge 在 Store 之前发生）。
+			c.auth.onPurge()
 			c.streamUp.Store(true)
 			// 只有收到 ready 才置为健康：此前服务端可能还没订上撤销频道，
 			// 那段时间的事件会丢，而 SDK 若已认为健康就不会收紧缓存窗口。
