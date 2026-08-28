@@ -905,3 +905,77 @@ Keycloak 用 master realm 提供这个隔离边界，但 **fp 砍掉了多用户
 - `identity(union_key)` 上的索引**不是** UNIQUE——同一 unionId 允许多条 identity 是归并规则 2 的前提。
   「一个 union_key 只属于一个用户」由应用层的 `lockUnionKeyTx` + 归属校验维持。
 - 测试必须串行（`-p 1`，禁用 `t.Parallel()`）：所有包共用同一个 `fp_test` 库，而每次 `NewTestDB` 都会清空全表。
+
+---
+
+## 附：第二阶段实施后的交接事项（写给计划三）
+
+第二阶段实现完毕（13 个任务、42 个提交、355 个测试）。gRPC 服务端与 Go SDK 已可用，
+demo 的四步手工验收全部实跑通过（含"杀掉 fp 后业务不中断"）。
+
+### 合入后应优先处理的三项
+
+| # | 事项 | 位置 | 理由 |
+|---|---|---|---|
+| 1 | `Validate` 不再响应调用方 ctx 的取消与 deadline | `sdk/auth.go` | 为修 singleflight 共享调用被领导者取消拖垮的问题，改成了 `context.WithoutCancel`。代价是调用方自带的 200ms deadline 会被拉长到 `ValidateTimeout`（默认 2 秒）。**有界，但要在 doc comment 里写明**，别让接入方以为传 ctx 还能控延迟 |
+| 2 | gRPC 与 HTTP 共用一个 10 秒关闭预算 | `cmd/fp/main.go` | 前者用满会让后者拿到已过期的 ctx，误报"HTTP 优雅关闭超时" |
+| 3 | SDK 未导出 `WriteError(w, err)` | `sdk/` | `examples/demo/main.go` 的 `writeAuthError` 重写了一遍 503/401 分类（`SendLoginCode`/`Login` 不经过 `Middleware`）。每个接入方都会重写一遍，且可能写反 |
+
+### 两条硬约束仍无测试守护
+
+分层约束已由 `sdk/arch_test.go` 与 `internal/service/arch_test.go` 用 `go/parser` 守住，
+但下面两条还没有：
+
+- **依赖白名单**（本阶段只允许 grpc / protobuf / golang-lru / x/sync）
+- **Redis 键统一 `fp:` 前缀**
+
+两者违反时都会在 `go.mod` 或 diff 里显形，不属于"可静默打破"，优先级低于分层约束。
+
+### 已知的、留给后续的设计问题
+
+- **全局撤销事件把各应用的 token 互相摊开。** `RevokeUsers`（改密/冻结）与 `RevokeSession`
+  传的都是 `AppID: uuid.Nil`，而 `revokeUserTokens` 会把该用户**跨全部应用**的 token
+  收进同一条事件。结果是 A 应用改一次密码，B 应用的 SDK 会收到 A 那些会话的 token 字符串。
+  token 广播时已从 Redis 删除，**不构成认证绕过**，但确是跨应用信息泄露。
+  收口方式：删除前记下每个会话的 `AppID`，全局撤销按 app 切分成多条事件——
+  每条仍是 `Nil` 语义（要求全体清缓存），但 `Tokens` 只带本 app 的
+- **SDK 把 `Internal` / `NotFound` / `ResourceExhausted` 都归入"fp 不可达"。**
+  `sdk/auth.go` 只把 `Unauthenticated`/`PermissionDenied` 判成鉴权失败，其余一律走陈旧兜底。
+  后果举例：管理端删掉一个 application 后回 `NotFound`，开了 `AllowStaleOnOutage` 的接入方
+  会继续用陈旧身份放行 `MaxStaleness`（默认 5 分钟）而不是立刻失败关闭。
+  这个 fail-soft 方向可能就是想要的，但注释与行为不一致，**值得显式定夺一次**
+- **退避复位没有"健康持续多久"的门槛。** 条件是"本次连接是否收到过 ready"。
+  fp 若出现"连上→吐一次 ready→立刻断开"式抖动，SDK 会以 200ms 高频冲击一个本就不稳的
+  服务端（每实例约 4.8 次/秒，有界）。补法三行："本次连接存活 < N 秒则不复位"
+- **`GetActiveByAppID` 每次回源一次 PG 查询。** 刻意不缓存（缓存 `Application` 快照会让
+  "停用应用"在 TTL 内形同虚设），单次约 1ms 而非 bcrypt 的 50–100ms。但它与上一条叠加时
+  会放大：fp 抖动 → SDK 200ms 重连 → 每次一次 PG 查询
+- **`MaxConnectionAge` 每 30 分钟触发一次全量缓存 purge。** 良性（默认 `cache_ttl` 30 秒
+  远短于 30 分钟），但配了 `TokenCacheTTLSeconds = 600` 的部署会每 30 分钟吃一次回源浪潮。
+  将来调大 `cache_ttl` 时要一起看
+- **验收表第 16 项是配置断言而非行为验证。** `keepalive_pairing_test.go` 断言了
+  `MaxConnectionAge > 0`，但"扩容后存量连接会重新分摊"这个行为需要等 30 分钟或把值做成
+  可注入才能真验。**不要把它记成已被行为覆盖**
+- **`Logout` 留下一个 token 存在性 oracle。** 跨应用登出返回 `Unauthenticated`，
+  未知 token 返回成功——两者可区分，比 `ValidateToken`（两种情况都返回 `Unauthenticated`）
+  泄露多一点。这是"不符时拒绝"与"查不到时静默成功"两条要求逻辑上无法同时满足的结果。
+  利用前提是攻击者已持有该 token 字符串（高熵不可枚举），实际价值很低
+- **`putIfGen` 的核对与写入之间仍有纳秒级 check-then-act 窗口。** 原窗口是整个 RPC 往返
+  （毫秒到秒），现在缩小约六个数量级。完全封死需要额外加锁，会打破 `cache`
+  "无需额外同步"的既有性质
+
+### 执行过程中总结出的一条方法论
+
+第二阶段的实施计划在执行中被修正了 13 次，其中**十处是实现者在计划里找出的真实缺陷**：
+
+- **九处是"要求写在散文里、却没有任何测试会因为违反而变红"**
+- **一处是"有测试，但它测不到自己声称验收的东西"**——为"让丢事件可观测"设计的验收测试，
+  在把 `broadcastPurge` 整个废掉之后仍然 100% 通过
+
+后者更危险：前者至少诚实地空着，后者给的是虚假的安全感。
+
+**写计划时"强调了"不等于"守住了"。** 每写一条"这是必须的"，都要同时问：
+哪一条测试会因为违反它而变红？答不上来就说明那条要求还没被守住。
+
+这也是分层硬约束最终要用 `go/parser` 写架构断言的原因——那六条约束此前全部可以被
+静默打破：违反任何一条，`go build` / `go vet` / `gofmt` / 全量测试**全绿**。
