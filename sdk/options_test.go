@@ -73,3 +73,43 @@ func TestValidateRejectsNegativeCacheSize(t *testing.T) {
 		t.Fatalf("负的 CacheSize 未被拒绝: %v", err)
 	}
 }
+
+// TestValidateRejectsNegativeDegradedCacheTTL 确认 DegradedCacheTTL < 0 这一
+// 分支真的被 validate 拒绝，而不只是声明了却没人调用到。
+func TestValidateRejectsNegativeDegradedCacheTTL(t *testing.T) {
+	o := Options{Addr: "x:9090", AppID: "a", AppSecret: "s", DegradedCacheTTL: -time.Second}
+	err := o.validate()
+	if err == nil || !strings.Contains(err.Error(), "DegradedCacheTTL") {
+		t.Fatalf("负的 DegradedCacheTTL 未被拒绝: %v", err)
+	}
+}
+
+// TestValidateRejectsNegativeMaxStaleness 确认 MaxStaleness < 0 这一分支
+// 真的被 validate 拒绝，而不只是声明了却没人调用到。
+func TestValidateRejectsNegativeMaxStaleness(t *testing.T) {
+	o := Options{Addr: "x:9090", AppID: "a", AppSecret: "s", MaxStaleness: -time.Second}
+	err := o.validate()
+	if err == nil || !strings.Contains(err.Error(), "MaxStaleness") {
+		t.Fatalf("负的 MaxStaleness 未被拒绝: %v", err)
+	}
+}
+
+// TestStaleFallbackIsOffByDefault 钉住降级方向的默认值。
+//
+// 字段命名为"允许用陈旧数据"而非它的反面，是为了让放宽的那个方向必须被
+// 显式写出来——没人会主动去关掉一项他不知道存在的开关，零值必须落在
+// 安全的一侧。
+func TestStaleFallbackIsOffByDefault(t *testing.T) {
+	var o Options
+	o.applyDefaults()
+	if o.AllowStaleOnOutage {
+		t.Fatal("默认允许使用陈旧缓存——fp 一挂，已被撤销的会话会继续通行")
+	}
+	if o.MaxStaleness <= 0 {
+		t.Fatalf("MaxStaleness 默认值为 %v——陈旧兜底必须有上限，"+
+			"否则 fp 长时间不可用时会无限延用", o.MaxStaleness)
+	}
+	if o.DegradedCacheTTL <= 0 {
+		t.Fatalf("DegradedCacheTTL 默认值为 %v", o.DegradedCacheTTL)
+	}
+}

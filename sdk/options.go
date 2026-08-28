@@ -33,13 +33,39 @@ type Options struct {
 	// CacheSize 是本地校验结果缓存的容量上限（条）。默认 10000。
 	CacheSize int
 
+	// DegradedCacheTTL 是**推送流断开时**的缓存时长上限。默认 5 秒。
+	//
+	// 推送断开意味着撤销的"加速"能力消失，只剩 TTL 兜底。主动收紧窗口
+	// 把安全性拉回来——这是 gRPC 流状态可感知才做得了的事。
+	DegradedCacheTTL time.Duration
+
+	// AllowStaleOnOutage 决定 fp 不可达时能否继续使用**已过期**的缓存条目。
+	//
+	// 它不是通常意义上的 "fail-open"。鉴权中间件放行却拿不出用户身份是
+	// 讲不通的——那等于接受一个无法验证的 token。真正有意义的降级是
+	// "继续用刚才验过的那个身份"：身份已知，只是刷新不了。
+	// 完全没有缓存条目时，无论本开关如何都必须拒绝。
+	//
+	// 零值 false = 不允许。命名为"允许"而非它的反面，是为了让放宽的方向
+	// 必须被显式写出来——零值必须落在安全的一侧。
+	AllowStaleOnOutage bool
+
+	// MaxStaleness 是 AllowStaleOnOutage 生效时，缓存条目最多能被延用多久
+	// （从它本该过期的时刻起算）。默认 5 分钟。
+	//
+	// 必须有上限：没有上限的话，fp 停机一整天，一个早已被踢下线的会话
+	// 就能畅通一整天。
+	MaxStaleness time.Duration
+
 	// Logger 是 SDK 内部日志。为 nil 时用 slog.Default()。
 	Logger *slog.Logger
 }
 
 const (
-	defaultValidateTimeout = 2 * time.Second
-	defaultCacheSize       = 10000
+	defaultValidateTimeout  = 2 * time.Second
+	defaultCacheSize        = 10000
+	defaultDegradedCacheTTL = 5 * time.Second
+	defaultMaxStaleness     = 5 * time.Minute
 )
 
 func (o *Options) applyDefaults() {
@@ -48,6 +74,12 @@ func (o *Options) applyDefaults() {
 	}
 	if o.CacheSize <= 0 {
 		o.CacheSize = defaultCacheSize
+	}
+	if o.DegradedCacheTTL <= 0 {
+		o.DegradedCacheTTL = defaultDegradedCacheTTL
+	}
+	if o.MaxStaleness <= 0 {
+		o.MaxStaleness = defaultMaxStaleness
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -66,6 +98,10 @@ func (o Options) validate() error {
 		return errors.New("fpsdk: Options.ValidateTimeout 不能为负")
 	case o.CacheSize < 0:
 		return errors.New("fpsdk: Options.CacheSize 不能为负")
+	case o.DegradedCacheTTL < 0:
+		return errors.New("fpsdk: Options.DegradedCacheTTL 不能为负")
+	case o.MaxStaleness < 0:
+		return errors.New("fpsdk: Options.MaxStaleness 不能为负")
 	}
 	return nil
 }

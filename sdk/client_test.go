@@ -54,6 +54,9 @@ func (s *stubServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 type stubEnv struct {
 	stub   *stubServer
 	client *Client
+	// auth 是 client.Auth() 的缓存值，测试直接用它调 Validate/Login 等，
+	// 不必每次都写 env.client.Auth()。
+	auth *Auth
 	// addr 是桩服务端的真实监听地址，重连测试要用它在原端口重启。
 	addr string
 	// stop 停掉桩服务端，模拟 fp 宕机。
@@ -141,7 +144,7 @@ func newStubEnv(t *testing.T, validate func(*fpv1.ValidateTokenRequest) (*fpv1.V
 		stop()
 	})
 
-	return &stubEnv{stub: stub, client: client, addr: addr, stop: stop}
+	return &stubEnv{stub: stub, client: client, auth: client.Auth(), addr: addr, stop: stop}
 }
 
 // pushRevoke 让桩服务端往流里推一条撤销事件。

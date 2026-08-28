@@ -20,13 +20,24 @@ type Client struct {
 	conn *grpc.ClientConn
 	rpc  fpv1.AuthServiceClient
 
+	// auth 在 New 里构造一次，之后不再替换，因此无需同步保护。
+	auth *Auth
+
 	// streamUp 是推送流的健康状态。它驱动缓存窗口的收紧，
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
 	streamUp atomic.Bool
 
+	// everReady 记录是否已经收到过至少一次 ready。用于区分"首次连接"
+	// 与"重连"：只有重连才需要清空缓存（断开期间的撤销可能漏收）。
+	// 见 watchOnce 里 Ready 分支的说明。
+	everReady atomic.Bool
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
+
+// Auth 返回认证能力。多次调用返回同一个实例。
+func (c *Client) Auth() *Auth { return c.auth }
 
 // New 建立与 fp 的连接并启动推送流。
 func New(opts Options) (*Client, error) {
@@ -60,8 +71,18 @@ func New(opts Options) (*Client, error) {
 		return nil, err
 	}
 
+	cch, err := newCache(opts.CacheSize, time.Now)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{opts: opts, conn: conn, rpc: fpv1.NewAuthServiceClient(conn), cancel: cancel}
+	// 必须在启动 watch goroutine 之前构造好：goroutine 一跑起来就可能调
+	// c.auth（收到第一条 ready/revoke/purge 就会），构造顺序反了就是
+	// nil 解引用——而且只在恰好有事件到达时才崩，本地测试多半复现不出来。
+	c.auth = &Auth{c: c, cache: cch}
 
 	c.wg.Add(1)
 	go func() {
@@ -141,19 +162,41 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 		}
 		switch {
 		case msg.GetReady() != nil:
+			// 只有"重连"（曾经收到过 ready，这次是再收到一次）才需要清空
+			// 缓存：断开期间发生的撤销一条都没收到，缓存里在断开前写入的
+			// 任何条目都可能是已被撤销的会话。
+			//
+			// 首次连接不 purge：New() 在启动本 goroutine 之前才构造
+			// c.auth（含空缓存），但 New() 会在本 goroutine 收到首条
+			// ready 之前就返回给调用方——调用方的第一个请求与这里的首条
+			// ready 谁先发生并无顺序保证。若首次也无条件 purge，一旦
+			// 调用方的请求先把结果写入缓存，这里会把它冲掉，造成一次
+			// 本可避免的额外回源（这不是理论风险：靠反复运行给定测试
+			// TestValidateCachesAndAvoidsRefetch 复现过，约几十分之一的
+			// 概率失败）。首次连接时缓存天然是空的，跳过 purge 无损。
+			//
+			// 顺序很重要（重连分支内）：先 purge、再把 streamUp 置为
+			// 健康。反过来的话，两次调用之间有一条极窄但真实存在的
+			// 竞态窗口——并发的 Validate() 一旦观察到 streamUp==true
+			// 就不再收紧查询窗口（maxTTL 归零），如果此时 purge 还没
+			// 跑完，它可能读到一条断连检测延迟期间（连接实际已断但
+			// streamUp 尚未翻 false 那段时间，最长一个 keepalive
+			// Timeout）写入的满 TTL 存量条目，把它当新鲜数据放行。
+			// 先 purge 后置位，保证任何观察到 streamUp==true 的调用，
+			// 看到的都已经是清空之后的缓存。
+			if c.everReady.Swap(true) {
+				c.auth.onPurge()
+			}
+			c.streamUp.Store(true)
 			// 只有收到 ready 才置为健康：此前服务端可能还没订上撤销频道，
 			// 那段时间的事件会丢，而 SDK 若已认为健康就不会收紧缓存窗口。
-			c.streamUp.Store(true)
 			gotReady = true
 		case msg.GetRevoke() != nil:
-			// 本任务只有连接层，还没有缓存可清。Task 10 会把这里换成
-			// 真正的缓存失效，并在 ready 分支补上重连后的整体清空。
-			c.opts.Logger.Debug("fpsdk: 收到撤销事件",
-				"tokens", len(msg.GetRevoke().GetTokens()),
-				"reason", msg.GetRevoke().GetReason())
+			c.auth.onRevoke(msg.GetRevoke())
 		case msg.GetPurge() != nil:
-			c.opts.Logger.Warn("fpsdk: 收到服务端的缓存清空指令",
+			c.opts.Logger.Warn("fpsdk: 按服务端要求清空校验缓存",
 				"reason", msg.GetPurge().GetReason())
+			c.auth.onPurge()
 		default:
 			// 未知事件类型（将来的 ConfigChanged / PolicyChanged）。
 			// 忽略，不要报错——oneof 的向前兼容就靠这里。
