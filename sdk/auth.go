@@ -20,6 +20,13 @@ var (
 	ErrUnauthorized = errors.New("fpsdk: token 无效或已过期")
 	// ErrUnavailable fp 不可达，且本地没有可用的缓存结果。
 	ErrUnavailable = errors.New("fpsdk: fp 不可达且无可用缓存")
+	// ErrInvalidArgument 调用方给的参数不合法（手机号格式、验证码格式等）。
+	// 与 ErrUnauthorized 的区别是：这不是"凭据不对"，是"请求本身就没法处理"，
+	// 客户端不该因此清掉会话或跳登录页。
+	ErrInvalidArgument = errors.New("fpsdk: 参数不合法")
+	// ErrRateLimited 被服务端限流（例如验证码发送过于频繁）。
+	// 同样不该被当成鉴权失败——用户的凭据没有任何问题。
+	ErrRateLimited = errors.New("fpsdk: 请求过于频繁")
 )
 
 // Identity 是一次成功校验得到的身份。
@@ -223,7 +230,11 @@ func (a *Auth) Logout(ctx context.Context, token string) error {
 // 让业务方用 errors.Is 判定而不必 import grpc 的 codes 包。
 //
 // codes.NotFound 归进 ErrUnauthorized，与 Validate 那侧的判断保持一致
-// （见其注释）：它是 fp 给出的确定答案，不是"够不着"。
+// （见其注释）：它是 fp 给出的确定答案，不是"够不着"。codes.InvalidArgument
+// 与 codes.ResourceExhausted 归进各自专属的哨兵——这两个码只会经
+// SendLoginCode/Login 出现（畸形手机号/验证码格式、短信发送被限流），
+// 且都不是"凭据不对"，不能落进 ErrUnauthorized（会让客户端清会话/跳
+// 登录页）也不能落进 ErrUnavailable（fp 明明健康地给出了判定）。
 func translate(err error) error {
 	if err == nil {
 		return nil
@@ -233,6 +244,10 @@ func translate(err error) error {
 		return errors.Join(ErrUnauthorized, err)
 	case codes.Unavailable, codes.DeadlineExceeded:
 		return errors.Join(ErrUnavailable, err)
+	case codes.InvalidArgument:
+		return errors.Join(ErrInvalidArgument, err)
+	case codes.ResourceExhausted:
+		return errors.Join(ErrRateLimited, err)
 	}
 	return err
 }

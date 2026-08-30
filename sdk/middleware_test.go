@@ -231,8 +231,8 @@ func TestMiddlewareUnavailableReturns503(t *testing.T) {
 	}
 }
 
-// TestWriteErrorMapsSentinelsToStatusCodes 守住导出的 WriteError 对三种
-// 哨兵错误的状态码映射。
+// TestWriteErrorMapsSentinelsToStatusCodes 守住导出的 WriteError 对五种
+// 哨兵错误的状态码映射（含 ErrInvalidArgument/ErrRateLimited 这两个后补的）。
 //
 // WriteError 存在的理由：SendLoginCode/Login 这类不经过 Middleware 的路由
 // 拿不到 defaultOnError，此前每个接入方都要自己重写一遍 503/401 分类
@@ -248,6 +248,8 @@ func TestWriteErrorMapsSentinelsToStatusCodes(t *testing.T) {
 		{"ErrNoToken", ErrNoToken, http.StatusUnauthorized},
 		{"ErrUnauthorized", ErrUnauthorized, http.StatusUnauthorized},
 		{"ErrUnavailable", ErrUnavailable, http.StatusServiceUnavailable},
+		{"ErrInvalidArgument", ErrInvalidArgument, http.StatusBadRequest},
+		{"ErrRateLimited", ErrRateLimited, http.StatusTooManyRequests},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -275,5 +277,38 @@ func TestWriteErrorDoesNotEchoCredential(t *testing.T) {
 
 	if body := rec.Body.String(); strings.Contains(body, secretToken) {
 		t.Fatalf("响应体回显了凭据: %q", body)
+	}
+}
+
+// TestWriteErrorNeverEchoesUnderlyingError 覆盖 WriteError 全部五个
+// 哨兵分支加 default，确认响应体永远不包含底层 err 的内容。
+//
+// TestWriteErrorDoesNotEchoCredential 只覆盖了 ErrUnauthorized 这一个
+// 分支。这里补齐其余分支：ErrInvalidArgument 包着的 err 可能带着调用方
+// 递上来的原始手机号/验证码，ErrRateLimited、ErrUnavailable 包着的 err
+// 也都可能携带内部细节（连接地址、限流窗口之类）。"固定文案、不回显"
+// 是删掉 examples/demo 那份自建 writeAuthError（它会回显 err.Error()）
+// 的理由之一，需要一条测试把全部分支一起守住，而不是只守一个。
+func TestWriteErrorNeverEchoesUnderlyingError(t *testing.T) {
+	const marker = "极其独特的敏感信息标记-9f3c"
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"ErrNoToken", fmt.Errorf("%w: %s", ErrNoToken, marker)},
+		{"ErrUnauthorized", errors.Join(ErrUnauthorized, fmt.Errorf("%s", marker))},
+		{"ErrUnavailable", errors.Join(ErrUnavailable, fmt.Errorf("%s", marker))},
+		{"ErrInvalidArgument", errors.Join(ErrInvalidArgument, fmt.Errorf("%s", marker))},
+		{"ErrRateLimited", errors.Join(ErrRateLimited, fmt.Errorf("%s", marker))},
+		{"未识别错误落进default分支", fmt.Errorf("%s", marker)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			WriteError(rec, c.err)
+			if body := rec.Body.String(); strings.Contains(body, marker) {
+				t.Fatalf("状态码 %d 的响应体回显了底层错误: %q", rec.Code, body)
+			}
+		})
 	}
 }

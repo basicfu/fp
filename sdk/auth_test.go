@@ -554,6 +554,57 @@ func TestLoginUnavailableReturnsErrUnavailable(t *testing.T) {
 	}
 }
 
+// TestLoginInvalidArgumentReturnsErrInvalidArgument 钉住 translate 把
+// InvalidArgument 映射成 ErrInvalidArgument 这一分支，经 Login 这条路径。
+//
+// 服务端对畸形凭据（比如手机号格式不对）返回这个码——这不是"凭据不对"，
+// 是"请求本身就没法处理"。此前 translate 原样透传这个码（不匹配任何
+// case），落进 WriteError 的 default 分支变成 401——用户手机号打错一位，
+// 会收到"未授权"，而不是"参数不对"。必须能被 errors.Is 与 ErrUnauthorized
+// 区分开，否则业务方没法对这两种情况做出不同的响应。
+func TestLoginInvalidArgumentReturnsErrInvalidArgument(t *testing.T) {
+	env := newStubEnvFull(t, &stubServer{
+		validate: okValidate("u1", 1000),
+		login: func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
+			return nil, status.Error(codes.InvalidArgument, "手机号格式不正确")
+		},
+	})
+
+	_, err := env.auth.Login(context.Background(), LoginInput{ConnectorType: "password"})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("参数不合法时 Login 返回 %v，期望 ErrInvalidArgument", err)
+	}
+	if errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("ErrInvalidArgument 不该同时满足 errors.Is(err, ErrUnauthorized)：%v", err)
+	}
+}
+
+// TestLoginRateLimitedReturnsErrRateLimited 钉住 translate 把
+// ResourceExhausted 映射成 ErrRateLimited 这一分支，经 Login 这条路径。
+//
+// translate 是纯粹按 gRPC status code 分类的函数，不关心具体是哪个 RPC
+// 触发的——用 Login 覆盖这一分支，与 TestLoginUnavailableReturnsErrUnavailable
+// /TestLoginInvalidArgumentReturnsErrInvalidArgument 保持同一种装配方式。
+// 限流在真实系统里最常见于 SendLoginCode（验证码发送过于频繁），但那不
+// 影响这里要验证的东西：只要 gRPC 返回 ResourceExhausted，无论出现在
+// 哪条 RPC 上，都必须落到 ErrRateLimited 而不是 ErrUnauthorized。
+func TestLoginRateLimitedReturnsErrRateLimited(t *testing.T) {
+	env := newStubEnvFull(t, &stubServer{
+		validate: okValidate("u1", 1000),
+		login: func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
+			return nil, status.Error(codes.ResourceExhausted, "请求过于频繁")
+		},
+	})
+
+	_, err := env.auth.Login(context.Background(), LoginInput{ConnectorType: "password"})
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("被限流时 Login 返回 %v，期望 ErrRateLimited", err)
+	}
+	if errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("ErrRateLimited 不该同时满足 errors.Is(err, ErrUnauthorized)：%v", err)
+	}
+}
+
 // TestLogoutForcesRefetchOnSameToken 盯住 Logout 里的 cache.drop(token)。
 //
 // 撤销推送会异步到达，但同一进程内紧接着的请求可能在事件到达前就命中了
