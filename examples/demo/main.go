@@ -9,7 +9,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -44,7 +43,7 @@ func main() {
 			return
 		}
 		if err := auth.SendLoginCode(r.Context(), req.Phone); err != nil {
-			writeAuthError(w, err)
+			fpsdk.WriteError(w, err)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
@@ -66,7 +65,7 @@ func main() {
 			UserAgent:     r.UserAgent(),
 		})
 		if err != nil {
-			writeAuthError(w, err)
+			fpsdk.WriteError(w, err)
 			return
 		}
 		// 浏览器客户端走 cookie；curl / 移动端等不处理 Set-Cookie 的客户端
@@ -108,21 +107,4 @@ func main() {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeAuthError 把 SDK 的哨兵错误映射成 HTTP 状态码。
-//
-// ErrUnavailable 映射到 503 而不是 400：这两个公开路由内部也是经 auth
-// 调 fp，fp 不可达时同样不该被客户端当成"这次请求本身有问题"——道理
-// 和 fpsdk.MiddlewareWith 默认的 OnError 一致，只是那一个是 SDK 自带的，
-// 这一个要业务方自己写，因为发码/登录本身不经过中间件。
-func writeAuthError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, fpsdk.ErrUnavailable):
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-	case errors.Is(err, fpsdk.ErrUnauthorized):
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	default:
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	}
 }

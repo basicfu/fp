@@ -1,6 +1,8 @@
 package fpsdk
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -226,5 +228,52 @@ func TestMiddlewareUnavailableReturns503(t *testing.T) {
 		t.Fatalf("fp 不可达时返回 %d，期望 %d(503)——"+
 			"回 401 会让客户端清掉一个仍然有效的 token，把一次 fp 抖动"+
 			"放大成全体用户重新登录", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// TestWriteErrorMapsSentinelsToStatusCodes 守住导出的 WriteError 对三种
+// 哨兵错误的状态码映射。
+//
+// WriteError 存在的理由：SendLoginCode/Login 这类不经过 Middleware 的路由
+// 拿不到 defaultOnError，此前每个接入方都要自己重写一遍 503/401 分类
+// （examples/demo/main.go 的 writeAuthError 就是一例），而写反的方向是
+// 危险的一边——把 ErrUnavailable 误判成 401 会让一次 fp 抖动变成全员登出。
+// WriteError 是唯一实现，defaultOnError 内部也调用它。
+func TestWriteErrorMapsSentinelsToStatusCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"ErrNoToken", ErrNoToken, http.StatusUnauthorized},
+		{"ErrUnauthorized", ErrUnauthorized, http.StatusUnauthorized},
+		{"ErrUnavailable", ErrUnavailable, http.StatusServiceUnavailable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			WriteError(rec, c.err)
+			if rec.Code != c.want {
+				t.Fatalf("状态码 = %d，期望 %d", rec.Code, c.want)
+			}
+		})
+	}
+}
+
+// TestWriteErrorDoesNotEchoCredential 确认响应体里不会出现 token。
+//
+// 它会流进前端日志、浏览器控制台、错误上报平台——一个仍然有效的凭据
+// 就此四处流传。这条直接测导出的 WriteError 本身（不经过 Middleware）：
+// TestMiddlewareDoesNotEchoToken 测的是走 Middleware 的路径，覆盖不到
+// SendLoginCode/Login 这类直接调用 WriteError 的调用方。
+func TestWriteErrorDoesNotEchoCredential(t *testing.T) {
+	const secretToken = "非常独特的令牌值-write-error-7c1e"
+	err := errors.Join(ErrUnauthorized, fmt.Errorf("token %q 校验失败", secretToken))
+
+	rec := httptest.NewRecorder()
+	WriteError(rec, err)
+
+	if body := rec.Body.String(); strings.Contains(body, secretToken) {
+		t.Fatalf("响应体回显了凭据: %q", body)
 	}
 }

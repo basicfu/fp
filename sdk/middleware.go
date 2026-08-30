@@ -124,11 +124,20 @@ func defaultOnRotate(opts MiddlewareOptions) func(http.ResponseWriter, *http.Req
 	}
 }
 
-// defaultOnError 写一个不含任何凭据的 401。
+// WriteError 把 SDK 的哨兵错误映射成 HTTP 状态码：
+// ErrNoToken/ErrUnauthorized → 401，ErrUnavailable → 503，其余 → 401。
 //
 // 绝不要把 token 拼进错误信息：它会流进前端日志、浏览器控制台、
-// 错误上报平台——一个仍然有效的凭据就此四处流传。
-func defaultOnError(w http.ResponseWriter, _ *http.Request, err error) {
+// 错误上报平台——一个仍然有效的凭据就此四处流传，因此这里只写固定的
+// 提示文案，从不回显 err.Error()。
+//
+// 供不经过 Middleware 的路由复用——SendLoginCode/Login 发生在鉴权中间件
+// 之前，拿不到 defaultOnError 的实现（defaultOnError 本身也是靠这个函数
+// 实现的，是唯一实现，不留第二份分类逻辑）。每个接入方原本都要自己重写
+// 一遍这个分类，而写反的方向是危险的一边：把 ErrUnavailable（fp 抖动）
+// 误判成 401 会让全体接入方的用户被强制登出，比把普通鉴权失败误判成 503
+// 后果重得多。
+func WriteError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrNoToken), errors.Is(err, ErrUnauthorized):
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -140,4 +149,9 @@ func defaultOnError(w http.ResponseWriter, _ *http.Request, err error) {
 	default:
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
+}
+
+// defaultOnError 是 Middleware 的默认错误响应，语义见 WriteError。
+func defaultOnError(w http.ResponseWriter, _ *http.Request, err error) {
+	WriteError(w, err)
 }
