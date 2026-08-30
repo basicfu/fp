@@ -42,6 +42,13 @@ type Auth struct {
 }
 
 // Validate 校验 token，命中本地缓存时不产生任何网络往返。
+//
+// 缓存未命中时，回源经由 singleflight 合并成一次共享 RPC，只受
+// ValidateTimeout（默认 2 秒）支配——ctx 的取消与 deadline 在这次共享
+// RPC 上不生效（有意为之：不然一个调用方取消自己的 ctx 会连累同一时刻
+// 在等同一个 token 的其他调用方，见内部 sf.Do 的注释）。调用方传一个
+// 更短的 deadline **不会**缩短这次回源的等待上限，客户端断连后中间件
+// 也会继续阻塞到这次共享 RPC 结束或 ValidateTimeout 到期为止。
 func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 	if token == "" {
 		return nil, ErrNoToken
