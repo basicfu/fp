@@ -366,7 +366,7 @@ func (s *SessionService) Revoke(ctx context.Context, token, reason string) error
 	if err != nil {
 		return err
 	}
-	_, err = s.revokeMatching(ctx, []uuid.UUID{sess.UserID}, sess.AppID, reason, func(x *domain.Session) bool {
+	_, err = s.revokeMatching(ctx, []uuid.UUID{sess.UserID}, reason, func(x *domain.Session) bool {
 		return x.ID == sess.ID
 	})
 	return err
@@ -379,7 +379,7 @@ func (s *SessionService) Revoke(ctx context.Context, token, reason string) error
 // 一次"踢掉这台平板"就会连累手机、电脑。这层压根不持有 EpochBumper
 // （只有 AccountService 持有），结构上就做不到误加。
 func (s *SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, sessionID, reason string) (int, error) {
-	return s.revokeMatching(ctx, []uuid.UUID{userID}, uuid.Nil, reason, func(sess *domain.Session) bool {
+	return s.revokeMatching(ctx, []uuid.UUID{userID}, reason, func(sess *domain.Session) bool {
 		return sess.ID == sessionID
 	})
 }
@@ -391,7 +391,7 @@ func (s *SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, se
 // 特例，单用户路径永远传一个元素的切片。两套实现意味着修一个 bug 要改
 // 两处，而漏改的那一处不会有任何测试变红——两条路径各有各的绿测试。
 func (s *SessionService) RevokeUsers(ctx context.Context, userIDs []uuid.UUID, reason string) (int, error) {
-	return s.revokeMatching(ctx, userIDs, uuid.Nil, reason, func(*domain.Session) bool { return true })
+	return s.revokeMatching(ctx, userIDs, reason, func(*domain.Session) bool { return true })
 }
 
 // RevokeUser 撤销单个用户的全部会话。用于封号、改密。是 RevokeUsers 的单元素包装。
@@ -402,30 +402,47 @@ func (s *SessionService) RevokeUser(ctx context.Context, userID uuid.UUID, reaso
 // RevokeUserInApp 只作废该用户在指定应用下的会话。
 // 多个应用共享同一套用户体系时，封禁某个应用的账号不应波及其他应用。
 func (s *SessionService) RevokeUserInApp(ctx context.Context, userID, appID uuid.UUID, reason string) (int, error) {
-	return s.revokeMatching(ctx, []uuid.UUID{userID}, appID, reason, func(sess *domain.Session) bool {
+	return s.revokeMatching(ctx, []uuid.UUID{userID}, reason, func(sess *domain.Session) bool {
 		return sess.AppID == appID
 	})
 }
 
-// revokeMatching 遍历这些用户的会话，删除满足 match 的那些，按 maxTokensPerEvent
-// 切片广播。
+// appGroup 累积同一个应用下被撤销的 token，以及贡献过 token 的用户。
+//
+// revokeMatching 用它按应用切分一次撤销：一次跨应用撤销（改密、冻结、
+// 踢全部）可能触达多个应用下的会话，每个应用的 SDK 只该在事件里看到
+// 属于它自己的 token 与用户，而不是这批用户在**全部**应用下的会话。
+type appGroup struct {
+	tokens []string
+	// users 只收在这个应用下真正贡献过 token 的用户，不是整批撤销涉及的
+	// 全部 userIDs——否则 A 应用的 SDK 会在事件里看到一个只在 B 应用有
+	// 会话、跟 A 毫无关系的 userID。
+	users map[uuid.UUID]bool
+}
+
+// revokeMatching 遍历这些用户的会话，删除满足 match 的那些，按应用分组、
+// 再按 maxTokensPerEvent 切片广播。
 //
 // userIDs 为多个元素时是 RevokeUsers 的批量路径；Revoke / RevokeSession /
 // RevokeUser / RevokeUserInApp 这些单用户入口都传一个元素的切片——这是全部
 // 撤销操作**唯一**的底层实现，不能有第二份（理由见 RevokeUsers 的注释）。
 //
-// eventAppID 直接写入事件而不从会话推断：会话删除后已无从查证，
-// 而调用方本来就知道这次撤销的作用域（uuid.Nil 表示跨全部应用）。
+// 不接受调用方传入的 eventAppID：事件的 AppID 从被删除的会话自己身上取
+// （见 revokeUserTokens），比让调用方声明一个"这次撤销的作用域"、再让
+// 接收端照单全收更准确——调用方（尤其 RevokeUsers/RevokeSession）本来就
+// 可能一次触达多个应用，没有单一的"这次的 AppID"可传。
+// 早期实现让调用方传 eventAppID（RevokeUsers/RevokeSession 固定传
+// uuid.Nil 表示"跨全部应用"），后果是一个用户跨应用的 token 被塞进
+// 同一条 Nil 事件，A 应用改一次密码，B 应用的 SDK 会收到 A 那些会话的
+// token 字符串——不构成认证绕过（token 广播时已从 Redis 删除），但是
+// 跨应用信息泄露。见 TestGlobalRevokeDoesNotLeakTokensAcrossApps。
 func (s *SessionService) revokeMatching(
 	ctx context.Context,
-	userIDs []uuid.UUID, eventAppID uuid.UUID,
+	userIDs []uuid.UUID,
 	reason string,
 	match func(*domain.Session) bool,
 ) (int, error) {
-	var (
-		tokens  []string
-		touched []uuid.UUID
-	)
+	groups := make(map[uuid.UUID]*appGroup)
 
 	// 中途出错时，已经删掉的 token 必须照样广播出去。
 	//
@@ -442,31 +459,41 @@ func (s *SessionService) revokeMatching(
 	// 同一个已死的 ctx，go-redis 会在取连接阶段直接拒掉 PUBLISH——
 	// token 已经从 Redis 删了，事件却发不出去，SDK 继续用缓存放行
 	// 一整个 cache_ttl。这正是 defer 要堵的洞，不剥掉取消信号就等于没堵。
+	//
+	// 按应用遍历 groups：一次跨应用撤销现在会广播多条事件（每个应用一条
+	// 或多条，取决于是否超过 maxTokensPerEvent），而不再是一条 Nil 事件。
 	defer func() {
-		if len(tokens) == 0 {
-			return
+		for appID, g := range groups {
+			if len(g.tokens) == 0 {
+				continue
+			}
+			users := make([]uuid.UUID, 0, len(g.users))
+			for u := range g.users {
+				users = append(users, u)
+			}
+			s.announceBatch(context.WithoutCancel(ctx), g.tokens, users, appID, reason)
 		}
-		s.announceBatch(context.WithoutCancel(ctx), tokens, touched, eventAppID, reason)
 	}()
 
 	for _, uid := range userIDs {
-		before := len(tokens)
-		err := s.revokeUserTokens(ctx, uid, match, &tokens)
-		// 没有贡献 token 的用户不进 touched——批量踢 500 个用户时大多数本来
-		// 就不在线，给它们各发一条空事件等于把刚省下的广播又加回来。即使
-		// 这个用户处理到一半出错，只要它已经贡献过 token，也要算进
-		// touched，否则事件里的 Tokens 与 UserIDs 会对不上。
-		if len(tokens) > before {
-			touched = append(touched, uid)
-		}
-		if err != nil {
-			return len(tokens), err
+		if err := s.revokeUserTokens(ctx, uid, match, groups); err != nil {
+			return revokedCount(groups), err
 		}
 	}
-	return len(tokens), nil
+	return revokedCount(groups), nil
 }
 
-// revokeUserTokens 删除单个用户满足 match 的会话，把被删的 token 追加进 *tokens。
+// revokedCount 汇总目前为止各应用分组里已经删除的 token 总数。
+func revokedCount(groups map[uuid.UUID]*appGroup) int {
+	n := 0
+	for _, g := range groups {
+		n += len(g.tokens)
+	}
+	return n
+}
+
+// revokeUserTokens 删除单个用户满足 match 的会话，把被删的 token 按会话
+// 自己的 AppID 追加进对应的分组。
 //
 // 这里不直接调用 store.DeleteUserTokens 做批量删除：撤销事件必须携带具体的
 // token 列表（SDK 按 token 缓存校验结果，只给 userID 无从得知该清哪些缓存
@@ -477,7 +504,7 @@ func (s *SessionService) revokeMatching(
 // 它分批删除，中途某一批失败时会**同时**返回已经真实删除的条数和一个非
 // nil 错误——那些删除已经在 Redis 里真实发生了，"出错就当 0 个"会让管理员
 // 误以为撤销完全没生效。
-func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID, match func(*domain.Session) bool, tokens *[]string) error {
+func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID, match func(*domain.Session) bool, groups map[uuid.UUID]*appGroup) error {
 	toks, err := s.store.ListUserTokens(ctx, userID)
 	if err != nil {
 		return err
@@ -496,7 +523,13 @@ func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID,
 		if err := s.store.Delete(ctx, tok); err != nil {
 			return err
 		}
-		*tokens = append(*tokens, tok)
+		g, ok := groups[sess.AppID]
+		if !ok {
+			g = &appGroup{users: make(map[uuid.UUID]bool)}
+			groups[sess.AppID] = g
+		}
+		g.tokens = append(g.tokens, tok)
+		g.users[userID] = true
 	}
 	return nil
 }

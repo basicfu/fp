@@ -191,6 +191,19 @@ func (h *RevokeHub) fanout(ev domain.RevokeEvent) {
 	for _, sub := range h.subs {
 		// AppID 为 Nil 表示跨全部应用（改密、冻结）——必须推给所有人。
 		// 把 Nil 当成一个具体应用 ID 去等值比较，这两类撤销一条也推不出去。
+		//
+		// 注意：internal/service.SessionService 现在按应用切分事件之后
+		// （见 revokeMatching），当前代码库里已经没有任何生产者会再发出
+		// AppID 为 Nil 的事件——这不代表这段处理是死代码，可以删掉。
+		// proto/fp/v1/common.proto 里 app_id 为空表示跨应用撤销是已经
+		// 写进线上契约的语义（下游 SDK 的实现也可能依赖它），"暂无生产者
+		// 在用"不等于"这个值不会出现"：任何未来的生产者（本仓库内的新
+		// 撤销入口，或者根本不是这个进程写的事件）都可能合法地发出它。
+		// 接收端老老实实实现一份已文档化的线上契约，是"暂无生产者"的
+		// 正当理由，不是删除的理由——删掉这段处理，一旦真的出现 Nil 事件，
+		// 会被这里的等值比较静默过滤成推给零个订阅者，正是这个阶段一直
+		// 在消灭的那类失效模式。TestGlobalRevokeReachesEveryApp 专门钉住
+		// 这一点，同样不能因为"看起来没有生产者覆盖它"而删除。
 		if ev.AppID != uuid.Nil && ev.AppID != sub.appID {
 			continue
 		}

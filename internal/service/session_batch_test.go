@@ -316,6 +316,88 @@ func TestRevokeUsersSkipsUsersWithoutSessions(t *testing.T) {
 	}
 }
 
+// TestGlobalRevokeDoesNotLeakTokensAcrossApps 守住"撤销事件按应用切分"。
+//
+// RevokeUsers（改密、冻结、踢全部）曾经把 eventAppID 定死为 uuid.Nil，而
+// revokeUserTokens 会把该用户跨全部应用的 token 收进同一条事件——A 应用
+// 改一次密码，B 应用的 SDK 会在撤销事件里收到 A 那些会话的 token 字符串
+// 和受影响的 userID。token 广播时已经从 Redis 删除，不构成认证绕过，
+// 但确是跨应用信息泄露。
+//
+// 装配：同一个用户在 A、B 两个应用各开一个会话，执行一次跨应用的
+// RevokeUsers（模拟改密）。断言产生两条事件，AppID 分别是 A 和 B，且
+// 互不包含对方的 token。
+//
+// 变异验证：把 revokeMatching 改回"不分组、所有 token 塞一条 AppID=Nil
+// 的事件"，本测试必须变红（已手工验证，见 cleanup-report.md）。
+func TestGlobalRevokeDoesNotLeakTokensAcrossApps(t *testing.T) {
+	env := newSessionEnv(t)
+	ctx := context.Background()
+
+	appA := testApp()
+	appB := testApp()
+	uid := uuid.New()
+
+	sessA, err := env.sessions.Issue(ctx, service.IssueInput{UserID: uid, App: appA})
+	if err != nil {
+		t.Fatalf("Issue A: %v", err)
+	}
+	sessB, err := env.sessions.Issue(ctx, service.IssueInput{UserID: uid, App: appB})
+	if err != nil {
+		t.Fatalf("Issue B: %v", err)
+	}
+
+	events := env.captureEvents(t)
+	if _, err := env.sessions.RevokeUsers(ctx, []uuid.UUID{uid}, domain.RevokeReasonPasswordChanged); err != nil {
+		t.Fatalf("RevokeUsers: %v", err)
+	}
+
+	got := events.collect(t, 2)
+	if len(got) != 2 {
+		t.Fatalf("跨应用撤销产生了 %d 条事件，期望 2 条（应按应用切分）：%+v", len(got), got)
+	}
+
+	byApp := make(map[uuid.UUID]domain.RevokeEvent, len(got))
+	for _, ev := range got {
+		if ev.AppID == uuid.Nil {
+			t.Fatalf("事件的 AppID 是 uuid.Nil，期望具体的应用 ID：%+v", ev)
+		}
+		byApp[ev.AppID] = ev
+	}
+
+	evA, ok := byApp[appA.ID]
+	if !ok {
+		t.Fatalf("没有找到应用 A（%v）的事件，收到的事件：%+v", appA.ID, got)
+	}
+	evB, ok := byApp[appB.ID]
+	if !ok {
+		t.Fatalf("没有找到应用 B（%v）的事件，收到的事件：%+v", appB.ID, got)
+	}
+
+	if len(evA.Tokens) != 1 || evA.Tokens[0] != sessA.Token {
+		t.Fatalf("应用 A 的事件 Tokens = %v，期望 [%s]", evA.Tokens, sessA.Token)
+	}
+	if len(evB.Tokens) != 1 || evB.Tokens[0] != sessB.Token {
+		t.Fatalf("应用 B 的事件 Tokens = %v，期望 [%s]", evB.Tokens, sessB.Token)
+	}
+	for _, tok := range evA.Tokens {
+		if tok == sessB.Token {
+			t.Fatal("应用 A 的事件里出现了应用 B 的 token——跨应用泄露")
+		}
+	}
+	for _, tok := range evB.Tokens {
+		if tok == sessA.Token {
+			t.Fatal("应用 B 的事件里出现了应用 A 的 token——跨应用泄露")
+		}
+	}
+	if len(evA.UserIDs) != 1 || evA.UserIDs[0] != uid {
+		t.Fatalf("应用 A 的事件 UserIDs = %v，期望 [%v]", evA.UserIDs, uid)
+	}
+	if len(evB.UserIDs) != 1 || evB.UserIDs[0] != uid {
+		t.Fatalf("应用 B 的事件 UserIDs = %v，期望 [%v]", evB.UserIDs, uid)
+	}
+}
+
 // TestRevokeUsersIsAtomicPerUserForEpoch 确认批量也逐个递增纪元。
 //
 // 纪元是用户级的，批量撤销必须给**每个**用户都递增，不能只递增第一个
