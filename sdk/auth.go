@@ -107,9 +107,27 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 		// 攻击者用海量随机 token 就能把真实条目全部挤出 LRU，
 		// 逼得每个正常请求都回源——一次廉价攻击让 fp 承受全量鉴权流量。
 		return nil, ErrUnauthorized
+	case codes.NotFound:
+		// GetActiveByAppID 找不到应用时返回这个码——fp 给出的是确定答案
+		// （这个应用不存在），不是"够不着"。多半意味着接入方的 appId
+		// 配错了，或者应用已经被管理端删除，这类配置错误应该立刻失败
+		// 关闭，而不是被下面的陈旧兜底悄悄放行 MaxStaleness（默认 5
+		// 分钟）——那样接入方会以为自己在正常运行，实际上验证的应用
+		// 已经不存在了。用 WARN 而不是普通的鉴权失败去处理，是为了在
+		// 日志里把它和"token 单纯过期/被撤销"区分开：后者是正常流量，
+		// 前者几乎总是配置问题，值得被人看到。
+		a.c.opts.Logger.Warn("fpsdk: fp 返回 NotFound，按配置错误处理——"+
+			"应用可能不存在或已被删除，请检查 Options.AppID", "err", err)
+		return nil, ErrUnauthorized
 	}
 
-	// 走到这里是 fp 不可达（Unavailable / DeadlineExceeded / 连接错误）。
+	// 走到这里的 err 覆盖 Unavailable / DeadlineExceeded / 连接错误（真正
+	// 够不着 fp），以及除上面两个 case 之外的其他 gRPC 状态码（例如
+	// Internal、ResourceExhausted）——fp 给出了响应，但响应本身是"我这边
+	// 出问题了"，语义上与"够不着"是同一类：调用方拿不到一个可信的鉴权
+	// 判定，能做的只有和真正不可达时一样的处理。NotFound 不属于这一类，
+	// 上面已经把它并入确定拒绝分支提前返回。
+	//
 	// 只有在调用方显式允许时，才用"刚才验过的那个身份"兜底。
 	if maxStale > 0 {
 		if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheStale {
@@ -196,12 +214,15 @@ func (a *Auth) Logout(ctx context.Context, token string) error {
 
 // translate 把 gRPC status 转成 SDK 的哨兵错误，
 // 让业务方用 errors.Is 判定而不必 import grpc 的 codes 包。
+//
+// codes.NotFound 归进 ErrUnauthorized，与 Validate 那侧的判断保持一致
+// （见其注释）：它是 fp 给出的确定答案，不是"够不着"。
 func translate(err error) error {
 	if err == nil {
 		return nil
 	}
 	switch status.Code(err) {
-	case codes.Unauthenticated, codes.PermissionDenied:
+	case codes.Unauthenticated, codes.PermissionDenied, codes.NotFound:
 		return errors.Join(ErrUnauthorized, err)
 	case codes.Unavailable, codes.DeadlineExceeded:
 		return errors.Join(ErrUnavailable, err)

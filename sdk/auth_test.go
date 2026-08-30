@@ -289,6 +289,59 @@ func TestUnavailableWithoutStaleFallbackIsRejected(t *testing.T) {
 	}
 }
 
+// TestNotFoundIsUnauthorizedNotUnavailable 守住"NotFound 是确定答案，不是
+// 不可达"。
+//
+// GetActiveByAppID 找不到应用时，服务端回 codes.NotFound——多半是接入方
+// 的 appId 配错了，或者应用被管理端删除了，fp 已经给出了明确的判定，
+// 不是"够不着 fp"。此前的实现只把 Unauthenticated/PermissionDenied 判成
+// 鉴权失败，NotFound 会落进"fp 不可达"的陈旧兜底分支。
+func TestNotFoundIsUnauthorizedNotUnavailable(t *testing.T) {
+	env := newStubEnv(t, func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+		return nil, status.Error(codes.NotFound, "application not found")
+	})
+	if _, err := env.auth.Validate(context.Background(), "tok"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("NotFound 时返回 %v，期望 ErrUnauthorized", err)
+	}
+}
+
+// TestNotFoundDoesNotFallBackToStaleEvenWithCache 是上一条的关键补充。
+//
+// 只测"NotFound 返回 ErrUnauthorized"是不够的：一个"NotFound 仍然走陈旧
+// 兜底分支、但这次测试恰好没有缓存条目可用，所以兜底分支自己也拒绝了"
+// 的实现，一样能让上一条测试通过。这条测试专门堵死这个后门——开
+// AllowStaleOnOutage 且缓存里确有一条陈旧条目可用时，NotFound 也必须
+// 立刻拒绝，而不是被当作"fp 不可达"继续放行 MaxStaleness。
+//
+// 装配与 TestStaleFallbackServesLastKnownIdentity 相同：cache_ttl 设得很短
+// （100ms），先成功校验一次并缓存，之后让桩服务端改口返回 NotFound，
+// 睡过 cache_ttl 进入陈旧窗口，再次校验必须拿到 ErrUnauthorized。
+func TestNotFoundDoesNotFallBackToStaleEvenWithCache(t *testing.T) {
+	var notFound atomic.Bool
+	env := newStubEnv(t, func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+		if notFound.Load() {
+			return nil, status.Error(codes.NotFound, "application not found")
+		}
+		return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 100}, nil
+	}, func(o *Options) {
+		o.AllowStaleOnOutage = true
+		o.MaxStaleness = 10 * time.Second
+	})
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
+
+	if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
+		t.Fatalf("首次校验: %v", err)
+	}
+
+	notFound.Store(true)
+	time.Sleep(300 * time.Millisecond) // 越过 100ms 的 cache_ttl，进入陈旧窗口
+
+	if _, err := env.auth.Validate(context.Background(), "tok"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("NotFound 且有陈旧缓存可用时返回了 %v，期望 ErrUnauthorized——"+
+			"NotFound 不该走陈旧兜底，哪怕缓存里确有条目", err)
+	}
+}
+
 // TestStaleFallbackServesLastKnownIdentity 确认陈旧兜底的语义。
 //
 // 它给出的是"刚才验过的那个身份"，不是"放行一个未经验证的 token"。
