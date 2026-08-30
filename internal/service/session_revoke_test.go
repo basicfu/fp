@@ -306,6 +306,119 @@ func TestRevokeAnnouncesPartialProgressOnError(t *testing.T) {
 	}
 }
 
+// TestRevokeAnnouncesPartialProgressAcrossApps 是
+// TestRevokeAnnouncesPartialProgressOnError 的跨应用版本，守住
+// revokeMatching 的 defer 在"按应用分组"之后依然成立。
+//
+// defer 保证"已经删掉的 token 必须照样广播出去"——这是个安全相关的
+// 承诺：不广播的话 SDK 会继续拿本地缓存放行一整个 cache_ttl，即使权威
+// 撤销（Redis 删除）早已完成。分组之后 defer 改成遍历 groups 逐组
+// announceBatch，"某一组已经完整产生、另一组处理到一半出错"这个组合
+// 此前没有测试覆盖——TestRevokeAnnouncesPartialProgressOnError 只有一个
+// 应用，天然测不到"一个分组的出错会不会连累另一个已经完整、且早于它
+// 处理完的分组"这件事。
+//
+// 装配：用户 X 只在应用 A 有一个会话，排在 userIDs 的第一位，先被完整
+// 处理成功；用户 Y 只在应用 B 有两个会话，排第二位，破坏其中一个会话
+// 的 Redis 内容（复用 TestRevokeAnnouncesPartialProgressOnError 的手法：
+// 直接写坏 JSON，制造一个非 ErrNotFound 的真实错误），让处理用户 Y 时
+// 中途出错。断言：应用 A 的事件完整送达（X 的会话已删除且已广播），
+// 应用 B 的事件也照样送达、且带着 Y 那个未损坏、已经成功删除的 token。
+func TestRevokeAnnouncesPartialProgressAcrossApps(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	st := store.NewSessionStore(rdb)
+	pub := store.NewRevokePublisher(rdb)
+	ep := store.NewEpochStore(rdb)
+	svc := service.NewSessionServiceWithClock(st, pub, ep, func() int64 { return time.Now().UnixMilli() })
+	appA := testApp()
+	appB := testApp()
+	userX := uuid.New()
+	userY := uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, closeFn, err := pub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer closeFn()
+
+	sessX, err := svc.Issue(ctx, service.IssueInput{UserID: userX, App: appA})
+	if err != nil {
+		t.Fatalf("Issue X: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := svc.Issue(ctx, service.IssueInput{UserID: userY, App: appB}); err != nil {
+			t.Fatalf("Issue Y %d: %v", i, err)
+		}
+	}
+
+	orderY, err := st.ListUserTokens(ctx, userY)
+	if err != nil {
+		t.Fatalf("ListUserTokens(Y): %v", err)
+	}
+	if len(orderY) != 2 {
+		t.Fatalf("len(orderY) = %d, want 2", len(orderY))
+	}
+	badToken := orderY[len(orderY)-1]
+	goodTokenY := orderY[0]
+
+	// fp:sess: 是 internal/store 包内 sessionKeyPrefix 常量的值，未导出，
+	// 测试只能照抄字面量，同 TestRevokeAnnouncesPartialProgressOnError。
+	if err := rdb.Set(ctx, "fp:sess:"+badToken, "not-json", time.Minute).Err(); err != nil {
+		t.Fatalf("破坏 token: %v", err)
+	}
+
+	n, err := svc.RevokeUsers(ctx, []uuid.UUID{userX, userY}, domain.RevokeReasonFreeze)
+	if err == nil {
+		t.Fatal("err = nil, want 解析损坏会话产生的错误")
+	}
+	if n != 2 {
+		t.Fatalf("撤销数 = %d, want 2（应用 A 完整的 1 个 + 应用 B 未损坏的 1 个）", n)
+	}
+
+	// X 在应用 A 的会话必须已失效。
+	if _, err := svc.Validate(ctx, sessX.Token, appA); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("应用 A 的会话仍然有效: %v", err)
+	}
+	// Y 未损坏的那个会话（应用 B）也必须已失效。
+	if _, err := svc.Validate(ctx, goodTokenY, appB); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("应用 B 未损坏的会话仍然有效: %v", err)
+	}
+
+	// 两条事件都必须送达：应用 A 完整的一条，应用 B 部分成功的一条。
+	gotByApp := map[uuid.UUID]domain.RevokeEvent{}
+	deadline := time.After(3 * time.Second)
+	for len(gotByApp) < 2 {
+		select {
+		case sig := <-events:
+			if sig.Kind != store.RevokeSignalEvent {
+				t.Fatalf("Kind = %v, want RevokeSignalEvent", sig.Kind)
+			}
+			gotByApp[sig.Event.AppID] = sig.Event
+		case <-deadline:
+			t.Fatalf("3 秒内只收到 %d 条事件，期望 2 条——"+
+				"某一分组的部分进度在另一分组出错时被连累丢弃了", len(gotByApp))
+		}
+	}
+
+	evA, ok := gotByApp[appA.ID]
+	if !ok {
+		t.Fatalf("没有收到应用 A 的事件：%+v", gotByApp)
+	}
+	if len(evA.Tokens) != 1 || evA.Tokens[0] != sessX.Token {
+		t.Fatalf("应用 A 事件 Tokens = %v，want [%s]", evA.Tokens, sessX.Token)
+	}
+
+	evB, ok := gotByApp[appB.ID]
+	if !ok {
+		t.Fatalf("没有收到应用 B 的事件：%+v", gotByApp)
+	}
+	if len(evB.Tokens) != 1 || evB.Tokens[0] != goodTokenY {
+		t.Fatalf("应用 B 事件 Tokens = %v，want [%s]（只应含未损坏的那个）", evB.Tokens, goodTokenY)
+	}
+}
+
 // 登出必须连带作废轮换过渡期里的兄弟 token。
 //
 // 过渡期内同一会话有新旧两个 token 都有效。只删调用方递上来的那个，

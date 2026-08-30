@@ -424,3 +424,112 @@ func TestRevokeUsersIsAtomicPerUserForEpoch(t *testing.T) {
 		}
 	}
 }
+
+// TestRevokeEventUserIDsOnlyIncludeContributorsOfThatApp 守住
+// "每组 UserIDs 只含真正在这一组贡献过 token 的用户"这条关键子性质。
+//
+// TestGlobalRevokeDoesNotLeakTokensAcrossApps 里 A、B 两个应用下的会话
+// 属于同一个用户，"每组独立维护 UserIDs" 与 "跨分组共享一个全局
+// touched 集合"两种实现在那个场景下算出来的结果完全一样（都是
+// [uid]），那条测试对这条子性质零区分度。这里换成两个用户：X 只在
+// A 应用有会话，Y 在 A、B 都有会话——若实现改成共享全局集合，B 应用的
+// 事件会把从未在 B 出现过的 X 也带上，B 应用的 SDK 会看到一个跟自己
+// 毫无关系的 userID。
+//
+// 变异验证：把按分组独立的 g.users 换成跨分组共享的全局集合，本测试
+// 必须变红，而 TestGlobalRevokeDoesNotLeakTokensAcrossApps 仍然绿——
+// 后半句同样重要，证明区分度确实来自这条新测试，不是碰巧被另一条测试
+// 顺带守住（已复核，见 cleanup-report.md）。
+func TestRevokeEventUserIDsOnlyIncludeContributorsOfThatApp(t *testing.T) {
+	env := newSessionEnv(t)
+	ctx := context.Background()
+
+	appA := testApp()
+	appB := testApp()
+	userX := uuid.New() // 只在 A 有会话
+	userY := uuid.New() // 在 A、B 都有会话
+
+	if _, err := env.sessions.Issue(ctx, service.IssueInput{UserID: userX, App: appA}); err != nil {
+		t.Fatalf("Issue X@A: %v", err)
+	}
+	if _, err := env.sessions.Issue(ctx, service.IssueInput{UserID: userY, App: appA}); err != nil {
+		t.Fatalf("Issue Y@A: %v", err)
+	}
+	if _, err := env.sessions.Issue(ctx, service.IssueInput{UserID: userY, App: appB}); err != nil {
+		t.Fatalf("Issue Y@B: %v", err)
+	}
+
+	events := env.captureEvents(t)
+	if _, err := env.sessions.RevokeUsers(ctx, []uuid.UUID{userX, userY}, domain.RevokeReasonPasswordChanged); err != nil {
+		t.Fatalf("RevokeUsers: %v", err)
+	}
+
+	got := events.collect(t, 2)
+	if len(got) != 2 {
+		t.Fatalf("产生了 %d 条事件，期望 2 条（按应用切分）：%+v", len(got), got)
+	}
+
+	byApp := make(map[uuid.UUID]domain.RevokeEvent, len(got))
+	for _, ev := range got {
+		byApp[ev.AppID] = ev
+	}
+
+	evB, ok := byApp[appB.ID]
+	if !ok {
+		t.Fatalf("没有找到应用 B 的事件，收到的事件：%+v", got)
+	}
+	if len(evB.UserIDs) != 1 || evB.UserIDs[0] != userY {
+		t.Fatalf("应用 B 的事件 UserIDs = %v，期望只含 [%v]——"+
+			"用户 X 只在 A 有会话，不该出现在 B 的事件里", evB.UserIDs, userY)
+	}
+
+	evA, ok := byApp[appA.ID]
+	if !ok {
+		t.Fatalf("没有找到应用 A 的事件，收到的事件：%+v", got)
+	}
+	gotA := map[uuid.UUID]bool{}
+	for _, u := range evA.UserIDs {
+		gotA[u] = true
+	}
+	if len(evA.UserIDs) != 2 || !gotA[userX] || !gotA[userY] {
+		t.Fatalf("应用 A 的事件 UserIDs = %v，期望恰好包含 [%v %v]", evA.UserIDs, userX, userY)
+	}
+}
+
+// TestRevokeSessionEventCarriesSessionsRealAppID 守住 RevokeSession
+// 现在广播真实 AppID、而不是 uuid.Nil 这个行为。
+//
+// 改前 RevokeSession 固定传 eventAppID=uuid.Nil，等于把某个用户在某个
+// 应用下的一次单会话登出，广播成"跨全部应用"的语义——按
+// internal/grpcapi 的 fanout 规则，一个跟这次登出毫无关系的其他应用的
+// SDK 也会收到这个 token。这是项 1 要堵的那类跨应用泄露的缩小版：范围
+// 更小（一个会话而不是一个用户的全部会话），性质相同。
+// TestRevokeSessionCoversTokensFromRotation 只验证会话失效，从不看
+// 事件的 AppID 字段，这个行为此前没有任何测试钉住。
+func TestRevokeSessionEventCarriesSessionsRealAppID(t *testing.T) {
+	env := newSessionEnv(t)
+	ctx := context.Background()
+
+	appA := testApp()
+	uid := uuid.New()
+
+	sess, err := env.sessions.Issue(ctx, service.IssueInput{UserID: uid, App: appA})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	events := env.captureEvents(t)
+	if _, err := env.sessions.RevokeSession(ctx, uid, sess.ID, domain.RevokeReasonKick); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+
+	got := events.collect(t, 1)
+	if len(got) != 1 {
+		t.Fatalf("产生了 %d 条事件，期望 1 条：%+v", len(got), got)
+	}
+	if got[0].AppID != appA.ID {
+		t.Fatalf("事件 AppID = %v，期望等于会话所属应用 %v——不该再是 uuid.Nil "+
+			"（那意味着广播给全部应用，其他跟这次登出无关的应用也会收到）",
+			got[0].AppID, appA.ID)
+	}
+}

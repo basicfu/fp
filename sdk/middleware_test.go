@@ -231,8 +231,11 @@ func TestMiddlewareUnavailableReturns503(t *testing.T) {
 	}
 }
 
-// TestWriteErrorMapsSentinelsToStatusCodes 守住导出的 WriteError 对五种
-// 哨兵错误的状态码映射（含 ErrInvalidArgument/ErrRateLimited 这两个后补的）。
+// TestWriteErrorMapsSentinelsToStatusCodes 守住导出的 WriteError 对五个哨兵
+// 错误 + default 兜底分支的状态码映射（含 ErrInvalidArgument/ErrRateLimited
+// 这两个后补的哨兵，以及"未识别错误落进 default"这一档——此前只有
+// TestWriteErrorNeverEchoesUnderlyingError 把 default 纳入用例，但只断言
+// 响应体不含标记串，没断言 rec.Code，把 401 改成别的值不会被任何测试拦下）。
 //
 // WriteError 存在的理由：SendLoginCode/Login 这类不经过 Middleware 的路由
 // 拿不到 defaultOnError，此前每个接入方都要自己重写一遍 503/401 分类
@@ -250,6 +253,7 @@ func TestWriteErrorMapsSentinelsToStatusCodes(t *testing.T) {
 		{"ErrUnavailable", ErrUnavailable, http.StatusServiceUnavailable},
 		{"ErrInvalidArgument", ErrInvalidArgument, http.StatusBadRequest},
 		{"ErrRateLimited", ErrRateLimited, http.StatusTooManyRequests},
+		{"未识别错误落进default分支", errors.New("SDK 还不认识的某个错误"), http.StatusUnauthorized},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
