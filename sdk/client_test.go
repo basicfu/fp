@@ -387,11 +387,11 @@ func (s *rejectingWatchServer) Watch(grpc.BidiStreamingServer[fpv1.WatchRequest,
 // TestWatchBackoffResetsAfterReady 守住退避复位。
 //
 // 简报明确要求（且不是可选优化）：runWatch 的退避必须区分"从未收到过
-// ready 就断开"（fp 本身没起来，继续按原节奏增长）与"收到过 ready 之后
-// 才断开"（曾经健康，这次断开大概率只是短暂抖动，退避该回到最小值）。
-// 不区分的话，一次长时间的 fp 故障会把退避顶到高位，此后哪怕只是被
-// MaxConnectionAge 正常回收之类的短暂抖动，SDK 也要按顶到的退避傻等，
-// 而不是立刻重连。
+// ready 就断开"（fp 本身没起来，继续按原节奏增长）与"收到过 ready、且
+// 这次连接存活超过 healthyConnDuration 才断开"（曾经真正健康过，这次
+// 断开大概率只是短暂抖动，退避该回到最小值）。不区分的话，一次长时间的
+// fp 故障会把退避顶到高位，此后哪怕只是被 MaxConnectionAge 正常回收之类
+// 的短暂抖动，SDK 也要按顶到的退避傻等，而不是立刻重连。
 //
 // 这条不是简报给的四条之一，是补的第五条：手工验证过，把 client.go
 // runWatch 里的复位逻辑整个删掉（也就是简报正文给的原始版本，退避
@@ -402,15 +402,19 @@ func (s *rejectingWatchServer) Watch(grpc.BidiStreamingServer[fpv1.WatchRequest,
 // 装配：先指向一个只会立刻拒绝 Watch、从不发 ready 的桩服务端，逼 SDK
 // 连续失败几次、把 backoff 顶到远高于 minBackoff（用原子计数器判断
 // "已经失败了几次"，不靠 sleep 一个猜测的时长）；换上真实桩服务端，
-// 等它连上并收到一次 ready（此时才第一次"曾经健康"）；立刻停掉制造
-// 一次曾经健康之后的断开——这正是复位应该发生的地方；最后立刻重启，
-// 断言重连发生得很快。只有退避真的被复位，这次重连才可能落在几百
-// 毫秒量级，否则会被顶到秒级的退避拖住——两者相差接近一个数量级，
-// 用居中的超时就能可靠区分，不依赖精确计时。
+// 等它连上并收到一次 ready；**让这次连接存活超过 healthyConnDuration**
+// （仅仅收到 ready 不够，见该常量的注释——这是本测试与
+// TestWatchBackoffDoesNotResetForShortLivedConnection 的唯一区别）；
+// 立刻停掉制造一次"曾经健康"之后的断开——这正是复位应该发生的地方；
+// 最后立刻重启，断言重连发生得很快。只有退避真的被复位，这次重连才
+// 可能落在几百毫秒量级，否则会被顶到秒级的退避拖住——两者相差接近
+// 一个数量级，用居中的超时就能可靠区分，不依赖精确计时。这个"重连耗时
+// 远小于被推高后的退避值"的时长比较是本测试的核心，加健康门槛之后
+// 依然保留，只是多了一步等待门槛的前置条件。
 //
-// 变异验证：删掉 client.go runWatch 里 `if gotReady { backoff = minBackoff }`
+// 变异验证：删掉 client.go runWatch 里 `if healthy { backoff = minBackoff }`
 // 那几行，只留无条件 `backoff *= 2`，本测试最后一步会因为重连没能在
-// 宽限时间内完成而失败（已手工验证）。
+// 宽限时间内完成而失败（已手工验证，见 cleanup-report.md）。
 func TestWatchBackoffResetsAfterReady(t *testing.T) {
 	rejecter := &rejectingWatchServer{}
 	addr, stopRejecter := startStub(t, "", rejecter)
@@ -441,6 +445,11 @@ func TestWatchBackoffResetsAfterReady(t *testing.T) {
 	waitUntilTimeout(t, 15*time.Second, client.StreamHealthy,
 		"换上真实服务端后，StreamHealthy 未能在 15 秒内变为 true")
 
+	// 必须让这次连接存活超过 healthyConnDuration，退避复位的门槛才会
+	// 满足——仅仅收到过 ready 不够（见该常量的注释）。stub 收到 ready 后
+	// 只是空转等下一个事件，不会自己断开，这段时间里连接会一直存活。
+	time.Sleep(healthyConnDuration)
+
 	stopStub() // 制造一次"曾经健康"之后的断开——退避复位应该在这里生效。
 
 	// 必须先确认 StreamHealthy 真的翻到了 false，才能开始计时重连——
@@ -459,6 +468,82 @@ func TestWatchBackoffResetsAfterReady(t *testing.T) {
 	// 2.5 秒的宽限时间会让这条断言可靠地失败。
 	waitUntilTimeout(t, 2500*time.Millisecond, client.StreamHealthy,
 		"曾经健康过一次之后的重连未能在 2.5 秒内完成——退避疑似没有复位")
+}
+
+// flappingReadyServer 是只给
+// TestWatchBackoffDoesNotResetForShortLivedConnection 用的 AuthService
+// 实现：Watch 建立后立刻发一次 ready，Send 一成功就直接返回——服务端
+// 主动关闭这条流，从不像 stubServer 那样停留等待。用于制造"连上→吐一次
+// ready→立刻断开"这种典型抖动，连接存活时间是一次本机回环 RPC 的量级
+// （通常远低于 1 毫秒），远低于 healthyConnDuration（5 秒）。
+type flappingReadyServer struct {
+	fpv1.UnimplementedAuthServiceServer
+	attempts atomic.Int64
+}
+
+func (s *flappingReadyServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fpv1.WatchResponse]) error {
+	s.attempts.Add(1)
+	return stream.Send(&fpv1.WatchResponse{
+		Event: &fpv1.WatchResponse_Ready{Ready: &fpv1.WatchReady{}},
+	})
+	// Send 成功后直接 return nil：服务端主动结束这个 RPC，客户端的下一次
+	// stream.Recv() 会拿到 io.EOF。gotReady 已经是 true，但连接寿命只有
+	// 这次 Send 的耗时。
+}
+
+// TestWatchBackoffDoesNotResetForShortLivedConnection 守住新加的健康
+// 门槛：仅仅"收到过 ready"不足以复位退避，连接还必须存活超过
+// healthyConnDuration。
+//
+// 少了这个门槛，一个"连上→吐一次 ready→立刻断开"式抖动的服务端会让
+// SDK 反复把退避打回 minBackoff，以约 1/minBackoff（200ms，即约每秒 5
+// 次）的频率持续冲击一个本就不稳的服务端，而不是随着连续失败退避增长。
+//
+// 装配：先用 rejectingWatchServer 把退避顶到远高于 minBackoff（与
+// TestWatchBackoffResetsAfterReady 完全相同的手法）；换上
+// flappingReadyServer——它会发 ready 但立刻断开，连接存活时间远低于
+// healthyConnDuration；记录它第一次被连接的时刻，再等它第二次被连接，
+// 用两次连接之间的真实间隔来判断退避是否被复位：
+//
+//   - 若退避被这次"收到 ready 但秒断"的连接错误复位，下一次重连会在
+//     minBackoff（200ms）量级重新发生；
+//   - 若退避正确地没有被复位，ramp-up 阶段已经把它顶到至少 1.6 秒
+//     （见 TestWatchBackoffResetsAfterReady 的推导），中途没有任何一次
+//     真正健康的长连接把它打回去，间隔至少还是这个量级。
+//
+// 1.2 秒的门槛在两者之间留了足够裕量，不依赖精确计时。
+func TestWatchBackoffDoesNotResetForShortLivedConnection(t *testing.T) {
+	rejecter := &rejectingWatchServer{}
+	addr, stopRejecter := startStub(t, "", rejecter)
+	t.Cleanup(func() { stopRejecter() })
+
+	client, err := New(Options{Addr: addr, AppID: "t", AppSecret: "t", Insecure: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	waitUntilTimeout(t, 15*time.Second, func() bool { return rejecter.attempts.Load() >= 4 },
+		"退避增长阶段：Watch 未能在 15 秒内累计失败 4 次")
+	stopRejecter()
+
+	flapper := &flappingReadyServer{}
+	_, stopFlapper := startStub(t, addr, flapper)
+	t.Cleanup(func() { stopFlapper() })
+
+	waitUntilTimeout(t, 15*time.Second, func() bool { return flapper.attempts.Load() >= 1 },
+		"换上会立刻断开的服务端后，15 秒内未见到第一次连接尝试")
+	firstAttemptAt := time.Now()
+
+	waitUntilTimeout(t, 15*time.Second, func() bool { return flapper.attempts.Load() >= 2 },
+		"15 秒内未见到第二次连接尝试")
+	gap := time.Since(firstAttemptAt)
+
+	if gap < 1200*time.Millisecond {
+		t.Fatalf("换服务端后两次连接尝试间隔只有 %s，退避疑似被短命连接错误复位——"+
+			"这次连接存活时间远低于 healthyConnDuration=%s，不该让退避回到 minBackoff",
+			gap, healthyConnDuration)
+	}
 }
 
 // goroutineCountAfterSettling 反复采样 runtime.NumGoroutine()，等它连续

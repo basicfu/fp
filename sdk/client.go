@@ -111,6 +111,18 @@ func (c *Client) Close() error {
 	return err
 }
 
+// healthyConnDuration 是判定"这次连接足够健康、可以复位退避"所需的最短
+// 存活时长。
+//
+// 仅仅"收到过 ready"不足以说明这次连接是健康的：fp 若出现"连上→吐一次
+// ready→立刻断开"式抖动（比如刚起来就被压垮、或反复被探活探针打断），
+// 一样会先发出 ready 再断开。只看 gotReady 复位的话，SDK 会以约
+// 1/minBackoff（200ms，约每秒 5 次）的频率持续冲击一个本就不稳的服务端，
+// 而不是随着连续失败让退避增长——这正是退避机制本来要防的事。加上这个
+// 存活时长门槛，把"曾经收到过 ready"收紧成"曾经收到过 ready、且这次
+// 连接撑过了这个门槛"，才有资格复位。
+const healthyConnDuration = 5 * time.Second
+
 // runWatch 维持推送流，断开后按退避重连，直到 ctx 取消。
 func (c *Client) runWatch(ctx context.Context) {
 	const (
@@ -120,6 +132,7 @@ func (c *Client) runWatch(ctx context.Context) {
 	backoff := minBackoff
 
 	for ctx.Err() == nil {
+		start := time.Now()
 		gotReady, err := c.watchOnce(ctx)
 		c.streamUp.Store(false)
 
@@ -127,13 +140,15 @@ func (c *Client) runWatch(ctx context.Context) {
 			return
 		}
 
-		// 退避复位：这次连接曾经收到过 ready，说明 fp 是健康的，这次断开
-		// 大概率是短暂抖动（网络毛刺、fp 的 MaxConnectionAge 主动回收
-		// 连接）而不是长时间故障，重连节奏应该从头开始，不能沿用断开前
-		// 累积的退避——否则一次长时间的 fp 故障之后，后续任何一次短暂
-		// 抖动都要等满 maxBackoff 才重连。只有连 ready 都没等到（fp 本身
-		// 就没起来）才继续按原节奏增长。
-		if gotReady {
+		// 退避复位：这次连接不仅收到过 ready，还存活超过了
+		// healthyConnDuration（见其注释），说明 fp 真的是健康的，这次
+		// 断开大概率是短暂抖动（网络毛刺、fp 的 MaxConnectionAge 主动
+		// 回收连接）而不是长时间故障，重连节奏应该从头开始，不能沿用
+		// 断开前累积的退避——否则一次长时间的 fp 故障之后，后续任何一次
+		// 短暂抖动都要等满 maxBackoff 才重连。没达到门槛的（连 ready 都
+		// 没等到，或者收到 ready 后转瞬即断）都继续按原节奏增长。
+		healthy := gotReady && time.Since(start) >= healthyConnDuration
+		if healthy {
 			backoff = minBackoff
 		}
 
@@ -145,7 +160,7 @@ func (c *Client) runWatch(ctx context.Context) {
 			return
 		case <-time.After(backoff):
 		}
-		if !gotReady {
+		if !healthy {
 			if backoff *= 2; backoff > maxBackoff {
 				backoff = maxBackoff
 			}
