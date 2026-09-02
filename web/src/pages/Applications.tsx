@@ -148,6 +148,26 @@ function CreateDialog({
 }
 
 /**
+ * copyAppSecret 把 appSecret 写入剪贴板，失败时给出提示而不是悄悄没反应。
+ *
+ * 两种失败都要接住：(1) navigator.clipboard 在非安全上下文（http 且非
+ * localhost）下整个是 undefined，直接调用会抛错；(2) 即使存在，
+ * writeText() 也可能因为权限被拒绝等原因 reject。之前的写法只有
+ * `.then(() => toast.success(...))`，没有 `.catch`——用户点了没反应，
+ * 控制台还会留一条未处理的 rejection（与 auth.tsx 的 logout() 是同一类
+ * 问题）。
+ */
+async function copyAppSecret(secret: string) {
+  try {
+    if (!navigator.clipboard) throw new Error('clipboard API 不可用')
+    await navigator.clipboard.writeText(secret)
+    toast.success('已复制')
+  } catch {
+    toast.error('复制失败，请手动选中复制')
+  }
+}
+
+/**
  * SecretDialog 展示刚创建出的明文 appSecret。
  *
  * 后端只在创建响应里返回这一次，之后无法读回（库里只有 bcrypt 哈希）。
@@ -155,8 +175,22 @@ function CreateDialog({
  */
 function SecretDialog({ value, onClose }: { value: CreateApplicationResponse | null; onClose: () => void }) {
   return (
-    <Dialog open={value !== null} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+    <Dialog
+      open={value !== null}
+      // appSecret 只在创建时返回这一次，后端库里只存了 bcrypt 哈希，没有
+      // "重新生成"接口——意外关闭这个弹窗（手滑点到遮罩外、习惯性按
+      // Escape）会让密钥永久丢失，只能整个应用作废重建，appId 也会跟着变，
+      // 下游已配置的 SDK 接入方随之失效。disablePointerDismissal 在源头
+      // 拦掉点遮罩（outsidePress）；但它只管 outsidePress，不管 Escape
+      // （@base-ui/react 的 DialogInteractions 里 escapeKey 判断只看
+      // isTopmost，不看 disablePointerDismissal，两者是分开的开关）。所以
+      // onOpenChange 干脆不响应任何 base-ui 内部发起的关闭请求（Escape、
+      // 万一 showCloseButton default 被升级改回来时的 X 按钮）——唯一能
+      // 关闭它的只有下面"我已保存"按钮直接调用的 onClose()，不经过这里。
+      onOpenChange={() => {}}
+      disablePointerDismissal
+    >
+      <DialogContent showCloseButton={false}>
         <DialogHeader>
           <DialogTitle>应用已创建</DialogTitle>
         </DialogHeader>
@@ -178,12 +212,7 @@ function SecretDialog({ value, onClose }: { value: CreateApplicationResponse | n
           </div>
         )}
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => {
-              if (value) void navigator.clipboard?.writeText(value.appSecret).then(() => toast.success('已复制'))
-            }}
-          >
+          <Button variant="outline" onClick={() => value && void copyAppSecret(value.appSecret)}>
             复制 appSecret
           </Button>
           <Button onClick={onClose}>我已保存</Button>
