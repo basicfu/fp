@@ -90,3 +90,32 @@ test('GET 不带请求体也不带 Content-Type', async () => {
   expect(init.body).toBeUndefined()
   expect(new Headers(init.headers).get('Content-Type')).toBeNull()
 })
+
+// 【辨别力】fetch 在网络层直接失败（断网、连接被拒、fp 服务没启动）时抛出
+// 的是浏览器原生 TypeError，消息类似 "Failed to fetch"——不是 ApiError，
+// 也不是中文。本项目 UI 文案一律简体中文，这条错误必须在 api.ts 里就地
+// 包装掉，不能让英文原文一路冒泡到 Login 页面的错误提示上。
+test('网络层失败时包装为 ApiError，状态码 0，消息为中文且不含原始英文', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+  const err = (await api.get('/applications').catch((e) => e)) as ApiError
+  expect(err).toBeInstanceOf(ApiError)
+  expect(err.status).toBe(0)
+  expect(err.message).toMatch(/[一-龥]/)
+  expect(err.message).not.toContain('Failed to fetch')
+  expect(err.message).not.toContain('fetch')
+})
+
+test('PATCH 请求方法正确', async () => {
+  const spy = stubFetch(new Response('{}', { status: 200 }))
+  await api.patch('/applications/1', { name: 'B' })
+  const init = spy.mock.calls[0][1] as RequestInit
+  expect(init.method).toBe('PATCH')
+})
+
+test('DELETE 请求方法正确', async () => {
+  const spy = stubFetch(new Response(null, { status: 204 }))
+  await api.del('/applications/1')
+  const init = spy.mock.calls[0][1] as RequestInit
+  expect(init.method).toBe('DELETE')
+})

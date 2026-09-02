@@ -40,7 +40,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     init.body = JSON.stringify(body)
   }
 
-  const res = await fetch(BASE + path, init)
+  let res: Response
+  try {
+    res = await fetch(BASE + path, init)
+  } catch {
+    // fetch 在网络层直接失败（断网、连接被拒、fp 服务没启动）时抛出的是
+    // 浏览器原生 TypeError（消息类似 "Failed to fetch"），既不是 ApiError，
+    // 也不是中文——原样冒泡到页面会让用户在 Login.tsx 的 catch 里看到一句
+    // 看不懂的英文。统一包装成 ApiError，状态码用 0 表示"请求没能到达
+    // 服务器"（与后端可能返回的任何真实 HTTP 状态码都不冲突）。
+    throw new ApiError(0, '无法连接到服务器，请检查网络或确认 fp 服务已启动')
+  }
 
   if (res.status === 401) {
     onUnauthorized()

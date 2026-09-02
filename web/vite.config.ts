@@ -20,5 +20,9 @@ export default defineConfig({
     // 刻意不开 globals：它只影响运行时，TypeScript 依然不认识 test/expect，
     // tsc -b 会报 TS2593/TS2304。每个测试文件顶部显式 import 即可。
     globals: false,
+    // @testing-library/react 的自动清理靠探测全局 afterEach 触发，globals
+    // 关闭后探测不到，组件测试之间不会自动 unmount（详见 test-setup.ts 里的
+    // 注释）。这里手动接上，否则每个用到 render() 的测试文件都要重复踩坑。
+    setupFiles: ['./src/test-setup.ts'],
   },
 })

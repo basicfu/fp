@@ -1,0 +1,41 @@
+import { Navigate, Route, Routes } from 'react-router'
+import Layout from '@/components/Layout'
+import Login from '@/pages/Login'
+import { useAuth } from '@/lib/auth'
+
+/**
+ * RequireAuth 把未登录的访问送回登录页。
+ *
+ * loading 期间渲染一个空白占位而不是直接跳转：首次进入时 /me 还没回来，
+ * 直接跳转会让已登录用户先看到一次登录页闪烁。
+ */
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { status } = useAuth()
+  if (status === 'loading') return <div className="p-8 text-sm text-muted-foreground">加载中…</div>
+  if (status === 'anon') return <Navigate to="/login" replace />
+  return <>{children}</>
+}
+
+export default function AppRoutes() {
+  const { status } = useAuth()
+
+  return (
+    <Routes>
+      <Route
+        path="/login"
+        element={status === 'authed' ? <Navigate to="/applications" replace /> : <Login />}
+      />
+      <Route
+        element={
+          <RequireAuth>
+            <Layout />
+          </RequireAuth>
+        }
+      >
+        <Route path="/" element={<Navigate to="/applications" replace />} />
+        {/* 后续任务把应用与用户页面挂在这里 */}
+      </Route>
+      <Route path="*" element={<Navigate to="/applications" replace />} />
+    </Routes>
+  )
+}
