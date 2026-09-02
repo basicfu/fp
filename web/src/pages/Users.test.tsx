@@ -59,13 +59,14 @@ test('URL 上的 page 是非法值时，分页显示第 1 页而不是第 NaN �
   await waitFor(() => expect(screen.getByText(/第 1 \/ 1 页/)).toBeTruthy())
 })
 
-// 【辨别力】搜索框是非受控组件（defaultValue，不是 value+onChange）。
-// 提交搜索走的是 setSp()，这类只改查询参数的导航在同一个
+// 【辨别力】搜索框是受控组件：keywordInput 这个本地 state 才是"真身"，
+// 一个 useEffect 在 keyword（来自 URL）变化时把它同步过去。提交搜索、
+// 点分页、切状态筛选走的都是 setSp()，这类只改查询参数的导航在同一个
 // <Route path="/users"> 上只会重渲染 Users、不会重新挂载它——浏览器
-// "后退/前进"到一个不同的 ?keyword= 时同样如此。不给输入框一个随
-// keyword 变化的 key，defaultValue 就不会在这类重渲染里重新生效：
-// 后退到"没有关键词"的历史记录后，地址栏和表格数据都变了，输入框里
-// 却还留着后退前敲的字，用户会以为筛选没生效。
+// "后退/前进"到一个不同的 ?keyword= 时同样如此。如果那个 useEffect 被
+// 删掉或者依赖数组写错，keywordInput 就不会跟着 keyword 回退：后退到
+// "没有关键词"的历史记录后，地址栏和表格数据都变了，输入框里却还留着
+// 后退前敲的字，用户会以为筛选没生效。
 test('浏览器后退到没有关键词的历史记录时，搜索框回填为空', async () => {
   stubFetchSequence(
     new Response(JSON.stringify(emptyList()), { status: 200 }), // 初次 GET /users
@@ -94,4 +95,40 @@ test('浏览器后退到没有关键词的历史记录时，搜索框回填为�
     const box = screen.getByPlaceholderText('手机号 / 用户名 / 昵称') as HTMLInputElement
     expect(box.value).toBe('')
   })
+})
+
+// 【辨别力】这条测试守住的是"提交搜索不能把输入框卸载重挂"这件事本身。
+// 旧实现给输入框加了 key={keyword} 来让后退时的回填生效（见上一条测试），
+// 副作用是提交搜索同样会让 keyword 变化——key 一变，React 会把这个
+// <Input> 卸载再重新挂载成一个新的 DOM 节点，焦点也随之丢失（浏览器和
+// jsdom 都一样：节点被移除后 document.activeElement 掉回 body，不会自动
+// 转移到新节点上）。键盘用户按 Enter 提交搜索后，光标会莫名跳出输入框。
+// 现在的受控实现不再需要 key：提交时 keywordInput 已经等于新 keyword，
+// 那个同步用的 useEffect 是 no-op，节点全程没有被替换过，焦点不会丢。
+test('提交搜索后输入框仍然持有焦点，不会因为组件重挂而跳出', async () => {
+  stubFetchSequence(
+    new Response(JSON.stringify(emptyList()), { status: 200 }), // 初次 GET /users
+    new Response(JSON.stringify(emptyList()), { status: 200 }), // 搜索后 GET /users?keyword=138
+  )
+  renderUsers(['/users'])
+
+  const input = (await waitFor(() =>
+    screen.getByPlaceholderText('手机号 / 用户名 / 昵称'),
+  )) as HTMLInputElement
+  const form = input.closest('form')
+  if (!form) throw new Error('未找到搜索表单')
+
+  input.focus()
+  expect(document.activeElement).toBe(input)
+
+  fireEvent.change(input, { target: { value: '138' } })
+  fireEvent.submit(form)
+
+  await waitFor(() => {
+    expect((screen.getByPlaceholderText('手机号 / 用户名 / 昵称') as HTMLInputElement).value).toBe('138')
+  })
+  // 同一个 DOM 节点应该还在文档里持有焦点——不是"又找到一个值对的输入框"，
+  // 而是这个输入框自己没有被换掉。
+  expect(document.activeElement).toBe(input)
+  expect(document.body.contains(input)).toBe(true)
 })

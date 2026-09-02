@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -31,6 +32,14 @@ export default function Users() {
     [page, keyword, status],
   )
 
+  // 搜索框是受控组件，本地状态是"真身"，keyword（来自 URL）只在它变化时
+  // 单向同步进来——见下面 Input 旁边的注释，这是为了不让提交搜索时的
+  // 卸载重挂把输入框焦点弄丢。
+  const [keywordInput, setKeywordInput] = useState(keyword)
+  useEffect(() => {
+    setKeywordInput(keyword)
+  }, [keyword])
+
   function update(next: Record<string, string>) {
     const q = new URLSearchParams(sp)
     for (const [k, v] of Object.entries(next)) {
@@ -48,27 +57,30 @@ export default function Users() {
         className="flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
           e.preventDefault()
-          const v = new FormData(e.currentTarget).get('keyword')
           // 改搜索条件必须回到第 1 页：停在第 5 页搜一个只有 3 条结果的
           // 关键词，会得到一张空表，看起来像"搜不到"。
-          update({ keyword: String(v ?? ''), page: '' })
+          update({ keyword: keywordInput, page: '' })
         }}
       >
         {/*
-          key={keyword}：这个输入框是非受控的（defaultValue，不是
-          value+onChange），故意的——键入过程不必每敲一下就触发整个页面
-          重渲染。但非受控组件的 defaultValue 只在"挂载那一刻"生效，
-          之后就不再跟随 props 更新。问题是：提交搜索、点分页、切状态
-          筛选走的都是 setSp()，这类只改查询参数的导航在同一个
-          <Route path="/users"> 上只会重渲染 Users，不会重新挂载它——
-          浏览器"后退/前进"到一个不同的 ?keyword= 时同样如此。不加 key
-          的话，后退到"没有关键词"的历史记录，地址栏和表格数据都变了，
-          这个输入框里却还留着后退前敲的字，用户会以为筛选没生效。
-          key 随 keyword 变化，等于是在"关键词真的变了"这一刻强制卸载
-          重挂输入框，让新的 defaultValue 重新生效——按下搜索按钮时
-          keyword 恰好等于用户刚敲的内容，这次重挂不会造成任何可见跳变。
+          这个输入框曾经是非受控的（key={keyword} + defaultValue），靠
+          key 随 keyword 变化去强制卸载重挂来让后退/前进时的回填生效——
+          但提交搜索同样会让 keyword 变化，一按 Enter，输入框就被卸载
+          重挂一次，光标/焦点随之丢失，键盘用户会看到焦点跳出输入框。
+          现在改成受控：keywordInput 这个本地 state 才是输入框的"真身"，
+          下面的 useEffect 只在 keyword（来自 URL）变化时把它同步过去。
+          提交搜索时 keywordInput 已经等于新 keyword，effect 是
+          no-op，节点不会被卸载，焦点保得住；浏览器后退导致 keyword
+          变回旧值时，effect 把 keywordInput 更新回去，输入框跟着回填，
+          节点同样没有被卸载重挂过。
         */}
-        <Input key={keyword} name="keyword" defaultValue={keyword} placeholder="手机号 / 用户名 / 昵称" className="w-64" />
+        <Input
+          name="keyword"
+          value={keywordInput}
+          onChange={(e) => setKeywordInput(e.target.value)}
+          placeholder="手机号 / 用户名 / 昵称"
+          className="w-64"
+        />
         <Button type="submit" variant="secondary">搜索</Button>
 
         <Select

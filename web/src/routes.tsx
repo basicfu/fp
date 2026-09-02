@@ -4,6 +4,7 @@ import Login from '@/pages/Login'
 import Applications from '@/pages/Applications'
 import ApplicationDetail from '@/pages/ApplicationDetail'
 import Users from '@/pages/Users'
+import UserDetail from '@/pages/UserDetail'
 import { useAuth } from '@/lib/auth'
 
 /**
@@ -39,7 +40,7 @@ export default function AppRoutes() {
         <Route path="/applications" element={<Applications />} />
         <Route path="/applications/:id" element={<ApplicationDetail />} />
         <Route path="/users" element={<Users />} />
-        {/* 后续任务把用户详情页面挂在这里 */}
+        <Route path="/users/:id" element={<UserDetail />} />
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>
