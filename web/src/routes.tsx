@@ -3,6 +3,7 @@ import Layout from '@/components/Layout'
 import Login from '@/pages/Login'
 import Applications from '@/pages/Applications'
 import ApplicationDetail from '@/pages/ApplicationDetail'
+import Users from '@/pages/Users'
 import { useAuth } from '@/lib/auth'
 
 /**
@@ -37,7 +38,8 @@ export default function AppRoutes() {
         <Route path="/" element={<Navigate to="/applications" replace />} />
         <Route path="/applications" element={<Applications />} />
         <Route path="/applications/:id" element={<ApplicationDetail />} />
-        {/* 后续任务把用户页面挂在这里 */}
+        <Route path="/users" element={<Users />} />
+        {/* 后续任务把用户详情页面挂在这里 */}
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>
