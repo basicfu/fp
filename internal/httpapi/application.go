@@ -134,6 +134,55 @@ func (h *applicationHandler) updateSession(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
 }
 
+type updateApplicationRequest struct {
+	Name         string `json:"name"`
+	CookieDomain string `json:"cookieDomain"`
+}
+
+// update 修改应用展示名与 cookie 作用域。
+// 会话策略与启停各有自己的接口，这里不受理——理由见 service.Update 的注释。
+func (h *applicationHandler) update(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req updateApplicationRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	app, err := h.svc.Update(r.Context(), id, req.Name, req.CookieDomain)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
+}
+
+type setApplicationStatusRequest struct {
+	Status string `json:"status"`
+}
+
+func (h *applicationHandler) setStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req setApplicationStatusRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	app, err := h.svc.SetStatus(r.Context(), id, req.Status)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
+}
+
 type connectorDTO struct {
 	Type    string         `json:"type"`
 	Enabled bool           `json:"enabled"`

@@ -207,3 +207,128 @@ func TestSetConnectorRejectsEmptyType(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
 }
+
+func TestSetStatusDisabledBlocksGetActive(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// 停用前拿得到
+	if _, err := svc.GetActiveByAppID(ctx, app.AppID); err != nil {
+		t.Fatalf("停用前 GetActiveByAppID: %v", err)
+	}
+
+	got, err := svc.SetStatus(ctx, app.ID, domain.ApplicationStatusDisabled)
+	if err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	if got.Status != domain.ApplicationStatusDisabled {
+		t.Fatalf("Status = %q, want DISABLED", got.Status)
+	}
+
+	// 停用后 GetActiveByAppID 必须拒绝，但 GetByAppID 仍然找得到——
+	// 这两者的区别正是"停用"而非"删除"的含义。
+	if _, err := svc.GetActiveByAppID(ctx, app.AppID); err == nil {
+		t.Fatal("停用后 GetActiveByAppID 仍然成功，停用形同虚设")
+	}
+	if _, err := svc.GetByAppID(ctx, app.AppID); err != nil {
+		t.Fatalf("停用后 GetByAppID 应仍可查到: %v", err)
+	}
+
+	// 能重新启用
+	if _, err := svc.SetStatus(ctx, app.ID, domain.ApplicationStatusActive); err != nil {
+		t.Fatalf("重新启用: %v", err)
+	}
+	if _, err := svc.GetActiveByAppID(ctx, app.AppID); err != nil {
+		t.Fatalf("重新启用后 GetActiveByAppID: %v", err)
+	}
+}
+
+func TestSetStatusRejectsUnknownStatus(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, bad := range []string{"", "disabled", "ENABLED", "DELETED"} {
+		if _, err := svc.SetStatus(ctx, app.ID, bad); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("status=%q err = %v, want ErrInvalidArgument", bad, err)
+		}
+	}
+}
+
+func TestSetStatusOnMissingApplication(t *testing.T) {
+	svc := newAppService(t)
+	if _, err := svc.SetStatus(context.Background(), uuid.New(), domain.ApplicationStatusDisabled); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestUpdateOnlyTouchesNameAndCookieDomain(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, secret, err := svc.Create(ctx, "旧名", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// 先把会话策略改成一组与默认值明显不同的值。必须先改：沿用默认值的话，
+	// "策略被清零"与"策略没动"在断言上有可能因为默认值本身含零值而无法区分。
+	want := domain.SessionPolicy{
+		IdleTimeoutSeconds:       3601,
+		IdleTimeoutMobileSeconds: 7202,
+		MaxLifetimeSeconds:       86403,
+		RotateIntervalSeconds:    604,
+		ExtendIntervalSeconds:    305,
+		TokenCacheTTLSeconds:     56,
+	}
+	if _, err := svc.UpdateSessionPolicy(ctx, app.ID, want); err != nil {
+		t.Fatalf("UpdateSessionPolicy: %v", err)
+	}
+
+	got, err := svc.Update(ctx, app.ID, "新名", "example.com")
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Name != "新名" {
+		t.Fatalf("Name = %q, want 新名", got.Name)
+	}
+	if got.CookieDomain != "example.com" {
+		t.Fatalf("CookieDomain = %q, want example.com", got.CookieDomain)
+	}
+	// slug 与 appId 是身份，改名不许动
+	if got.Slug != app.Slug || got.AppID != app.AppID {
+		t.Fatalf("slug/appId 被改动: %+v", got)
+	}
+	// 会话策略必须原封不动
+	if got.Session != want {
+		t.Fatalf("会话策略被改名连带改动了: got %+v, want %+v", got.Session, want)
+	}
+	// appSecret 必须仍然有效
+	if _, err := svc.VerifySecret(ctx, app.AppID, secret); err != nil {
+		t.Fatalf("改名后 appSecret 失效: %v", err)
+	}
+	// 状态必须仍是启用
+	if got.Status != domain.ApplicationStatusActive {
+		t.Fatalf("Status = %q, want ACTIVE", got.Status)
+	}
+}
+
+func TestUpdateRejectsEmptyName(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := svc.Update(ctx, app.ID, "", "example.com"); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}

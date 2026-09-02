@@ -138,9 +138,8 @@ func (s *ApplicationService) GetByAppID(ctx context.Context, appID string) (*dom
 // 状态语义将来若有变化（比如多出一种"只读"状态），改这里就够了，
 // 不需要去找"到底还有哪条路径没检查"。
 //
-// 注意：目前还没有把应用置为 DISABLED 的管理接口，这条分支只能由
-// 直接改库触发。这是刻意的：先让字段有意义，再在后续阶段补上开关，
-// 而不是反过来先做开关再发现没人校验。
+// 把应用置为 DISABLED 的管理入口见 SetStatus；该方法的注释说明了
+// 停用为什么不需要连带撤销已签发的 token。
 func (s *ApplicationService) GetActiveByAppID(ctx context.Context, appID string) (*domain.Application, error) {
 	app, err := s.GetByAppID(ctx, appID)
 	if err != nil {
@@ -195,6 +194,64 @@ func (s *ApplicationService) UpdateSessionPolicy(ctx context.Context, id uuid.UU
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新会话策略: %w", err)
+	}
+	return app, nil
+}
+
+// Update 修改应用的展示名与 cookie 作用域。
+//
+// 只碰这两列。slug 与 app_id 是应用的身份，已经被 SDK 配置、被其他系统
+// 引用，改掉等于换了一个应用；status 走 SetStatus；会话策略走
+// UpdateSessionPolicy。每样东西一个入口，避免一次"改名"顺手把别的字段
+// 覆盖成零值。
+func (s *ApplicationService) Update(ctx context.Context, id uuid.UUID, name, cookieDomain string) (*domain.Application, error) {
+	if name == "" {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "name 不能为空")
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE application SET
+			name          = $2,
+			cookie_domain = $3,
+			updated_at    = now()
+		WHERE id = $1
+		RETURNING `+applicationColumns, id, name, cookieDomain)
+
+	app, err := scanApplication(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.Errorf(domain.ErrNotFound, "应用不存在")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: 更新应用: %w", err)
+	}
+	return app, nil
+}
+
+// SetStatus 启用或停用应用。
+//
+// 停用不撤销任何已签发的 token，也不需要：应用是否启用由
+// GetActiveByAppID 在每次登录和每次 SDK 回源校验时重新判定，gRPC 拦截器
+// 的凭据缓存刻意不缓存应用状态（见 grpcapi.appVerifier 的注释）。所以
+// 停用的实际生效延迟上限就是该应用自己配置的 TokenCacheTTLSeconds
+// （SDK 本地缓存），在这里再撤销一遍只会制造第二个执行点。
+func (s *ApplicationService) SetStatus(ctx context.Context, id uuid.UUID, status string) (*domain.Application, error) {
+	switch status {
+	case domain.ApplicationStatusActive, domain.ApplicationStatusDisabled:
+	default:
+		return nil, domain.Errorf(domain.ErrInvalidArgument,
+			"未知的应用状态 %q，只接受 %s 或 %s",
+			status, domain.ApplicationStatusActive, domain.ApplicationStatusDisabled)
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE application SET status = $2, updated_at = now()
+		WHERE id = $1
+		RETURNING `+applicationColumns, id, status)
+
+	app, err := scanApplication(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.Errorf(domain.ErrNotFound, "应用不存在")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: 更新应用状态: %w", err)
 	}
 	return app, nil
 }

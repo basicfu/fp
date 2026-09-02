@@ -61,6 +61,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/applications", appH.list)
 			r.Post("/applications", appH.create)
 			r.Get("/applications/{id}", appH.get)
+			// PATCH 而不是 PUT：这两个接口都是**局部更新**，只碰自己那几列。
+			// 与下面 /session 的全量替换语义刻意不同。
+			r.Patch("/applications/{id}", appH.update)
+			r.Patch("/applications/{id}/status", appH.setStatus)
 			// PUT 而不是 PATCH：这个接口是整份会话策略的**全量替换**。
 			// decodeJSON 开了 DisallowUnknownFields、sessionPolicyDTO 六个字段
 			// 都是非指针、SessionPolicy.Validate 又要求六项全部有值——只发其中
