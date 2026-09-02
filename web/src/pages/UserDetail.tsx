@@ -240,7 +240,18 @@ function ResetPasswordDialog({
           </p>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              // 取消也要清空 pwd：不清的话，有人输入过密码但没提交就点了取消，
+              // 下一次打开这个弹窗（哪怕是别的管理员）会看到一个已经填好的
+              // 密码框。
+              setPwd('')
+              onOpenChange(false)
+            }}
+          >
+            取消
+          </Button>
           <Button disabled={busy || pwd === ''} onClick={() => void submit()}>确认重置</Button>
         </DialogFooter>
       </DialogContent>

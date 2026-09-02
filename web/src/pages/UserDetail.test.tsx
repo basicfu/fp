@@ -53,9 +53,22 @@ function renderDetail() {
   )
 }
 
-/** 数一下打到"在线设备"这个接口（不含单设备 DELETE）的请求发了几次。 */
+/**
+ * 数一下 GET /users/{id}/sessions（拉取在线设备列表）发了几次。
+ *
+ * 【复审第 1 轮修复】必须同时按 URL 和方法过滤，不能只看 URL：
+ * "全部下线"走的是 DELETE /users/{id}/sessions——和这个 GET 是完全相同
+ * 的 URL，只有方法不同。只按 URL 过滤的话，revokeAll 自己那次 DELETE
+ * 请求会被误计成一次"列表被拉取"，删掉 sessions.reload() 之后这里的
+ * 计数依然是 2（1 次初始 GET + 1 次自己的 DELETE），测试不会变红——
+ * 这个坑是靠变异测试才现出原形的：第一次删掉 revokeAll 里的
+ * sessions.reload() 后重跑测试，8/8 全绿，说明这条断言当时是摆设。
+ */
 function sessionsListCallCount(fetchMock: ReturnType<typeof vi.fn>) {
-  return fetchMock.mock.calls.filter(([url]) => url === '/admin/api/users/user-1/sessions').length
+  return fetchMock.mock.calls.filter(([url, init]) => {
+    if (url !== '/admin/api/users/user-1/sessions') return false
+    return (init as RequestInit | undefined)?.method === 'GET'
+  }).length
 }
 
 /** 点开"重置密码"弹窗，填入新密码并提交。调用方负责准备好 fetch 序列。 */
@@ -212,4 +225,37 @@ test('踢单个设备成功后，设备列表被重新拉取', async () => {
 
   await waitFor(() => expect(screen.getByText('没有在线设备')).toBeTruthy())
   expect(sessionsListCallCount(fetchMock)).toBe(2)
+})
+
+// 复审第 1 轮 Important：revokeAll 是四个会触发 reload 的操作
+// （冻结/重置密码/踢单个设备/全部下线）里唯一会去读自己响应体字段的——
+// UserDetail.tsx 里 `已下线 ${res.revoked} 个设备` 直接把 DELETE
+// /users/{id}/sessions 的响应体字段拼进提示文案。revokeOne 那条测试
+// 完全不碰响应体（它拿到 { revoked: 1 } 但从来不读），所以那条测试对
+// "字段名/形状漂移"这类回归的覆盖是零；revokeAll 也走一条不同的路径
+// （DELETE .../sessions 而不是 .../sessions/{sid}）。这条测试特意让
+// mock 返回 { revoked: 3 }（不是 1，避免"提示文案里凑巧出现别的数字"
+// 这种假阳性），断言里同时守两件独立的事：
+//   1. sessionsListCallCount === 2——全部下线后设备列表被重新拉取；
+//   2. toast.success 收到的文案精确是"已下线 3 个设备"——res.revoked
+//      这个字段真的被正确读出来拼进了提示，不是读到 undefined 或者
+//      读错了字段名。
+test('全部下线成功后，在线设备列表被重新拉取，且提示文案带上后端返回的下线数量', async () => {
+  const fetchMock = stubFetchSequence(
+    new Response(JSON.stringify(sampleUser), { status: 200 }), // GET 用户详情
+    new Response(JSON.stringify([sampleSession]), { status: 200 }), // GET 在线设备
+    new Response(JSON.stringify([]), { status: 200 }), // GET 登录日志
+    new Response(JSON.stringify({ revoked: 3 }), { status: 200 }), // DELETE 全部设备
+    new Response(JSON.stringify([]), { status: 200 }), // reload GET 在线设备——已清空
+  )
+  const successSpy = vi.spyOn(toast, 'success').mockImplementation(() => 'toast-id')
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('张三')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText('1.2.3.4')).toBeTruthy())
+
+  fireEvent.click(screen.getByRole('button', { name: '全部下线' }))
+
+  await waitFor(() => expect(sessionsListCallCount(fetchMock)).toBe(2))
+  expect(successSpy).toHaveBeenCalledWith('已下线 3 个设备')
 })
