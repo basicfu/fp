@@ -38,6 +38,16 @@ function initialValue(f: Field, saved: Values): unknown {
  *
  * 约束：Field.Key 必须是简单标识符，不能含 `.` 或 `[`——react-hook-form
  * 会把它们解释成嵌套路径。后端所有 ConfigSchema 目前都满足。
+ *
+ * bool 字段的可访问名：<Switch id={f.key}> 底层是 base-ui，nativeButton
+ * 默认 false 时会把这个 id 挪给内部隐藏的原生 checkbox，可见的
+ * role="switch" 根元素用的是自己生成的 id；但 base-ui 会自动探测兄弟
+ * <Label htmlFor={f.key}>，把它接到根元素的 aria-labelledby 上。所以
+ * 测试要用 getByRole('switch', { name }) 定位（只有根元素带
+ * role="switch"，隐藏 checkbox 是 aria-hidden，不会被 role 查询命中），
+ * 不能用 getByLabelText（隐藏 checkbox 经 label[for] 也关联得上，
+ * 两个元素都命中会报"找到多个元素"）。这样 Label 保留 htmlFor，
+ * 点文案依然能切换开关。
  */
 export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }: Props) {
   const defaults: Values = {}
@@ -84,24 +94,12 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
                 render={({ field }) => (
                   <Switch
                     id={f.key}
-                    // 不给旁边的 Label 设 htmlFor，只靠 aria-label 标注这个开关本身：
-                    // base-ui 的 Switch（nativeButton=false，即默认状态）把我们传入的
-                    // id 挪给了内部隐藏的原生 <input type="checkbox">，而不是带
-                    // role="switch"/aria-checked 的可见根元素；根元素的 id 是它
-                    // 自己生成的。这时如果 Label 用 htmlFor={f.key} 关联，
-                    // getByLabelText 会同时匹配到「隐藏 checkbox（经原生
-                    // label[for] 关联）」和「switch 根元素（base-ui 探测到那个
-                    // label 后自动把它接上根元素的 aria-labelledby）」两个元素，
-                    // 测试报"找到多个元素"而不是缺失——实测验证过，见
-                    // DynamicForm.test.tsx 里三条断言 getByLabelText(...).
-                    // getAttribute('aria-checked') 的用例。
-                    aria-label={f.label}
                     checked={Boolean(field.value)}
                     onCheckedChange={field.onChange}
                   />
                 )}
               />
-              <Label>{f.label}</Label>
+              <Label htmlFor={f.key}>{f.label}</Label>
             </div>
           ) : (
             <>

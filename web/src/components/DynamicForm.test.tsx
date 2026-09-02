@@ -15,7 +15,10 @@ test('按 schema 渲染出每个字段', () => {
   render(<DynamicForm fields={fields} values={{}} onSubmit={vi.fn()} />)
 
   expect(screen.getByLabelText('API 密钥')).toBeDefined()
-  expect(screen.getByLabelText('开启')).toBeDefined()
+  // bool 字段渲染成 Switch：可见的 role="switch" 根元素不是 htmlFor 关联的那个
+  // DOM 节点（见 DynamicForm.tsx 顶部注释），要用 getByRole 按可访问名定位，
+  // 不能用 getByLabelText——后者会同时命中隐藏的原生 checkbox 而报"多个元素"。
+  expect(screen.getByRole('switch', { name: '开启' })).toBeDefined()
 })
 
 test('展示字段的 help 文案', () => {
@@ -69,8 +72,8 @@ test('未配置过时采用 schema 声明的默认值', async () => {
   ]
   render(<DynamicForm fields={fields} values={{}} onSubmit={onSubmit} />)
 
-  expect(screen.getByLabelText('允许手机号').getAttribute('aria-checked')).toBe('true')
-  expect(screen.getByLabelText('允许邮箱').getAttribute('aria-checked')).toBe('false')
+  expect(screen.getByRole('switch', { name: '允许手机号' }).getAttribute('aria-checked')).toBe('true')
+  expect(screen.getByRole('switch', { name: '允许邮箱' }).getAttribute('aria-checked')).toBe('false')
 
   submitForm()
   await waitFor(() => expect(onSubmit).toHaveBeenCalled())
@@ -84,7 +87,7 @@ test('已有配置优先于 schema 默认值', () => {
   const fields: Field[] = [{ key: 'allowPhone', label: '允许手机号', type: 'bool', required: false, default: true }]
   render(<DynamicForm fields={fields} values={{ allowPhone: false }} onSubmit={vi.fn()} />)
 
-  expect(screen.getByLabelText('允许手机号').getAttribute('aria-checked')).toBe('false')
+  expect(screen.getByRole('switch', { name: '允许手机号' }).getAttribute('aria-checked')).toBe('false')
 })
 
 test('secret 字段渲染成密码输入框', () => {
@@ -107,6 +110,21 @@ test('非必填的空字符串不进入提交载荷', async () => {
 
   await waitFor(() => expect(onSubmit).toHaveBeenCalled())
   expect(onSubmit.mock.calls[0][0]).toEqual({ name: 'x' })
+})
+
+// 载荷规则的 int 版本：非必填的 int 字段留空，提交载荷里必须**没有**这个键，
+// 而不是变成 0。如果实现把空值转成 0 提交上去，后端 connector 里
+// ConfigInt(cfg, key, 30) 这样的默认值就会被 0 静默覆盖——配置文件里显式写
+// 一个 0 和"没配置这一项"是两个不同的语义，界面不能替管理员做这个决定。
+test('非必填的 int 字段留空不进入提交载荷', async () => {
+  const onSubmit = vi.fn()
+  const fields: Field[] = [{ key: 'ttl', label: '有效期', type: 'int', required: false }]
+  render(<DynamicForm fields={fields} values={{}} onSubmit={onSubmit} />)
+
+  submitForm()
+
+  await waitFor(() => expect(onSubmit).toHaveBeenCalled())
+  expect(onSubmit.mock.calls[0][0]).toEqual({})
 })
 
 // 【辨别力】未来后端加了新的 FieldType，前端不许白屏。
