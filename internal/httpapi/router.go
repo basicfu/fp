@@ -42,6 +42,11 @@ func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	// 管理控制台第一次给 fp 带来浏览器 UI：没有这个头，已登录管理员访问
+	// 一个恶意页面就可能被 iframe 嵌套后 clickjack 成一次"停用应用"之类的
+	// 点击。放在最前面而不是只加在 /admin/api 或静态兜底其中一支，保证
+	// 三类响应（/healthz、/admin/api/*、静态兜底）都带上。
+	r.Use(xFrameOptionsDeny)
 
 	ah := &adminHandler{svc: d.Admin, secureCookies: d.SecureCookies}
 	appH := &applicationHandler{svc: d.Apps}
@@ -100,7 +105,16 @@ func NewRouter(d Deps) http.Handler {
 
 	// 放在最后：chi 的路由匹配偏好更具体的模式，/healthz 与 /admin/api/*
 	// 都比 /* 具体，不会被这条吃掉。
-	r.Handle("/*", newStaticHandler(d.Console))
+	//
+	// 【终审】只对 GET/HEAD 注册，不能用 r.Handle（对全部方法生效）。
+	// 前端某处如果漏写 /admin/api 前缀，DELETE/PATCH/PUT 这类写请求会落到
+	// 这条通配；如果不管方法一律回 200 + index.html，前端 api.ts 会在
+	// res.json() 上抛一个和"URL 前缀写错"毫无关系的解析错误，事故排查
+	// 会被带偏。GET/HEAD 之外的方法交给 chi 的默认行为（找不到匹配方法时
+	// 405，路径本身也未知时 404），都不是 200。
+	console := newStaticHandler(d.Console)
+	r.Get("/*", console.ServeHTTP)
+	r.Head("/*", console.ServeHTTP)
 
 	return r
 }

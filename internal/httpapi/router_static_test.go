@@ -70,6 +70,30 @@ func TestRouterAPINotFoundStaysJSON(t *testing.T) {
 	}
 }
 
+// 【终审必须修】管理控制台在这条分支之前没有任何浏览器 UI，缺
+// X-Frame-Options 之前是纯理论问题；现在控制台能被 <iframe> 嵌入的话，
+// 已登录管理员访问一个恶意页面就可能被 clickjack 成一次"停用应用"之类的
+// 点击。这条断言响应头在三类路径上都存在：/healthz（不经过 /admin/api
+// 分组）、/admin/api 下的 404（经过 /admin/api 分组但不经过
+// requireAdmin，因为路由树匹配阶段就没找到）、静态兜底（/* 通配，走的是
+// newStaticHandler）——覆盖 r.Use 中间件链能触达的全部三条分支，
+// 不只测其中一条侥幸过关的路径。
+func TestRouterSetsXFrameOptionsDenyOnAllPaths(t *testing.T) {
+	h := httpapi.NewRouter(httpapi.Deps{Console: builtConsole()})
+
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/healthz", nil),
+		httptest.NewRequest(http.MethodGet, "/admin/api/no-such-endpoint", nil),
+		httptest.NewRequest(http.MethodGet, "/", nil),
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Fatalf("%s: X-Frame-Options = %q, want %q——控制台可以被 iframe 嵌套，已登录管理员能被 clickjack", req.URL.Path, got, "DENY")
+		}
+	}
+}
+
 // /healthz 是显式注册的路由，不能被 /* 通配吃掉。
 //
 // 同样用零值 Deps 装配：/healthz 的 handler
@@ -86,6 +110,32 @@ func TestRouterHealthzNotShadowedByStatic(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "id=root") {
 		t.Fatal("/healthz 返回了 index.html")
+	}
+}
+
+// 【终审】静态兜底 r.Handle("/*", ...) 之前对所有 HTTP 方法都生效。
+//
+// 失败场景：前端某处漏写 /admin/api 前缀，DELETE /users/123 本该打到
+// /admin/api/users/123，写错后落到这条 /* 通配，兜底 handler 不管方法一律
+// 回 200 + index.html——前端 api.ts 的 request() 看到 200 会继续
+// res.json()，jsdom/浏览器把这段 HTML 当 JSON 解析会抛一个和"URL 前缀写
+// 错"毫无关系的语法错误，几乎没法从错误消息联想到真实原因。改成只对
+// GET/HEAD 回退之后，非法方法应当拿到 404 或 405（chi 默认行为），而不是
+// 200——用两个都断言，不管 chi 具体选哪个都算过，但绝不能是 200。
+func TestStaticOnlyFallsBackForGetAndHead(t *testing.T) {
+	h := httpapi.NewRouter(httpapi.Deps{Console: builtConsole()})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/some/spa/path", nil))
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("DELETE /some/spa/path 返回了 200，body = %q——非 GET/HEAD 方法不应该拿到 SPA 回退", rec.Body.String())
+	}
+	if rec.Code != http.StatusMethodNotAllowed && rec.Code != http.StatusNotFound {
+		t.Fatalf("DELETE /some/spa/path code = %d，想要 404 或 405", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "id=root") {
+		t.Fatalf("DELETE /some/spa/path 的响应体里出现了 index.html 的内容：%q", rec.Body.String())
 	}
 }
 
