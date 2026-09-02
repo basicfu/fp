@@ -45,7 +45,17 @@ export function useResource<T>(load: () => Promise<T>, deps: unknown[]): Resourc
       alive = false
     }
     // load 每次渲染都是新函数，不能进依赖数组；由调用方通过 deps 声明。
-  }, [...deps, nonce]) // eslint-disable-line react-hooks/exhaustive-deps
+    //
+    // 【终审】这里不是 ESLint 项目（没有 ESLint 配置，lint 用的是
+    // oxlint），下面这行原来挂着一条 `// eslint-disable-line
+    // react-hooks/exhaustive-deps`，但一行都没抑制到——纯粹是误导：下一个
+    // 人会以为这里的"少依赖"是权衡过、已经被 lint 工具确认过的。实测跑
+    // `npx oxlint`，这段代码周围依然会报 react-hooks(exhaustive-deps)
+    // （缺 load 依赖、依赖数组里有 spread 属于"复杂表达式"两条）和
+    // react(set-state-in-effect)，一条都没被压下去。这里的选择（deps 由
+    // 调用方声明、不把 load 本身放进依赖数组）是刻意的、行为正确，已记为
+    // 可推迟消掉的告警，不是也从来没有靠这行注释压下去的。
+  }, [...deps, nonce])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
   return { data, loading, error, reload }
