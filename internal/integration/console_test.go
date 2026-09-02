@@ -59,8 +59,18 @@ func TestConsoleDistGitkeepTrackedByGit(t *testing.T) {
 // 为什么不直接断言"必须有 index.html"：仓库里 web/dist/ 只提交了
 // .gitkeep，任何没跑过 ./scripts/build-web.sh 的开发环境和 CI 都会是空的，
 // 硬性要求会让全量测试在干净 clone 上必红。所以这里断言的是**一致性**：
-// 有 index.html 就必须同时有 assets/ 下的产物；两者都没有则跳过。
-// 缺一半的状态（比如构建到一半被打断）会被这条抓住。
+// 有 index.html 就必须同时有 assets/ 下的产物；dist 目录的内容等价于
+// "完全没构建过"（为空，或只剩 .gitkeep）则跳过。缺一半的状态（比如
+// 构建到一半被打断、手滑删掉 index.html 但留下了 assets/ 里的旧产物、
+// 切分支后残留另一次构建的文件）都会被这条抓住。
+//
+// 注意 skip 的判断条件是"根目录内容等价于未构建"，不是"index.html 不
+// 存在"——这两者不对称：只看 index.html 在不在的话，"index.html 缺失但
+// assets/ 下还有旧的 .js/.css"这个半吊子状态会被误判成"未构建"而直接
+// 跳过，永远走不到下面的完整性检查，而这恰恰是本测试注释开头点名要抓的
+// 场景。复审时用"删掉 web/dist/index.html、保留 assets/"这个状态做过
+// 变异验证：旧版（只看 index.html 在不在）在这个状态下 SKIP（假绿），
+// 修复后的版本在同一状态下 Fatal。
 //
 // 这条测试和上面的 TestConsoleDistGitkeepTrackedByGit 互补：那条守的是
 // "版本库里有没有一个能让 go build 通过的占位文件"，这条守的是"如果本机
@@ -69,8 +79,23 @@ func TestConsoleDistGitkeepTrackedByGit(t *testing.T) {
 func TestEmbeddedConsoleIsPresentOrClearlyAbsent(t *testing.T) {
 	dist := web.Dist()
 
+	rootEntries, err := fs.ReadDir(dist, ".")
+	if err != nil {
+		t.Fatalf("读取 web/dist 根目录失败: %v", err)
+	}
+	if distRootLooksUnbuilt(rootEntries) {
+		t.Skip("前端未构建（web/dist 为空，只有 .gitkeep）——跑 ./scripts/build-web.sh 后本测试才有意义")
+	}
+
+	// 走到这里说明 dist 根目录不是"完全没构建过"的状态（比如有 assets/
+	// 目录本身、或其他构建产物的残留），此时必须要求 index.html 也在，
+	// 否则就是上面注释里说的那种缺一半的半吊子状态。
 	if _, err := fs.Stat(dist, "index.html"); err != nil {
-		t.Skip("前端未构建（web/dist 为空）——跑 ./scripts/build-web.sh 后本测试才有意义")
+		t.Fatalf(
+			"web/dist 根目录不止 .gitkeep（说明构建过，或残留了构建产物），却没有 index.html，"+
+				"前端产物不完整（可能是构建中途被打断，或手滑删掉了 index.html）: %v",
+			err,
+		)
 	}
 
 	entries, err := fs.ReadDir(dist, "assets")
@@ -89,4 +114,17 @@ func TestEmbeddedConsoleIsPresentOrClearlyAbsent(t *testing.T) {
 	if !hasJS || !hasCSS {
 		t.Fatalf("assets 里缺 js 或 css：hasJS=%v hasCSS=%v", hasJS, hasCSS)
 	}
+}
+
+// distRootLooksUnbuilt 判断 web/dist 根目录的内容是否等价于"完全没有
+// 构建过"：目录为空，或者只剩仓库提交的占位文件 .gitkeep。任何其他内容
+// （哪怕只是一个空的 assets/ 目录）都不算"未构建"，必须继续走完整性
+// 检查——这正是本测试要区分"没构建"与"构建到一半"这两种状态的关键。
+func distRootLooksUnbuilt(entries []fs.DirEntry) bool {
+	for _, e := range entries {
+		if e.Name() != ".gitkeep" {
+			return false
+		}
+	}
+	return true
 }
