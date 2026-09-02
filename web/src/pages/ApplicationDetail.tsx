@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams } from 'react-router'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -10,13 +11,18 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import ConnectorsPanel from '@/components/ConnectorsPanel'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
+import { applicationStatusLabels } from '@/lib/labels'
 import type { Application, SessionPolicy } from '@/lib/types'
 
 export default function ApplicationDetail() {
   const { id = '' } = useParams()
   const app = useResource(() => api.get<Application>(`/applications/${id}`), [id])
+  // 只有"停用"这个方向需要二次确认：它会拒绝该应用的全部新登录与 SDK 回源
+  // 校验，是四个破坏性操作之一。"启用"是恢复服务，不是破坏性操作，直接执行。
+  const [confirmingDisable, setConfirmingDisable] = useState(false)
 
   if (app.loading) return <p className="text-sm text-muted-foreground">加载中…</p>
   if (app.error) return <p className="text-sm text-destructive">{app.error}</p>
@@ -35,18 +41,38 @@ export default function ApplicationDetail() {
     }
   }
 
+  function onToggleStatusClick() {
+    if (a.status === 'ACTIVE') {
+      setConfirmingDisable(true)
+    } else {
+      void toggleStatus()
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <h1 className="text-xl font-semibold">{a.name}</h1>
         <Badge variant={a.status === 'ACTIVE' ? 'default' : 'secondary'}>
-          {a.status === 'ACTIVE' ? '启用' : '停用'}
+          {applicationStatusLabels[a.status] ?? a.status}
         </Badge>
         <div className="flex-1" />
-        <Button variant={a.status === 'ACTIVE' ? 'destructive' : 'default'} onClick={() => void toggleStatus()}>
+        <Button variant={a.status === 'ACTIVE' ? 'destructive' : 'default'} onClick={onToggleStatusClick}>
           {a.status === 'ACTIVE' ? '停用应用' : '启用应用'}
         </Button>
       </div>
+
+      <ConfirmDialog
+        open={confirmingDisable}
+        onOpenChange={setConfirmingDisable}
+        title="停用应用"
+        description={`停用后，「${a.name}」的全部新登录与 SDK 的下一次回源校验都会被拒绝。已签发的 token 最多还能在各接入方本地缓存里存活 ${a.session.tokenCacheTtlSeconds} 秒。此操作可以随时再次启用撤销，但停用期间会中断所有依赖该应用登录的下游服务。`}
+        confirmLabel="确认停用"
+        onConfirm={() => {
+          setConfirmingDisable(false)
+          void toggleStatus()
+        }}
+      />
 
       {a.status === 'DISABLED' && (
         <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">

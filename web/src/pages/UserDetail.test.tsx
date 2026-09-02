@@ -109,6 +109,10 @@ test('初次加载渲染身份、在线设备、登录日志三块数据', async
 // 显示在表格里的"僵尸设备"列表。断言方式刻意数请求次数而不是只看
 // UI 有没有报错——只看报错的话，删掉 sessions.reload() 这一行代码之后
 // 页面照样能正常渲染、不抛任何异常，测试却应该为此变红。
+// 【终审必须修】冻结账号现在要经过二次确认弹窗（ConfirmDialog）——弹窗
+// 内的确认按钮是"确认冻结"，与触发按钮"冻结账号"文案不同（照抄
+// ResetPasswordDialog 的先例：触发是"重置密码"、确认是"确认重置"），
+// 避免两个按钮同名导致 getByRole 命中多个元素。
 test('冻结账号成功后，在线设备列表被重新拉取', async () => {
   const frozenUser: User = { ...sampleUser, status: 'FROZEN' }
   const fetchMock = stubFetchSequence(
@@ -124,6 +128,8 @@ test('冻结账号成功后，在线设备列表被重新拉取', async () => {
   await waitFor(() => expect(screen.getByText('张三')).toBeTruthy())
 
   fireEvent.click(screen.getByRole('button', { name: '冻结账号' }))
+  const confirmBtn = await waitFor(() => screen.getByRole('button', { name: '确认冻结' }))
+  fireEvent.click(confirmBtn)
 
   // 等按钮文案翻成"解除冻结"，说明 user.reload() 那次 GET 已经跑完并
   // 重新渲染过——这一步只是确保下面数请求次数时冻结流程已经走完，
@@ -131,6 +137,31 @@ test('冻结账号成功后，在线设备列表被重新拉取', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: '解除冻结' })).toBeTruthy())
 
   expect(sessionsListCallCount(fetchMock)).toBe(2)
+})
+
+// 【终审 3(A) 的核心行为】二次确认弹窗必须真的能拦下操作，不能只是摆设。
+// 点"冻结账号"弹出弹窗后点"取消"，不能发出任何 PATCH /status 请求——
+// 用户的状态必须原封不动地停在 ACTIVE。
+test('冻结账号弹窗点取消，不会真的冻结账号', async () => {
+  const fetchMock = stubFetchSequence(
+    new Response(JSON.stringify(sampleUser), { status: 200 }),
+    new Response(JSON.stringify([sampleSession]), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+  )
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('张三')).toBeTruthy())
+
+  fireEvent.click(screen.getByRole('button', { name: '冻结账号' }))
+  const cancelBtn = await waitFor(() => screen.getByRole('button', { name: '取消' }))
+  fireEvent.click(cancelBtn)
+
+  // 给一点时间：如果实现有问题（比如取消按钮误接到了 onConfirm），
+  // 请求会在这段等待内被发出。
+  await new Promise((r) => setTimeout(r, 50))
+
+  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(false)
+  expect(screen.getByRole('button', { name: '冻结账号' })).toBeTruthy()
 })
 
 // 与上一条同理：管理员重置密码在 AccountService.ResetPassword 里同样会
@@ -240,6 +271,8 @@ test('踢单个设备成功后，设备列表被重新拉取', async () => {
 //   2. toast.success 收到的文案精确是"已下线 3 个设备"——res.revoked
 //      这个字段真的被正确读出来拼进了提示，不是读到 undefined 或者
 //      读错了字段名。
+// 【终审必须修】全部下线现在也要经过二次确认弹窗，确认按钮文案是
+// "确认全部下线"，与触发按钮"全部下线"不同名，理由同上一条冻结账号。
 test('全部下线成功后，在线设备列表被重新拉取，且提示文案带上后端返回的下线数量', async () => {
   const fetchMock = stubFetchSequence(
     new Response(JSON.stringify(sampleUser), { status: 200 }), // GET 用户详情
@@ -255,7 +288,32 @@ test('全部下线成功后，在线设备列表被重新拉取，且提示文�
   await waitFor(() => expect(screen.getByText('1.2.3.4')).toBeTruthy())
 
   fireEvent.click(screen.getByRole('button', { name: '全部下线' }))
+  const confirmBtn = await waitFor(() => screen.getByRole('button', { name: '确认全部下线' }))
+  fireEvent.click(confirmBtn)
 
   await waitFor(() => expect(sessionsListCallCount(fetchMock)).toBe(2))
   expect(successSpy).toHaveBeenCalledWith('已下线 3 个设备')
+})
+
+// 二次确认弹窗必须真的能拦下操作：点"取消"不能发出 DELETE /sessions。
+test('全部下线弹窗点取消，不会真的下线任何设备', async () => {
+  const fetchMock = stubFetchSequence(
+    new Response(JSON.stringify(sampleUser), { status: 200 }),
+    new Response(JSON.stringify([sampleSession]), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+  )
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('张三')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText('1.2.3.4')).toBeTruthy())
+
+  fireEvent.click(screen.getByRole('button', { name: '全部下线' }))
+  const cancelBtn = await waitFor(() => screen.getByRole('button', { name: '取消' }))
+  fireEvent.click(cancelBtn)
+
+  await new Promise((r) => setTimeout(r, 50))
+
+  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toBe(false)
+  // 设备行还在——没有被误删。
+  expect(screen.getByText('1.2.3.4')).toBeTruthy()
 })

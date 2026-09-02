@@ -119,3 +119,101 @@ test('延期间隔大于等于空闲超时时，前端拦截，不发请求且�
   // 只有初始加载那一次 GET，没有任何 PUT 打到 /session。
   expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false)
 })
+
+/** 从 fetchMock 里找出方法为 method 的那次调用，断言存在并返回 [url, init]。 */
+function findCall(fetchMock: ReturnType<typeof vi.fn>, method: string): [string, RequestInit] {
+  const call = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === method)
+  if (!call) throw new Error(`没有发出过 ${method} 请求`)
+  return call as [string, RequestInit]
+}
+
+// 【终审必须修：ApplicationDetail 的两个变更操作零测试】
+//
+// ApplicationStatusDisabled 从"只读不写的死常量"变成可写，是整个第三阶段
+// 的第一条需求，但停用/启用应用（toggleStatus → PATCH /status）此前没有
+// 任何前端测试。这条覆盖完整的往返：停用需要先经过二次确认弹窗（见
+// 终审第 3 条），确认后才真正发出 PATCH；停用成功、按钮翻成"启用应用"
+// 后再点一次，走的是另一条分支——不需要确认，直接发 PATCH。断言同时
+// 覆盖 URL 与 body：只断言"发了个 PATCH"的话，路径写成 /state 或 body
+// 形状写错都不会被这条测试抓到。
+test('停用应用需要二次确认才发 PATCH status=DISABLED；启用应用直接发 PATCH status=ACTIVE', async () => {
+  const disabledApp: Application = { ...baseApp, status: 'DISABLED' }
+  const fetchMock = stubFetchSequence(
+    new Response(JSON.stringify(baseApp), { status: 200 }), // GET 详情（ACTIVE）
+    new Response(JSON.stringify(disabledApp), { status: 200 }), // PATCH /status → DISABLED
+    new Response(JSON.stringify(disabledApp), { status: 200 }), // 停用后 reload GET
+    new Response(JSON.stringify(baseApp), { status: 200 }), // PATCH /status → ACTIVE
+    new Response(JSON.stringify(baseApp), { status: 200 }), // 启用后 reload GET
+  )
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('测试应用')).toBeTruthy())
+
+  // 第一次点击只弹确认框，不应该已经发出 PATCH。
+  fireEvent.click(screen.getByRole('button', { name: '停用应用' }))
+  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(false)
+
+  const confirmBtn = await waitFor(() => screen.getByRole('button', { name: '确认停用' }))
+  fireEvent.click(confirmBtn)
+
+  await waitFor(() => expect(screen.getByRole('button', { name: '启用应用' })).toBeTruthy())
+
+  const [disableUrl, disableInit] = findCall(fetchMock, 'PATCH')
+  expect(disableUrl).toBe('/admin/api/applications/app-1/status')
+  expect(JSON.parse(disableInit.body as string)).toEqual({ status: 'DISABLED' })
+
+  // 启用方向不是破坏性操作，不经过确认弹窗，直接点按钮就发请求。
+  fireEvent.click(screen.getByRole('button', { name: '启用应用' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: '停用应用' })).toBeTruthy())
+
+  const patchCalls = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')
+  expect(patchCalls).toHaveLength(2)
+  const [enableUrl, enableInit] = patchCalls[1] as [string, RequestInit]
+  expect(enableUrl).toBe('/admin/api/applications/app-1/status')
+  expect(JSON.parse(enableInit.body as string)).toEqual({ status: 'ACTIVE' })
+})
+
+// 二次确认弹窗必须真的能拦下操作：点「取消」不能发出 PATCH /status。
+test('停用应用弹窗点取消，不发请求，应用保持启用', async () => {
+  const fetchMock = stubFetchSequence(new Response(JSON.stringify(baseApp), { status: 200 }))
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('测试应用')).toBeTruthy())
+
+  fireEvent.click(screen.getByRole('button', { name: '停用应用' }))
+  const cancelBtn = await waitFor(() => screen.getByRole('button', { name: '取消' }))
+  fireEvent.click(cancelBtn)
+
+  await new Promise((r) => setTimeout(r, 50))
+
+  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(false)
+  expect(screen.getByRole('button', { name: '停用应用' })).toBeTruthy()
+})
+
+// 【终审必须修】BasicForm.onSubmit 此前也是零测试。断言同时覆盖 URL 与
+// body：body 必须含 name 与 cookieDomain 这两个被编辑的字段。
+test('基本信息表单提交，PATCH 请求体含 name 与 cookieDomain', async () => {
+  const updated: Application = { ...baseApp, name: '改名后的应用', cookieDomain: 'example.com' }
+  const fetchMock = stubFetchSequence(
+    new Response(JSON.stringify(baseApp), { status: 200 }), // GET 详情
+    new Response(JSON.stringify(updated), { status: 200 }), // PATCH 基本信息
+    new Response(JSON.stringify(updated), { status: 200 }), // 保存后 reload GET
+  )
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('测试应用')).toBeTruthy())
+
+  const nameInput = screen.getByLabelText('名称') as HTMLInputElement
+  const cookieInput = screen.getByLabelText('Cookie 作用域') as HTMLInputElement
+  fireEvent.change(nameInput, { target: { value: '改名后的应用' } })
+  fireEvent.change(cookieInput, { target: { value: 'example.com' } })
+  fireEvent.submit(nameInput.closest('form')!)
+
+  await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(true))
+
+  const [url, init] = findCall(fetchMock, 'PATCH')
+  expect(url).toBe('/admin/api/applications/app-1')
+  const body = JSON.parse(init.body as string) as Record<string, unknown>
+  expect(body.name).toBe('改名后的应用')
+  expect(body.cookieDomain).toBe('example.com')
+})

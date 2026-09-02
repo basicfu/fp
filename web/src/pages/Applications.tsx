@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { formatTime } from '@/lib/format'
+import { applicationStatusLabels } from '@/lib/labels'
 import type { Application, CreateApplicationResponse } from '@/lib/types'
 
 const createSchema = z.object({
@@ -70,7 +71,7 @@ export default function Applications() {
                   <TableCell className="font-mono text-xs">{a.appId}</TableCell>
                   <TableCell>
                     <Badge variant={a.status === 'ACTIVE' ? 'default' : 'secondary'}>
-                      {a.status === 'ACTIVE' ? '启用' : '停用'}
+                      {applicationStatusLabels[a.status] ?? a.status}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-muted-foreground">{formatTime(a.createdAt)}</TableCell>

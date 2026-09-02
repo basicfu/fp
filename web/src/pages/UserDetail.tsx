@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { formatTime } from '@/lib/format'
@@ -20,6 +21,10 @@ export default function UserDetail() {
   const sessions = useResource(() => api.get<UserSession[]>(`/users/${id}/sessions`), [id])
   const logs = useResource(() => api.get<LoginLog[]>(`/users/${id}/login-logs?limit=50`), [id])
   const [resetting, setResetting] = useState(false)
+  // 只有"冻结"这个方向需要二次确认：会连带撤销该用户全部会话。"解除冻结"
+  // 是恢复访问，不是破坏性操作，直接执行。
+  const [confirmingFreeze, setConfirmingFreeze] = useState(false)
+  const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false)
 
   if (user.loading) return <p className="text-sm text-muted-foreground">加载中…</p>
   if (user.error) return <p className="text-sm text-destructive">{user.error}</p>
@@ -60,6 +65,14 @@ export default function UserDetail() {
     }
   }
 
+  function onToggleFrozenClick() {
+    if (u.status === 'ACTIVE') {
+      setConfirmingFreeze(true)
+    } else {
+      void toggleFrozen()
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
@@ -70,11 +83,23 @@ export default function UserDetail() {
         <div className="flex-1" />
         <Button variant="outline" onClick={() => setResetting(true)}>重置密码</Button>
         {(u.status === 'ACTIVE' || u.status === 'FROZEN') && (
-          <Button variant={u.status === 'ACTIVE' ? 'destructive' : 'default'} onClick={() => void toggleFrozen()}>
+          <Button variant={u.status === 'ACTIVE' ? 'destructive' : 'default'} onClick={onToggleFrozenClick}>
             {u.status === 'ACTIVE' ? '冻结账号' : '解除冻结'}
           </Button>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmingFreeze}
+        onOpenChange={setConfirmingFreeze}
+        title="冻结账号"
+        description={`冻结后「${u.nickname || u.id}」将无法登录，且会立即下线该用户当前全部在线设备${sessions.data ? `（现有 ${sessions.data.length} 台）` : ''}，需要解除冻结后用新会话重新登录。`}
+        confirmLabel="确认冻结"
+        onConfirm={() => {
+          setConfirmingFreeze(false)
+          void toggleFrozen()
+        }}
+      />
 
       <Card>
         <CardHeader><CardTitle className="text-base">身份</CardTitle></CardHeader>
@@ -112,7 +137,7 @@ export default function UserDetail() {
             variant="outline"
             size="sm"
             disabled={!sessions.data || sessions.data.length === 0}
-            onClick={() => void revokeAll()}
+            onClick={() => setConfirmingRevokeAll(true)}
           >
             全部下线
           </Button>
@@ -196,6 +221,18 @@ export default function UserDetail() {
           user.reload()
           // 重置密码会连带撤销全部会话（后端的安全耦合），设备列表必须刷新。
           sessions.reload()
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmingRevokeAll}
+        onOpenChange={setConfirmingRevokeAll}
+        title="全部下线设备"
+        description={`将立即下线「${u.nickname || u.id}」当前全部在线设备${sessions.data ? `（${sessions.data.length} 台）` : ''}，这些设备需要重新登录才能继续使用。`}
+        confirmLabel="确认全部下线"
+        onConfirm={() => {
+          setConfirmingRevokeAll(false)
+          void revokeAll()
         }}
       />
     </div>
