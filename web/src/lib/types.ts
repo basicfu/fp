@@ -37,7 +37,7 @@ export interface Field {
   key: string
   label: string
   type: FieldType
-  required?: boolean
+  required: boolean
   default?: unknown
   help?: string
 }

@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import ConnectorsPanel from '@/components/ConnectorsPanel'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import type { Application, SessionPolicy } from '@/lib/types'
@@ -70,8 +71,7 @@ export default function ApplicationDetail() {
         </TabsContent>
 
         <TabsContent value="connectors" className="pt-4">
-          {/* Task 7 在这里挂 <ConnectorsPanel appId={id} /> */}
-          <p className="text-sm text-muted-foreground">登录方式配置</p>
+          <ConnectorsPanel appId={id} />
         </TabsContent>
       </Tabs>
     </div>
