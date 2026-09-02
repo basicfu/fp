@@ -1,3 +1,4 @@
+import { useId } from 'react'
 import { Controller, useForm } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -42,14 +43,27 @@ function initialValue(f: Field, saved: Values): unknown {
  * bool 字段的可访问名：<Switch id={f.key}> 底层是 base-ui，nativeButton
  * 默认 false 时会把这个 id 挪给内部隐藏的原生 checkbox，可见的
  * role="switch" 根元素用的是自己生成的 id；但 base-ui 会自动探测兄弟
- * <Label htmlFor={f.key}>，把它接到根元素的 aria-labelledby 上。所以
- * 测试要用 getByRole('switch', { name }) 定位（只有根元素带
- * role="switch"，隐藏 checkbox 是 aria-hidden，不会被 role 查询命中），
- * 不能用 getByLabelText（隐藏 checkbox 经 label[for] 也关联得上，
- * 两个元素都命中会报"找到多个元素"）。这样 Label 保留 htmlFor，
+ * <Label htmlFor={f.key}>，把它接到根元素的 aria-labelledby 上（具体是
+ * `${htmlFor}-label` 这个 id）。所以测试要用 getByRole('switch', { name })
+ * 定位（只有根元素带 role="switch"，隐藏 checkbox 是 aria-hidden，不会被
+ * role 查询命中），不能用 getByLabelText（隐藏 checkbox 经 label[for] 也
+ * 关联得上，两个元素都命中会报"找到多个元素"）。这样 Label 保留 htmlFor，
  * 点文案依然能切换开关。
+ *
+ * 【终审必须修】DOM id 必须按组件实例命名空间化，不能直接用 f.key。
+ * ConnectorsPanel 会把每个已注册 connector 的 DynamicForm 渲染在同一个
+ * 页面上；两个 connector 各自声明一个同名字段（"enabled"/"autoRegister"
+ * 都是极自然的命名）时，若两处都直接 id={f.key}，两个开关会共享同一个
+ * `${f.key}-label` id，浏览器/jsdom 对重复 id 的解析会让两个开关的
+ * 可访问名都解析成文档序里第一个——点第二个连带把第一个也翻了，且是在
+ * "登录方式"这种直接改后端落库配置的页面上。用 useId() 而不是让调用方
+ * 传 idPrefix：后者要求 ConnectorsPanel 记得传且传的值全局唯一，前者由
+ * React 保证每个组件实例天然唯一，不存在"调用方忘了传"这一整类回归。
  */
 export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }: Props) {
+  const uid = useId()
+  const domId = (key: string) => `${uid}-${key}`
+
   const defaults: Values = {}
   for (const f of fields) defaults[f.key] = initialValue(f, values)
 
@@ -93,22 +107,22 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
                 name={f.key}
                 render={({ field }) => (
                   <Switch
-                    id={f.key}
+                    id={domId(f.key)}
                     checked={Boolean(field.value)}
                     onCheckedChange={field.onChange}
                   />
                 )}
               />
-              <Label htmlFor={f.key}>{f.label}</Label>
+              <Label htmlFor={domId(f.key)}>{f.label}</Label>
             </div>
           ) : (
             <>
-              <Label htmlFor={f.key}>
+              <Label htmlFor={domId(f.key)}>
                 {f.label}
                 {f.required && <span className="ml-1 text-destructive">*</span>}
               </Label>
               <Input
-                id={f.key}
+                id={domId(f.key)}
                 type={inputType(f.type)}
                 {...register(f.key, {
                   required: f.required ? `${f.label}不能为空` : false,

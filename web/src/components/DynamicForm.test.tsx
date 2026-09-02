@@ -154,3 +154,37 @@ test('没有任何字段时也能渲染并提交空配置', async () => {
   await waitFor(() => expect(onSubmit).toHaveBeenCalled())
   expect(onSubmit.mock.calls[0][0]).toEqual({})
 })
+
+// 【终审必须修】DOM id 未命名空间化。ConnectorsPanel 会把每个 connector 的
+// DynamicForm 渲染在同一个页面上；两个 connector 各自声明一个同名字段
+// （"enabled"、"autoRegister" 之类都是极自然的命名）时，若 id/htmlFor 直接
+// 用 f.key，两个开关的可访问名会互相串——终审实测点了"B 的开关"文案，
+// 翻的却是 A。这不是可访问性瑕疵，是管理员在登录方式页上一次没人授意的
+// 配置写入。用两个渲染在同一文档里、字段 key 相同但 label 不同的
+// DynamicForm 实例模拟两个 connector，而不是断言具体 id 字符串——后者会
+// 绑死实现细节（idPrefix vs useId），这条测试只关心可观察的行为：按可访问名
+// 各自唯一命中，点其中一个不连带翻另一个。
+test('两个字段 key 相同的 DynamicForm 实例（模拟两个 connector）互不串扰', () => {
+  const fieldsA: Field[] = [{ key: 'enabled', label: 'A 的开关', type: 'bool', required: false }]
+  const fieldsB: Field[] = [{ key: 'enabled', label: 'B 的开关', type: 'bool', required: false }]
+  render(
+    <>
+      <DynamicForm fields={fieldsA} values={{}} onSubmit={vi.fn()} />
+      <DynamicForm fields={fieldsB} values={{}} onSubmit={vi.fn()} />
+    </>,
+  )
+
+  // getByRole 本身要求“恰好一个”命中；命名空间没做对的话，这两行会先炸：
+  // 要么两个开关的可访问名都被解析成同一个 label（2 个命中），要么另一个
+  // 变成 0 个命中——终审报告里实测到的正是这种情况。
+  const switchA = screen.getByRole('switch', { name: 'A 的开关' })
+  const switchB = screen.getByRole('switch', { name: 'B 的开关' })
+  expect(switchA.getAttribute('aria-checked')).toBe('false')
+  expect(switchB.getAttribute('aria-checked')).toBe('false')
+
+  fireEvent.click(switchB)
+
+  expect(switchB.getAttribute('aria-checked')).toBe('true')
+  // 关键断言：点 B 不能连带把 A 也翻了。
+  expect(switchA.getAttribute('aria-checked')).toBe('false')
+})
