@@ -269,6 +269,11 @@ func TestSetStatusOnMissingApplication(t *testing.T) {
 	}
 }
 
+// strPtr 是取字符串字面量地址的小工具：Go 不允许 &"字面量"，
+// Update 的局部更新语义又必须靠 *string 区分"没传"与"传了空串"，
+// 测试里到处需要它。
+func strPtr(s string) *string { return &s }
+
 func TestUpdateOnlyTouchesNameAndCookieDomain(t *testing.T) {
 	svc := newAppService(t)
 	ctx := context.Background()
@@ -292,7 +297,7 @@ func TestUpdateOnlyTouchesNameAndCookieDomain(t *testing.T) {
 		t.Fatalf("UpdateSessionPolicy: %v", err)
 	}
 
-	got, err := svc.Update(ctx, app.ID, "新名", "example.com")
+	got, err := svc.Update(ctx, app.ID, strPtr("新名"), strPtr("example.com"))
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -320,6 +325,81 @@ func TestUpdateOnlyTouchesNameAndCookieDomain(t *testing.T) {
 	}
 }
 
+// TestUpdatePartialNameOnlyKeepsCookieDomain 只传 name 时，cookieDomain
+// 必须原封不动。cookie_domain 建表默认就是空串，所以必须先把它改成一个
+// 非空值再验证——不然"没被改"和"本来就是空"在断言上分不出来。
+func TestUpdatePartialNameOnlyKeepsCookieDomain(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "旧名", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := svc.Update(ctx, app.ID, nil, strPtr("original.example.com")); err != nil {
+		t.Fatalf("预置 cookieDomain: %v", err)
+	}
+
+	got, err := svc.Update(ctx, app.ID, strPtr("新名"), nil)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Name != "新名" {
+		t.Fatalf("Name = %q, want 新名", got.Name)
+	}
+	if got.CookieDomain != "original.example.com" {
+		t.Fatalf("CookieDomain = %q, 只传 name 时不该被改动", got.CookieDomain)
+	}
+}
+
+// TestUpdatePartialCookieDomainOnlyKeepsName 只传 cookieDomain 时，name
+// 必须原封不动。
+func TestUpdatePartialCookieDomainOnlyKeepsName(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "原名", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := svc.Update(ctx, app.ID, nil, strPtr("example.com"))
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.CookieDomain != "example.com" {
+		t.Fatalf("CookieDomain = %q, want example.com", got.CookieDomain)
+	}
+	if got.Name != "原名" {
+		t.Fatalf("Name = %q, 只传 cookieDomain 时不该被改动", got.Name)
+	}
+}
+
+// TestUpdateExplicitEmptyCookieDomainClearsIt 证明 nil 与显式空串被区分
+// 对待：先把 cookieDomain 设成非空值，再显式传 &""，必须真的被清空——
+// 与 TestUpdatePartialNameOnlyKeepsCookieDomain（传 nil，保持不变）对照，
+// 才能证明这不是巧合。
+func TestUpdateExplicitEmptyCookieDomainClearsIt(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := svc.Update(ctx, app.ID, nil, strPtr("example.com")); err != nil {
+		t.Fatalf("预置 cookieDomain: %v", err)
+	}
+
+	got, err := svc.Update(ctx, app.ID, nil, strPtr(""))
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.CookieDomain != "" {
+		t.Fatalf("CookieDomain = %q, 显式传空字符串应该清空为空串", got.CookieDomain)
+	}
+}
+
 func TestUpdateRejectsEmptyName(t *testing.T) {
 	svc := newAppService(t)
 	ctx := context.Background()
@@ -328,7 +408,23 @@ func TestUpdateRejectsEmptyName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := svc.Update(ctx, app.ID, "", "example.com"); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := svc.Update(ctx, app.ID, strPtr(""), strPtr("example.com")); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// TestUpdateRejectsWhenNoFieldsGiven 两个字段都不传（nil）必须报错，而不是
+// 悄悄 no-op——decodeJSON 已经用 DisallowUnknownFields 挡掉了拼错字段名的
+// 情况，所以两个都是 nil 就意味着请求体真的什么有效字段都没给。
+func TestUpdateRejectsWhenNoFieldsGiven(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := svc.Update(ctx, app.ID, nil, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
 }

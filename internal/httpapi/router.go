@@ -61,8 +61,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/applications", appH.list)
 			r.Post("/applications", appH.create)
 			r.Get("/applications/{id}", appH.get)
-			// PATCH 而不是 PUT：这两个接口都是**局部更新**，只碰自己那几列。
-			// 与下面 /session 的全量替换语义刻意不同。
+			// PATCH 而不是 PUT：这两个接口都是**局部更新**，只碰自己那几列，
+			// 且 /applications/{id} 允许只传其中一个字段——省略或传 null 表示
+			// 不改，显式传空字符串才是把 cookieDomain 清空。与下面 /session
+			// 的全量替换语义刻意不同。
 			r.Patch("/applications/{id}", appH.update)
 			r.Patch("/applications/{id}/status", appH.setStatus)
 			// PUT 而不是 PATCH：这个接口是整份会话策略的**全量替换**。

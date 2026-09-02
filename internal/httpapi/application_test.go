@@ -159,6 +159,48 @@ func TestPatchApplicationUpdatesName(t *testing.T) {
 	}
 }
 
+// TestPatchApplicationNameOnlyKeepsCookieDomain 只发 {"name":...}——不带
+// cookieDomain 字段——必须是真正的局部更新：已经配置好的 cookieDomain
+// 不能被静默清空。cookieDomain 先设成一个非空值再验证，否则"没被改"
+// 和"本来就是空"在响应体里分不出来。
+func TestPatchApplicationNameOnlyKeepsCookieDomain(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"旧名","slug":"a"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+
+	rec = do(t, h, token, http.MethodPatch, "/admin/api/applications/"+created.Application.ID,
+		`{"name":"旧名","cookieDomain":"original.example.com"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("预置 cookieDomain status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodPatch, "/admin/api/applications/"+created.Application.ID,
+		`{"name":"新名"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Name         string `json:"name"`
+		CookieDomain string `json:"cookieDomain"`
+	}
+	decode(t, rec, &got)
+	if got.Name != "新名" {
+		t.Fatalf("Name = %q, want 新名", got.Name)
+	}
+	if got.CookieDomain != "original.example.com" {
+		t.Fatalf("CookieDomain = %q, 只发 name 时不该被清空", got.CookieDomain)
+	}
+}
+
 func TestPatchApplicationStatusDisables(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 

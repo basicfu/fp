@@ -198,20 +198,32 @@ func (s *ApplicationService) UpdateSessionPolicy(ctx context.Context, id uuid.UU
 	return app, nil
 }
 
-// Update 修改应用的展示名与 cookie 作用域。
+// Update 局部修改应用的展示名与/或 cookie 作用域。
+//
+// name/cookieDomain 为 nil 表示"这个字段不改"，非 nil 才写入——这正是
+// 用指针而不是空字符串做参数类型的原因：cookieDomain 显式传 &"" 是
+// 合法操作（清空、不限定 cookie 作用域），必须能与"根本没传这个字段"
+// 区分开，否则调用方只想改名时会把已经配置好的 cookie_domain 顺手
+// 清空，跟 Step 2 那条"改名连带清零会话策略"是同一类事故，只是换成了
+// Update 自己的两个字段互相踩。
 //
 // 只碰这两列。slug 与 app_id 是应用的身份，已经被 SDK 配置、被其他系统
 // 引用，改掉等于换了一个应用；status 走 SetStatus；会话策略走
 // UpdateSessionPolicy。每样东西一个入口，避免一次"改名"顺手把别的字段
 // 覆盖成零值。
-func (s *ApplicationService) Update(ctx context.Context, id uuid.UUID, name, cookieDomain string) (*domain.Application, error) {
-	if name == "" {
+func (s *ApplicationService) Update(ctx context.Context, id uuid.UUID, name, cookieDomain *string) (*domain.Application, error) {
+	if name == nil && cookieDomain == nil {
+		return nil, domain.Errorf(domain.ErrInvalidArgument, "至少要提供一个要修改的字段")
+	}
+	if name != nil && *name == "" {
 		return nil, domain.Errorf(domain.ErrInvalidArgument, "name 不能为空")
 	}
+	// COALESCE($n, col)：参数为 NULL（对应 Go 里的 nil 指针）时保留原值，
+	// 非 NULL 时才覆盖，借此把"不改"和"改成空串"区分开。
 	row := s.pool.QueryRow(ctx, `
 		UPDATE application SET
-			name          = $2,
-			cookie_domain = $3,
+			name          = COALESCE($2, name),
+			cookie_domain = COALESCE($3, cookie_domain),
 			updated_at    = now()
 		WHERE id = $1
 		RETURNING `+applicationColumns, id, name, cookieDomain)

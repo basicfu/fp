@@ -134,12 +134,16 @@ func (h *applicationHandler) updateSession(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
 }
 
+// updateApplicationRequest 两个字段都用指针：json 包对缺失字段/显式 null
+// 都会把指针留成 nil，只有真正带了值（哪怕是空字符串）才会分配非 nil
+// 指针——借此把"没传，不改这个字段"和"传了空字符串，把它清空"区分开，
+// 原样透传给 service.Update，不在这一层补默认值或做转换。
 type updateApplicationRequest struct {
-	Name         string `json:"name"`
-	CookieDomain string `json:"cookieDomain"`
+	Name         *string `json:"name"`
+	CookieDomain *string `json:"cookieDomain"`
 }
 
-// update 修改应用展示名与 cookie 作用域。
+// update 局部修改应用展示名与/或 cookie 作用域。
 // 会话策略与启停各有自己的接口，这里不受理——理由见 service.Update 的注释。
 func (h *applicationHandler) update(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
