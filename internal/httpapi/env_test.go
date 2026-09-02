@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,6 +55,20 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 		t.Fatalf("Login: %v", err)
 	}
 	return httpapi.NewRouter(deps), token, deps
+}
+
+// newTestRouterWithConsole 复用 newAdminEnv 装配好的依赖，额外挂上一份
+// 前端静态资源，用于测试 /admin/api 与静态兜底路由（/*）之间的路由优先级。
+//
+// 不单独拼一套依赖：newAdminEnv 已经把 Admin/Apps/Users 等服务和真实的
+// Postgres/Redis 接好了，这里只是在其基础上多设置 Console 字段后重新
+// 装一次 router——与 TestAdminSessionCookieAttributes 里"改一个字段、
+// 重新 NewRouter"的写法一致。
+func newTestRouterWithConsole(t *testing.T, fsys fs.FS) http.Handler {
+	t.Helper()
+	_, _, deps := newAdminEnv(t)
+	deps.Console = fsys
+	return httpapi.NewRouter(deps)
 }
 
 // do 发一个请求并返回响应记录器。token 为空时不带鉴权头。

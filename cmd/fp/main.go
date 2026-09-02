@@ -21,6 +21,7 @@ import (
 	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/web"
 )
 
 func main() {
@@ -147,6 +148,7 @@ func run() error {
 			Registry: registry,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
+			Console:       web.Dist(),
 		}),
 	}
 

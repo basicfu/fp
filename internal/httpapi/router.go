@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"io/fs"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -27,6 +28,10 @@ type Deps struct {
 	// HTTP 上原样出现——反代前面掉了 TLS、内网跳板、有人手滑访问 http:// 都算。
 	// 本地开发拿不到 TLS，所以不能无脑写死 true，只能由启动配置决定。
 	SecureCookies bool
+
+	// Console 是管理控制台的前端构建产物。为 nil（或其中没有 index.html）
+	// 时，非 API 路径统一返回 503 加一句"请先构建前端"，而不是空白页。
+	Console fs.FS
 }
 
 // NewRouter 装配管理 UI 的 HTTP 路由。
@@ -48,6 +53,12 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	r.Route("/admin/api", func(r chi.Router) {
+		// API 的 404 必须是 JSON。少了这行，chi 会用它默认的纯文本 404，
+		// 前端的 res.json() 会抛一个与真实原因无关的解析错误。
+		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusNotFound, errorBody{Error: "接口不存在"})
+		})
+
 		r.Post("/login", ah.login)
 
 		r.Group(func(r chi.Router) {
@@ -86,6 +97,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/users/{id}/login-logs", userH.listLoginLogs)
 		})
 	})
+
+	// 放在最后：chi 的路由匹配偏好更具体的模式，/healthz 与 /admin/api/*
+	// 都比 /* 具体，不会被这条吃掉。
+	r.Handle("/*", newStaticHandler(d.Console))
 
 	return r
 }
