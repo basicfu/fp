@@ -1,9 +1,13 @@
 package integration_test
 
 import (
+	"io/fs"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/basicfu/fp/web"
 )
 
 // TestConsoleDistGitkeepTrackedByGit 守住"web/dist/.gitkeep 必须留在版本库
@@ -46,5 +50,43 @@ func TestConsoleDistGitkeepTrackedByGit(t *testing.T) {
 				"唯一依托，从版本库里消失会让任何 fresh clone 无法 go build ./...",
 			err, out,
 		)
+	}
+}
+
+// TestEmbeddedConsoleIsPresentOrClearlyAbsent 确认嵌进二进制的前端产物
+// 要么是完整的，要么是明确的"没构建"，不存在第三种半吊子状态。
+//
+// 为什么不直接断言"必须有 index.html"：仓库里 web/dist/ 只提交了
+// .gitkeep，任何没跑过 ./scripts/build-web.sh 的开发环境和 CI 都会是空的，
+// 硬性要求会让全量测试在干净 clone 上必红。所以这里断言的是**一致性**：
+// 有 index.html 就必须同时有 assets/ 下的产物；两者都没有则跳过。
+// 缺一半的状态（比如构建到一半被打断）会被这条抓住。
+//
+// 这条测试和上面的 TestConsoleDistGitkeepTrackedByGit 互补：那条守的是
+// "版本库里有没有一个能让 go build 通过的占位文件"，这条守的是"如果本机
+// 已经构建过前端，go:embed 真的把它嵌进来了没有"——一个 embed 路径写错
+// 或者构建脚本半途而废，表现都是运行时 503，但两条既有测试各自都会照绿。
+func TestEmbeddedConsoleIsPresentOrClearlyAbsent(t *testing.T) {
+	dist := web.Dist()
+
+	if _, err := fs.Stat(dist, "index.html"); err != nil {
+		t.Skip("前端未构建（web/dist 为空）——跑 ./scripts/build-web.sh 后本测试才有意义")
+	}
+
+	entries, err := fs.ReadDir(dist, "assets")
+	if err != nil {
+		t.Fatalf("有 index.html 却没有 assets 目录，前端产物不完整: %v", err)
+	}
+	var hasJS, hasCSS bool
+	for _, e := range entries {
+		switch {
+		case strings.HasSuffix(e.Name(), ".js"):
+			hasJS = true
+		case strings.HasSuffix(e.Name(), ".css"):
+			hasCSS = true
+		}
+	}
+	if !hasJS || !hasCSS {
+		t.Fatalf("assets 里缺 js 或 css：hasJS=%v hasCSS=%v", hasJS, hasCSS)
 	}
 }

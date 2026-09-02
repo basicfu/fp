@@ -2,11 +2,15 @@ package httpapi_test
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/basicfu/fp/internal/httpapi"
+	"github.com/basicfu/fp/web"
 )
 
 // builtConsole 模拟一份构建好的前端产物。
@@ -66,5 +70,57 @@ func TestRouterHealthzNotShadowedByStatic(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "id=root") {
 		t.Fatal("/healthz 返回了 index.html")
+	}
+}
+
+// TestRouterServesRealEmbeddedConsoleAtRoot 用真正嵌进二进制的 web.Dist()
+// 装配路由，而不是本文件其余用例里 builtConsole() 造的假 fstest.MapFS，
+// 确认"go:embed 真的把前端产物嵌进来了"，而不仅仅是 newStaticHandler /
+// NewRouter 的路由逻辑本身是对的。
+//
+// 这条测试要补的缺口：builtConsole() 系列的假产物内容恒定，就算
+// web/embed.go 的 //go:embed 指令路径写错、或者构建脚本没跑，上面那些
+// 用假 fs 的测试也会照样全绿——线上表现却是打开控制台看到 503。只有
+// 直接问 web.Dist() 本身，才能抓住这类问题。
+//
+// Deps 除 Console 外全部留空（零值/nil）：NewRouter 构造时只是把这些
+// 指针存进 adminHandler/applicationHandler/userHandler/connectorHandler
+// 的结构体字段，requireAdmin(nil) 返回的也只是一个捕获了 nil 的闭包，
+// 全部推迟到请求真正落进 /admin/api 分组、调用某个 handler 方法时才会
+// 解引用。本测试只发一个 GET /，被 chi 路由到最后兜底的
+// r.Handle("/*", newStaticHandler(...))，从未经过 /admin/api 分组，
+// 所以不会 panic——这是先读过 router.go 与 middleware.go 的
+// requireAdmin 得出的假设，并且已经用本测试的实际通过验证过，不是纸面
+// 推导；如果这个假设错了，chi 的 middleware.Recoverer 也只会把 panic
+// 转成 500 而不是让测试进程崩溃，但下面的断言会因为 code != 200 而失败，
+// 从而暴露出来。
+//
+// 前端未构建（web/dist 只有 .gitkeep）时优雅跳过，理由与
+// internal/integration 包里的 TestEmbeddedConsoleIsPresentOrClearlyAbsent
+// 相同：仓库干净 clone 出来 web/dist 就是空的，硬性要求会让全量测试在
+// 干净 clone 上必红。
+func TestRouterServesRealEmbeddedConsoleAtRoot(t *testing.T) {
+	dist := web.Dist()
+	if _, err := fs.Stat(dist, "index.html"); err != nil {
+		t.Skip("前端未构建（web/dist 为空）——跑 ./scripts/build-web.sh 后本测试才有意义")
+	}
+
+	h := httpapi.NewRouter(httpapi.Deps{Console: dist})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200；body = %q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `id="root"`) {
+		t.Fatalf("响应体里没有 id=\"root\"，看起来不是真实构建出的控制台 index.html：%q", body)
+	}
+	if strings.Contains(body, "尚未构建") {
+		t.Fatal("拿到了「前端尚未构建」的 503 提示页，而不是真实 index.html")
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+		t.Fatalf("index.html 的 Cache-Control = %q，必须含 no-cache", cc)
 	}
 }
