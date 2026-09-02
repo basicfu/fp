@@ -47,7 +47,6 @@ func newEnv(t *testing.T) *env {
 	rdb := testsupport.NewTestRedis(t)
 	ctx := context.Background()
 
-	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
 	logs := service.NewLoginLogService(pool)
 	codes := notify.NewCodeService(rdb)
@@ -64,6 +63,7 @@ func newEnv(t *testing.T) *env {
 	if err := registry.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
+	apps := service.NewApplicationService(pool, registry)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// 这里传 []RateRule{} 是**显式关闭**频率限制，不是"没配"：

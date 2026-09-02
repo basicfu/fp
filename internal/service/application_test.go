@@ -7,14 +7,28 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/testsupport"
 )
 
+// stubSchemas 让 SetConnector 的校验测试不依赖真实 registry，
+// 从而能覆盖到"必填字段"这条——线上两个 connector 恰好都没有必填字段。
+type stubSchemas map[string][]domain.Field
+
+func (s stubSchemas) Schemas() map[string][]domain.Field { return s }
+
 func newAppService(t *testing.T) *service.ApplicationService {
 	t.Helper()
-	return service.NewApplicationService(testsupport.NewTestDB(t))
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewPassword(nil)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
+	}
+	return service.NewApplicationService(testsupport.NewTestDB(t), reg)
 }
 
 func TestCreateApplicationReturnsPlainSecretOnce(t *testing.T) {
@@ -165,12 +179,12 @@ func TestConnectorConfigRoundTrip(t *testing.T) {
 		t.Fatalf("未配置时 err = %v, want ErrNotFound", err)
 	}
 
-	cfg := map[string]any{"minLength": float64(8)}
+	cfg := map[string]any{"allowPhone": true}
 	if err := svc.SetConnector(ctx, app.ID, "password", true, cfg); err != nil {
 		t.Fatalf("SetConnector: %v", err)
 	}
 	// 重复设置应为 upsert 而非报错
-	cfg["minLength"] = float64(10)
+	cfg["allowPhone"] = false
 	if err := svc.SetConnector(ctx, app.ID, "password", true, cfg); err != nil {
 		t.Fatalf("SetConnector upsert: %v", err)
 	}
@@ -182,8 +196,8 @@ func TestConnectorConfigRoundTrip(t *testing.T) {
 	if !got.Enabled {
 		t.Fatal("Enabled = false, want true")
 	}
-	if got.Config["minLength"] != float64(10) {
-		t.Fatalf("minLength = %v, want 10", got.Config["minLength"])
+	if got.Config["allowPhone"] != false {
+		t.Fatalf("allowPhone = %v, want false", got.Config["allowPhone"])
 	}
 
 	list, err = svc.ListConnectors(ctx, app.ID)
@@ -192,6 +206,126 @@ func TestConnectorConfigRoundTrip(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].Type != "password" {
 		t.Fatalf("list = %+v", list)
+	}
+}
+
+func TestSetConnectorRejectsUnregisteredType(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// wechat 没有注册。写成功的话，库里会多出一行永远不会被使用的配置，
+	// 而管理员以为自己开通了微信登录。
+	if err := svc.SetConnector(ctx, app.ID, "wechat", true, nil); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	list, err := svc.ListConnectors(ctx, app.ID)
+	if err != nil {
+		t.Fatalf("ListConnectors: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("被拒绝的配置仍然落库了: %+v", list)
+	}
+}
+
+func TestSetConnectorRejectsUnknownConfigKey(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// minLength 不在 password 的 ConfigSchema 里。前后端字段名漂移时，
+	// 这条校验是唯一会喊出声的地方。
+	err = svc.SetConnector(ctx, app.ID, "password", true, map[string]any{"minLength": float64(8)})
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestSetConnectorRejectsWrongValueType(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// allowPhone 是 bool。前端如果把开关序列化成字符串 "true"，
+	// connector.ConfigBool 读到的会是 false —— 开关看起来开着，实际关着。
+	err = svc.SetConnector(ctx, app.ID, "password", true, map[string]any{"allowPhone": "true"})
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestSetConnectorRejectsMissingRequiredField(t *testing.T) {
+	// 线上两个 connector 都没有必填字段，只能用 stub 覆盖这条分支。
+	svc := service.NewApplicationService(testsupport.NewTestDB(t), stubSchemas{
+		"demo": {
+			{Key: "apiKey", Label: "API Key", Type: domain.FieldTypeString, Required: true},
+			{Key: "note", Label: "备注", Type: domain.FieldTypeString},
+		},
+	})
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// 缺 apiKey
+	if err := svc.SetConnector(ctx, app.ID, "demo", true, map[string]any{"note": "x"}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("缺必填 err = %v, want ErrInvalidArgument", err)
+	}
+	// 必填给了空串同样不算数
+	if err := svc.SetConnector(ctx, app.ID, "demo", true, map[string]any{"apiKey": ""}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("必填为空串 err = %v, want ErrInvalidArgument", err)
+	}
+	// 给全了就该成功；可选字段不给也没问题
+	if err := svc.SetConnector(ctx, app.ID, "demo", true, map[string]any{"apiKey": "k"}); err != nil {
+		t.Fatalf("SetConnector: %v", err)
+	}
+}
+
+// 未注入元数据时必须**失败关闭**，不能退化成"跳过校验"。
+// 如果 nil 意味着放行，那么任何一个忘了传 registry 的调用点都会静默地
+// 失去全部校验，而所有测试照绿——这正是第二阶段反复栽跟头的那类缺陷。
+func TestSetConnectorFailsClosedWithoutSchemas(t *testing.T) {
+	svc := service.NewApplicationService(testsupport.NewTestDB(t), nil)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := svc.SetConnector(ctx, app.ID, "password", true, nil); err == nil {
+		t.Fatal("未注入 connector 元数据时 SetConnector 竟然成功了")
+	}
+}
+
+func TestSetConnectorAcceptsIntFromJSONFloat(t *testing.T) {
+	// JSONB 反序列化出来的数字一律是 float64（见 connector.ConfigInt 的注释）。
+	// int 字段的校验必须接受整数值的 float64，否则任何走过一次 JSON 的
+	// 配置都会被自己的校验拒掉。
+	svc := service.NewApplicationService(testsupport.NewTestDB(t), stubSchemas{
+		"demo": {{Key: "ttl", Label: "TTL", Type: domain.FieldTypeInt}},
+	})
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := svc.SetConnector(ctx, app.ID, "demo", true, map[string]any{"ttl": float64(30)}); err != nil {
+		t.Fatalf("整数值的 float64 被拒: %v", err)
+	}
+	// 但小数不是整数
+	if err := svc.SetConnector(ctx, app.ID, "demo", true, map[string]any{"ttl": float64(1.5)}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("小数 err = %v, want ErrInvalidArgument", err)
 	}
 }
 

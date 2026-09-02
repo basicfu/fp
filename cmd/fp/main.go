@@ -62,7 +62,6 @@ func run() error {
 	epochStore := store.NewEpochStore(rdb)
 
 	userSvc := service.NewUserService(pool)
-	appSvc := service.NewApplicationService(pool)
 	codeSvc := notify.NewCodeService(rdb)
 
 	registry := connector.NewRegistry()
@@ -72,6 +71,8 @@ func run() error {
 	if err := registry.Register(connector.NewSMSCode(codeSvc)); err != nil {
 		return err
 	}
+
+	appSvc := service.NewApplicationService(pool, registry)
 
 	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore)
 

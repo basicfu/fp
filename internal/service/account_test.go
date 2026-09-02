@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
@@ -42,11 +43,18 @@ func newAccountEnv(t *testing.T) *accountEnv {
 	sessions := service.NewSessionServiceWithClock(
 		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, clock.Now)
 	logs := service.NewLoginLogService(pool)
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewPassword(nil)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
+	}
 	return &accountEnv{
 		accounts: service.NewAccountService(users, sessions, epochs, logs),
 		users:    users,
 		sessions: sessions,
-		apps:     service.NewApplicationService(pool),
+		apps:     service.NewApplicationService(pool, reg),
 		logs:     logs,
 		epochs:   epochs,
 		app:      testApp(),

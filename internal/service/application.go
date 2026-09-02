@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -33,14 +34,27 @@ const applicationColumns = `
 	(extract(epoch from created_at) * 1000)::bigint,
 	(extract(epoch from updated_at) * 1000)::bigint`
 
+// ConnectorSchemas 是 SetConnector 校验配置所需的最小能力。
+// *connector.Registry 满足它。用窄接口而不是直接依赖 *connector.Registry，
+// 是为了让测试能注入自定义元数据——线上两个 connector 恰好都没有必填字段，
+// 直接依赖真实 registry 的话"必填校验"这条分支永远测不到。
+type ConnectorSchemas interface {
+	Schemas() map[string][]domain.Field
+}
+
 // ApplicationService 管理接入端应用及其登录方式配置。
 type ApplicationService struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	schemas ConnectorSchemas
 }
 
 // NewApplicationService 构造 ApplicationService。
-func NewApplicationService(pool *pgxpool.Pool) *ApplicationService {
-	return &ApplicationService{pool: pool}
+//
+// schemas 为 nil 时 SetConnector 会直接报错而不是跳过校验——失败关闭。
+// 让 nil 等于"不校验"的话，任何一个忘了注入的调用点都会静默地失去全部
+// 配置校验，而没有任何测试会变红。
+func NewApplicationService(pool *pgxpool.Pool, schemas ConnectorSchemas) *ApplicationService {
+	return &ApplicationService{pool: pool, schemas: schemas}
 }
 
 // Create 新建应用，返回应用与仅此一次可见的明文 appSecret。
@@ -276,6 +290,9 @@ func (s *ApplicationService) SetConnector(ctx context.Context, appID uuid.UUID, 
 	if config == nil {
 		config = map[string]any{}
 	}
+	if err := s.validateConnectorConfig(connectorType, config); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		return domain.Errorf(domain.ErrInvalidArgument, "connector 配置无法序列化: %v", err)
@@ -288,6 +305,82 @@ func (s *ApplicationService) SetConnector(ctx context.Context, appID uuid.UUID, 
 		appID, connectorType, enabled, raw)
 	if err != nil {
 		return fmt.Errorf("service: 写入 connector 配置: %w", err)
+	}
+	return nil
+}
+
+// validateConnectorConfig 按 connector 自己声明的 ConfigSchema 校验一份配置。
+//
+// 四条：类型已注册、无多余键、必填有值、值类型相符。多余键这条是给
+// 前后端字段名漂移准备的——少了它，前端把 allowPhone 写成 allow_phone
+// 会一路静默写库，开关看起来是开的，实际读到的永远是默认值。
+func (s *ApplicationService) validateConnectorConfig(connectorType string, config map[string]any) error {
+	if s.schemas == nil {
+		return fmt.Errorf("service: ApplicationService 未注入 connector 元数据，无法校验 %q 的配置", connectorType)
+	}
+	all := s.schemas.Schemas()
+	fields, ok := all[connectorType]
+	if !ok {
+		return domain.Errorf(domain.ErrNotFound, "未知的登录方式 %q", connectorType)
+	}
+
+	byKey := make(map[string]domain.Field, len(fields))
+	for _, f := range fields {
+		byKey[f.Key] = f
+	}
+	for key := range config {
+		if _, ok := byKey[key]; !ok {
+			return domain.Errorf(domain.ErrInvalidArgument, "%s 不支持配置项 %q", connectorType, key)
+		}
+	}
+	for _, f := range fields {
+		v, present := config[f.Key]
+		if !present {
+			if f.Required {
+				return domain.Errorf(domain.ErrInvalidArgument, "%s 缺少必填配置项 %q", connectorType, f.Key)
+			}
+			continue
+		}
+		if err := checkFieldValue(f, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkFieldValue 校验单个配置值的类型。
+//
+// int 分支接受整数值的 float64：配置在库里是 JSONB，反序列化出来的数字
+// 一律是 float64（同 connector.ConfigInt 的注释）。不接受的话，任何一份
+// 存过又读回来的配置都会被自己的校验拒掉。
+func checkFieldValue(f domain.Field, v any) error {
+	switch f.Type {
+	case domain.FieldTypeBool:
+		if _, ok := v.(bool); !ok {
+			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要布尔值，收到 %T", f.Key, v)
+		}
+	case domain.FieldTypeInt:
+		switch n := v.(type) {
+		case float64:
+			if n != math.Trunc(n) {
+				return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要整数，收到 %v", f.Key, n)
+			}
+		case int, int32, int64:
+		default:
+			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要整数，收到 %T", f.Key, v)
+		}
+	case domain.FieldTypeString, domain.FieldTypeSecret:
+		str, ok := v.(string)
+		if !ok {
+			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要字符串，收到 %T", f.Key, v)
+		}
+		if f.Required && str == "" {
+			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 是必填项，不能为空", f.Key)
+		}
+	default:
+		// 未知的 FieldType 说明有人加了新类型却没同步这里。放行会让新类型
+		// 完全失去校验，所以宁可报错——这是内部一致性问题，不是调用方的错。
+		return fmt.Errorf("service: 未知的配置项类型 %q（字段 %q）", f.Type, f.Key)
 	}
 	return nil
 }

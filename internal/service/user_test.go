@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -554,7 +555,14 @@ func TestSetStatusEnforcesStateMachine(t *testing.T) {
 func TestEnsureRegistrationIsIdempotent(t *testing.T) {
 	pool := testsupport.NewTestDB(t)
 	users := service.NewUserService(pool)
-	apps := service.NewApplicationService(pool)
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewPassword(nil)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
+	}
+	apps := service.NewApplicationService(pool, reg)
 	ctx := context.Background()
 
 	app, _, err := apps.Create(ctx, "A", "a")
