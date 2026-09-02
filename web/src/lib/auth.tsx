@@ -70,6 +70,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     try {
       await api.post('/logout')
+    } catch {
+      // /logout 挂在 requireAdmin 中间件之后：管理端会话 cookie 一旦过期，
+      // 这个请求本身就会先被中间件拦成 401（正是下面 finally 注释里"cookie
+      // 可能已经过期"预设的场景）。这里必须接住这个异常——logout() 是给
+      // Layout.tsx 用 void logout() 调用的"发射后不管"写法，void 不会消费
+      // rejection，不接住就会在控制台留一条 Uncaught (in promise) ApiError。
+      // 放在这个函数内部而不是留给调用方处理：能一次性保护所有未来调用方，
+      // 不用要求每个调用点都记得自己去 catch。
     } finally {
       // 后端登出失败也要把前端状态清掉：cookie 可能已经过期，
       // 留在"已登录"状态只会让用户在每个页面上撞 401。
