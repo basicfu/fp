@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { buildUserQuery, PAGE_SIZE } from './query'
+import { buildUserQuery, normalizePage, PAGE_SIZE } from './query'
 
 // 【辨别力】后端要的是 offset，不是页码。
 //
@@ -40,4 +40,30 @@ test('关键词做 URL 转义', () => {
 test('页码小于 1 时按第 1 页处理', () => {
   expect(new URLSearchParams(buildUserQuery({ page: 0 })).get('offset')).toBe('0')
   expect(new URLSearchParams(buildUserQuery({ page: -3 })).get('offset')).toBe('0')
+})
+
+// normalizePage 是 buildUserQuery 与 Users.tsx 共用的页码钳制逻辑。
+// 【辨别力】此前 Users.tsx 曾经自己重复实现过一遍同样的算法（未受测试
+// 覆盖，也不保证与这里同步）——这里直接针对 normalizePage 本身补单元
+// 测试，以后两处调用点才不会因为其中一处被单独改动而悄悄分叉。
+test('normalizePage 把非法输入（非数字、负数、小数）钳到 >= 1 的整数', () => {
+  expect(normalizePage('abc')).toBe(1) // 非数字字符串（比如手改 ?page=abc）→ NaN → 兜底
+  expect(normalizePage(-3)).toBe(1) // 负数
+  expect(normalizePage('-3')).toBe(1) // 负数字符串
+  expect(normalizePage(0)).toBe(1) // 0
+  expect(normalizePage(2.7)).toBe(2) // 小数向下取整，不能原样透传给 Pagination 显示成"第 2.7 页"
+
+  for (const v of ['abc', -3, '-3', 0, 2.7]) {
+    expect(Number.isInteger(normalizePage(v))).toBe(true)
+    expect(normalizePage(v)).toBeGreaterThanOrEqual(1)
+  }
+})
+
+test('normalizePage 缺省（null/undefined）按第 1 页处理，合法页码原样返回', () => {
+  // URLSearchParams#get() 在参数不存在时返回 null，不是 undefined——
+  // 两种"缺省"都要处理到，否则其中一种会漏测。
+  expect(normalizePage(null)).toBe(1)
+  expect(normalizePage(undefined)).toBe(1)
+  expect(normalizePage(3)).toBe(3)
+  expect(normalizePage('5')).toBe(5)
 })

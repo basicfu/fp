@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import Pagination from '@/components/Pagination'
 import { api } from '@/lib/api'
 import { useResource } from '@/lib/useResource'
-import { buildUserQuery, PAGE_SIZE } from '@/lib/query'
+import { buildUserQuery, normalizePage, PAGE_SIZE } from '@/lib/query'
 import { formatTime } from '@/lib/format'
 import { statusLabels } from '@/lib/labels'
 import type { UserListResponse, UserStatus } from '@/lib/types'
@@ -17,13 +17,12 @@ const ALL = '__all__'
 export default function Users() {
   // 查询条件放进 URL：刷新、后退、把链接发给同事，都能回到同一个视图。
   const [sp, setSp] = useSearchParams()
-  // URL 参数可能被手动改成非法值（?page=abc、?page=-1、?page=2.7）。
-  // buildUserQuery 内部会把这类值兜底到第 1 页，但如果这里不做同样的
-  // 归一化，Pagination 组件收到的 page 会是 NaN/负数/小数——
-  // Math.max(1, NaN) 的结果仍是 NaN（不是 1），会显示"第 NaN / y 页"，
-  // 上一页/下一页的禁用判断也会失真。用与 buildUserQuery 相同的算法
-  // 在读取处统一归一化一次。
-  const page = Math.max(1, Math.floor(Number(sp.get('page') ?? '1')) || 1)
+  // normalizePage 同时也是 buildUserQuery 算 offset 用的那个函数——两处
+  // 用同一套钳制逻辑，URL 上的页码和实际发给后端的 offset 就不会因为
+  // 各自实现一遍而悄悄对不上。sp.get('page') 在参数缺失时是 null（不是
+  // undefined），被手动改成 "abc"/"-1"/"2.7" 时 normalizePage 也会兜底
+  // 到 1，不会把 NaN/负数/小数透传给下面的 Pagination 组件。
+  const page = normalizePage(sp.get('page'))
   const keyword = sp.get('keyword') ?? ''
   const status = sp.get('status') ?? ''
 
@@ -55,7 +54,21 @@ export default function Users() {
           update({ keyword: String(v ?? ''), page: '' })
         }}
       >
-        <Input name="keyword" defaultValue={keyword} placeholder="手机号 / 用户名 / 昵称" className="w-64" />
+        {/*
+          key={keyword}：这个输入框是非受控的（defaultValue，不是
+          value+onChange），故意的——键入过程不必每敲一下就触发整个页面
+          重渲染。但非受控组件的 defaultValue 只在"挂载那一刻"生效，
+          之后就不再跟随 props 更新。问题是：提交搜索、点分页、切状态
+          筛选走的都是 setSp()，这类只改查询参数的导航在同一个
+          <Route path="/users"> 上只会重渲染 Users，不会重新挂载它——
+          浏览器"后退/前进"到一个不同的 ?keyword= 时同样如此。不加 key
+          的话，后退到"没有关键词"的历史记录，地址栏和表格数据都变了，
+          这个输入框里却还留着后退前敲的字，用户会以为筛选没生效。
+          key 随 keyword 变化，等于是在"关键词真的变了"这一刻强制卸载
+          重挂输入框，让新的 defaultValue 重新生效——按下搜索按钮时
+          keyword 恰好等于用户刚敲的内容，这次重挂不会造成任何可见跳变。
+        */}
+        <Input key={keyword} name="keyword" defaultValue={keyword} placeholder="手机号 / 用户名 / 昵称" className="w-64" />
         <Button type="submit" variant="secondary">搜索</Button>
 
         <Select
