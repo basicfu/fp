@@ -16,7 +16,7 @@ fp-im 是一个通用的连接网关：管 ws 连接、管路由、把字节从�
 2. client 通过 ws 连 fp-im 的 LB，落到**随机一个**节点。
 3. im 节点之间**只通过 Redis 互通**，不做 gRPC 互联。Redis 为 8.0 以上，可能是 Cluster。
 
-目标量级：全网每秒数万条消息，单节点十万级连接。Redis 命令按管道攒批发送，往返次数与消息量脱钩。
+目标量级：全网每秒数万条消息，单节点十万级连接。热路径每条消息最多两条 Redis 命令；需要时可开启写管道攒批，让往返次数与消息量脱钩。
 
 fp-im 当前依赖 `fpsdk`（验 token、拉 app 配置）。依赖通过两个接口隔离（第十一节），将来拆开成本很低。
 
@@ -53,7 +53,7 @@ fp-im 当前依赖 `fpsdk`（验 token、拉 app 配置）。依赖通过两个�
 |---|---|---|---|
 | `fp:im:node` | hash | nodeId → 心跳时间戳 | 每节点每 3 秒 `HSET`。超过 10 秒未刷新视为死亡（两个值都是配置） |
 | `fp:im:srv:{app}` | hash | nodeId → 心跳时间戳 | 持有该 app 至少一条 server 流的节点每 3 秒 `HSET`；最后一条流断开时立即 `HDEL` |
-| `fp:im:{app:subject}:conn` | hash | connId → 连接元数据 JSON | 握手时写，断开时删。key 级 `EXPIRE 86400` |
+| `fp:im:{app:subject}:conn` | hash | connId → 连接元数据 JSON | 握手时写，断开时删。field 级 `HEXPIRE`，持有连接的节点周期续期 |
 
 `{app:subject}` 是 Cluster 的 hash tag，例如 `fp:im:{a1:u:1001}:conn`。每个 subject 一个 key，理由：Cluster 下按 subject 均匀分片，不会出现一个 app 一个大 hash 的热点；hash 删空最后一个 field 时 Redis 自动删 key，所以 key 数等于此刻在线的 subject 数；握手脚本只需锁一个 key。
 
@@ -65,11 +65,13 @@ fp-im 当前依赖 `fpsdk`（验 token、拉 app 配置）。依赖通过两个�
 
 `n` 所在节点，`os` 取值 `android | ios | windows | mac | linux | other`，`m` 是否移动端，`ts` 连接时间。不存原始 UA。
 
-**条目有效性的唯一判据：`n` 在 `fp:im:node` 存活列表里。** 活着的节点一定会在关闭连接时 `HDEL` 自己的条目，所以"节点活着但条目是假的"不存在。死节点的残留条目在所有读路径上被过滤（Push、Sessions、握手脚本），并在该 subject 下次握手时被脚本顺手删掉，最晚 24 小时随 key 一起过期。残留期间只占内存，不影响任何判定。
+**条目有效性的唯一判据：`n` 在 `fp:im:node` 存活列表里。** 活着的节点一定会在关闭连接时 `HDEL` 自己的条目，所以"节点活着但条目是假的"不存在。死节点的残留条目在所有读路径上被过滤（Push、Sessions、握手脚本），并在该 subject 下次握手时被脚本顺手删掉，最晚在 field TTL（默认 30 分钟）到期时自动消失。残留期间只占内存，不影响任何判定。
+
+field TTL 由持有连接的节点续期：每个节点每 `conn.field_renew`（默认 10 分钟）对本地全部连接按 subject key 分组，每组发一条 `HEXPIRE key ttl FIELDS n connId...`，进写管道。10 万连接的节点是每秒约 170 条命令。所有 field 过期后 hash 自动删除。
 
 ### 3.3 频道
 
-Cluster 用 sharded pub/sub（`SSUBSCRIBE` / `SPUBLISH`），单机退回 `SUBSCRIBE` / `PUBLISH`。普通 `PUBLISH` 在 Cluster 里是全集群广播，每秒数万条扛不住。
+统一用 sharded pub/sub（`SSUBSCRIBE` / `SPUBLISH`）。单机 Redis 7 以上同样支持这两条命令，所以不区分模式。普通 `PUBLISH` 在 Cluster 里是全集群广播，每秒数万条扛不住。启动时执行一次 `INFO cluster`，`cluster_enabled:1` 则用 Cluster 客户端，否则用单机客户端，不需要配置项。
 
 | 频道 | 谁订阅 | 承载 |
 |---|---|---|
@@ -85,7 +87,7 @@ Cluster 用 sharded pub/sub（`SSUBSCRIBE` / `SPUBLISH`），单机退回 `SUBSC
 | server 流表 | `app → []stream` |
 | 存活节点缓存 | `fp:im:node` 的快照，每 3 秒 `HGETALL` 刷新 |
 | server 节点缓存 | 每个已知 app 的 `fp:im:srv:{app}` 快照，每 3 秒 `HGETALL` 刷新 |
-| 写管道 | 一条，热路径命令全部进管道，攒 5 毫秒或 256 条刷一次。Cluster 客户端按槽并行发往各分片 |
+| 写管道 | 一条，热路径命令全部经它发出。默认每条命令立即发送；配置 `pipeline.flush_interval` / `pipeline.flush_size` 后攒批，两者先到为准。Cluster 客户端按槽并行发往各分片 |
 
 ### 3.5 帧格式
 
@@ -130,14 +132,14 @@ client ──ws {t:"auth", token | guest+app, ua?, os?, mobile?}──► im-B
                             ▼
    ┌────────────────────────────────────────────────────────┐
    │ EVALSHA 握手脚本   KEYS[1] = fp:im:{a1:u:1001}:conn      │ ← Redis 1 次
-   │   ARGV: connId, 元数据 JSON, policy, N, TTL, 存活节点列表 │
+   │   ARGV: connId, 元数据 JSON, policy, N, fieldTTL, 存活节点列表│
    │                                                        │
    │   ① 遍历 hash，n 不在存活列表的 field 全部 HDEL          │
    │   ② 按 policy 判定（数的是①之后的数量）：               │
    │      replace  → 记下现存条目，全部 HDEL，HSET 自己       │
    │      reject   → 现存 ≥1 返回 REJECT，不写               │
    │      limit N  → 现存 ≥N 返回 REJECT，否则 HSET 自己      │
-   │   ③ EXPIRE key TTL                                     │
+   │   ③ HEXPIRE key fieldTTL FIELDS 1 connId               │
    │   返回 {OK | REJECT, 被顶替的 [connId, nodeId]...}       │
    └───────────────┬────────────────────────────────────────┘
                    │
@@ -295,7 +297,7 @@ deliver(Event{Disconnected, reason}, 0)
 ```
 它的 ws 全断，client 经 LB 重连到其他节点，走第四节
 它在 fp:im:node 的心跳 10 秒后过期，其他节点的缓存把它剔除
-它留在各 conn hash 里的条目：所有读路径过滤；下次该 subject 握手时脚本 HDEL；最晚 24 小时随 key 过期
+它留在各 conn hash 里的条目：所有读路径过滤；下次该 subject 握手时脚本 HDEL；无人续期，最晚 field TTL 到期自动消失
 它的 pub/sub 订阅随 Redis 连接一起消失
 它在 fp:im:srv:{app} 里的条目过期后，rendezvous hash 自动把它的份额分给别人
 它持有的 server 流断开，SDK 经 LB 重连到任一节点
@@ -315,7 +317,7 @@ deliver(Event{Disconnected, reason}, 0)
 SSUBSCRIBE 本节点频道
 HSET fp:im:node 心跳，HSET 各 fp:im:srv:{app}
 若发现自己在 fp:im:node 里的条目消失（Redis 重启过、数据没了）
-   → 把本地所有连接重新用握手脚本登记（policy 传 `none`：只清残留、HSET、EXPIRE，不判定），限速
+   → 把本地所有连接重新用握手脚本登记（policy 传 `none`：只清残留、HSET、HEXPIRE，不判定），限速
 断线期间：Push 返回 Unavailable；client→server 消息静默丢弃；握手拒绝（关闭 4004）
 ```
 
@@ -333,7 +335,7 @@ HSET fp:im:node 心跳，HSET 各 fp:im:srv:{app}
 
 | 路径 | 命令 | 备注 |
 |---|---|---|
-| 握手 | `EVALSHA` 1 | 单 key 脚本，含 EXPIRE |
+| 握手 | `EVALSHA` 1 | 单 key 脚本，含 HEXPIRE |
 | Push，单连接策略且本地命中 | 0 | |
 | Push，其他 | `HGETALL` 1 + 每目标节点 `SPUBLISH` 1 | 通常共 2 |
 | PushMany | 每 subject 同上，合一批 | |
@@ -343,9 +345,9 @@ HSET fp:im:node 心跳，HSET 各 fp:im:srv:{app}
 | client→server，本地无流 | `SPUBLISH` 1，最多 2 | |
 | 断开 | `HDEL` 1 | |
 | 后台 | 每节点每 3 秒 `HSET` 1 + 每 app `HSET` 1 + `HGETALL` 若干 | 与消息量无关 |
-| 长连接续期 | 每条存活超过 12 小时的连接每小时 `EXPIRE` 1 | 可忽略 |
+| field 续期 | 每节点每 `conn.field_renew` 对本地连接按 subject 分组各 `HEXPIRE` 1 | 10 万连接约每秒 170 条 |
 
-每秒 3 万条消息、最坏情况全是跨节点 Push，是每秒 6 万条命令，按 hash tag 散在各分片上；全部进管道，每节点每秒往返约 200 次。
+每秒 3 万条消息、最坏情况全是跨节点 Push，是每秒 6 万条命令，按 hash tag 散在各分片上。默认每条命令一次往返；开启写管道攒批（比如 5 毫秒或 256 条）后每节点每秒往返约 200 次，代价是每条消息平均多 2 到 3 毫秒延迟。
 
 ---
 
@@ -404,16 +406,16 @@ func (s Subject) String() string                    // "u:1001" / "g:8f3a…"
 
 ### 10.2 client 侧
 
-第一版提供 TS 客户端（浏览器 + 小程序）与 Go 客户端，行为一致：
+不提供客户端 SDK。对 client 来说 fp-im 就是一个 ws 端点，契约是 3.5 节的帧格式和下面的关闭码：
 
-```ts
-const c = fpim.connect({ url, token })              // 或 { url, guest, app }
-c.onMessage(p => …)
-c.send(p)                                           // 不返回结果，可靠性由业务层按配方实现
-c.onClose(code => …)                                // 4001 认证失败 4002 被策略拒绝 4003 被踢 4004 服务不可用
-```
+| close code | 含义 |
+|---|---|
+| 4001 | 认证失败 |
+| 4002 | 被连接策略拒绝 |
+| 4003 | 被踢（含被顶替） |
+| 4004 | 服务不可用（Redis 断线期间） |
 
-客户端负责：握手第一帧、应用层 ping、指数退避重连、访客 id 的生成与持久化。
+客户端自己负责：连接后 5 秒内发握手帧、应用层 ping、指数退避重连、访客 id 的生成（`crypto.randomUUID()`）与持久化。`send` 不返回结果，可靠性由业务层按第九节的配方实现。
 
 ---
 
@@ -451,13 +453,15 @@ app 级（来自 `AppConfigSource`，热更新）：
 |---|---|---|
 | `node.heartbeat` | 3s | 心跳与缓存刷新间隔 |
 | `node.dead_after` | 10s | 判死阈值 |
-| `conn.key_ttl` | 24h | conn hash 的 key TTL |
+| `conn.field_ttl` | 30m | conn hash 里每个 field 的 TTL |
+| `conn.field_renew` | 10m | 节点对本地连接续期的间隔，必须小于 `conn.field_ttl` 的一半 |
 | `conn.idle_timeout` | 60s | 无帧关闭 |
 | `conn.auth_timeout` | 5s | 握手帧等待 |
 | `conn.send_queue` | 256 | 每连接发送队列长度，满则关闭连接（reason `backpressure`） |
-| `pipeline.flush_interval` | 5ms | 写管道刷新间隔 |
-| `pipeline.flush_size` | 256 | 写管道刷新条数 |
-| `redis.mode` | auto | `standalone` / `cluster`，决定用普通还是 sharded pub/sub |
+| `pipeline.flush_interval` | 0 | 写管道攒批时长，0 为不按时长攒 |
+| `pipeline.flush_size` | 1 | 写管道攒批条数，1 为每条立即发。两项都设时先到为准 |
+
+Redis 是单机还是 Cluster 由启动时 `INFO cluster` 探测，不配置。
 
 ---
 
@@ -471,6 +475,7 @@ app 级（来自 `AppConfigSource`，热更新）：
 - 存活过滤：`HGETALL` 结果里含死节点条目时 `NotOnline` 判定与 `Sessions` 输出正确。
 - 访客解析：uuid 格式校验、IP 限流、`allow_guest` 关闭时拒绝。
 - rendezvous hash 的稳定性：节点集合不变时同 subject 恒选同节点；增删一个节点时只有该节点份额的 subject 换目标。
+- field 续期：续期循环按 subject 分组发 `HEXPIRE`，只覆盖本节点的 connId；写管道在默认配置下每条立即发，配置攒批后按时长或条数先到者刷新。
 
 集成层（真实 Redis 8，Cluster 用 docker 起三主）：
 
@@ -490,7 +495,7 @@ app 级（来自 `AppConfigSource`，热更新）：
 | PushChannel / Broadcast / 业务频道订阅 | 一对多推送量大到 server 查成员再 `PushMany` 成为瓶颈 | 节点按本地订阅者 `SSUBSCRIBE fp:im:ch:{app}:{channel}`，发送方一条 `SPUBLISH`，Redis 负责扇出。订阅凭证由业务方签发。当前用 `PushMany` 代替 |
 | Push 定向到某个终端 | 业务需要"只推手机" | `Push(subject, connId)`，注册表已有 connId，只是 API 没开 |
 | fp 签发访客 token | 访客需要被 fp 管理（合并、封禁、跨设备） | 加 `GuestLogin` RPC，im 握手逻辑不变 |
-| 字段级 TTL | 想让崩溃残留更快消失 | `HEXPIRE` 每 field，代价是每连接周期续期 |
+| 客户端 SDK（Go / TS） | 多个业务方重复写握手、心跳、重连 | 协议已定，封装即可 |
 | JWT Authenticator / 文件 AppConfigSource | fp-im 要脱离 fp 部署 | 接口已留 |
 | 二进制帧 | JSON 编解码成为瓶颈 | 握手时协商 |
 | 节点直连 | Redis pub/sub 成为瓶颈 | 平台设计已预留，`fp:im:node` 表里加地址 |
