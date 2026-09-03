@@ -7,3 +7,10 @@
 .env.local
 .idea/
 .superpowers/
+
+# 前端构建产物：由 scripts/build-web.sh 生成，go:embed（web/embed.go）
+# 在编译期把它打进二进制，不入库。.gitkeep 占位，保证没跑过 npm 的人
+# clone 下来也能 go build ./...（细节见 web/embed.go 顶部注释）。
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep

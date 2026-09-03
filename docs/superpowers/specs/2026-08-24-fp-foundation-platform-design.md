@@ -989,3 +989,78 @@ demo 的四步手工验收全部实跑通过（含"杀掉 fp 后业务不中断"
 
 这也是分层硬约束最终要用 `go/parser` 写架构断言的原因——那六条约束此前全部可以被
 静默打破：违反任何一条，`go build` / `go vet` / `gofmt` / 全量测试**全绿**。
+
+---
+
+## 附：第三阶段（管理控制台）实施后的交接事项
+
+第三阶段共 21 个 commit，手写约 4646 行 / 66 个文件（不含 npm lock 与 shadcn 生成组件）。十个任务各自通过独立审查，触发 6 轮任务级修复；全分支终审判定「可合并，需修」，无 Critical，修复波次 4 个 commit 后复审全部核销。
+
+### 一、本阶段**没有**完成的事（最要紧的一条）
+
+**计划自己写的验收标准 —— Task 10 Step 7 那十步端到端人工验收，完全没做。**
+
+原因：局域网 Postgres（10.9.1.2:15432）与 Redis（10.9.1.2:4379）从执行中途（Task 6）起就一直拒绝连接，至今未恢复。`fp` 进程起不来，全量 Go 测试 248 条因连接被拒而失败。
+
+由此产生的具体后果，不要含糊过去：
+
+- **控制台与后端之间的真实 HTTP 往返，本阶段从头到尾一次都没有发生过。** 所有前端测试都是 `vi.stubGlobal('fetch', ...)` 的进程内桩，所有后端路由测试都是 `httptest`。
+- 「在控制台上点停用，应用真的被停用」这件事**没有任何形式的验证**。它的三条验证腿当时全断：后端测试跑不了、前端当时无测试（已在修复波次补上）、人工验收未做。
+- 后端逻辑本身有**间接**证据：终审逐 commit 核实过，最后一个改动"依赖数据库的生产代码"的提交是 `96af88d`（Task 2），而 Postgres 是 Task 6 才断的——也就是说 Task 1/2 的后端改动当年是在真库上验过绿的，且此后未被触碰。这是间接证据，不是验收。
+
+**数据库恢复后必须做的事**：走完 Task 10 Step 7 的十步，尤其第 3、4、10 步（配登录方式 / 调会话策略 / 停用应用）——正好是自动化测试最薄的三处。**跑完之前，不要对外声称第三阶段验收通过。**
+
+### 二、留给下一阶段的待办（按优先级）
+
+1. **三个新增的变更操作没有任何审计记录。** `ApplicationService` 的 `Update` / `SetStatus` / `SetConnector` 都不写日志。有人把生产上全部应用停用、或把某个应用的短信登录悄悄关掉，数据库里没有任何痕迹——既不知道发生过，更不知道是谁。全仓唯一的管理侧审计写入是 `service/account.go` 的 `writeRevokeLog`。
+   另一半问题是基线遗留：`login_log` 表没有操作者列，`internal/httpapi/user.go` 里几处 handler 拿到 `adminIDFrom(ctx)` 却直接丢掉。补 actor 列涉及迁移。
+
+2. **陈旧的 connector 配置键会让启停开关卡住。** Task 2 给 `SetConnector` 加了"拒绝未知配置键"的校验，但**没有配套迁移**。本阶段之前任意键都能落库（这正是 Task 2 的立项理由），所以既有部署里很可能存在带陈旧键的行。而 `ConnectorsPanel` 的启停开关会把已存配置**原样回传**——管理员点开关关闭一个登录方式会得到 400「不支持配置项 "xxx"」，而正确操作（先在下面的表单点一次保存把配置洗干净）完全不可发现。同理，未来给某个 connector 加**必填**字段也会让启停开关先坏掉。
+   修法二选一：开关只提交 `enabled`（需要后端支持局部更新），或提交前用 schema 过滤一遍 config。
+
+3. **secret 字段的脱敏与落库加密仍未实现。** `domain.Field` 那条注释已在本阶段补上"尚未实现"的说明，但行为没变：`SetConnector` 明文入 JSONB、`ListConnectors` 原样回传，前端渲染成 `type="password"` **只是视觉遮挡**。当前两个 connector 一个 secret 字段都没有，所以现在没有实际泄露。**真到加微信 AppSecret 那天，它会明文出现在 `GET /applications/{id}/connectors` 的响应里——必须先补上这条链路。**
+
+4. **一批基线遗留的安全问题，本阶段一行都没碰，但本阶段第一次给 fp 装上浏览器界面，把其中几条从"理论问题"变成了"可被点击利用的问题"：**
+   - `/admin/api/login` 没有限流（`store.RateLimiter` 是现成的）。
+   - 登录响应体里回显了 token，抵消了 HttpOnly cookie 的意义。
+   - `FP_ENV` 的取值不做校验，拼错会让 `IsProd()` 静默返回 false，进而让管理端 cookie 的 `Secure` 属性静默关闭。
+   - 用户列表把身份手机号明文下发，而登录日志里的同一个手机号是脱敏的（`service.MaskSubject`）——同一份数据两套标准。
+
+### 三、这份计划自身被实现者挑出的缺陷（方法论记录）
+
+九处。每一处都是"我写计划时以为写对了、实际跑起来才发现不对"：
+
+1. `PATCH /applications/{id}` 的 `cookieDomain` 是非指针，只发 `name` 会把它静默清空——而路由注释写着"局部更新"。
+2. 测试名写错：`TestConnectorCRUD` 实际叫 `TestConnectorConfigRoundTrip`。
+3. 外部测试包（`package service_test`）里漏了 `service.` 包限定符，照抄编译不过。
+4. 把 8 条测试放进一个 `package httpapi` 文件，但既有测试是 `package httpapi_test`，两者互不可见。
+5. `ApiError` 用了 TypeScript 构造函数参数属性，在脚手架开启的 `erasableSyntaxOnly` 下编译不过。
+6. 关掉了 vitest 的 `globals`（为 TypeScript 的正确理由），却没想到 `@testing-library/react` 的自动 DOM 清理靠裸标识符探测全局 `afterEach`——于是清理失效、组件测试之间 DOM 互相污染，计划给的 3 条测试里有 2 条会**假红**。
+7. `Select.onValueChange` 在当前 base-ui 下参数类型是 `string | null`，原文编译不过。
+8. `CardHeader` 写了 `flex-row` 却没写 `flex`，被基类的 `grid` 压住，实际是纵向堆叠。
+9. `TestEmbeddedConsoleIsPresentOrClearlyAbsent` 的 skip 条件只看 `index.html` 在不在，而注释声称"两者都没有才跳过"——"index.html 缺失但 assets 有残留"这个半吊子状态会被直接 skip 掉，**而那正是这条测试点名要抓的东西**。
+
+### 四、方法论：第二阶段那条教训的现场复现
+
+第二阶段记的是：
+
+> 写计划时"强调了"不等于"守住了"。每写一条"这是必须的"，都要同时问：**哪一条测试会因为违反它而变红？**
+> 补充：还要再问一句——**这条测试的前置数据里，有没有某种巧合，使得正确实现和错误实现产出同样的结果？**
+
+第三阶段有两个案例把这条教训坐实了，都值得记住：
+
+**案例一（Task 9）：变异测试逼出了一条假绿的测试。** 实现者给"全部下线"补测试时做变异验证——删掉 `sessions.reload()`，本该变红，结果 8/8 全绿。他没有放过，查出根因是测试辅助函数 `sessionsListCallCount` **只按 URL 过滤、不看 HTTP 方法**，而 `DELETE /users/{id}/sessions` 与拉取列表的 `GET /users/{id}/sessions` 是**同一个 URL**，那次 DELETE 被误计成了一次"列表被拉取"。
+连带结论更值得记：**既有的"踢单个设备"那条测试之所以一直有效，纯属路径巧合**（`.../sessions/{sid}` 恰好不同于 `.../sessions`），不是设计上的严谨。
+**没有变异测试，这条假绿会一直当成保护伞挂在那里。**
+
+**案例二（终审）：一条被记为"当前不冲突"的 Minor，实测后升级成必修。** `DynamicForm` 的 DOM id 没加命名空间，任务级审查记的是"当前 password/sms_code 的字段 key 不冲突，推迟"。终审写了个临时测试实跑，发现后果根本不是"重复 id"：两个 connector 有同名字段时，**点 B 的开关文案会翻掉 A 的开关**，且 B 的开关无法按可访问名定位。而这恰好发生在本阶段押注的那个场景——"后端加登录方式、前端零改动"。
+**教训：判断一条缺陷的严重性时，"当前不会触发"和"在这个项目的核心场景下会不会触发"是两个问题。**
+
+第三阶段自己新增的一条实践，建议延续：**每条标注「辨别力」的测试，实现者都要做一次变异验证**——把实现改成错误版本，确认这条测试真的变红，再改回来。本阶段十个任务全部执行了这条，直接产出了案例一。
+
+### 五、本阶段确立、后续应当延续的技术约定
+
+- 前端工具链有六条与官方文档冲突的坑（tsconfig 不许有 `baseUrl`、shadcn 组件名必须带 `@shadcn/` 命名空间否则静默失败、shadcn v4 没有 form 组件、TanStack Table v9 是彻底重写故未引入、`go:embed` 必须用 `all:` 前缀、`defineConfig` 要从 `vitest/config` 导入）。全部记在 `docs/console.md`，改前端工程配置前先读那一节。
+- `web/dist/.gitkeep` 是 `//go:embed all:dist` 能在前端未构建时通过编译的唯一依托。`web/package.json` 的 build 脚本末尾有一段专门重建它的逻辑（Vite 的 `emptyOutDir` 会清空目录），`internal/integration/console_test.go` 有一条测试用 `git ls-files` 断言它仍被版本库跟踪——**查的是索引不是磁盘**，因为危险情形恰恰是"从版本库删了但本地还在"，那时破坏者一切正常、只有下一个 clone 的人 `go build` 会炸。
+- 前后端 DTO 契约靠两个后端护栏而非前端自觉：`decodeJSON` 开了 `DisallowUnknownFields`（请求方向字段名拼错 = 400 而不是静默丢弃），`validateConnectorConfig` 拒绝未知配置键。`web/src/lib/types.ts` 是手工镜像，`api.get<T>` 只是类型断言，字段名对不上不会有编译错误、只会在运行时变成 undefined。
+- 破坏性操作（停用应用、冻结账号、全部下线）有二次确认；「下线单设备」刻意没有（破坏半径最小、高频重复动作）。确认框允许 Escape/点遮罩关闭——语义是"取消 = 不执行"，与 appSecret 那个"不许被误关"的弹窗刚好相反。

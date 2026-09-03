@@ -78,7 +78,6 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
-	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
 	epochs := store.NewEpochStore(rdb)
 	clk := newFakeClock(time.Now().UnixMilli())
@@ -97,6 +96,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
+	apps := service.NewApplicationService(pool, reg)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的

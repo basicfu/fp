@@ -21,6 +21,7 @@ import (
 	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
+	"github.com/basicfu/fp/web"
 )
 
 func main() {
@@ -62,7 +63,6 @@ func run() error {
 	epochStore := store.NewEpochStore(rdb)
 
 	userSvc := service.NewUserService(pool)
-	appSvc := service.NewApplicationService(pool)
 	codeSvc := notify.NewCodeService(rdb)
 
 	registry := connector.NewRegistry()
@@ -72,6 +72,8 @@ func run() error {
 	if err := registry.Register(connector.NewSMSCode(codeSvc)); err != nil {
 		return err
 	}
+
+	appSvc := service.NewApplicationService(pool, registry)
 
 	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore)
 
@@ -146,6 +148,7 @@ func run() error {
 			Registry: registry,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
+			Console:       web.Dist(),
 		}),
 	}
 

@@ -46,7 +46,6 @@ type phase2Services struct {
 func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Services {
 	t.Helper()
 
-	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
 	logs := service.NewLoginLogService(pool)
 	codes := notify.NewCodeService(rdb)
@@ -62,6 +61,7 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	if err := registry.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
+	apps := service.NewApplicationService(pool, registry)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// []RateRule{} 是显式关闭频率限制，仅用于测试——生产装配千万别照抄，

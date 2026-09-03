@@ -260,14 +260,15 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 
 	users := service.NewUserService(pool)
 	logs := service.NewLoginLogService(pool)
+	reg := connector.NewRegistry()
 	deps := httpapi.Deps{
 		Admin:    admin,
-		Apps:     service.NewApplicationService(pool),
+		Apps:     service.NewApplicationService(pool, reg),
 		Users:    users,
 		Accounts: service.NewAccountService(users, sessions, epochs, logs),
 		Sessions: sessions,
 		Logs:     logs,
-		Registry: connector.NewRegistry(),
+		Registry: reg,
 	}
 	h := httpapi.NewRouter(deps)
 

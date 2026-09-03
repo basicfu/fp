@@ -47,7 +47,6 @@ func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
-	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
 	epochs := store.NewEpochStore(rdb)
 	sessions := service.NewSessionServiceWithClock(
@@ -62,6 +61,7 @@ func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
 	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
+	apps := service.NewApplicationService(pool, reg)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的
@@ -846,13 +846,13 @@ func TestRateLimitedResendDoesNotInvalidateDeliveredCode(t *testing.T) {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
-	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
 	codes := notify.NewCodeService(rdb)
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册: %v", err)
 	}
+	apps := service.NewApplicationService(pool, reg)
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	sender := notify.NewSender(pool, store.NewRateLimiter(rdb),
 		[]notify.RateRule{{Name: "30s", Window: 30 * time.Second, Limit: 1}})
@@ -900,13 +900,13 @@ func TestSendLoginCodeIsRateLimitedPerPhone(t *testing.T) {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
-	apps := service.NewApplicationService(pool)
 	users := service.NewUserService(pool)
 	codes := notify.NewCodeService(rdb)
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册: %v", err)
 	}
+	apps := service.NewApplicationService(pool, reg)
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// 启用 30 秒一次的限制
 	sender := notify.NewSender(pool, store.NewRateLimiter(rdb),
