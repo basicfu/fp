@@ -406,7 +406,7 @@ func (s Subject) String() string                    // "u:1001" / "g:8f3a…"
 
 ### 10.2 client 侧
 
-不提供客户端 SDK。对 client 来说 fp-im 就是一个 ws 端点，契约是 3.5 节的帧格式和下面的关闭码：
+提供 Go 客户端（设备、原生程序、测试用），不提供 JS 客户端。对浏览器和小程序来说 fp-im 就是一个 ws 端点，按 3.5 节的帧格式和下面的关闭码自己接：
 
 | close code | 含义 |
 |---|---|
@@ -415,7 +415,23 @@ func (s Subject) String() string                    // "u:1001" / "g:8f3a…"
 | 4003 | 被踢（含被顶替） |
 | 4004 | 服务不可用（Redis 断线期间） |
 
-客户端自己负责：连接后 5 秒内发握手帧、应用层 ping、指数退避重连、访客 id 的生成（`crypto.randomUUID()`）与持久化。`send` 不返回结果，可靠性由业务层按第九节的配方实现。
+客户端负责：连接后 5 秒内发握手帧、应用层 ping、指数退避重连、访客 id 的生成（`crypto.randomUUID()`）与持久化。`send` 不返回结果，可靠性由业务层按第九节的配方实现。
+
+Go 客户端把上面这些封装掉：
+
+```go
+c, err := fpsdk.IM.Client(ctx, fpim.ClientConfig{
+    URL:   "wss://im.example.com/ws",
+    Token: token,                       // 或 Guest: id, App: "a1"
+    OS:    "linux", Mobile: false,      // 可选，不传则 im 按 UA 解析
+})
+c.OnMessage(func(p []byte) { … })
+c.OnClose(func(code int) { … })         // 4001 / 4002 / 4003 / 4004
+err = c.Send(ctx, payload)              // 只表示已写入 ws，不代表 server 收到
+c.Close()
+```
+
+握手、ping、退避重连由客户端内部处理；被踢（4003）和认证失败（4001）不自动重连，交给调用方。
 
 ---
 
@@ -495,7 +511,7 @@ Redis 是单机还是 Cluster 由启动时 `INFO cluster` 探测，不配置。
 | PushChannel / Broadcast / 业务频道订阅 | 一对多推送量大到 server 查成员再 `PushMany` 成为瓶颈 | 节点按本地订阅者 `SSUBSCRIBE fp:im:ch:{app}:{channel}`，发送方一条 `SPUBLISH`，Redis 负责扇出。订阅凭证由业务方签发。当前用 `PushMany` 代替 |
 | Push 定向到某个终端 | 业务需要"只推手机" | `Push(subject, connId)`，注册表已有 connId，只是 API 没开 |
 | fp 签发访客 token | 访客需要被 fp 管理（合并、封禁、跨设备） | 加 `GuestLogin` RPC，im 握手逻辑不变 |
-| 客户端 SDK（Go / TS） | 多个业务方重复写握手、心跳、重连 | 协议已定，封装即可 |
+| JS 客户端 | 多个前端重复写握手、心跳、重连 | 协议已定，封装即可 |
 | JWT Authenticator / 文件 AppConfigSource | fp-im 要脱离 fp 部署 | 接口已留 |
 | 二进制帧 | JSON 编解码成为瓶颈 | 握手时协商 |
 | 节点直连 | Redis pub/sub 成为瓶颈 | 平台设计已预留，`fp:im:node` 表里加地址 |
