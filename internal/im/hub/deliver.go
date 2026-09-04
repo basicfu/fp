@@ -66,7 +66,7 @@ func (h *Hub) Deliver(ctx context.Context, env bus.Envelope) bool {
 
 	for i := int(env.Hop); i < len(env.Route); i++ {
 		target := env.Route[i]
-		env.Hop = uint8(i + 1) // 先把游标推进到下一位再发出去，下游拿到的是"从这里继续"
+		env.Hop = uint16(i + 1) // 先把游标推进到下一位再发出去，下游拿到的是"从这里继续"
 		n, err := h.pub.Publish(ctx, target, env)
 		if err != nil {
 			slog.Warn("hub: 发布到节点失败，尝试下一候选", "target", target, "err", err)

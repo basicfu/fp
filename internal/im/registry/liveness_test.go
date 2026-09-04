@@ -56,6 +56,33 @@ func waitSrvField(t *testing.T, rdb *redis.Client, app, node string, want bool) 
 	}
 }
 
+// waitRunPrimed 轮询直到 node 在 fp:im:node 存活表里出现，用来确定性地等
+// Liveness.Run 启动时那一次性的 Beat/Refresh/writeServingTable"预热轮"跑完。
+//
+// 复审实测过这里不等待会导致约 1/8 的假阳性：go l.Run(runCtx) 只是发起了
+// 一个 goroutine，调度器什么时候真正执行它的预热轮不确定。如果这一轮
+// 恰好被调度到测试后面 gate 已经放行、甲乙双方都已经决定了最终状态之后
+// 才执行，它自己的 writeServingTable 调用会独立地把 Redis 状态写成
+// l.serving 当时的值——这次"额外的"写跟测试要验证的那次交错完全无关，
+// 却可能凑巧把断言撞对，掩盖掉被测代码其实还是旧实现的事实。这里先等
+// 预热轮确认跑完（此时 everSrv 还是空的，它内部的 writeServingTable 会
+// 直接空跑），再开始整个"甲乙"交错，Run 在测试窗口内就不会再有背景写
+// 干扰（心跳周期设成了 1 小时，ticker 分支不会在测试期间触发）。
+func waitRunPrimed(t *testing.T, rdb *redis.Client, node string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		v, err := rdb.HGet(context.Background(), model.KeyNodes, node).Result()
+		if err == nil && v != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等待 Run 的启动预热轮完成超时：%s 一直没有出现在 %s 里，err=%v", node, model.KeyNodes, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestLivenessServerNodes 用真正跑起来的 Run 消费 SetServing 的信号，
 // 而不是像旧版本那样假设 SetServing 会同步写 Redis。
 func TestLivenessServerNodes(t *testing.T) {
@@ -145,7 +172,7 @@ func TestSetServingRapidSuccessionEndsAtRealState(t *testing.T) {
 // 这个交错。放行之后：
 //   - 若被测代码是本次改动前的旧实现，SetServing 会在锁外直接同步发起这条
 //     被卡住的 HDel，放行后它真正执行并把状态覆盖回"没有"，断言失败。
-//   - 若被测代码是新实现，SetServing 本身根本不use这个 ctx 发任何 Redis
+//   - 若被测代码是新实现，SetServing 本身根本不用这个 ctx 发任何 Redis
 //     命令（它只改内存、发信号），delayHook 从头到尾不会被这次调用触发，
 //     真正的写由 Run 里的消费协程稍后统一发出，读到的是调用这一刻的
 //     最终真实状态（true），断言通过。
@@ -160,6 +187,10 @@ func TestSetServingOutOfOrderRegression(t *testing.T) {
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go l.Run(runCtx)
+
+	// 先确定性地等 Run 的启动预热轮跑完，再开始下面的"甲乙"交错——见
+	// waitRunPrimed 的注释，这一步是消除约 1/8 假阳性的关键。
+	waitRunPrimed(t, rdb, "im-a")
 
 	// 起点：已有一条流，状态是"有"，且已经落地。
 	if err := l.SetServing(context.Background(), "a1", true); err != nil {
@@ -234,29 +265,44 @@ func (delayHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Proce
 	return func(ctx context.Context, cmds []redis.Cmder) error { return next(ctx, cmds) }
 }
 
-// TestHeartbeatBackstopRestoresDroppedEntry 覆盖 B2 的心跳兜底：DropLocal 只
-// 影响本地视图，不动 Redis；本节点自己的心跳周期到了之后，会无条件按当下
-// 真实的 serving 状态重写一次服务表，把被误剔的条目自然长回来。
-func TestHeartbeatBackstopRestoresDroppedEntry(t *testing.T) {
+// TestHeartbeatBackstopHDelsStaleEntry 覆盖 B2 的心跳兜底，专门验证 HDEL
+// 方向。
+//
+// 复审实测过一个假阳性：如果把心跳分支里的 writeServingTable(ctx) 换成
+// 空语句，整个 registry 包的测试仍然全绿——因为 Beat() 本身就会对
+// l.serving 集合里的每个 app 做 HSET，只要断言的是"条目被 HSET 回来"，
+// Beat() 单独就能让测试通过，根本测不到 writeServingTable 是否被调用。
+// writeServingTable 唯一无可替代的地方是 HDEL 方向：Beat() 从来不会
+// HDEL 任何条目。这里构造的场景是：本节点已经决定不再服务 a1（serving
+// 里没有它），但 Redis 里因为某种原因（另一个进程误写、失败重试后的
+// 孤儿写入……）残留了一条本节点的条目。只有心跳分支里那次无条件的
+// writeServingTable 会把它 HDEL 掉；Beat() 对着一个不在 l.serving 里的
+// app 什么也不做。
+func TestHeartbeatBackstopHDelsStaleEntry(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
 	l := NewLiveness(rdb, "im-a", 30*time.Millisecond, 10*time.Second)
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go l.Run(runCtx)
 
+	// 先服务再撤销：让 a1 进入 everSrv 追踪范围，且最终真实状态落地为
+	// "没有"。
 	if err := l.SetServing(context.Background(), "a1", true); err != nil {
 		t.Fatal(err)
 	}
 	waitSrvField(t, rdb, "a1", "im-a", true)
-
-	// 直接从 Redis 里删掉这条条目，模拟它被误删（比如被 DropLocal 剔除的
-	// 目标节点自己的条目在 Redis 侧因为别的原因消失）：本节点的内存状态
-	// （l.serving）完全没变，仍然是"有"。验证的是"就算 Redis 里的条目没了，
-	// 下一次心跳也会用真实状态把它重写回来"。
-	if err := rdb.HDel(context.Background(), model.SrvKey("a1"), "im-a").Err(); err != nil {
+	if err := l.SetServing(context.Background(), "a1", false); err != nil {
 		t.Fatal(err)
 	}
-	waitSrvField(t, rdb, "a1", "im-a", true)
+	waitSrvField(t, rdb, "a1", "im-a", false)
+
+	// 从外部把字段重新写回去，模拟一条不该存在的残留条目。l.serving["a1"]
+	// 仍然是 false，没有任何本地事件会再次触发 SetServing 的信号——能纠正
+	// 这条残留的，只有心跳分支的无条件重写。
+	if err := rdb.HSet(context.Background(), model.SrvKey("a1"), "im-a", time.Now().UnixMilli()).Err(); err != nil {
+		t.Fatal(err)
+	}
+	waitSrvField(t, rdb, "a1", "im-a", false)
 }
 
 // TestDropLocalHidesNodeUntilRefresh 覆盖 B3：DropLocal 之后 ServerNodes 与

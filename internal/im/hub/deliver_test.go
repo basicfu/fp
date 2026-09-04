@@ -2,7 +2,9 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/rendezvous"
@@ -183,6 +185,75 @@ func TestDeliverRouteOrderStableAcrossCalls(t *testing.T) {
 			if order[j] != first[j] {
 				t.Fatalf("第 %d 次候选顺序变了：%v vs %v", i, first, order)
 			}
+		}
+	}
+}
+
+// TestDeliverRouteLargerThan255DoesNotWrapAround 是"游标溢出"缺陷的回归
+// 测试。复审实测过：Hop 若是 uint8，候选数达到 256 时第 256 次发布会把
+// Hop 从 255 加到 256、回绕成 0，下游会把游标读成"从 Route[0] 重新开始"，
+// 导致整条候选列表被反复重试，消息在节点间打转，还会把同一条消息重复
+// 投给已经成功接收过的那条 server 流。
+//
+// 这里构造 300 个候选节点，只有最后一个（按 rendezvous 顺序排到最后的那个）
+// 返回非 0 订阅者数，逼着 Deliver 把整条列表试完。用一个后台 goroutine 加
+// 超时保护：如果游标真的回绕，循环会永不终止，测试会在超时后失败而不是
+// 挂起整个测试进程。
+func TestDeliverRouteLargerThan255DoesNotWrapAround(t *testing.T) {
+	h, _, live, pub := newHub(t)
+
+	const n = 300
+	nodes := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		nodes = append(nodes, fmt.Sprintf("im-node-%03d", i))
+	}
+	live.servers["a1"] = nodes
+
+	ranked := rendezvous.Rank(nodes, "u:1")
+	last := ranked[len(ranked)-1]
+	subs := make(map[string]int64, len(ranked))
+	for _, node := range ranked {
+		subs[node] = 0
+	}
+	subs[last] = 1 // 只有排在最后的候选有订阅者，逼着走完整条 Route
+	pub.subs = subs
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- h.Deliver(context.Background(), up("u:1"))
+	}()
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("最后一个候选有订阅者，Deliver 应该返回 true")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Deliver 3 秒内没有返回：游标很可能回绕，陷入了对候选列表的无限重试")
+	}
+
+	if len(pub.sent) != len(ranked) {
+		t.Fatalf("应该恰好把全部 %d 个候选试一遍（每个只试一次），实际发布了 %d 次：可能因为游标回绕重复尝试了同一个候选", len(ranked), len(pub.sent))
+	}
+	seen := map[string]int{}
+	for _, s := range pub.sent {
+		seen[s.node]++
+	}
+	for node, cnt := range seen {
+		if cnt != 1 {
+			t.Fatalf("候选 %s 被发布了 %d 次，游标应该只增不减，每个候选只应该被试一次", node, cnt)
+		}
+	}
+	for i, node := range ranked {
+		if pub.sent[i].node != node {
+			t.Fatalf("发布顺序在第 %d 位应该是 %s，实际是 %s：候选顺序被打乱", i, node, pub.sent[i].node)
+		}
+		// 关键断言：写进信封、真正发到网络上的 Hop 必须等于 i+1（下一跳
+		// 该从哪里继续），不能因为字段宽度不够而回绕。i=255 时 i+1=256，
+		// 这正是 uint8 会在这里绕回 0 的临界点——加宽到 uint16 之前，这个
+		// 断言在这个用例上会在 i=255 处失败。
+		if int(pub.sent[i].env.Hop) != i+1 {
+			t.Fatalf("第 %d 次发布的信封里 Hop 应该是 %d，实际是 %d：游标回绕了", i, i+1, pub.sent[i].env.Hop)
 		}
 	}
 }

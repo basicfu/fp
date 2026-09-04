@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strconv"
 	"sync"
@@ -182,7 +183,7 @@ func (l *Liveness) writeServingTable(ctx context.Context) {
 		return
 	}
 	ts := l.now().UnixMilli()
-	_, _ = l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
+	if _, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
 		for _, a := range apps {
 			if on[a] {
 				p.HSet(ctx, model.SrvKey(a), l.nodeID, ts)
@@ -191,7 +192,14 @@ func (l *Liveness) writeServingTable(ctx context.Context) {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		// 不能静默吞掉：这正是这批改动要消灭的"节点持有活流却对外不宣告、
+		// 该 app 上行被静默丢弃"症状，只是把触发原因从"锁外写序倒挂"换成了
+		// "Redis 持续写失败"。至少要留一条日志，让运维能定位到是这里在丢写，
+		// 而不是无声无息。下一次心跳或下一次 serving 信号会重试，这里不用
+		// 自己做退避重试。
+		slog.Warn("registry: 写服务表失败", "err", err, "apps", apps)
+	}
 }
 
 // TrackApp 让 Refresh 开始拉该 app 的 srv 表。hub 第一次需要某 app 的 ServerNodes 时调用。

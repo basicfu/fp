@@ -344,22 +344,34 @@ func TestRemoveConnWaitsForConnectedEventOrder(t *testing.T) {
 }
 
 // TestRemoveConnSkipsDisconnectWhenConnectedNotDelivered 覆盖 C2 第 6 步：
-// 建立事件投递失败（本地无流、全网也没有 server）时，RemoveConn 不应该再
-// 发 Disconnected——业务 server 压根不知道这条连接存在，发断开只会制造一个
-// 无法解释的孤儿消息。
+// 建立事件投递失败时，RemoveConn 不应该再发 Disconnected——业务 server 压根
+// 不知道这条连接存在，发断开只会制造一个无法解释的孤儿消息。
+//
+// 关键在于：AddConn 发 Connected 时必须真的投递失败（这里用"全网无
+// server"来构造），但断开时必须有一条本地流"本可以"收到 Disconnected——
+// 只是这条流是在 AddConn 完成之后才挂上的，不影响 Connected 那次投递
+// 结果。这样能真正检验 C2 第 6 步本身：如果把 hub.go 里
+// `if !entry.delivered { return }` 整段删掉，RemoveConn 会走到 emit，
+// 这次因为已经有本地流，Deliver 会成功写入，s.got 会多出一条——测试能
+// 抓到这个差异。旧版本只测"候选为空"这一种情形时，AddConn 和 RemoveConn
+// 走的是同一条"没有任何投递目标"的路径，删掉这段判断也不会改变
+// pub.sent 的长度，测试形同虚设。
 func TestRemoveConnSkipsDisconnectWhenConnectedNotDelivered(t *testing.T) {
-	h, _, live, pub := newHub(t)
+	h, _, live, _ := newHub(t)
 	live.servers["a1"] = nil // 本地无流，全网也没有 server：Connected 必然投递失败
 
 	c := &fakeConn{id: "c1"}
 	h.AddConn(context.Background(), "a1", model.User("1"), c, model.ConnMeta{Node: "im-a"}, "")
-	if len(pub.sent) != 0 {
-		t.Fatalf("候选为空，不该有任何发布尝试：%+v", pub.sent)
-	}
+
+	// Connected 已经处理完（AddConn 已返回），现在才挂上本地流：如果
+	// RemoveConn 没有正确记住"Connected 投递失败"，会在下面成功把
+	// Disconnected 写进这条流。
+	s := &fakeStream{}
+	h.AddStream(context.Background(), "a1", s)
 
 	h.RemoveConn(context.Background(), "a1", model.User("1"), "c1", model.ReasonClient)
-	if len(pub.sent) != 0 {
-		t.Fatalf("Connected 事件投递失败后不该再发 Disconnected：%+v", pub.sent)
+	if len(s.got) != 0 {
+		t.Fatalf("Connected 事件投递失败后不该再发 Disconnected，实际收到：%+v", s.got)
 	}
 }
 

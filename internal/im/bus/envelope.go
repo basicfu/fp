@@ -21,8 +21,15 @@ type Envelope struct {
 	// Hop 是游标，指向 Route 里"当前正在尝试"的位置：Hub.Deliver 每转发一次
 	// 就把它设成"目标在 Route 里的下标 + 1"再发出去，这样收到信封的下游节点
 	// 知道该从哪一位继续试，而不是从头重新试一遍已经确认没有订阅者的节点。
-	// 只增不减、且 Route 长度固定，转发不可能无限循环。
-	Hop     uint8
+	// 只增不减、且 Route 长度固定，最多试完全部候选就会结束，不会无限循环。
+	//
+	// 类型是 uint16 而不是 uint8：候选列表长度等于活跃节点数，uint8 在 255
+	// 个节点时就会溢出——复审实测过这个场景，第 256 次发布时 Hop 从 255 加到
+	// 256 后回绕成 0，下游节点会把游标读成"从 Route[0] 重新开始"，导致整条
+	// 候选列表被反复重试，消息在节点间永久打转，还会把同一条消息重复投给
+	// 已经成功接收过的那条 server 流。uint16 把上限抬到 65535，覆盖任何
+	// 现实中会出现的节点规模；代价只是每条信封多 1 字节，可以忽略。
+	Hop     uint16
 	App     string
 	Subject string
 	ConnID  string
@@ -36,19 +43,22 @@ type Envelope struct {
 	Payload []byte
 }
 
-// Encode 布局：type(1) hop(1)，然后 app/subject/connID/extra 四个长度前缀
-// （uvarint）的字节串，接着 Route（先一个 uvarint 元素个数，再逐个长度前缀
-// 的字节串），最后 payload。Route 放在 payload 之前而不是最后：payload 长度
-// 通常远大于 Route，把变长的路由段夹在两个定长可预期的字段之间，Decode 读取
-// 顺序与这里的写入顺序严格一一对应，不需要额外的长度字段区分"这是路由还是
-// payload"。
+// Encode 布局：type(1) hop(2，大端定长)，然后 app/subject/connID/extra 四个
+// 长度前缀（uvarint）的字节串，接着 Route（先一个 uvarint 元素个数，再逐个
+// 长度前缀的字节串），最后 payload。hop 用定长 2 字节而不是 uvarint：它在
+// 转发路径上每一跳都要读写，定长字段免去一次 uvarint 解码，且 Encode/Decode
+// 两处的字段边界更容易对齐检查。Route 放在 payload 之前而不是最后：payload
+// 长度通常远大于 Route，把变长的路由段夹在两个定长可预期的字段之间，Decode
+// 读取顺序与这里的写入顺序严格一一对应，不需要额外的长度字段区分"这是路由
+// 还是 payload"。
 func (e Envelope) Encode() []byte {
 	size := 16 + len(e.App) + len(e.Subject) + len(e.ConnID) + len(e.Extra) + len(e.Payload)
 	for _, n := range e.Route {
 		size += len(n) + 10
 	}
 	b := make([]byte, 0, size)
-	b = append(b, e.Type, e.Hop)
+	b = append(b, e.Type)
+	b = binary.BigEndian.AppendUint16(b, e.Hop)
 	for _, s := range [][]byte{[]byte(e.App), []byte(e.Subject), []byte(e.ConnID), []byte(e.Extra)} {
 		b = binary.AppendUvarint(b, uint64(len(s)))
 		b = append(b, s...)
@@ -66,11 +76,11 @@ func (e Envelope) Encode() []byte {
 var ErrBadEnvelope = errors.New("bus: 信封损坏")
 
 func Decode(b []byte) (Envelope, error) {
-	if len(b) < 2 {
+	if len(b) < 3 {
 		return Envelope{}, ErrBadEnvelope
 	}
-	e := Envelope{Type: b[0], Hop: b[1]}
-	rest := b[2:]
+	e := Envelope{Type: b[0], Hop: binary.BigEndian.Uint16(b[1:3])}
+	rest := b[3:]
 
 	readBytes := func() ([]byte, bool) {
 		n, k := binary.Uvarint(rest)

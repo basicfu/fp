@@ -116,6 +116,15 @@ const removeConnWait = 30 * time.Second
 func (h *Hub) AddConn(ctx context.Context, app string, sub model.Subject, c Conn, meta model.ConnMeta, ua string) {
 	k := key(app, sub.String())
 	entry := &connEntry{conn: c, meta: meta, established: make(chan struct{})}
+	// defer 而不是在函数末尾显式 close：h.emit 走 Deliver，理论上不会 panic，
+	// 但一旦真的 panic（比如调用方传进来的 Stream/Publisher 实现有 bug），
+	// 显式 close 写在最后一行的话根本执行不到，established 永远不会关闭，
+	// 之后每一次 RemoveConn 都要白等满 30 秒才会超时放弃。defer 保证不管
+	// 函数是正常返回还是 panic 退出，established 都会被关闭；entry.delivered
+	// 仍然要在 defer 触发前的正常路径里赋值，panic 时它保持零值 false，
+	// 效果等同于"建立事件投递结果未知，按失败处理，不发断开事件"，是比
+	// 悬挂等待更安全的默认值。
+	defer close(entry.established)
 	h.mu.Lock()
 	if h.conns[k] == nil {
 		h.conns[k] = map[string]*connEntry{}
@@ -127,7 +136,6 @@ func (h *Hub) AddConn(ctx context.Context, app string, sub model.Subject, c Conn
 	h.mu.Unlock()
 	delivered := h.emit(ctx, app, sub, c.ID(), model.EventBody{Kind: model.EventConnected, OS: meta.OS, Mobile: meta.Mobile, UA: ua, At: meta.At})
 	entry.delivered = delivered
-	close(entry.established)
 }
 
 // RemoveConn 从表里删除并发 Disconnected 事件。幂等：重复删除不发第二次事件。
@@ -136,6 +144,11 @@ func (h *Hub) AddConn(ctx context.Context, app string, sub model.Subject, c Conn
 // 断开事件之前，先等 AddConn 那边的建立事件处理完。这个等待必须发生在锁外
 // ——锁内只做"从表里摘除"这一件事，等待可能长达 30 秒，锁在手里等于把整个
 // 节点的路由（所有连接的增删）都锁死。
+//
+// 业务方契约：处理断开事件时，遇到不认识的连接 id 必须安静忽略。原因不止
+// 是这里"建立事件投递失败就不发断开"这一种情形——业务 server 自身重启后，
+// 那些在它启动之前就连上的 client 断开时，它同样会收到一个自己从未见过的
+// 连接 id。这是 im 消除不掉的、必须由接入方容忍的行为，不是这里能修的 bug。
 func (h *Hub) RemoveConn(ctx context.Context, app string, sub model.Subject, connID, reason string) {
 	k := key(app, sub.String())
 	h.mu.Lock()
