@@ -353,7 +353,11 @@ message PermissionPoint {
 
 ## 十二、新增依赖
 
-`github.com/casbin/casbin/v2` —— **仅服务端**。需要在 `internal/integration/dependency_whitelist_test.go` 的白名单里登记一行并说明用途。SDK 侧不引入任何新依赖（`sdk/arch_test.go` 的分层约束仍然成立）。
+**实施结果：零新增依赖。** 设计时预留了 `github.com/casbin/casbin/v2`（仅服务端，用于展开角色继承），实施时发现不需要——展开继承就是沿 `parent_id` 往上走一遍并让子角色的直接授权优先，二十行的事（见 `internal/service/policy.go` 的 `effectiveFor`）。为此引入 casbin 及其传递依赖，换来的只是同一个循环。
+
+真正需要 casbin 的是**数据范围**（本期非目标）——那时它的 `model.conf` 表达力才值这个依赖。届时再引入，且只在服务端：SDK 侧的判定是一张扁平表上的 map 查找，永远不需要 casbin。
+
+判定逻辑落在 `sdk/authzcore`，服务端与 SDK 共用同一份实现。选这个位置是因为：`sdk/` 不得 import `internal/`（`sdk/arch_test.go`），`internal/` 不宜 import sdk 的业务包，而 `sdk/gen` 是 buf 的 clean 目标（手写文件会被下次 `./scripts/gen.sh` 删掉——实施时真踩到了这一脚）。
 
 ## 十三、实施顺序建议
 
