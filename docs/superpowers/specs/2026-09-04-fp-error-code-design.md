@@ -90,11 +90,11 @@ domain.Fail(domain.ErrRateLimited, "RATE_LIMITED", "操作过于频繁，请稍�
 
 **`domain.Errorf` 迁移完毕后整个删除**，并由架构测试禁止它复活（见第八节）。这样"每个对外错误都有码"由编译器保证，而不是靠约定——这是全量迁移相对于"只迁移登录路径、其余靠哨兵兜底"的唯一实质收益，也是选择全量迁移的理由。
 
-**哨兵不变。** `ErrNotFound` / `ErrInvalidCredential` / `ErrUnauthorized` / `ErrConflict` / `ErrInvalidArgument` / `ErrRateLimited` / `ErrForbidden` 七个照旧，仍然是状态码映射的唯一依据。`Error.Code` 是在哨兵之上的细分，不替代它。
+**哨兵新增一个。** `ErrNotFound` / `ErrInvalidCredential` / `ErrUnauthorized` / `ErrConflict` / `ErrInvalidArgument` / `ErrRateLimited` / `ErrForbidden` 七个照旧，另加 `ErrInternal`——传输层此前用 switch 的 `default` 分支处理内部错误，给它一个显式哨兵是为了让"每个码都有登记的哨兵"在注册表里成立、可被测试遍历；`default` 分支仍然保留，接的是真正未识别、不带码的错误。八个哨兵，仍然是状态码映射的唯一依据。`Error.Code` 是在哨兵之上的细分，不替代它。
 
 ## 五、完整错误码清单
 
-下表覆盖全部 86 处 `domain.Errorf` 调用点。同一类情形共用一个码，靠 `msg` 与 `detail` 区分——码的数量收敛到 30 个，每个都有调用方真正会分支判断的意义。
+下表覆盖全部 86 处 `domain.Errorf` 调用点。同一类情形共用一个码，靠 `msg` 与 `detail` 区分——码的数量收敛到 31 个，每个都有调用方真正会分支判断的意义。
 
 **本节的表格就是完整的码注册表**：实施时第八节第 1 条那张 `code → (哨兵, HTTP 状态码, gRPC code)` 的表要与这里逐行对齐，不允许出现只在正文里提到、表格里没有的码。
 
@@ -158,12 +158,13 @@ domain.Fail(domain.ErrRateLimited, "RATE_LIMITED", "操作过于频繁，请稍�
 | `CONNECTOR_NOT_CONFIGURED` | ErrNotFound | 404 | 该应用未配置此登录方式 | service/application.go:400 |
 | `NOTIFY_PROVIDER_MISSING` | ErrNotFound | 404 | 通道未配置供应商 | notify/notify.go:117 |
 | `SMS_TEMPLATE_MISSING` | ErrNotFound | 404 | 短信模板未配置 | notify/aliyun.go:125 |
+| `ROUTE_NOT_FOUND` | ErrNotFound | 404 | 接口不存在 | httpapi/router.go 的 `r.NotFound`——路由层的 404，与"资源不存在"不同：它意味着调用方把 URL 写错了，而不是某个 id 查不到 |
 
 ### 内部错误与不变式违背
 
 | code | 哨兵 | HTTP | msg | 调用点 |
 |---|---|---|---|---|
-| `INTERNAL` | 无（走 default 分支） | 500 | 服务器内部错误 | 未识别的错误兜底；以及下列不变式违背 |
+| `INTERNAL` | ErrInternal | 500 | 服务器内部错误 | 未识别的错误兜底；以及下列不变式违背 |
 
 不变式违背的调用点：`service/session.go:58,137`（"签发/校验会话缺少应用信息"）、`store/session.go:54,238`（ttl 必须为正）、`service/application.go:298`（配置无法序列化）、`notify/aliyun.go:48,51`（阿里云凭据缺失）、`service/user.go:362`。
 
