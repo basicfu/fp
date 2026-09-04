@@ -39,3 +39,17 @@ message RevokeEvent {
   // at_ms 是撤销发生的毫秒时间戳。
   int64 at_ms = 5;
 }
+
+// ErrorDetail 随 gRPC status 一起返回，承载 fp 的统一错误三元组。
+//
+// gRPC 的 status code 与 message 保持原有语义不变，本 message 是**附加**
+// 信息：老接入方不解析它也不受影响，新接入方用 errors.As 取出结构化错误。
+message ErrorDetail {
+  // code 机器可读，稳定契约，调用方据此分支。一经发布不得更名。
+  string code = 1;
+  // msg 面向终端用户，接入方可以直接展示，不含任何内部标识。
+  string msg = 2;
+  // detail 是 JSON 字符串，可为空。通常含 desc 字段，视错误类型可能带
+  // retryAfterMs、field 等扩展字段。字段可增删，不承担契约约束。
+  string detail = 3;
+}

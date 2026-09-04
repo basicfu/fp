@@ -9,6 +9,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/web"
 )
@@ -60,13 +61,19 @@ func TestRouterAPINotFoundStaysJSON(t *testing.T) {
 	// errorBody 是 httpapi 包内部类型，这里是黑盒测试看不到，用等价的本地
 	// 结构体解析（其余用例文件里 login/me 之类响应也是这么处理的）。
 	var body struct {
-		Error string `json:"error"`
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
-	if body.Error == "" {
-		t.Fatal("error 字段为空")
+	// 断言 code 而不只是"有内容"：路由层的 404 与"资源不存在"是两回事，
+	// 调用方要能据此区分"URL 写错了"和"这个 id 查不到"。
+	if body.Code != domain.CodeRouteNotFound {
+		t.Fatalf("code = %q, want %q", body.Code, domain.CodeRouteNotFound)
+	}
+	if body.Msg == "" {
+		t.Fatal("msg 字段为空")
 	}
 }
 

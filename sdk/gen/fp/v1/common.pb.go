@@ -125,6 +125,74 @@ func (x *RevokeEvent) GetAtMs() int64 {
 	return 0
 }
 
+// ErrorDetail 随 gRPC status 一起返回，承载 fp 的统一错误三元组。
+//
+// gRPC 的 status code 与 message 保持原有语义不变，本 message 是**附加**
+// 信息：老接入方不解析它也不受影响，新接入方用 errors.As 取出结构化错误。
+type ErrorDetail struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// code 机器可读，稳定契约，调用方据此分支。一经发布不得更名。
+	Code string `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	// msg 面向终端用户，接入方可以直接展示，不含任何内部标识。
+	Msg string `protobuf:"bytes,2,opt,name=msg,proto3" json:"msg,omitempty"`
+	// detail 是 JSON 字符串，可为空。通常含 desc 字段，视错误类型可能带
+	// retryAfterMs、field 等扩展字段。字段可增删，不承担契约约束。
+	Detail        string `protobuf:"bytes,3,opt,name=detail,proto3" json:"detail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ErrorDetail) Reset() {
+	*x = ErrorDetail{}
+	mi := &file_fp_v1_common_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ErrorDetail) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ErrorDetail) ProtoMessage() {}
+
+func (x *ErrorDetail) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_common_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ErrorDetail.ProtoReflect.Descriptor instead.
+func (*ErrorDetail) Descriptor() ([]byte, []int) {
+	return file_fp_v1_common_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ErrorDetail) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *ErrorDetail) GetMsg() string {
+	if x != nil {
+		return x.Msg
+	}
+	return ""
+}
+
+func (x *ErrorDetail) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
 var File_fp_v1_common_proto protoreflect.FileDescriptor
 
 const file_fp_v1_common_proto_rawDesc = "" +
@@ -135,7 +203,11 @@ const file_fp_v1_common_proto_rawDesc = "" +
 	"\buser_ids\x18\x02 \x03(\tR\auserIds\x12\x15\n" +
 	"\x06app_id\x18\x03 \x01(\tR\x05appId\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x13\n" +
-	"\x05at_ms\x18\x05 \x01(\x03R\x04atMsB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
+	"\x05at_ms\x18\x05 \x01(\x03R\x04atMs\"K\n" +
+	"\vErrorDetail\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\x12\x10\n" +
+	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x16\n" +
+	"\x06detail\x18\x03 \x01(\tR\x06detailB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
 
 var (
 	file_fp_v1_common_proto_rawDescOnce sync.Once
@@ -149,9 +221,10 @@ func file_fp_v1_common_proto_rawDescGZIP() []byte {
 	return file_fp_v1_common_proto_rawDescData
 }
 
-var file_fp_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_fp_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_fp_v1_common_proto_goTypes = []any{
 	(*RevokeEvent)(nil), // 0: fp.v1.RevokeEvent
+	(*ErrorDetail)(nil), // 1: fp.v1.ErrorDetail
 }
 var file_fp_v1_common_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
@@ -172,7 +245,7 @@ func file_fp_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_common_proto_rawDesc), len(file_fp_v1_common_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   1,
+			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

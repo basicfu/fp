@@ -160,8 +160,11 @@ func TestSessionStorePutRejectsNonPositiveTTL(t *testing.T) {
 
 	for _, ttl := range []time.Duration{0, -time.Second} {
 		err := st.Put(ctx, sampleSession("tok-1", uuid.New()), ttl)
-		if !errors.Is(err, domain.ErrInvalidArgument) {
-			t.Fatalf("ttl=%v err = %v, want ErrInvalidArgument", ttl, err)
+		// 非正 TTL 是调用方代码的 bug（不变式违背），不是终端用户传错了
+		// 什么——归 INTERNAL，对外是 500 而不是 400。
+		var de *domain.Error
+		if !errors.As(err, &de) || de.Code != domain.CodeInternal {
+			t.Fatalf("ttl=%v err = %v, want CodeInternal", ttl, err)
 		}
 	}
 	// 确认真的什么都没写进去

@@ -40,33 +40,33 @@ func DefaultSessionPolicy() SessionPolicy {
 // Validate 校验策略的内部一致性。
 func (p SessionPolicy) Validate() error {
 	if p.IdleTimeoutSeconds <= 0 {
-		return Errorf(ErrInvalidArgument, "idle_timeout 必须大于 0")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "idle_timeout 必须大于 0")
 	}
 	if p.IdleTimeoutMobileSeconds < 0 {
-		return Errorf(ErrInvalidArgument, "idle_timeout_mobile 不能为负")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "idle_timeout_mobile 不能为负")
 	}
 	if p.MaxLifetimeSeconds <= 0 {
-		return Errorf(ErrInvalidArgument, "max_lifetime 必须大于 0")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "max_lifetime 必须大于 0")
 	}
 	if p.RotateIntervalSeconds <= 0 {
-		return Errorf(ErrInvalidArgument, "rotate_interval 必须大于 0")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "rotate_interval 必须大于 0")
 	}
 	if p.ExtendIntervalSeconds <= 0 {
-		return Errorf(ErrInvalidArgument, "extend_interval 必须大于 0")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "extend_interval 必须大于 0")
 	}
 	if p.TokenCacheTTLSeconds <= 0 {
-		return Errorf(ErrInvalidArgument, "token_cache_ttl 必须大于 0")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "token_cache_ttl 必须大于 0")
 	}
 	if p.RotateIntervalSeconds > p.MaxLifetimeSeconds {
-		return Errorf(ErrInvalidArgument, "rotate_interval 不能大于 max_lifetime")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "rotate_interval 不能大于 max_lifetime")
 	}
 	// 降频间隔必须远小于空闲超时，否则用户会因为"少延"而意外掉线。
 	if p.ExtendIntervalSeconds >= p.IdleTimeoutSeconds {
-		return Errorf(ErrInvalidArgument, "extend_interval 必须小于 idle_timeout")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "extend_interval 必须小于 idle_timeout")
 	}
 	// 缓存窗口大于空闲超时意味着 token 过期后仍可能被 SDK 放行。
 	if p.TokenCacheTTLSeconds > p.IdleTimeoutSeconds {
-		return Errorf(ErrInvalidArgument, "token_cache_ttl 不能大于 idle_timeout")
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "token_cache_ttl 不能大于 idle_timeout")
 	}
 	return nil
 }

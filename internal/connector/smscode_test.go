@@ -64,7 +64,7 @@ func TestSMSCodeAuthenticateSuccess(t *testing.T) {
 }
 
 func TestSMSCodeAuthenticateWrongCode(t *testing.T) {
-	codes := &fakeCodes{err: domain.Errorf(domain.ErrInvalidCredential, "验证码不正确")}
+	codes := &fakeCodes{err: domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "验证码不正确")}
 	c := connector.NewSMSCode(codes)
 
 	_, err := c.Authenticate(context.Background(), nil, connector.Credentials{

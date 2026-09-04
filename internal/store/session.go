@@ -51,8 +51,8 @@ func NewSessionStore(rdb *redis.Client) *SessionStore {
 // ListUserTokens 只清理"已消失"的键，反而会把它当成活跃会话一直列出去。
 func (s *SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.Duration) error {
 	if ttl <= 0 {
-		return domain.Errorf(domain.ErrInvalidArgument,
-			"会话 TTL 必须为正，收到 %v（写入会得到一个永不过期的键）", ttl)
+		return domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").
+			WithDesc("会话 TTL 必须为正，收到 %v（写入会得到一个永不过期的键）", ttl)
 	}
 	raw, err := json.Marshal(sess)
 	if err != nil {
@@ -78,7 +78,7 @@ func (s *SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.D
 func (s *SessionStore) Get(ctx context.Context, token string) (*domain.Session, error) {
 	raw, err := s.rdb.Get(ctx, sessionKeyPrefix+token).Bytes()
 	if errors.Is(err, redis.Nil) {
-		return nil, domain.Errorf(domain.ErrNotFound, "会话不存在或已过期")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeSessionNotFound, "会话不存在或已过期")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: 读取会话: %w", err)
@@ -235,7 +235,7 @@ func (s *SessionStore) TryLock(ctx context.Context, key string, ttl time.Duratio
 // 不存在的新 token。
 func (s *SessionStore) PutRotation(ctx context.Context, oldToken, newToken string, ttl time.Duration) error {
 	if ttl <= 0 {
-		return domain.Errorf(domain.ErrInvalidArgument, "轮换映射的 ttl 必须为正，得到 %v", ttl)
+		return domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").WithDesc("轮换映射的 ttl 必须为正，得到 %v", ttl)
 	}
 	if err := s.rdb.Set(ctx, rotationPrefix+oldToken, newToken, ttl).Err(); err != nil {
 		return fmt.Errorf("store: 写入轮换映射: %w", err)

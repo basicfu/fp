@@ -46,7 +46,7 @@ func (f *fakeLookup) FindByIdentity(_ context.Context, identityType, subject str
 	}
 	id, ok := f.byIdentity[identityType+"|"+subject]
 	if !ok {
-		return nil, nil, domain.Errorf(domain.ErrNotFound, "登录标识不存在")
+		return nil, nil, domain.Failf(domain.ErrNotFound, domain.CodeInternal, "登录标识不存在")
 	}
 	return &domain.User{ID: id, Status: f.statuses[id]},
 		&domain.Identity{UserID: id, Type: identityType, Subject: subject}, nil
@@ -59,7 +59,7 @@ func (f *fakeLookup) VerifyPassword(_ context.Context, userID uuid.UUID, plain s
 	}
 	want, ok := f.passwords[userID]
 	if !ok || want == "" || want != plain {
-		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
+		return domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "账号或密码不正确")
 	}
 	return nil
 }

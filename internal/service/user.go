@@ -67,10 +67,10 @@ type EnsureIdentityInput struct {
 
 func (in EnsureIdentityInput) validate() error {
 	if in.Type == "" {
-		return domain.Errorf(domain.ErrInvalidArgument, "identity 类型不能为空")
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "identity 类型不能为空")
 	}
 	if in.Subject == "" {
-		return domain.Errorf(domain.ErrInvalidArgument, "identity subject 不能为空")
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "identity subject 不能为空")
 	}
 	return nil
 }
@@ -219,7 +219,7 @@ func (s *UserService) AttachIdentity(ctx context.Context, userID uuid.UUID, in E
 			return nil, fmt.Errorf("service: 按 unionKey 查询归属: %w", err)
 		}
 		if err == nil && owner != userID {
-			return nil, domain.Errorf(domain.ErrConflict, "该 unionKey 已归属其他账号")
+			return nil, domain.Failf(domain.ErrConflict, domain.CodeUnionKeyConflict, "该 unionKey 已归属其他账号")
 		}
 	}
 
@@ -245,13 +245,13 @@ func (s *UserService) FindByIdentity(ctx context.Context, identityType, subject 
 func (s *UserService) FindByUnionKey(ctx context.Context, unionKey string) (*domain.User, error) {
 	unionKey = strings.TrimSpace(unionKey)
 	if unionKey == "" {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "unionKey 不能为空")
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "unionKey 不能为空")
 	}
 	var userID uuid.UUID
 	err := s.pool.QueryRow(ctx,
 		`SELECT user_id FROM identity WHERE union_key = $1 LIMIT 1`, unionKey).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "未找到该 unionKey 对应的用户")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeUnionKeyNotFound, "未找到该 unionKey 对应的用户")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 按 unionKey 查询: %w", err)
@@ -290,10 +290,10 @@ func (s *UserService) ListIdentities(ctx context.Context, userID uuid.UUID) ([]d
 // SetPassword 设置或重置用户密码。
 func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, plain string) error {
 	if len([]rune(plain)) < minPasswordLength {
-		return domain.Errorf(domain.ErrInvalidArgument, "密码长度不能少于 %d 位", minPasswordLength)
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodePasswordTooShort, "密码长度不能少于 %d 位", minPasswordLength)
 	}
 	if len(plain) > maxPasswordBytes {
-		return domain.Errorf(domain.ErrInvalidArgument,
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodePasswordTooLong,
 			"密码过长（超过 %d 字节，约 %d 个汉字）", maxPasswordBytes, maxPasswordBytes/3)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcryptCost)
@@ -306,7 +306,7 @@ func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, plain s
 		return fmt.Errorf("service: 更新密码: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return domain.Errorf(domain.ErrNotFound, "用户不存在")
+		return domain.Failf(domain.ErrNotFound, domain.CodeUserNotFound, "用户不存在")
 	}
 	return nil
 }
@@ -341,10 +341,10 @@ func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID, plai
 		// 用户不存在，或存在但未设密码。消耗等量时间后统一失败。
 		// 比对结果必然不成立，这里刻意丢弃。
 		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(plain))
-		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
+		return domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "账号或密码不正确")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)); err != nil {
-		return domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
+		return domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "账号或密码不正确")
 	}
 	return nil
 }
@@ -359,7 +359,7 @@ func (s *UserService) SetStatus(ctx context.Context, userID uuid.UUID, status st
 		return current, nil
 	}
 	if !domain.CanTransitionUserStatus(current.Status, status) {
-		return nil, domain.Errorf(domain.ErrInvalidArgument,
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"不允许的状态迁移 %s → %s", current.Status, status)
 	}
 
@@ -389,7 +389,7 @@ func (s *UserService) TouchIdentityLogin(ctx context.Context, identityID uuid.UU
 		return fmt.Errorf("service: 更新 identity 登录时间: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return domain.Errorf(domain.ErrNotFound, "identity 不存在")
+		return domain.Failf(domain.ErrNotFound, domain.CodeIdentityNotFound, "identity 不存在")
 	}
 	return nil
 }
@@ -542,7 +542,7 @@ func findByIdentityTx(ctx context.Context, q querier, identityType, subject stri
 		identityType, subject)
 	identity, err := scanIdentity(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil, domain.Errorf(domain.ErrNotFound, "登录标识不存在")
+		return nil, nil, domain.Failf(domain.ErrNotFound, domain.CodeIdentityNotFound, "登录标识不存在")
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("service: 查询 identity: %w", err)
@@ -558,7 +558,7 @@ func getUserTx(ctx context.Context, q querier, id uuid.UUID) (*domain.User, erro
 	row := q.QueryRow(ctx, `SELECT `+userColumns+` FROM app_user WHERE id = $1`, id)
 	u, err := scanUser(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "用户不存在")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeUserNotFound, "用户不存在")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 查询用户: %w", err)
@@ -577,7 +577,7 @@ func insertIdentityTx(ctx context.Context, q querier, userID uuid.UUID, in Ensur
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			return nil, domain.Errorf(domain.ErrConflict,
+			return nil, domain.Failf(domain.ErrConflict, domain.CodeUnionKeyConflict,
 				"登录标识 %s:%s 已被其他账号占用", in.Type, in.Subject)
 		}
 		return nil, fmt.Errorf("service: 创建 identity: %w", err)

@@ -73,6 +73,11 @@ const (
 	CodeNotifyProviderMissing  = "NOTIFY_PROVIDER_MISSING"
 	CodeSMSTemplateMissing     = "SMS_TEMPLATE_MISSING"
 
+	// CodeRouteNotFound 是路由层的 404：请求的 HTTP 路径不存在。
+	// 与"资源不存在"那一组不同——它意味着调用方把 URL 写错了，
+	// 而不是某个 id 查不到。
+	CodeRouteNotFound = "ROUTE_NOT_FOUND"
+
 	// 内部错误与不变式违背。
 	//
 	// 编程错误或启动配置错误，接入方分支判断没有意义。它们仍然显式带码
@@ -120,6 +125,7 @@ var codeSentinels = map[string]error{
 	CodeConnectorNotConfigured: ErrNotFound,
 	CodeNotifyProviderMissing:  ErrNotFound,
 	CodeSMSTemplateMissing:     ErrNotFound,
+	CodeRouteNotFound:          ErrNotFound,
 
 	CodeInternal: ErrInternal,
 }

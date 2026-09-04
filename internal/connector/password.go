@@ -48,14 +48,14 @@ func (c *PasswordConnector) Authenticate(ctx context.Context, cfg map[string]any
 	account := creds.Get("account")
 	password := creds.Get("password")
 	if account == "" {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "account 不能为空")
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "account 不能为空")
 	}
 	if password == "" {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "password 不能为空")
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "password 不能为空")
 	}
 
 	// 统一的失败错误，三种失败原因共用，防止账号枚举。
-	invalid := domain.Errorf(domain.ErrInvalidCredential, "账号或密码不正确")
+	invalid := domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "账号或密码不正确")
 
 	identityType := DetectIdentityType(account)
 	if !identityTypeAllowed(cfg, identityType) {

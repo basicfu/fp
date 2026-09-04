@@ -55,7 +55,7 @@ type IssueInput struct {
 // Issue 为一次成功的认证签发新会话。
 func (s *SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Session, error) {
 	if in.App == nil {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "签发会话缺少应用信息")
+		return nil, domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").WithDesc("签发会话缺少应用信息")
 	}
 	token, err := randomToken()
 	if err != nil {
@@ -134,22 +134,22 @@ func GraceDuration(p domain.SessionPolicy) time.Duration {
 // 「不属于本应用」——这些差异对调用方没有意义，却会给攻击者提供信息。
 func (s *SessionService) Validate(ctx context.Context, token string, app *domain.Application) (*ValidateResult, error) {
 	if app == nil {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "校验 token 缺少应用信息")
+		return nil, domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").WithDesc("校验 token 缺少应用信息")
 	}
 	if token == "" {
-		return nil, domain.Errorf(domain.ErrUnauthorized, "缺少 token")
+		return nil, domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 
 	sess, err := s.store.Get(ctx, token)
 	if errors.Is(err, domain.ErrNotFound) {
-		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+		return nil, domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 	if err != nil {
 		return nil, err
 	}
 	// token 与应用必须匹配：A 应用签发的 token 不能在 B 应用上使用。
 	if sess.AppID != app.ID {
-		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+		return nil, domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 
 	// 纪元比对：会话刻的纪元与当前不一致，说明它是在一次撤销的竞态窗口里
@@ -164,14 +164,14 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 		if err := s.store.Delete(ctx, sess.Token); err != nil {
 			slog.Error("service: 删除纪元失配的会话失败", "err", err, "sessionId", sess.ID)
 		}
-		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+		return nil, domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 
 	now := s.now()
 	// 以 IdleExpiresAt / MaxExpiresAt 为准，不看 Redis TTL——TTL 只是兜底清理，
 	// 时钟精度或取整都不该成为放行一个已过期 token 的理由。
 	if sess.RemainingAt(now, app.Session) <= 0 {
-		return nil, domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+		return nil, domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 
 	res := &ValidateResult{Session: sess}

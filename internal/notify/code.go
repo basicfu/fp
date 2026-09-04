@@ -71,7 +71,7 @@ func NewCodeService(rdb *redis.Client) *CodeService {
 // 只有真的生成新码时才清尝试计数：否则重复点"重发"会无限重置爆破计数器。
 func (s *CodeService) Issue(ctx context.Context, purpose, target string) (string, error) {
 	if purpose == "" || target == "" {
-		return "", domain.Errorf(domain.ErrInvalidArgument, "purpose 与 target 不能为空")
+		return "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "purpose 与 target 不能为空")
 	}
 
 	if existing, err := s.rdb.Get(ctx, codeKey(purpose, target)).Result(); err == nil {
@@ -98,7 +98,7 @@ func (s *CodeService) Issue(ctx context.Context, purpose, target string) (string
 // 码错误、码不存在、尝试超限一律返回 domain.ErrInvalidCredential，不向调用方区分。
 func (s *CodeService) Verify(ctx context.Context, purpose, target, code string) error {
 	if code == "" {
-		return domain.Errorf(domain.ErrInvalidCredential, "验证码不正确")
+		return domain.Failf(domain.ErrInvalidCredential, domain.CodeCodeInvalid, "验证码不正确")
 	}
 	res, err := verifyScript.Run(ctx, s.rdb,
 		[]string{codeKey(purpose, target), tryKey(purpose, target)},
@@ -109,7 +109,7 @@ func (s *CodeService) Verify(ctx context.Context, purpose, target, code string) 
 	if res == 1 {
 		return nil
 	}
-	return domain.Errorf(domain.ErrInvalidCredential, "验证码不正确或已过期")
+	return domain.Failf(domain.ErrInvalidCredential, domain.CodeCodeInvalid, "验证码不正确或已过期")
 }
 
 func codeKey(purpose, target string) string { return "fp:code:" + purpose + ":" + target }

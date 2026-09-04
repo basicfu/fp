@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 )
 
@@ -61,7 +62,10 @@ func NewRouter(d Deps) http.Handler {
 		// API 的 404 必须是 JSON。少了这行，chi 会用它默认的纯文本 404，
 		// 前端的 res.json() 会抛一个与真实原因无关的解析错误。
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(w, http.StatusNotFound, errorBody{Error: "接口不存在"})
+			writeJSON(w, http.StatusNotFound, errorBody{
+				Code: domain.CodeRouteNotFound,
+				Msg:  "接口不存在",
+			})
 		})
 
 		r.Post("/login", ah.login)

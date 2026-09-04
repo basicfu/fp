@@ -49,7 +49,7 @@ func (s *AdminService) EnsureBootstrap(ctx context.Context, username, password s
 	// 同 UserService.SetPassword 的理由：bcrypt 超过 72 字节直接报错，
 	// 不拦住就会在启动时炸出一个不知所云的 bcrypt 错误。
 	if len(password) > maxPasswordBytes {
-		return domain.Errorf(domain.ErrInvalidArgument,
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodePasswordTooLong,
 			"引导管理员密码过长（超过 %d 字节，约 %d 个汉字）", maxPasswordBytes, maxPasswordBytes/3)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
@@ -78,16 +78,16 @@ func (s *AdminService) Login(ctx context.Context, username, password string) (st
 		Scan(&id, &hash, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 与密码错误返回同一错误，避免用户名枚举。
-		return "", domain.Errorf(domain.ErrInvalidCredential, "用户名或密码不正确")
+		return "", domain.Failf(domain.ErrInvalidCredential, domain.CodeAdminCredentialInvalid, "用户名或密码不正确")
 	}
 	if err != nil {
 		return "", fmt.Errorf("service: 查询管理员: %w", err)
 	}
 	if status != "ACTIVE" {
-		return "", domain.Errorf(domain.ErrForbidden, "管理员账号已停用")
+		return "", domain.Failf(domain.ErrForbidden, domain.CodeAdminDisabled, "管理员账号已停用")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
-		return "", domain.Errorf(domain.ErrInvalidCredential, "用户名或密码不正确")
+		return "", domain.Failf(domain.ErrInvalidCredential, domain.CodeAdminCredentialInvalid, "用户名或密码不正确")
 	}
 
 	token, err := randomToken()
@@ -104,12 +104,12 @@ func (s *AdminService) Login(ctx context.Context, username, password string) (st
 // Authenticate 校验管理端 token，返回管理员 ID 与用户名，并顺延会话有效期。
 func (s *AdminService) Authenticate(ctx context.Context, token string) (uuid.UUID, string, error) {
 	if token == "" {
-		return uuid.Nil, "", domain.Errorf(domain.ErrUnauthorized, "缺少管理端凭据")
+		return uuid.Nil, "", domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
 	}
 	key := adminTokenPrefix + token
 	payload, err := s.rdb.Get(ctx, key).Result()
 	if errors.Is(err, redis.Nil) {
-		return uuid.Nil, "", domain.Errorf(domain.ErrUnauthorized, "管理端凭据无效或已过期")
+		return uuid.Nil, "", domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
 	}
 	if err != nil {
 		return uuid.Nil, "", fmt.Errorf("service: 读取管理端会话: %w", err)
@@ -117,11 +117,11 @@ func (s *AdminService) Authenticate(ctx context.Context, token string) (uuid.UUI
 
 	idStr, username, ok := strings.Cut(payload, "|")
 	if !ok {
-		return uuid.Nil, "", domain.Errorf(domain.ErrUnauthorized, "管理端凭据损坏")
+		return uuid.Nil, "", domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
 	}
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		return uuid.Nil, "", domain.Errorf(domain.ErrUnauthorized, "管理端凭据损坏")
+		return uuid.Nil, "", domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
 	}
 
 	// 管理端会话数量极少，每次访问直接顺延，无需降频。

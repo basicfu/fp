@@ -76,7 +76,7 @@ const maxCacheEntries = 256
 
 func (v *appVerifier) verify(ctx context.Context, appID, secret string) error {
 	if appID == "" || secret == "" {
-		return domain.Errorf(domain.ErrInvalidCredential, "缺少 appId 或 appSecret")
+		return domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "缺少 appId 或 appSecret")
 	}
 
 	key := verifierCacheKey(appID, secret)
@@ -110,7 +110,7 @@ func (v *appVerifier) verify(ctx context.Context, appID, secret string) error {
 func (v *appVerifier) authenticate(ctx context.Context) (context.Context, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return nil, domain.Errorf(domain.ErrInvalidCredential, "缺少 appId 或 appSecret")
+		return nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "缺少 appId 或 appSecret")
 	}
 	appID := first(md, mdAppID)
 	secret := first(md, mdAppSecret)
@@ -131,7 +131,7 @@ func first(md metadata.MD, key string) string {
 func (v *appVerifier) UnaryInterceptor(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	authed, err := v.authenticate(ctx)
 	if err != nil {
-		return nil, statusFrom(err)
+		return nil, StatusFrom(err)
 	}
 	return handler(authed, req)
 }
@@ -143,7 +143,7 @@ func (v *appVerifier) UnaryInterceptor(ctx context.Context, req any, _ *grpc.Una
 func (v *appVerifier) StreamInterceptor(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	authed, err := v.authenticate(ss.Context())
 	if err != nil {
-		return statusFrom(err)
+		return StatusFrom(err)
 	}
 	return handler(srv, &authedStream{ServerStream: ss, ctx: authed})
 }

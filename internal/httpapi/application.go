@@ -238,7 +238,7 @@ func (h *applicationHandler) putConnector(w http.ResponseWriter, r *http.Request
 func pathUUID(r *http.Request, key string) (uuid.UUID, error) {
 	id, err := uuid.Parse(chi.URLParam(r, key))
 	if err != nil {
-		return uuid.Nil, domain.Errorf(domain.ErrInvalidArgument, "路径参数 %s 不是合法 UUID", key)
+		return uuid.Nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "路径参数 %s 不是合法 UUID", key)
 	}
 	return id, nil
 }

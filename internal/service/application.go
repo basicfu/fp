@@ -61,7 +61,7 @@ func NewApplicationService(pool *pgxpool.Pool, schemas ConnectorSchemas) *Applic
 // 明文 secret 不落库，只存 bcrypt 哈希。
 func (s *ApplicationService) Create(ctx context.Context, name, slug string) (*domain.Application, string, error) {
 	if name == "" || slug == "" {
-		return nil, "", domain.Errorf(domain.ErrInvalidArgument, "name 与 slug 不能为空")
+		return nil, "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "name 与 slug 不能为空")
 	}
 
 	appID, err := randomToken()
@@ -86,7 +86,7 @@ func (s *ApplicationService) Create(ctx context.Context, name, slug string) (*do
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			return nil, "", domain.Errorf(domain.ErrConflict, "slug %q 已被占用", slug)
+			return nil, "", domain.Failf(domain.ErrConflict, domain.CodeSlugTaken, "slug %q 已被占用", slug)
 		}
 		return nil, "", fmt.Errorf("service: 创建应用: %w", err)
 	}
@@ -120,7 +120,7 @@ func (s *ApplicationService) GetByID(ctx context.Context, id uuid.UUID) (*domain
 	row := s.pool.QueryRow(ctx, `SELECT `+applicationColumns+` FROM application WHERE id = $1`, id)
 	app, err := scanApplication(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "应用不存在")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 查询应用: %w", err)
@@ -133,7 +133,7 @@ func (s *ApplicationService) GetByAppID(ctx context.Context, appID string) (*dom
 	row := s.pool.QueryRow(ctx, `SELECT `+applicationColumns+` FROM application WHERE app_id = $1`, appID)
 	app, err := scanApplication(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "应用不存在")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 按 appId 查询应用: %w", err)
@@ -160,7 +160,7 @@ func (s *ApplicationService) GetActiveByAppID(ctx context.Context, appID string)
 		return nil, err
 	}
 	if app.Status != domain.ApplicationStatusActive {
-		return nil, domain.Errorf(domain.ErrForbidden, "应用已停用")
+		return nil, domain.Failf(domain.ErrForbidden, domain.CodeAppDisabled, "应用已停用")
 	}
 	return app, nil
 }
@@ -171,13 +171,13 @@ func (s *ApplicationService) VerifySecret(ctx context.Context, appID, plainSecre
 	var hash string
 	err := s.pool.QueryRow(ctx, `SELECT app_secret_hash FROM application WHERE app_id = $1`, appID).Scan(&hash)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrInvalidCredential, "appId 或 appSecret 不正确")
+		return nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "appId 或 appSecret 不正确")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 读取 appSecret 哈希: %w", err)
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plainSecret)); err != nil {
-		return nil, domain.Errorf(domain.ErrInvalidCredential, "appId 或 appSecret 不正确")
+		return nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "appId 或 appSecret 不正确")
 	}
 	return s.GetByAppID(ctx, appID)
 }
@@ -204,7 +204,7 @@ func (s *ApplicationService) UpdateSessionPolicy(ctx context.Context, id uuid.UU
 
 	app, err := scanApplication(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "应用不存在")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新会话策略: %w", err)
@@ -227,10 +227,10 @@ func (s *ApplicationService) UpdateSessionPolicy(ctx context.Context, id uuid.UU
 // 覆盖成零值。
 func (s *ApplicationService) Update(ctx context.Context, id uuid.UUID, name, cookieDomain *string) (*domain.Application, error) {
 	if name == nil && cookieDomain == nil {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "至少要提供一个要修改的字段")
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "至少要提供一个要修改的字段")
 	}
 	if name != nil && *name == "" {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "name 不能为空")
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "name 不能为空")
 	}
 	// COALESCE($n, col)：参数为 NULL（对应 Go 里的 nil 指针）时保留原值，
 	// 非 NULL 时才覆盖，借此把"不改"和"改成空串"区分开。
@@ -244,7 +244,7 @@ func (s *ApplicationService) Update(ctx context.Context, id uuid.UUID, name, coo
 
 	app, err := scanApplication(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "应用不存在")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新应用: %w", err)
@@ -263,7 +263,7 @@ func (s *ApplicationService) SetStatus(ctx context.Context, id uuid.UUID, status
 	switch status {
 	case domain.ApplicationStatusActive, domain.ApplicationStatusDisabled:
 	default:
-		return nil, domain.Errorf(domain.ErrInvalidArgument,
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"未知的应用状态 %q，只接受 %s 或 %s",
 			status, domain.ApplicationStatusActive, domain.ApplicationStatusDisabled)
 	}
@@ -274,7 +274,7 @@ func (s *ApplicationService) SetStatus(ctx context.Context, id uuid.UUID, status
 
 	app, err := scanApplication(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "应用不存在")
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新应用状态: %w", err)
@@ -285,7 +285,7 @@ func (s *ApplicationService) SetStatus(ctx context.Context, id uuid.UUID, status
 // SetConnector 写入或覆盖某个应用的某种登录方式配置。
 func (s *ApplicationService) SetConnector(ctx context.Context, appID uuid.UUID, connectorType string, enabled bool, config map[string]any) error {
 	if connectorType == "" {
-		return domain.Errorf(domain.ErrInvalidArgument, "connector 类型不能为空")
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "connector 类型不能为空")
 	}
 	if config == nil {
 		config = map[string]any{}
@@ -295,7 +295,7 @@ func (s *ApplicationService) SetConnector(ctx context.Context, appID uuid.UUID, 
 	}
 	raw, err := json.Marshal(config)
 	if err != nil {
-		return domain.Errorf(domain.ErrInvalidArgument, "connector 配置无法序列化: %v", err)
+		return domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").WithDesc("connector 配置无法序列化: %v", err)
 	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO application_connector (application_id, connector_type, enabled, config)
@@ -321,7 +321,7 @@ func (s *ApplicationService) validateConnectorConfig(connectorType string, confi
 	all := s.schemas.Schemas()
 	fields, ok := all[connectorType]
 	if !ok {
-		return domain.Errorf(domain.ErrNotFound, "未知的登录方式 %q", connectorType)
+		return domain.Failf(domain.ErrNotFound, domain.CodeConnectorUnknown, "未知的登录方式 %q", connectorType)
 	}
 
 	byKey := make(map[string]domain.Field, len(fields))
@@ -330,14 +330,14 @@ func (s *ApplicationService) validateConnectorConfig(connectorType string, confi
 	}
 	for key := range config {
 		if _, ok := byKey[key]; !ok {
-			return domain.Errorf(domain.ErrInvalidArgument, "%s 不支持配置项 %q", connectorType, key)
+			return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "%s 不支持配置项 %q", connectorType, key)
 		}
 	}
 	for _, f := range fields {
 		v, present := config[f.Key]
 		if !present {
 			if f.Required {
-				return domain.Errorf(domain.ErrInvalidArgument, "%s 缺少必填配置项 %q", connectorType, f.Key)
+				return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "%s 缺少必填配置项 %q", connectorType, f.Key)
 			}
 			continue
 		}
@@ -357,25 +357,25 @@ func checkFieldValue(f domain.Field, v any) error {
 	switch f.Type {
 	case domain.FieldTypeBool:
 		if _, ok := v.(bool); !ok {
-			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要布尔值，收到 %T", f.Key, v)
+			return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "配置项 %q 需要布尔值，收到 %T", f.Key, v)
 		}
 	case domain.FieldTypeInt:
 		switch n := v.(type) {
 		case float64:
 			if n != math.Trunc(n) {
-				return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要整数，收到 %v", f.Key, n)
+				return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "配置项 %q 需要整数，收到 %v", f.Key, n)
 			}
 		case int, int32, int64:
 		default:
-			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要整数，收到 %T", f.Key, v)
+			return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "配置项 %q 需要整数，收到 %T", f.Key, v)
 		}
 	case domain.FieldTypeString, domain.FieldTypeSecret:
 		str, ok := v.(string)
 		if !ok {
-			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 需要字符串，收到 %T", f.Key, v)
+			return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "配置项 %q 需要字符串，收到 %T", f.Key, v)
 		}
 		if f.Required && str == "" {
-			return domain.Errorf(domain.ErrInvalidArgument, "配置项 %q 是必填项，不能为空", f.Key)
+			return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "配置项 %q 是必填项，不能为空", f.Key)
 		}
 	default:
 		// 未知的 FieldType 说明有人加了新类型却没同步这里。放行会让新类型
@@ -397,7 +397,7 @@ func (s *ApplicationService) GetConnector(ctx context.Context, appID uuid.UUID, 
 		WHERE application_id = $1 AND connector_type = $2`, appID, connectorType).
 		Scan(&c.Type, &c.Enabled, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Errorf(domain.ErrNotFound, "该应用未配置 %s 登录方式", connectorType)
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeConnectorNotConfigured, "该应用未配置 %s 登录方式", connectorType)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 查询 connector 配置: %w", err)
