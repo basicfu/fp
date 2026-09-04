@@ -22,8 +22,8 @@ fp 现在能回答"你是谁"，回答不了"你能做什么"。每个接入方�
 **本期不做（各自附理由，不是遗漏）**
 
 - **数据范围与组织树**（设计文档 5.3 原本就留给实现阶段判断）。数据范围必然侵入业务方的查询语句——SDK 要给出可拼接的过滤条件——接入成本高很多。casbin 的 model.conf 一开始就把维度留好，以后加不用重构策略结构。
-- **菜单与按钮权限**（5.4）。`permission` 表的 `kind` 与 `parent_key` 两列现在就建好，SDK 上报协议里也留了对应字段：以后加菜单只是多一种 `kind` 加一个枚举接口，不需要改表、更不需要让所有已接入方重新上报一遍。**这两列现在留着不启用，是为了避免那次迁移，不是投机。**
-- **权限点分组**（"订单相关权限"这类）。路径自动收集会产出几百个权限点，角色编辑页需要分组才可用。但结构上分组就是树里的非叶子节点，可以复用已留的 `parent_key`，不需要新表。本期不做，需要时再说。
+- **菜单与按钮权限**（5.4）。`permission` 表的 `kind` 与 `parent_id` 两列现在就建好，SDK 上报协议里也留了对应字段：以后加菜单只是多一种 `kind` 加一个枚举接口，不需要改表、更不需要让所有已接入方重新上报一遍。**这两列现在留着不启用，是为了避免那次迁移，不是投机。**
+- **权限点分组**（"订单相关权限"这类）。路径自动收集会产出几百个权限点，角色编辑页需要分组才可用。但结构上分组就是树里的非叶子节点，可以复用已留的 `parent_id`，不需要新表。本期不做，需要时再说。
 - **全局用户扩展字段**。用户级（非 per-app）的自定义字段，需要界面能动态增删字段、以及字段级的可见/可改规则（参考 Casdoor 的 Public / Self / Admin 三档）。独立一块，后期做。
 
 ## 三、与 Casdoor 的对照
@@ -72,10 +72,13 @@ CREATE INDEX user_role_roles_idx ON user_role USING gin (roles);
 -- 两个应用的权限。当前只有一个平台管理员，这不构成问题；将来若要做
 -- 应用级的角色隔离，给本表加一个**可空**的 application_id
 -- （NULL = 全局角色，有值 = 只属于该应用）即可，已有数据与判定逻辑都不用改。
+--
+-- key 是身份，**不可修改**；要改显示文字改 name。理由见第七节末。
 CREATE TABLE role (
-    key        text PRIMARY KEY,          -- "商城管理员"
+    id         uuid PRIMARY KEY DEFAULT uuidv7(),
+    key        text NOT NULL UNIQUE,           -- "商城管理员"
     name       text NOT NULL,
-    parent_key text REFERENCES role(key) ON DELETE SET NULL,
+    parent_id  uuid REFERENCES role(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -84,27 +87,28 @@ CREATE TABLE role (
 -- 命名说明：Casdoor 里 "Permission" 指的是授权本身（主体+资源+动作+效果），
 -- 而这里 permission 指的是**被授权的那个东西**，role_permission 才是授权。
 -- 对着 Casdoor 文档看本表时注意这个差异。
+--
+-- key 是身份，不可修改（它由路由模式推导而来）；name 是显示文字，人维护。
 CREATE TABLE permission (
+    id             uuid PRIMARY KEY DEFAULT uuidv7(),
     application_id uuid NOT NULL REFERENCES application(id) ON DELETE CASCADE,
     key            text NOT NULL,                  -- "GET:/orders/{id}"
     name           text NOT NULL DEFAULT '',       -- 显示名，人维护，上报不覆盖
     kind           text NOT NULL DEFAULT 'api',    -- menu/button 本期不启用
-    parent_key     text,                           -- 菜单树/分组用，本期为空
+    parent_id      uuid REFERENCES permission(id) ON DELETE SET NULL,  -- 菜单树/分组用，本期为空
     source         text NOT NULL,                  -- app | manual
     last_seen_at   timestamptz,                    -- manual 的为 NULL
     created_at     timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (application_id, key)
+    UNIQUE (application_id, key)
 );
 
--- ⑤ 角色 → 权限点。
+-- ⑤ 角色 → 权限点。两个外键，不再抄一份 application_id——
+-- 权限点属于哪个应用由 permission 自己说。
 CREATE TABLE role_permission (
-    application_id uuid NOT NULL,
-    role_key       text NOT NULL,
-    point_key      text NOT NULL,
-    effect         text NOT NULL DEFAULT 'allow',  -- allow | deny
-    PRIMARY KEY (application_id, role_key, point_key),
-    FOREIGN KEY (role_key) REFERENCES role (key) ON DELETE CASCADE,
-    FOREIGN KEY (application_id, point_key) REFERENCES permission (application_id, key) ON DELETE CASCADE
+    role_id       uuid NOT NULL REFERENCES role(id) ON DELETE CASCADE,
+    permission_id uuid NOT NULL REFERENCES permission(id) ON DELETE CASCADE,
+    effect        text NOT NULL DEFAULT 'allow',   -- allow | deny
+    PRIMARY KEY (role_id, permission_id)
 );
 
 -- ⑥ 应用的默认角色。roles 为空的用户按它判定。
@@ -112,6 +116,16 @@ ALTER TABLE application ADD COLUMN default_role_key text NOT NULL DEFAULT '';
 ```
 
 ⑤ 上那两条外键就是"删权限点连带删授权关系"的执行点——由数据库保证，不靠代码记得清理。
+
+**`user_role.roles` 是 `text[]` 而不是关系表**，因此它没有外键。这是刻意的取舍：数组人眼可读、登录时零 join（会话与 SDK 策略表里用的都是 key 字符串，关系表要多一次 join 才能拿到）。代价是删角色时必须连带清理：
+
+```sql
+UPDATE user_role SET roles = array_remove(roles, $1) WHERE roles @> ARRAY[$1];
+```
+
+GIN 索引直接命中，一条 UPDATE。这条耦合放在 service 层的删除方法里，**并配一条会因为漏做而变红的测试**——与仓库既有的"冻结账号必须连带撤销会话"是同一类处理。
+
+**角色的 `key` 不可修改**（`permission.key` 同理），只允许改 `name`。不是为了省事：改 key 会同时波及 `user_role` 的数组、SDK 策略表的键、以及**已签发会话里刻着的旧 key**——那批用户会在会话刷新前丢掉这个角色。禁掉之后，需要连带清理的操作只剩"删除"一种。
 
 **`user_application` 改名为 `user_extra` 并瘦身**：原表的 `nickname` / `status` / `extra` 三列自建表起从未被任何代码读写，删除。它们对应的 per-app 用户资料与状态两个功能都还没做，且 per-app `status` 真要启用需要改登录流程同时判全局与应用内状态，不是加列就完事。留着的唯一后果是让下一个人以为有代码在用——这个仓库刚被 `ApplicationStatusDisabled` 坑过一次（有字段、有常量、有 DTO 输出，就是没人写它，直到第三阶段才发现"停用应用"根本触发不了）。
 
@@ -159,7 +173,7 @@ if rctx.Routes.Match(probe, req.Method, req.URL.Path) {
 
 **过渡是自动且可逆的**：误删接口、下个版本又加回来，下次上报 `last_seen_at` 一刷新就自动回到"正常"，不需要人操作。回滚同理。
 
-**人工改过的不被上报覆盖**：`name` 只在权限点**首次创建时**写入；`parent_key` 人工改过之后上报不再动它。否则每次重启，运营填的中文名和整理好的归类就没了。
+**人工改过的不被上报覆盖**：`name` 只在权限点**首次创建时**写入；`parent_id` 人工改过之后上报不再动它。否则每次重启，运营填的中文名和整理好的归类就没了。
 
 ## 七、角色的解析与缓存
 
@@ -296,17 +310,17 @@ message ReportPermissionsRequest {
 message PermissionPoint {
   string key    = 1;   // "GET:/orders/{id}"
   string kind   = 2;   // 本期恒为 "api"
-  string parent = 3;   // 本期恒为空
+  string parent = 3;   // 父权限点的 key（不是 uuid，SDK 不知道 id）；本期恒为空
   string name   = 4;   // 可选；SDK 给不出时留空，由人在控制台填
 }
 ```
 
 服务端处理：
 
-1. 快照里的每一条 → 存在则刷新 `last_seen_at`；不存在则新建（`source='app'`，`name` 与 `parent` 按上报值写入）
+1. 快照里的每一条 → 存在则刷新 `last_seen_at`；不存在则新建（`source='app'`，`name` 按上报值写入，`parent` 按 key 解析成 `parent_id`——解析不到就留空，不因为一个父节点没上报而整批失败）
 2. **快照里没有的一律不动**——状态是算出来的，不需要写库
 3. `source='manual'` 的**永远不被上报触碰**（业务方的路由清单里当然没有人手动加的东西）
-4. `name` / `parent_key` **只在首次创建时**由上报写入，之后不覆盖
+4. `name` / `parent_id` **只在首次创建时**由上报写入，之后不覆盖
 
 `kind` 与 `parent` 现在恒为 `api` / 空，但协议里留着——以后 SDK 上报菜单时不用改协议版本，老服务端也能忽略它们。
 
