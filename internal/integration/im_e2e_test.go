@@ -1,0 +1,321 @@
+package integration_test
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/basicfu/fp/internal/im/appcfg"
+	"github.com/basicfu/fp/internal/im/auth"
+	"github.com/basicfu/fp/internal/im/bus"
+	"github.com/basicfu/fp/internal/im/hub"
+	"github.com/basicfu/fp/internal/im/imgrpc"
+	"github.com/basicfu/fp/internal/im/model"
+	"github.com/basicfu/fp/internal/im/redisx"
+	"github.com/basicfu/fp/internal/im/registry"
+	"github.com/basicfu/fp/internal/im/wsapi"
+	"github.com/basicfu/fp/internal/testsupport"
+	fpim "github.com/basicfu/fp/sdk/im"
+)
+
+// staticAuth 是测试用的假 Authenticator：不起真实的身份平台（fp），
+// token 直接查表映射到 Subject。task 17 的重点是验证 fp-im 内部（跨节点
+// 转发、注册表、bus）这条链路真跑起来，不是再测一遍身份校验——那是
+// fpauth 包自己的单元测试的职责。
+type staticAuth map[string]model.Subject
+
+func (a staticAuth) Verify(_ context.Context, _, token string) (model.Subject, error) {
+	if s, ok := a[token]; ok {
+		return s, nil
+	}
+	return model.Subject{}, auth.ErrUnauthorized
+}
+
+// imNode 是测试里起的一个完整 im 节点的句柄：client 连 wsURL，业务 server
+// 连 grpcAddr，live 暴露给测试轮询"这个节点的存活视图有没有看到另一个节点"。
+type imNode struct {
+	id       string
+	hub      *hub.Hub
+	live     *registry.Liveness
+	wsURL    string
+	grpcAddr string
+}
+
+// startNode 起一个完整的 im 节点：registry、bus、hub、wsapi、imgrpc 全部
+// 用真实 Redis 接线，装配顺序照抄 cmd/fp-im/main.go 的 run()——先订阅节点
+// 频道、再写首个心跳、再同步 Refresh 一次存活视图，最后才起监听。顺序错了
+// （比如先起监听再订阅）会在握手脚本清理"存活列表之外的残留连接"那一步上
+// 出现难以复现的偶发失败：见 cmd/fp-im/main.go run() 里"债务 1"那段注释。
+//
+// 心跳周期给 200ms（而不是生产的秒级）：验收项⑥（顶号）依赖节点 A 的
+// live 视图先看到节点 B 持有 server 流，这段传播延迟就是心跳周期本身，
+// 测试用轮询等待这件事发生，但心跳周期太长会把测试拖得没必要地慢。
+func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSource, authn auth.Authenticator) *imNode {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	run, err := redisx.NewRunner(rdb, 0, 1)
+	if err != nil {
+		t.Fatalf("redisx.NewRunner: %v", err)
+	}
+	t.Cleanup(run.Close)
+
+	live := registry.NewLiveness(rdb, id, 200*time.Millisecond, time.Second)
+	conns := registry.NewConns(rdb, run, 30*time.Minute)
+	b := bus.New(rdb, run)
+	h := hub.New(id, conns, live, b, apps)
+
+	// 先订阅节点频道、起分发协程，确保别的节点后面往我的频道发信封时
+	// 我已经在监听——与 cmd/fp-im/main.go 的 runBusLoop 同一个理由。
+	ch, closeFn, err := b.Subscribe(ctx, id)
+	if err != nil {
+		t.Fatalf("bus.Subscribe: %v", err)
+	}
+	t.Cleanup(closeFn)
+	go func() {
+		for sig := range ch {
+			if sig.Kind == bus.SignalEnvelope {
+				h.HandleEnvelope(ctx, sig.Env)
+			}
+		}
+	}()
+
+	// 主动为 apps 里声明的每个 app 打开 srv 表追踪。生产代码里这一步是
+	// 惰性的：只有 hub.Deliver 第一次真的需要转发某个 app 的消息时才调用
+	// TrackApp（见 internal/im/hub/deliver.go），这意味着"节点第一次尝试
+	// 转发"这件事本身会撞上"srv 表还没被 Refresh 过"的窗口，第一条消息
+	// 可能因为候选列表为空而被静默丢弃，之后的消息才能路由成功——这条
+	// 窗口在生产里是良性的（丢的是极早期的一条消息，之后自愈），但会让
+	// 这条测试的"轮询等待 A 看到 B"这一步变得不确定该等多久、等的到底是
+	// 不是同一件事。这里提前显式调用 TrackApp，让下面 go live.Run(ctx)
+	// 的首轮 Beat+Refresh 就能把 srv 表读全，把"惰性追踪的自愈窗口"这个
+	// 生产环境本就存在、且已被其它机制兜住的细节，从这条测试要验证的
+	// 主路径里摘出去。
+	for _, appID := range apps.Apps() {
+		live.TrackApp(appID)
+	}
+
+	// 再写首个心跳、同步 Refresh 一次：HTTP/gRPC 开始服务之前，本节点看到
+	// 的存活视图必须是 Redis 里当下真实的全量存活节点，否则握手脚本会把
+	// "存活列表之外的节点"上同 subject 的连接当残留清掉。live.Run 内部
+	// 首轮虽然也会做一次 Beat+Refresh，但那是异步的，这里必须先同步跑一次
+	// ——原样照抄 cmd/fp-im/main.go run() 里"债务 1"那段注释的结论。
+	if err := live.Beat(ctx); err != nil {
+		t.Fatalf("live.Beat: %v", err)
+	}
+	if err := live.Refresh(ctx); err != nil {
+		t.Fatalf("live.Refresh: %v", err)
+	}
+	go live.Run(ctx)
+
+	wsLis := listenAddr(t, "127.0.0.1:0")
+	httpSrv := &http.Server{Handler: wsapi.New(wsapi.Deps{
+		Hub: h, Conns: conns, Live: live, Auth: authn, Apps: apps, Guests: wsapi.NewGuestLimiter(),
+		Cfg: wsapi.Config{AuthTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second, SendQueue: 64},
+	})}
+	go httpSrv.Serve(wsLis)
+	t.Cleanup(func() { httpSrv.Close() })
+
+	grpcLis := listenAddr(t, "127.0.0.1:0")
+	g := imgrpc.New(imgrpc.Deps{Hub: h, Apps: apps})
+	go g.Serve(grpcLis)
+	t.Cleanup(func() { g.Stop(context.Background()) })
+
+	return &imNode{
+		id: id, hub: h, live: live,
+		wsURL:    "ws://" + wsLis.Addr().String() + "/",
+		grpcAddr: grpcLis.Addr().String(),
+	}
+}
+
+// writeApps 在临时目录写一份 apps.json，只声明一个应用 a1，策略可配置
+// （"replace" 用于顶号场景⑥）。
+func writeApps(t *testing.T, policy string) *appcfg.Source {
+	t.Helper()
+	p := t.TempDir() + "/apps.json"
+	body := `{"apps":[{"app_id":"a1","app_secret":"s1","conn_policy":"` + policy + `","conn_limit":3,"allow_guest":true,"guest_ip_rate":20}]}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("写 apps.json: %v", err)
+	}
+	src, err := appcfg.LoadFile(p)
+	if err != nil {
+		t.Fatalf("appcfg.LoadFile: %v", err)
+	}
+	return src
+}
+
+// uniqueNodeID 保证同一次测试进程内多次调用生成的 nodeId 互不冲突——同一个
+// Redis 被本包所有测试共享，同一次 TestImTwoNodesEndToEnd 内部起的两个
+// 节点必须彼此不同，单靠时间戳在同一毫秒内起两个节点会撞车，必须叠加一个
+// 单调递增的计数器。
+var nodeIDCounter atomic.Int64
+
+func uniqueNodeID(prefix string) string {
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), nodeIDCounter.Add(1))
+}
+
+// TestImTwoNodesEndToEnd 是本任务的核心：同一进程内起两个真实 im 节点
+// （不同 nodeId、各自独立的 ws/gRPC 监听），共用同一个真实 Redis，一个
+// fpim.Server 连节点 B，一个 fpim.Client 连节点 A，走通 spec 第二、五、
+// 六节的主路径：连接事件跨节点到达、上行消息跨节点转发、推送跨节点到达、
+// 离线返回 NotOnline、查会话、顶号、踢人。
+//
+// 这条测试单独跑得出的价值：这里每一步都是真实网络往返 + 真实 Redis
+// pub/sub + 真实握手脚本，任何一个包各自的单元测试都只测了"自己这一层
+// 内部逻辑自洽"，测不出"两个节点接起来之后，转发路径真的能把消息从 A
+// 送到 B、再从 B 送回 A"这件事。
+func TestImTwoNodesEndToEnd(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	apps := writeApps(t, "replace")
+	authn := staticAuth{"tok-1": model.User("1"), "tok-2": model.User("2")}
+
+	a := startNode(t, rdb, uniqueNodeID("im-a"), apps, authn)
+	b := startNode(t, rdb, uniqueNodeID("im-b"), apps, authn)
+
+	// 业务 server 连节点 B。
+	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: b.grpcAddr, AppID: "a1", AppSecret: "s1", Insecure: true})
+	if err != nil {
+		t.Fatalf("fpim.NewServer: %v", err)
+	}
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var inbound []fpim.Inbound
+	var events []fpim.Event
+	srv.OnMessage(func(_ context.Context, in fpim.Inbound) error {
+		mu.Lock()
+		inbound = append(inbound, in)
+		mu.Unlock()
+		return nil
+	})
+	srv.OnEvent(func(_ context.Context, ev fpim.Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	})
+	waitUntil(t, srv.StreamHealthy, "server 到节点 B 的接入流应就绪")
+
+	// 节点 A 的存活视图有传播延迟：B 注册"持有 a1 的 server 流"之后，A 要
+	// 等到下一次 Refresh（心跳周期 200ms）才知道。必须轮询等到这件事真的
+	// 发生，再让 client 连 A、发消息——否则 A 转发消息时 ServerNodes("a1")
+	// 拿到的候选列表是空的，消息会被静默丢弃，测试会在一个和"跨节点转发
+	// 坏了"完全不同的原因上失败（"A 还没来得及知道 B"），把两种失败原因
+	// 混在一起，排查故障会被引向错误的方向。
+	waitUntil(t, func() bool { return len(a.live.ServerNodes("a1")) > 0 }, "节点 A 应看到节点 B 持有 a1 的 server 流")
+
+	// client 连节点 A。
+	cli, err := fpim.Dial(context.Background(), fpim.ClientConfig{URL: a.wsURL, App: "a1", Token: "tok-1", OS: "linux"})
+	if err != nil {
+		t.Fatalf("fpim.Dial: %v", err)
+	}
+	defer cli.Close()
+	got := make(chan []byte, 8)
+	cli.OnMessage(func(p []byte) { got <- p })
+
+	// ① 连接事件跨节点到达：client 连的是 A，业务 server 连的是 B，
+	// Connected 事件必须经 A→Redis→B 才能到达 server。
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(events) == 1 && events[0].Kind == fpim.EventConnected
+	}, "server 应收到 Connected 事件")
+	mu.Lock()
+	connID := events[0].ConnID
+	mu.Unlock()
+
+	// ② client 发消息跨节点到达业务服务：节点 A 没有 a1 的 server 流，
+	// 消息必须转发一跳到节点 B。
+	if err := cli.Send(context.Background(), []byte(`{"q":1}`)); err != nil {
+		t.Fatalf("cli.Send: %v", err)
+	}
+	waitUntil(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(inbound) == 1 }, "server 应收到 client 发上来的消息")
+	mu.Lock()
+	got0 := inbound[0]
+	mu.Unlock()
+	if got0.Subject != fpim.User("1") || got0.ConnID != connID || string(got0.Payload) != `{"q":1}` {
+		t.Fatalf("server 收到的 Inbound 不对：%+v", got0)
+	}
+
+	// ③ 业务服务推送跨节点到达 client：推送从节点 B 发出，client 在节点 A。
+	res, err := srv.Push(context.Background(), fpim.User("1"), []byte(`{"r":2}`))
+	if err != nil {
+		t.Fatalf("srv.Push: %v", err)
+	}
+	if res.Status != fpim.Sent || res.Nodes != 1 {
+		t.Fatalf("Push 应返回 Sent{Nodes:1}，实际 %+v", res)
+	}
+	select {
+	case p := <-got:
+		if string(p) != `{"r":2}` {
+			t.Fatalf("client 收到的推送内容不对：%s", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client 5 秒内没有收到推送")
+	}
+
+	// ④ 推送给不在线的主体应返回 NotOnline。
+	if res, err := srv.Push(context.Background(), fpim.User("2"), []byte(`1`)); err != nil || res.Status != fpim.NotOnline {
+		t.Fatalf("推送给离线 subject 应返回 NotOnline，实际 %+v，err=%v", res, err)
+	}
+
+	// ⑤ 查会话应返回正确的节点与系统标识。
+	sess, err := srv.Sessions(context.Background(), fpim.User("1"))
+	if err != nil {
+		t.Fatalf("srv.Sessions: %v", err)
+	}
+	if len(sess) != 1 || sess[0].ConnID != connID || sess[0].Node != a.id || sess[0].OS != "linux" {
+		t.Fatalf("Sessions 结果不对：%+v", sess)
+	}
+
+	// ⑥ 顶号：同一 subject 从节点 B 再连一次，节点 A 上的旧连接应收到
+	// 被踢的关闭码（4003），业务 server 应收到原因为 replaced 的断开事件。
+	closed := make(chan int, 1)
+	cli.OnClose(func(code int) { closed <- code })
+	cli2, err := fpim.Dial(context.Background(), fpim.ClientConfig{URL: b.wsURL, App: "a1", Token: "tok-1"})
+	if err != nil {
+		t.Fatalf("fpim.Dial(cli2): %v", err)
+	}
+	defer cli2.Close()
+	select {
+	case code := <-closed:
+		if code != fpim.CloseKicked {
+			t.Fatalf("被顶替的旧连接应以 %d 关闭，实际 %d", fpim.CloseKicked, code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("旧连接 5 秒内没有被顶掉")
+	}
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, ev := range events {
+			if ev.Kind == fpim.EventDisconnected && ev.ConnID == connID {
+				return ev.Reason == "replaced"
+			}
+		}
+		return false
+	}, "server 应收到原因为 replaced 的 Disconnected 事件")
+
+	// ⑦ 踢人：业务服务主动踢掉该 subject 的全部连接，cli2 应收到被踢的
+	// 关闭码。
+	closed2 := make(chan int, 1)
+	cli2.OnClose(func(code int) { closed2 <- code })
+	if err := srv.Kick(context.Background(), fpim.User("1")); err != nil {
+		t.Fatalf("srv.Kick: %v", err)
+	}
+	select {
+	case code := <-closed2:
+		if code != fpim.CloseKicked {
+			t.Fatalf("Kick 应以 %d 关闭连接，实际 %d", fpim.CloseKicked, code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kick 5 秒内没有生效")
+	}
+}
