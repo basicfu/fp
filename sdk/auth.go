@@ -120,7 +120,12 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 		// **不缓存失败结果。** 缓存有容量上限，把失败也塞进去的话，
 		// 攻击者用海量随机 token 就能把真实条目全部挤出 LRU，
 		// 逼得每个正常请求都回源——一次廉价攻击让 fp 承受全量鉴权流量。
-		return nil, ErrUnauthorized
+		//
+		// 走 translate 而不是返回裸哨兵：fp 在这里给出的"为什么"——账号
+		// 被冻结、应用已停用、登录已过期——此前在这一行被整个丢掉，接入方
+		// 只看到一个 401，既无从判断该提示用户什么，也无从区分"该重新登录"
+		// 与"该联系管理员"。
+		return nil, translate(err)
 	case codes.NotFound:
 		// GetActiveByAppID 找不到应用时返回这个码——fp 给出的是确定答案
 		// （这个应用不存在），不是"够不着"。多半意味着接入方的 appId
@@ -132,7 +137,11 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 		// 前者几乎总是配置问题，值得被人看到。
 		a.c.opts.Logger.Warn("fpsdk: fp 返回 NotFound，按配置错误处理——"+
 			"应用可能不存在或已被删除，请检查 Options.AppID", "err", err)
-		return nil, ErrUnauthorized
+		//
+		// 走 translate 而不是直接返回裸哨兵：fp 在这里给出的"为什么"
+		//（账号被冻结、应用已停用、登录已过期）此前在这一行被整个丢掉，
+		// 接入方只看到一个 401，无从判断该提示用户什么。
+		return nil, translate(err)
 	}
 
 	// 走到这里的 err 覆盖 Unavailable / DeadlineExceeded / 连接错误（真正
@@ -239,15 +248,26 @@ func translate(err error) error {
 	if err == nil {
 		return nil
 	}
+	var sentinel error
 	switch status.Code(err) {
 	case codes.Unauthenticated, codes.PermissionDenied, codes.NotFound:
-		return errors.Join(ErrUnauthorized, err)
+		sentinel = ErrUnauthorized
 	case codes.Unavailable, codes.DeadlineExceeded:
-		return errors.Join(ErrUnavailable, err)
+		sentinel = ErrUnavailable
 	case codes.InvalidArgument:
-		return errors.Join(ErrInvalidArgument, err)
+		sentinel = ErrInvalidArgument
 	case codes.ResourceExhausted:
-		return errors.Join(ErrRateLimited, err)
+		sentinel = ErrRateLimited
 	}
-	return err
+
+	// fp 带了结构化错误就用它——调用方既能 errors.Is 判哨兵，
+	// 也能 errors.As 拿到 Code 与可直接展示的 Msg。
+	if fe := errorFrom(err, sentinel); fe != nil {
+		return fe
+	}
+	// 没带（老服务端，或非 fp 产生的传输层错误）时行为与升级前一致。
+	if sentinel == nil {
+		return err
+	}
+	return errors.Join(sentinel, err)
 }

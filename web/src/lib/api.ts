@@ -11,11 +11,17 @@ export class ApiError extends Error {
   // 这是非 erasable 语法（会生成运行时赋值代码），当前 tsconfig 开了
   // erasableSyntaxOnly，写成参数属性会让 tsc -b 报 TS1294。
   readonly status: number
+  /** 后端的机器可读错误码，例如 ACCOUNT_FROZEN。响应里没有时是空串。 */
+  readonly code: string
+  /** 后端的诊断详情，JSON 字符串，可能为空。原样打进日志即可。 */
+  readonly detail: string
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code = '', detail = '') {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
+    this.detail = detail
   }
 }
 
@@ -56,7 +62,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     onUnauthorized()
   }
   if (!res.ok) {
-    throw new ApiError(res.status, await readErrorMessage(res))
+    const e = await readError(res)
+    throw new ApiError(res.status, e.msg, e.code, e.detail)
   }
   // 后端多个接口返回 204 且不带响应体（putConnector、setPassword、
   // logout）。对这些响应调 res.json() 会抛 SyntaxError。
@@ -67,22 +74,29 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 /**
- * 从错误响应里取可读的消息。
+ * 从错误响应里取出 code / msg / detail。
  *
- * 后端的错误一律是 {"error": "..."}（见 httpapi/respond.go）。但反代插进来
- * 的 502、或者请求路径写错时，响应体可能是一整页 HTML——那时用状态码兜底，
- * 既不抛解析错误，也不把 HTML 塞进提示框。
+ * 后端的错误一律是 {"code","msg","detail"}（见 httpapi/respond.go）：
+ * msg 面向终端用户可直接展示，code 机器可读，detail 是排查用的 JSON 串
+ * （没有细节时该字段整个不出现）。
+ *
+ * 但反代插进来的 502、或者请求路径写错时，响应体可能是一整页 HTML——
+ * 那时用状态码兜底，既不抛解析错误，也不把 HTML 塞进提示框。
  */
-async function readErrorMessage(res: Response): Promise<string> {
+async function readError(res: Response): Promise<{ msg: string; code: string; detail: string }> {
   try {
-    const data = (await res.json()) as { error?: unknown }
-    if (typeof data?.error === 'string' && data.error !== '') {
-      return data.error
+    const data = (await res.json()) as { code?: unknown; msg?: unknown; detail?: unknown }
+    if (typeof data?.msg === 'string' && data.msg !== '') {
+      return {
+        msg: data.msg,
+        code: typeof data.code === 'string' ? data.code : '',
+        detail: typeof data.detail === 'string' ? data.detail : '',
+      }
     }
   } catch {
     // 不是 JSON，落到下面的兜底
   }
-  return `请求失败（HTTP ${res.status}）`
+  return { msg: `请求失败（HTTP ${res.status}）`, code: '', detail: '' }
 }
 
 export const api = {
