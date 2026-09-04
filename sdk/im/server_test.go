@@ -211,3 +211,190 @@ func TestServerInFlightPushFailsFastOnDisconnect(t *testing.T) {
 			"要一直等到 RequestTimeout(10s) 才会失败")
 	}
 }
+
+// TestServerPushInsideOnMessageDoesNotDeadlock 守住修复批次 2 问题一：
+// OnMessage 回调里直接同步调用 Push（不开 goroutine）必须能正常拿到
+// 结果，而不是把 Server 内部读循环自己堵死。
+//
+// 这是 examples/im-demo 能不能写成"最直白的同步写法"的验收标准本身：
+// 如果这条测试红了，说明 Inbound 又被塞回了读循环同步处理，回调里的
+// Push 会因为等不到 Result（Result 也只能靠这同一个循环读到）卡满
+// RequestTimeout。断言用 500ms 的上界（远小于下面配的 3s
+// RequestTimeout）区分"立刻拿到结果"与"卡死等超时"两种情形，不用
+// sleep 等条件成立。
+//
+// 回退验证：把 runOnce 里 Inbound 分支从 s.enqueue(...) 改回直接调用
+// s.handleInbound(ctx, b.Inbound)（修复前的写法），本测试按预期变红，
+// 报错为"回调里同步调用 Push 应该在 500ms 内返回"；改回 enqueue 后
+// 复测转绿。过程记在 fix-batch-2-report.md。
+func TestServerPushInsideOnMessageDoesNotDeadlock(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true, RequestTimeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	resultCh := make(chan PushResult, 1)
+	errCh := make(chan error, 1)
+	s.OnMessage(func(ctx context.Context, in Inbound) error {
+		// 故意不开 goroutine：这正是 examples/im-demo 想写、也应该能写的
+		// "最直白"版本。如果这里会自死锁，示例就必须继续绕开协程写法，
+		// 说明修复没到位。
+		res, pushErr := s.Push(ctx, in.Subject, in.Payload)
+		if pushErr != nil {
+			errCh <- pushErr
+			return pushErr
+		}
+		resultCh <- res
+		return nil
+	})
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Inbound{Inbound: &fpimv1.Inbound{Subject: "u:1", ConnId: "c", Payload: []byte(`1`)}}})
+
+	select {
+	case res := <-resultCh:
+		if res.Status != Sent {
+			t.Fatalf("回调里同步 Push 应该成功送达，实际状态 %v", res.Status)
+		}
+	case err := <-errCh:
+		t.Fatalf("回调里同步调用 Push 不应该报错，实际 %v", err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("回调里同步调用 Push 应该在 500ms 内返回，实际没有——" +
+			"疑似 Inbound 又被塞回了读循环同步处理，读循环被自己的回调堵住（自死锁），" +
+			"要一直等到 RequestTimeout 才会因超时返回")
+	}
+}
+
+// TestServerPreservesEventBeforeMessageOrder 守住修复批次 2 问题一的第二条
+// 约束：Inbound 与 Event 必须共用同一条队列。
+//
+// 构造"先事件、后消息"的序列（与 hub 的真实保证一致：连接建立事件严格
+// 早于该连接的第一条消息），并且让 OnEvent 回调故意卡住（等测试放行）。
+// 只要 Inbound 与 Event 真的共用同一条队列、由同一个单消费者按序处理，
+// 消息就绝不可能在事件回调返回之前被观测到——它俩共用一个"queue 位置"，
+// 消息排在事件后面，必须等前面处理完。用一个 200ms 的 channel+超时窗口
+// 确认这一点，而不是假设"消息永远不会先到"（有限时间里没法断言永远，
+// 但两条毫无阻塞的纯内存 channel 操作用不了 200ms，200ms 足够暴露反例，
+// 不会因为调度延迟产生误报）。
+//
+// 回退验证：把 runOnce 里 Event 分支临时改成 `go s.handleEvent(ctx,
+// b.Event)`（消息仍走队列，但事件绕开队列、自己开一个不受队列约束的
+// goroutine——这是"事件不走同一条队列"最贴近真实的一种误修法，而不是
+// 完全同步内联：后者会直接把读循环本身堵住，读循环在事件回调返回之前
+// 根本读不到后面那条消息，反而无法制造出"消息先于事件被观测到"这个
+// 反例，所以要验证的是"绕开共享队列"这类错误，不是"读循环同步阻塞"
+// 那类错误——问题一的另一条测试已经覆盖了后者）。用这个变体复跑，
+// 本测试如期变红：消息回调在 200ms 内被调用，先于事件回调返回。改回
+// 共享队列后复测转绿。过程记在 fix-batch-2-report.md。
+func TestServerPreservesEventBeforeMessageOrder(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	defer s.Close()
+
+	var mu sync.Mutex
+	var order []string
+	release := make(chan struct{})
+	msgDone := make(chan struct{})
+	s.OnEvent(func(_ context.Context, ev Event) {
+		<-release // 卡住，模拟"还没处理完"的事件回调
+		mu.Lock()
+		order = append(order, "event")
+		mu.Unlock()
+	})
+	s.OnMessage(func(_ context.Context, in Inbound) error {
+		mu.Lock()
+		order = append(order, "message")
+		mu.Unlock()
+		close(msgDone)
+		return nil
+	})
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Event{Event: &fpimv1.Event{Kind: fpimv1.EventKind_EVENT_KIND_CONNECTED, Subject: "u:1", ConnId: "c", AtMs: 1}}})
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Inbound{Inbound: &fpimv1.Inbound{Subject: "u:1", ConnId: "c", Payload: []byte(`1`)}}})
+
+	select {
+	case <-msgDone:
+		t.Fatal("消息不应该在事件回调返回之前被观测到——Inbound 与 Event 必须共用" +
+			"同一条队列、由同一个单消费者按入队顺序处理，消息不能绕过还没处理完的" +
+			"事件抢先被处理")
+	case <-time.After(200 * time.Millisecond):
+		// 符合预期：消息还卡在事件后面，尚未被处理。
+	}
+
+	close(release) // 放行事件回调
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) == 2
+	}, "事件与消息都应该被处理")
+
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	if got[0] != "event" || got[1] != "message" {
+		t.Fatalf("事件应先于消息被观测到，实际顺序 %v", got)
+	}
+}
+
+// TestServerDropsFramesWhenQueueFull 守住修复批次 2 问题一的溢出约束：
+// 入队必须非阻塞，队列满了要丢弃并计数、而不是静默卡住或阻塞读循环。
+//
+// 用一个永远不放行的回调把消费协程卡死在第一条消息上，再抢着推
+// frameQueueCap（256）之外的一批消息：这些消息在队列已满之后仍然要
+// 能被读循环正常收下（stub.push 走的是同步 st.Send，如果 enqueue 会
+// 阻塞，读循环会卡在这次入队上，读不出后面的帧，stub.push 本身也可能
+// 因为 gRPC 流控窗口写满而跟着卡住——所以能顺利推完这一批，本身就是
+// "入队非阻塞"这条约束成立的证据），多出的部分应该被丢弃并计入
+// DroppedFrames。
+//
+// 回退验证：把 enqueue 里的 `select { case s.frames <- f: default: ... }`
+// 改回无条件阻塞发送 `s.frames <- f`，本测试按预期变红——
+// waitUntil 等 DroppedFrames()>0 会一直等到 5 秒超时失败（丢弃计数永远
+// 停在 0，因为阻塞发送不会走到 default 分支），而不是这里断言的"很快
+// 就能观测到丢弃"。改回 select+default 后复测转绿。过程记在
+// fix-batch-2-report.md。
+func TestServerDropsFramesWhenQueueFull(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	defer s.Close()
+
+	started := make(chan struct{})
+	var once sync.Once
+	block := make(chan struct{}) // 永远不关闭：让消费协程死死卡在第一条消息上
+	s.OnMessage(func(_ context.Context, in Inbound) error {
+		once.Do(func() { close(started) })
+		<-block
+		return nil
+	})
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+
+	// 第一条：占住消费协程。
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Inbound{Inbound: &fpimv1.Inbound{Subject: "u:1", ConnId: "c", Payload: []byte(`0`)}}})
+	waitUntil(t, func() bool {
+		select {
+		case <-started:
+			return true
+		default:
+			return false
+		}
+	}, "消费协程应已开始处理第一条消息（卡在回调里）")
+
+	// 消费协程卡住不动，队列此刻是空的（第一条已经被取走，只是回调没
+	// 返回）。再推 frameQueueCap+一批，前 frameQueueCap 条能填满队列，
+	// 剩下的应该被丢弃。
+	const extra = frameQueueCap + 40
+	for i := 0; i < extra; i++ {
+		stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Inbound{Inbound: &fpimv1.Inbound{Subject: "u:1", ConnId: "c", Payload: []byte(`1`)}}})
+	}
+	wantDropped := int64(extra - frameQueueCap)
+	waitUntil(t, func() bool { return s.DroppedFrames() >= wantDropped }, "队列打满后应该有帧被丢弃并计数")
+	if got := s.DroppedFrames(); got != wantDropped {
+		t.Fatalf("丢弃计数不对：want %d, got %d", wantDropped, got)
+	}
+	close(block) // 收尾：放行卡住的回调，避免消费协程带着阻塞状态进 Close
+}

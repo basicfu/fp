@@ -23,9 +23,12 @@ func main() {
 		Addr:      envOr("FP_IM_ADDR", "localhost:9091"),
 		AppID:     os.Getenv("FP_APP_ID"),
 		AppSecret: os.Getenv("FP_APP_SECRET"),
-		// 本地开发没有 TLS。生产环境绝不要开——appSecret 会随每个 RPC
-		// 以明文发送，见 sdk/im/server.go ServerConfig.Insecure 的注释。
-		Insecure: true,
+		// 与姊妹示例 examples/demo 用同一个开关（FP_INSECURE=1），而不是
+		// 硬编码 true：这份文件的头注释自称"照抄就是接入网关要写的全部
+		// 代码"，硬编码会让照抄的人把明文传密钥的写法一起带进生产——见
+		// sdk/im/server.go ServerConfig.Insecure 的注释，appSecret 会随
+		// 每个 RPC 以明文发送，生产环境绝不能开。
+		Insecure: os.Getenv("FP_INSECURE") == "1",
 	})
 	if err != nil {
 		slog.Error("连接 fp-im 失败", "err", err)
@@ -45,24 +48,19 @@ func main() {
 
 	// 回显：收到什么推回什么。
 	//
-	// 必须在另一个 goroutine 里调 Push，不能直接在这个回调里同步等它
-	// 返回：OnMessage 是在 Server 内部唯一一条读循环里同步执行的（见
-	// sdk/im/server.go OnMessage 的注释），而 Push 要等的 Result 回执
-	// 恰好也是从这同一条流、由同一条读循环读回来的——如果在回调里同步
-	// 等 Push，读循环没法转回去读它自己在等的那个 Result，会把自己
-	// 死锁到 RequestTimeout（默认 5 秒）超时：本例最初就是照这个"看起来
-	// 最直白"的同步写法验收的，实测每一次回显都稳定卡满 5 秒后报
-	// ErrUnavailable，而消息其实已经送达——这正是 OnMessage 注释里"慢
-	// 操作应由业务方自己在回调里另起 goroutine"这条契约要防的情形，不是
-	// 这个例子专属的坑。返回值恒为 nil：fp-im 不等 OnMessage 的返回值，
-	// 也不会因为它非 nil 而重试，回调本身早已经把处理这件事交给了下面
-	// 这个新协程。
+	// 直接在回调里同步调用 Push、不开 goroutine——这就是接入 fp-im 要写
+	// 的最直白代码。早期实现下这样写会死锁（OnMessage 曾经是在 Server
+	// 内部唯一一条读循环里同步执行的，而 Push 要等的 Result 回执也只能
+	// 由那同一条读循环读回来，回调里同步等 Push 就会把读循环自己堵死，
+	// 卡满 RequestTimeout 才报 ErrUnavailable，消息其实已经送达）；现在
+	// OnMessage/OnEvent 由 Server 内部一个独立的消费协程按入队顺序调用，
+	// 不会再和读等 Result 抢同一条路径，回调里可以放心同步调用 Push。
+	// 返回值只会被 SDK 记一条警告日志：fp-im 网关本身不知道这个回调
+	// 存不存在，更不会等它的返回值、也不会因为它非 nil 而重试。
 	srv.OnMessage(func(ctx context.Context, in fpim.Inbound) error {
-		go func() {
-			res, err := srv.Push(ctx, in.Subject, in.Payload)
-			slog.Info("回显", "subject", in.Subject, "status", res.Status, "err", err)
-		}()
-		return nil
+		res, err := srv.Push(ctx, in.Subject, in.Payload)
+		slog.Info("回显", "subject", in.Subject, "status", res.Status, "err", err)
+		return err
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

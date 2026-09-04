@@ -63,12 +63,6 @@ FP_IM_HTTP_ADDR=:8082 FP_IM_GRPC_ADDR=:9092 ./scripts/run-im.sh   # 终端 B
 
 **该看到**每个终端各打一行 `"fp-im 启动"`，带各自的 `node`/`http`/`grpc`。
 
-**两个节点不要在同一秒内起**（隔几秒起，或确认两条日志的 `node` 字段
-后缀的毫秒时间戳不同）：`nodeId` 是"主机名-启动毫秒时间戳"
-（`internal/im/model/nodeid.go`），本机实测过一次两个节点前后脚起导致
-时间戳撞在同一毫秒、拿到完全相同 `nodeId` 的情况——那样两个节点会共用
-同一条心跳和同一个节点频道，后面的顶号/判死验证会失真。
-
 ## 第 4 步：起 im-demo，连第二个节点
 
 ```bash
@@ -173,15 +167,16 @@ INFO 回显 subject=u:<userId> status=1 err=<nil>
 （`status=1` 是 `fpim.Sent`。第 4 步连的是节点二、这次握手连的是节点一，
 一来一回真的跨了一个节点转发。）
 
-**踩过的坑，写给下一个人**：`main.go` 里 `OnMessage` 回调必须在另开的
-goroutine 里调 `srv.Push`，不能直接同步调用后等它返回——`OnMessage` 是在
-`Server` 内部唯一一条 gRPC 读循环里同步执行的，而 `Push` 要等的 `Result`
-回执恰好也是从这同一条流由同一条读循环读回来的。本机第一次手工验收时
-就是照"看起来最直白"的同步写法测的，结果每一次回显都稳定卡满
-`RequestTimeout`（默认 5 秒）后报 `ErrUnavailable`，而消息其实已经送达
-——这正是 `sdk/im/server.go` `OnMessage` 注释里"慢操作应由业务方自己在
-回调里另起 goroutine"这条契约要防的情形。现在 `main.go` 已经是正确写法，
-这里记录下来是因为这个坑极容易在照抄示例时被绕开注释直接抄同步版本。
+**已修复的坑，写给下一个人**：`main.go` 里 `OnMessage` 回调现在可以直接
+同步调用 `srv.Push` 后等它返回，不需要另开 goroutine——`OnMessage`/
+`OnEvent` 由 `Server` 内部一个独立的消费协程按入队顺序调用，不再是在
+读 `Result` 应答的那条 gRPC 读循环里同步执行。早期实现不是这样：那时
+`OnMessage` 就是在唯一一条读循环里同步执行的，而 `Push` 要等的 `Result`
+回执恰好也是从这同一条流由同一条读循环读回来的，回调里同步调用 `Push`
+会把读循环自己堵死，卡满 `RequestTimeout`（默认 5 秒）后才报
+`ErrUnavailable`，而消息其实已经送达——这里记录下来是因为这个坑一度
+非常容易在照抄示例时踩上，见 `sdk/im/server.go` 的
+`TestServerPushInsideOnMessageDoesNotDeadlock`。
 
 ## 第 7 步：顶号
 

@@ -11,7 +11,11 @@ fp-im 是无队列的 WebSocket 连接网关：只管"谁在线、递一条消�
 FP_IM_HTTP_ADDR=:8081 FP_IM_GRPC_ADDR=:9091 ./scripts/run-im.sh
 ```
 
-依赖 `FP_IM_REDIS_URL`（默认复用 `FP_REDIS_URL`）、`FP_IM_FP_ADDR`、`FP_IM_APPS_FILE`：
+依赖 `FP_IM_REDIS_URL`、`FP_IM_FP_ADDR`、`FP_IM_APPS_FILE`：三者对二进制本身都是
+必填项，缺一个直接启动失败（`internal/im/config.Load`）。"`FP_IM_REDIS_URL` 默认
+复用 `FP_REDIS_URL`"这条回退**只在 `scripts/run-im.sh`（经 `scripts/env.sh`）里
+成立**，是本机联调的便利写法；直接跑 `./fp-im` 二进制的人没有这层回退，必须自己
+显式传全这三个变量。
 
 ```json
 {"apps":[{"app_id":"…","app_secret":"…","allow_guest":true}]}
@@ -36,11 +40,18 @@ FP_IM_HTTP_ADDR=:8081 FP_IM_GRPC_ADDR=:9091 ./scripts/run-im.sh
 
 ## 两个 SDK
 
-server：`srv.OnMessage`/`OnEvent` 在同一条 gRPC 读循环里**同步**执行，回调里若要
-再调 `Push`/`Sessions`/`Kick`（都要等 Result），必须另开 goroutine，否则会把读循环
-自己死锁到 `RequestTimeout`（`examples/im-demo` 真实踩过，见其 README 第 6 步）。
+server：`srv.OnMessage`/`OnEvent` 由 `Server` 内部一个独立的消费协程按入队顺序
+调用，不是在读 gRPC 流的那条循环里同步执行——回调里可以直接同步调用
+`Push`/`PushMany`/`Sessions`/`Kick` 等它们的 Result 返回，不会自死锁。Inbound 与
+Event 共用同一条容量 256 的队列（单消费者保证同一 subject 的处理顺序与投递顺序
+一致，且事件与消息的相对顺序也不变），队列满了会丢弃并计数（`srv.DroppedFrames()`
+查询）、同时打一条警告日志，不会阻塞读循环。`Close()` 会等这个消费协程真正退出
+再返回，之后不会再有回调被调用。最小接入示例、可以直接照抄的同步写法见
+`examples/im-demo/main.go`。
+
 client：`fpim.Dial` 后 `OnMessage`/`OnClose`/`Send`，握手、心跳、按上表退避重连全部
-内部处理。
+内部处理；一个可以直接照抄的最小用法（握手、发消息、收回显）见
+`examples/im-demo/README.md` 第 5 步的 `wsclient` 小工具，用的就是这个 client SDK。
 
 ## 运维要点
 

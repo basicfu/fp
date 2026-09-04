@@ -204,9 +204,41 @@ type Server struct {
 
 	up atomic.Bool
 
+	// frames 是 Inbound 与 Event 共用的唯一入站队列，由 runOnce 的读循环
+	// 非阻塞写入、由单独一个消费协程（consumeLoop）按序取出后调用业务
+	// 回调。Inbound 与 Event 必须共用同一条队列而不是各自一条：现在两者
+	// 由同一个读循环串行处理，连接建立事件严格早于该连接的第一条消息，
+	// 一旦分成两条队列各自异步消费，就再也无法保证这个先后关系（各自的
+	// 消费速度互不相干），会引入"先看到消息、后看到上线事件"的隐性
+	// 顺序回归——参见 consumeLoop 的注释。
+	//
+	// 容量 256：与网关侧每连接发送队列同量级（internal/im/config 的
+	// Conn.SendQueue 默认值），不是随意取的数字。
+	frames chan queuedFrame
+	// dropped 统计因为业务回调处理不过来、入队时队列已满而被丢弃的入站
+	// 帧总数，供业务方轮询自查（DroppedFrames）。宁可丢一条、记一笔账、
+	// 大声喊一句警告日志，也不能为了不丢帧而让入队本身阻塞——阻塞会让
+	// "消费者卡住→队列填满→读循环卡在入队→在途请求的应答读不到"这个
+	// 死锁原样回来，只是从必然复现变成生产高负载下偶发，比现在更糟。见
+	// enqueue 的注释。
+	dropped atomic.Int64
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
+
+// queuedFrame 是喂给 consumeLoop 的统一载体：in 非 nil 表示一条 Inbound，
+// ev 非 nil 表示一个 Event，两者互斥。用同一个类型进同一条 channel，
+// 是"Inbound 与 Event 共用一条队列"这条约束在类型层面的体现——如果
+// 拆成两个 channel，队列共享这件事就无从谈起。
+type queuedFrame struct {
+	ctx context.Context
+	in  *fpimv1.Inbound
+	ev  *fpimv1.Event
+}
+
+// frameQueueCap 是 frames 队列的容量。
+const frameQueueCap = 256
 
 // NewServer 建立与 fp-im 的连接并启动接入流。
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -241,6 +273,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		rpc:     fpimv1.NewImServiceClient(conn),
 		log:     cfg.Logger,
 		pending: map[string]chan *fpimv1.Result{},
+		frames:  make(chan queuedFrame, frameQueueCap),
 		cancel:  cancel,
 	}
 	s.wg.Add(1)
@@ -248,26 +281,50 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		defer s.wg.Done()
 		s.runLoop(ctx)
 	}()
+	// consumeLoop 与 runLoop 各自独立计入 wg：Close() 必须等这个消费协程
+	// 真正退出之后才能返回，否则会出现"Close 已经返回，但队列里还剩最后
+	// 一帧、业务回调随后才被调用"的窗口——对业务方而言这比"回调多等一会"
+	// 更危险，因为它意味着 Close() 的返回不再是"以后不会再有回调"的
+	// 可靠信号。
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.consumeLoop(ctx)
+	}()
 	return s, nil
 }
 
 // OnMessage 注册接收 client 上行消息的回调。
 //
-// 回调在接收流的读循环里同步执行，不是另起 goroutine 派发：这保证同一个
-// subject 的多条消息，业务侧处理的先后顺序与 fp-im 投递的顺序完全一致——
-// 一旦异步派发，两条消息谁先被业务逻辑处理就不再有任何保证。慢操作应由
-// 业务方自己在回调里另起 goroutine，回调本身必须快，否则会拖慢整条流后续
-// 事件（包括其他 subject 的消息、Result 应答）的处理。
+// 回调不是在接收流的读循环里执行，而是由 Server 内部唯一一个消费协程按
+// 入队顺序调用：这样回调里可以直接同步调用 Push/PushMany/Sessions/Kick
+// 等待应答，而不会像早期实现那样把唯一的读循环（也是唯一读到 Result
+// 应答的地方）自己堵死、卡到 RequestTimeout 才报超时——那种写法一度是
+// 本 SDK 的推荐用法，但它必然自死锁，参见 sdk/im 测试
+// TestServerPushInsideOnMessageDoesNotDeadlock 与 examples/im-demo。
+//
+// 因为消费协程只有一个、严格按入队顺序处理，"同一 subject 的多条消息，
+// 业务侧处理的先后顺序与 fp-im 投递的顺序完全一致"这条承诺依然成立，
+// 且与 OnEvent 共用同一个队列，见 TestServerPreservesEventBeforeMessageOrder。
+// 慢操作仍然应该自己另起 goroutine：回调本身慢会拖慢队列里排在它后面
+// 的其它消息与事件（包括其它 subject 的），但不会再拖慢 Push 等方法的
+// 应答，也不会再让整条流卡死。
 func (s *Server) OnMessage(fn func(context.Context, Inbound) error) { s.onMessage.Store(&fn) }
 
-// OnEvent 注册接收连接生命周期事件的回调，语义与 OnMessage 相同：同步
-// 执行，慢操作自行另起 goroutine。
+// OnEvent 注册接收连接生命周期事件的回调，语义与 OnMessage 相同：由同一
+// 个消费协程按入队顺序调用，可以在回调里直接同步调用 Push/Sessions/Kick。
 func (s *Server) OnEvent(fn func(context.Context, Event)) { s.onEvent.Store(&fn) }
 
 // StreamHealthy 报告当前接入流是否可用（已收到过 Ready）。
 func (s *Server) StreamHealthy() bool { return s.up.Load() }
 
-// Close 关闭连接并停止后台重连循环。
+// Close 关闭连接并停止后台重连循环与消费协程。
+//
+// s.wg.Wait() 同时等 runLoop 和 consumeLoop 两个协程都真正退出——缺这一
+// 步，Close() 返回之后 consumeLoop 仍可能在处理队列里最后几帧时调用
+// 业务回调，对业务方来说"Close 已经返回"就不再是"以后不会再有回调"的
+// 可靠信号，会让业务方以为自己可以安全释放回调闭包里捕获的资源，实际
+// 还有一个回调随时可能在跑。
 func (s *Server) Close() error {
 	s.cancel()
 	err := s.conn.Close()
@@ -319,6 +376,13 @@ func (s *Server) runLoop(ctx context.Context) {
 }
 
 // runOnce 建一次流并读到断开为止，返回本次连接是否曾经收到过 Ready。
+//
+// 这个读循环退化成纯分发：Ready 与 Result 都是常数时间操作、永不调用
+// 业务代码，原地处理；Inbound 与 Event 只做一件事——非阻塞地塞进
+// s.frames，转手交给 consumeLoop 那个独立协程去调业务回调。读循环本身
+// 绝不能等业务回调返回，否则业务回调里一旦反过来同步调用 Push 等待
+// Result，而 Result 又只能靠这同一个循环读到，就会自己把自己锁死——这
+// 正是本文件曾经的实现方式，也是这批修复要消灭的死锁。
 func (s *Server) runOnce(ctx context.Context) (gotReady bool) {
 	stream, err := s.rpc.Connect(ctx)
 	if err != nil {
@@ -352,9 +416,62 @@ func (s *Server) runOnce(ctx context.Context) (gotReady bool) {
 				ch <- b.Result
 			}
 		case *fpimv1.ConnectResponse_Inbound:
-			s.handleInbound(ctx, b.Inbound)
+			s.enqueue(queuedFrame{ctx: ctx, in: b.Inbound})
 		case *fpimv1.ConnectResponse_Event:
-			s.handleEvent(ctx, b.Event)
+			s.enqueue(queuedFrame{ctx: ctx, ev: b.Event})
+		}
+	}
+}
+
+// enqueue 把一帧非阻塞地塞进 s.frames。
+//
+// 必须非阻塞：如果这里改成阻塞发送，"消费协程卡在业务回调里→队列被
+// 后续帧填满→读循环阻塞在这次 enqueue 上→在途请求的 Result 应答也读不
+// 到→call() 卡到 RequestTimeout"这条死锁链路会原样重新出现，只是从
+// 开发期必然复现（旧实现）退化成生产高负载下偶发——那比现在更糟：现在
+// 的 bug 至少能在开发阶段就被撞见，偶发的版本会在生产里潜伏很久才发作。
+// 所以满了就丢，绝不能等。
+//
+// 满了不能悄悄丢：记一条警告日志、累加 dropped 计数供业务方
+// DroppedFrames 查询。这与产品既有契约自洽——网关本身就不保证送达，
+// 业务方按"带 id 去重 + 落库 + 上线同步"的配方自己补漏，网关自己的
+// 发送队列满了也是直接断连而不是死等——SDK 这层选择"丢弃并告警"而不是
+// "阻塞等待"，是同一条契约在客户端 SDK 里的延续。
+func (s *Server) enqueue(f queuedFrame) {
+	select {
+	case s.frames <- f:
+	default:
+		total := s.dropped.Add(1)
+		s.log.Warn("fpim: 入站队列已满，丢弃一帧", "dropped_total", total)
+	}
+}
+
+// DroppedFrames 返回因为业务回调处理不过来、入队时队列已满而被丢弃的
+// 入站帧（Inbound + Event）总数，供业务方监控告警。
+func (s *Server) DroppedFrames() int64 { return s.dropped.Load() }
+
+// consumeLoop 是 s.frames 唯一的消费者：单协程按入队顺序取帧、调用业务
+// 回调，直到 ctx 被 Close() 取消。
+//
+// 单消费者是"同一 subject 的处理顺序与投递顺序一致"这条承诺继续成立的
+// 全部理由——这里不需要再对 subject 分桶或加锁，纯粹因为只有一个协程
+// 在消费，先入队的必然先被处理。
+//
+// ctx 取消后立刻返回，不排空队列里剩下的帧：Close() 之后不应该再有任何
+// 业务回调被调用，"尽量处理完积压"和这条保证冲突，两者只能选一个，
+// 选后者——业务方主动关闭时，剩下几帧没处理到是可接受的代价，此时之
+// 前已经处理过的部分本来就不保证送达（Push 本身就不保证）。
+func (s *Server) consumeLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case f := <-s.frames:
+			if f.in != nil {
+				s.handleInbound(f.ctx, f.in)
+			} else {
+				s.handleEvent(f.ctx, f.ev)
+			}
 		}
 	}
 }
@@ -369,8 +486,10 @@ func (s *Server) handleInbound(ctx context.Context, in *fpimv1.Inbound) {
 		s.log.Warn("fpim: 收到的 Inbound.subject 解析失败", "subject", in.GetSubject(), "err", err)
 		return
 	}
-	// 同步调用：保证同一 subject 的消息处理顺序与 fp-im 投递顺序一致，
-	// 见 OnMessage 的注释。
+	// 在消费协程里调用，不是在读循环里：回调可以直接同步调用 Push 等
+	// 方法而不会自死锁，见 runOnce/consumeLoop 的注释。返回的 error 只
+	// 会被 SDK 记一条警告日志，不会回传给 fp-im、也不会触发任何重试——
+	// fp-im 网关本身根本不知道这个回调是否存在、更不等它的返回值。
 	if err := (*fn)(ctx, Inbound{Subject: sub, ConnID: in.GetConnId(), Payload: in.GetPayload()}); err != nil {
 		s.log.Warn("fpim: OnMessage 回调返回错误", "subject", sub, "err", err)
 	}
