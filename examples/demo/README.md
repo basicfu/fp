@@ -59,8 +59,9 @@ git。`scripts/demo.sh` 与 `scripts/run.sh` 同构：都是先 `. scripts/env.s
 ### 第 1 步：起 fp，建应用，启用 sms_code
 
 > 从第三阶段起，下面这些准备步骤都可以在管理控制台里点完，不必用 curl：
-> 先 `./scripts/build-web.sh && go build -o fp ./cmd/fp && ./fp`，
-> 浏览器打开 http://localhost:8080/ 。详见 [docs/console.md](../../docs/console.md)。
+> 先 `./scripts/build-web.sh` 构建前端，再照下面一样 `./scripts/run.sh` 起服务，
+> 浏览器打开 http://localhost:8080/ 即是控制台（默认账号 `admin` / `admin123456`）。
+> 详见 [docs/console.md](../../docs/console.md)。
 > curl 的写法保留在这里，供脚本化和排障使用。
 
 ```bash
