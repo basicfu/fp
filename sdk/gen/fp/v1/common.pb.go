@@ -193,6 +193,125 @@ func (x *ErrorDetail) GetDetail() string {
 	return ""
 }
 
+// RolePolicy 是一个角色的**隐式权限全集**（角色继承已在服务端展开）。
+type RolePolicy struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RoleKey       string                 `protobuf:"bytes,1,opt,name=role_key,json=roleKey,proto3" json:"role_key,omitempty"`
+	Allow         []string               `protobuf:"bytes,2,rep,name=allow,proto3" json:"allow,omitempty"`
+	Deny          []string               `protobuf:"bytes,3,rep,name=deny,proto3" json:"deny,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RolePolicy) Reset() {
+	*x = RolePolicy{}
+	mi := &file_fp_v1_common_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RolePolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RolePolicy) ProtoMessage() {}
+
+func (x *RolePolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_common_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RolePolicy.ProtoReflect.Descriptor instead.
+func (*RolePolicy) Descriptor() ([]byte, []int) {
+	return file_fp_v1_common_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RolePolicy) GetRoleKey() string {
+	if x != nil {
+		return x.RoleKey
+	}
+	return ""
+}
+
+func (x *RolePolicy) GetAllow() []string {
+	if x != nil {
+		return x.Allow
+	}
+	return nil
+}
+
+func (x *RolePolicy) GetDeny() []string {
+	if x != nil {
+		return x.Deny
+	}
+	return nil
+}
+
+// AppPolicy 是某个应用的完整策略快照，由 fp 推给该应用的 SDK。
+//
+// 只包含**在该应用有权限点的角色**：用户带着「商城管理员」去视频时，
+// 那个角色在视频的策略表里根本不存在，等同于没有——这正是"角色全局、
+// 应用归属由权限点决定"这个设计能成立的原因。
+type AppPolicy struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Roles []*RolePolicy          `protobuf:"bytes,1,rep,name=roles,proto3" json:"roles,omitempty"`
+	// version 是策略的版本号，SDK 用它判断要不要重拉。
+	Version       int64 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppPolicy) Reset() {
+	*x = AppPolicy{}
+	mi := &file_fp_v1_common_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppPolicy) ProtoMessage() {}
+
+func (x *AppPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_common_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppPolicy.ProtoReflect.Descriptor instead.
+func (*AppPolicy) Descriptor() ([]byte, []int) {
+	return file_fp_v1_common_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *AppPolicy) GetRoles() []*RolePolicy {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+func (x *AppPolicy) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
 var File_fp_v1_common_proto protoreflect.FileDescriptor
 
 const file_fp_v1_common_proto_rawDesc = "" +
@@ -207,7 +326,15 @@ const file_fp_v1_common_proto_rawDesc = "" +
 	"\vErrorDetail\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x10\n" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x16\n" +
-	"\x06detail\x18\x03 \x01(\tR\x06detailB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
+	"\x06detail\x18\x03 \x01(\tR\x06detail\"Q\n" +
+	"\n" +
+	"RolePolicy\x12\x19\n" +
+	"\brole_key\x18\x01 \x01(\tR\aroleKey\x12\x14\n" +
+	"\x05allow\x18\x02 \x03(\tR\x05allow\x12\x12\n" +
+	"\x04deny\x18\x03 \x03(\tR\x04deny\"N\n" +
+	"\tAppPolicy\x12'\n" +
+	"\x05roles\x18\x01 \x03(\v2\x11.fp.v1.RolePolicyR\x05roles\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversionB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
 
 var (
 	file_fp_v1_common_proto_rawDescOnce sync.Once
@@ -221,17 +348,20 @@ func file_fp_v1_common_proto_rawDescGZIP() []byte {
 	return file_fp_v1_common_proto_rawDescData
 }
 
-var file_fp_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_fp_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_fp_v1_common_proto_goTypes = []any{
 	(*RevokeEvent)(nil), // 0: fp.v1.RevokeEvent
 	(*ErrorDetail)(nil), // 1: fp.v1.ErrorDetail
+	(*RolePolicy)(nil),  // 2: fp.v1.RolePolicy
+	(*AppPolicy)(nil),   // 3: fp.v1.AppPolicy
 }
 var file_fp_v1_common_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	2, // 0: fp.v1.AppPolicy.roles:type_name -> fp.v1.RolePolicy
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_fp_v1_common_proto_init() }
@@ -245,7 +375,7 @@ func file_fp_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_common_proto_rawDesc), len(file_fp_v1_common_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

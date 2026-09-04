@@ -15,6 +15,9 @@ type entry struct {
 	// 回传给客户端——fp 在过渡期内会重复告知，SDK 也必须重复转达，
 	// 否则缓存命中的那些请求反而成了交接的黑洞。
 	rotatedTo string
+	// roles 是该用户在本应用的有效角色，鉴权判定用它。
+	// 跟着身份一起缓存：判定因此完全不碰网络。
+	roles []string
 
 	// cachedAt 与 ttl 分开存，过期判定在 get 里现算。
 	// 合并成一个 expiresAt 就无法在读取时收紧窗口——见下方 get 的说明。
@@ -145,4 +148,19 @@ func (c *cache) drop(tokens ...string) {
 func (c *cache) purge() {
 	c.gen.Add(1)
 	c.lru.Purge()
+}
+
+// dropUser 丢掉某个用户的全部缓存条目。
+//
+// 用于角色变更：与撤销不同，这里只是让下次校验回源拿新角色，**不影响
+// 登录态**——给某人加个权限不该把他踢下线。
+func (c *cache) dropUser(userID string) {
+	if userID == "" {
+		return
+	}
+	for _, k := range c.lru.Keys() {
+		if e, ok := c.lru.Peek(k); ok && e.userID == userID {
+			c.lru.Remove(k)
+		}
+	}
 }

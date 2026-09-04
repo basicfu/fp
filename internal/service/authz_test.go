@@ -12,6 +12,7 @@ import (
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/testsupport"
+	"github.com/basicfu/fp/sdk/authzcore"
 )
 
 type authzEnv struct {
@@ -85,10 +86,11 @@ func TestCompilePolicyExpandsInheritance(t *testing.T) {
 	}
 
 	got := rolePolicyOf(t, pol, "商城管理员")
-	sort.Strings(got.Allow)
+	allow := got.Allow
+	sort.Strings(allow)
 	want := []string{"DELETE:/orders/{id}", "GET:/orders/{id}"}
-	if len(got.Allow) != 2 || got.Allow[0] != want[0] || got.Allow[1] != want[1] {
-		t.Fatalf("商城管理员的 allow = %v, want %v——继承没有展开", got.Allow, want)
+	if len(allow) != 2 || allow[0] != want[0] || allow[1] != want[1] {
+		t.Fatalf("商城管理员的 allow = %v, want %v——继承没有展开", allow, want)
 	}
 
 	// 父角色不该反过来拿到子角色的权限。
@@ -143,25 +145,25 @@ func TestCompilePolicyExcludesRolesWithoutPermissionsHere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompilePolicy: %v", err)
 	}
-	for _, rp := range pol.Roles {
+	for _, rp := range pol {
 		if rp.RoleKey == "视频管理员" {
 			t.Fatalf("视频管理员不该出现在商城的策略表里: %+v", rp)
 		}
 	}
-	if len(pol.Roles) != 1 {
-		t.Fatalf("策略表应当只有普通用户一条，实际 %d 条", len(pol.Roles))
+	if len(pol) != 1 {
+		t.Fatalf("策略表应当只有普通用户一条，实际 %d 条", len(pol))
 	}
 }
 
-func rolePolicyOf(t *testing.T, p *domain.AppPolicy, key string) domain.RolePolicy {
+func rolePolicyOf(t *testing.T, p []authzcore.RolePolicy, key string) authzcore.RolePolicy {
 	t.Helper()
-	for _, rp := range p.Roles {
+	for _, rp := range p {
 		if rp.RoleKey == key {
 			return rp
 		}
 	}
-	t.Fatalf("策略表里没有角色 %q，实际有 %+v", key, p.Roles)
-	return domain.RolePolicy{}
+	t.Fatalf("策略表里没有角色 %q，实际有 %+v", key, p)
+	return authzcore.RolePolicy{}
 }
 
 // ---------------------------------------------------------------------------
@@ -319,8 +321,8 @@ func TestDeletePermissionCascadesGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompilePolicy: %v", err)
 	}
-	if len(pol.Roles) != 0 {
-		t.Fatalf("删权限点后策略表非空: %+v——授权关系没有被级联删除", pol.Roles)
+	if len(pol) != 0 {
+		t.Fatalf("删权限点后策略表非空: %+v——授权关系没有被级联删除", pol)
 	}
 }
 

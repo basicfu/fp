@@ -53,3 +53,21 @@ message ErrorDetail {
   // retryAfterMs、field 等扩展字段。字段可增删，不承担契约约束。
   string detail = 3;
 }
+
+// RolePolicy 是一个角色的**隐式权限全集**（角色继承已在服务端展开）。
+message RolePolicy {
+  string role_key = 1;
+  repeated string allow = 2;
+  repeated string deny = 3;
+}
+
+// AppPolicy 是某个应用的完整策略快照，由 fp 推给该应用的 SDK。
+//
+// 只包含**在该应用有权限点的角色**：用户带着「商城管理员」去视频时，
+// 那个角色在视频的策略表里根本不存在，等同于没有——这正是"角色全局、
+// 应用归属由权限点决定"这个设计能成立的原因。
+message AppPolicy {
+  repeated RolePolicy roles = 1;
+  // version 是策略的版本号，SDK 用它判断要不要重拉。
+  int64 version = 2;
+}

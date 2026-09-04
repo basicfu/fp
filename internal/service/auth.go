@@ -29,6 +29,9 @@ type AuthDeps struct {
 	Registry *connector.Registry
 	Notifier *notify.Sender
 	Codes    *notify.CodeService
+	// Authz 解析用户在本应用的有效角色，签发会话时刻进去。
+	// 可为 nil——授权模块未启用时会话不带角色，判定一律拒绝（默认拒绝）。
+	Authz *AuthzService
 }
 
 // AuthService 编排登录流程。它是唯一知道"登录该按什么顺序发生"的地方：
@@ -146,8 +149,21 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		}
 	}
 
+	// 角色在**签发时**解析一次刻进会话，判定路径因此完全不碰数据库。
+	// 解析失败不阻断登录：授权是登录之后的事，让鉴权失败（默认拒绝）比
+	// 让人登不进去更合理——后者会把一个授权模块的故障放大成完全不可用。
+	var roles []string
+	if s.deps.Authz != nil {
+		roles, err = s.deps.Authz.EffectiveRoles(ctx, user.ID, app.ID)
+		if err != nil {
+			slog.Error("service: 解析用户角色失败，本次会话不带角色", "err", err,
+				"userId", user.ID, "appId", app.ID)
+			roles = nil
+		}
+	}
+
 	sess, err := s.deps.Sessions.Issue(ctx, IssueInput{
-		UserID: user.ID, App: app, IP: in.IP, UA: in.UA, Mobile: in.Mobile,
+		UserID: user.ID, App: app, IP: in.IP, UA: in.UA, Mobile: in.Mobile, Roles: roles,
 	})
 	if err != nil {
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)

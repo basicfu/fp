@@ -7,9 +7,14 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/sdk/authzcore"
 )
 
 // CompilePolicy 编译某个应用的完整策略快照，供推送给该应用的 SDK。
+//
+// 返回 authzcore 的纯结构而不是 gRPC 生成类型：service 层不该知道协议编码，
+// 否则 httpapi 的响应类型就没法独立演化（见 internal/service/arch_test.go）。
+// 转成线上类型是 grpcapi 的事。
 //
 // 产物是每个角色的**隐式权限全集**——继承已经展开，SDK 拿到的是一张扁平表，
 // 判定退化成纯 map 查找、不依赖 casbin。这么做的三个理由：
@@ -21,7 +26,7 @@ import (
 // **只包含在该应用有权限点的角色。** 用户带着「商城管理员」去视频时，那个角色
 // 在视频的策略表里根本不存在，等同于没有——这正是"角色全局、应用归属由权限点
 // 决定"这个设计能成立的原因。
-func (s *AuthzService) CompilePolicy(ctx context.Context, appID uuid.UUID) (*domain.AppPolicy, error) {
+func (s *AuthzService) CompilePolicy(ctx context.Context, appID uuid.UUID) ([]authzcore.RolePolicy, error) {
 	parents, keys, err := s.roleGraph(ctx)
 	if err != nil {
 		return nil, err
@@ -53,14 +58,14 @@ func (s *AuthzService) CompilePolicy(ctx context.Context, appID uuid.UUID) (*dom
 		return nil, fmt.Errorf("service: 遍历角色权限: %w", err)
 	}
 
-	out := &domain.AppPolicy{ApplicationID: appID}
+	out := []authzcore.RolePolicy{}
 	for roleID, key := range keys {
 		eff := effectiveFor(roleID, parents, direct)
 		if len(eff) == 0 {
 			// 在本应用没有任何权限的角色不进策略表——它在这个应用里不存在。
 			continue
 		}
-		rp := domain.RolePolicy{RoleKey: key}
+		rp := authzcore.RolePolicy{RoleKey: key}
 		for pk, e := range eff {
 			if e == domain.EffectDeny {
 				rp.Deny = append(rp.Deny, pk)
@@ -68,7 +73,7 @@ func (s *AuthzService) CompilePolicy(ctx context.Context, appID uuid.UUID) (*dom
 				rp.Allow = append(rp.Allow, pk)
 			}
 		}
-		out.Roles = append(out.Roles, rp)
+		out = append(out, rp)
 	}
 	return out, nil
 }

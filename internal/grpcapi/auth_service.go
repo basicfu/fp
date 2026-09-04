@@ -33,18 +33,21 @@ type AuthServerDeps struct {
 	Hub *RevokeHub
 	// Apps 把 Watch 的调用方 appId（字符串）换成内部 UUID，用于按应用订阅。
 	Apps AppLookup
+	// Authz 处理权限点上报与策略拉取。
+	Authz *service.AuthzService
 }
 
 // NewAuthServer 构造 gRPC 认证服务。
 func NewAuthServer(d AuthServerDeps) fpv1.AuthServiceServer {
-	return &authServer{auth: d.Auth, hub: d.Hub, apps: d.Apps}
+	return &authServer{auth: d.Auth, hub: d.Hub, apps: d.Apps, authz: d.Authz}
 }
 
 type authServer struct {
 	fpv1.UnimplementedAuthServiceServer
-	auth *service.AuthService
-	hub  *RevokeHub
-	apps AppLookup
+	auth  *service.AuthService
+	hub   *RevokeHub
+	apps  AppLookup
+	authz *service.AuthzService
 }
 
 // callerAppID 取出拦截器已认证的 appId。
@@ -123,6 +126,10 @@ func (s *authServer) ValidateToken(ctx context.Context, req *fpv1.ValidateTokenR
 		CacheTtlMs: res.CacheTTL.Milliseconds(),
 		Rotated:    res.Rotated,
 		NewToken:   res.NewToken,
+		// 角色随身份一起回来：SDK 的鉴权判定因此完全不碰网络，本地只需
+		// 一份很小的策略表（角色 → 权限点）。把 casbin 的 g 规则（用户 →
+		// 角色）全量下发给每个 SDK 实例是不现实的——它随用户数增长。
+		Roles: res.Session.Roles,
 	}, nil
 }
 
@@ -212,4 +219,83 @@ func revokeEvent(ev domain.RevokeEvent) *fpv1.RevokeEvent {
 		out.AppId = ev.AppID.String()
 	}
 	return out
+}
+
+// ReportPermissions 接收业务方 SDK 启动时上报的权限点全量快照。
+//
+// 快照里没有的权限点**不会被删除**——处理规则见 service.ReportPermissions。
+func (s *authServer) ReportPermissions(ctx context.Context, req *fpv1.ReportPermissionsRequest) (*fpv1.ReportPermissionsResponse, error) {
+	if err := s.requireAuthz(); err != nil {
+		return nil, err
+	}
+	app, err := s.callerApp(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pts := make([]service.ReportedPoint, 0, len(req.GetPoints()))
+	for _, p := range req.GetPoints() {
+		pts = append(pts, service.ReportedPoint{
+			Key: p.GetKey(), Kind: p.GetKind(), Parent: p.GetParent(), Name: p.GetName(),
+		})
+	}
+	if err := s.authz.ReportPermissions(ctx, app.ID, pts); err != nil {
+		return nil, StatusFrom(err)
+	}
+	return &fpv1.ReportPermissionsResponse{}, nil
+}
+
+// GetPolicy 返回本应用的完整策略快照。
+func (s *authServer) GetPolicy(ctx context.Context, _ *fpv1.GetPolicyRequest) (*fpv1.GetPolicyResponse, error) {
+	if err := s.requireAuthz(); err != nil {
+		return nil, err
+	}
+	app, err := s.callerApp(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pol, err := s.authz.CompilePolicy(ctx, app.ID)
+	if err != nil {
+		return nil, StatusFrom(err)
+	}
+	ver, err := s.authz.PolicyVersion(ctx, app.ID)
+	if err != nil {
+		return nil, StatusFrom(err)
+	}
+	// service 返回的是纯结构，在这里转成线上类型——协议编码只属于传输层。
+	roles := make([]*fpv1.RolePolicy, 0, len(pol))
+	for _, rp := range pol {
+		roles = append(roles, &fpv1.RolePolicy{RoleKey: rp.RoleKey, Allow: rp.Allow, Deny: rp.Deny})
+	}
+	return &fpv1.GetPolicyResponse{Policy: &fpv1.AppPolicy{Roles: roles, Version: ver}}, nil
+}
+
+// callerApp 把拦截器认证过的 appId 换成应用实体。
+//
+// 走 GetActiveByAppID 而不是 GetByAppID：应用停用后所有 SDK 入口都必须
+// 立即失效，授权相关的两个接口也不例外。
+func (s *authServer) callerApp(ctx context.Context) (*domain.Application, error) {
+	appIDStr, err := callerAppID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	app, err := s.apps.GetActiveByAppID(ctx, appIDStr)
+	if err != nil {
+		return nil, StatusFrom(err)
+	}
+	return app, nil
+}
+
+// requireAuthz 确保授权服务已注入。
+//
+// 未注入时返回 Unimplemented 而不是让它 panic：Authz 是可选依赖（授权模块
+// 未启用的部署、以及只测认证的集成测试都可能不传它），而一个 nil 解引用会
+// 让**整个 gRPC 服务进程崩掉**——一个可选功能没配，不该把认证也一起带走。
+//
+// 选 Unimplemented 而非 Internal：它准确表达了"这个服务端没有提供这个能力"，
+// SDK 据此可以安静地跳过策略拉取，而不是当成故障反复重试。
+func (s *authServer) requireAuthz() error {
+	if s.authz == nil {
+		return status.Error(codes.Unimplemented, "该 fp 部署未启用授权模块")
+	}
+	return nil
 }

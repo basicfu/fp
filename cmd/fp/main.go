@@ -83,6 +83,7 @@ func run() error {
 	}
 
 	logSvc := service.NewLoginLogService(pool)
+	authzSvc := service.NewAuthzService(pool)
 
 	// 短信供应商：四项阿里云凭据齐全就用真实供应商——不管是不是生产环境，
 	// 有人就是想在本机联调真实短信通道。凭据不全时：
@@ -134,6 +135,7 @@ func run() error {
 		Registry: registry,
 		Notifier: smsSender,
 		Codes:    codeSvc,
+		Authz:    authzSvc,
 	})
 
 	httpSrv := &http.Server{
@@ -172,9 +174,10 @@ func run() error {
 	}()
 
 	grpcSrv := grpcapi.New(grpcapi.Deps{
-		Auth: authSvc,
-		Apps: appSvc,
-		Pub:  revokePub,
+		Auth:  authSvc,
+		Apps:  appSvc,
+		Pub:   revokePub,
+		Authz: authzSvc,
 	})
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
