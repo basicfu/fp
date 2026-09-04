@@ -224,10 +224,12 @@ func defaultOnError(w http.ResponseWriter, _ *http.Request, err error) {
 // import fpim 来复用：fpsdk 是被所有接入方依赖的认证 SDK，fpim 是
 // WebSocket 网关专用的库，反过来依赖会让每一个只想要"认证中间件"的
 // 业务方都被迫拉进整个 WebSocket 依赖树。这是第三份同样的实现（另两份
-// 是 internal/im/model 与 sdk/im），三份的一致性目前没有专门的对照测试
-// 覆盖——sdk/im/subject.go 顶部提到的 internal/integration/im_parity_test.go
-// 尚不存在，且即便日后建了也很可能只覆盖前两份；这份改动只能手工保证
-// 与另外两份字节级一致，改这个函数时请一并检查另外两处。
+// 是 internal/im/model 与 sdk/im）。三份的一致性由
+// internal/integration/im_parity_test.go 的 TestSubjectFormatParity（比对
+// 前两份）与 TestGuestUUIDValidationParityViaMiddleware（这第三份是未导出
+// 函数，测不到它本身，改为通过 a.MiddlewareWith(MiddlewareOptions{AllowGuest:
+// true}) 这层可观察的 HTTP 行为间接验证）共同覆盖；改这个函数时请一并检查
+// 另外两处，并确认那两条测试仍然通过。
 //
 // 大写或去掉连字符虽然和标准写法是同一个 uuid，但落到存储层（Redis key /
 // 数据库主键）会生成不同的键，同一个访客就变成了两个人——所以这里直接

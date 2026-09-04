@@ -42,7 +42,6 @@ func (a staticAuth) Verify(_ context.Context, _, token string) (model.Subject, e
 // 连 grpcAddr，live 暴露给测试轮询"这个节点的存活视图有没有看到另一个节点"。
 type imNode struct {
 	id       string
-	hub      *hub.Hub
 	live     *registry.Liveness
 	wsURL    string
 	grpcAddr string
@@ -130,7 +129,8 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 	t.Cleanup(func() { g.Stop(context.Background()) })
 
 	return &imNode{
-		id: id, hub: h, live: live,
+		id:       id,
+		live:     live,
 		wsURL:    "ws://" + wsLis.Addr().String() + "/",
 		grpcAddr: grpcLis.Addr().String(),
 	}
@@ -209,7 +209,16 @@ func TestImTwoNodesEndToEnd(t *testing.T) {
 	// 拿到的候选列表是空的，消息会被静默丢弃，测试会在一个和"跨节点转发
 	// 坏了"完全不同的原因上失败（"A 还没来得及知道 B"），把两种失败原因
 	// 混在一起，排查故障会被引向错误的方向。
-	waitUntil(t, func() bool { return len(a.live.ServerNodes("a1")) > 0 }, "节点 A 应看到节点 B 持有 a1 的 server 流")
+	//
+	// 断言不是"非空"而是"恰好等于 [B]"：这条测试要成立的前提是节点 A
+	// 全程没有任何业务服务流，"A 看到的候选列表里唯一的节点就是 B"这件事
+	// 应该被显式钉在代码里，而不是靠读者自己推导——如果哪天这条测试被改坏、
+	// A 自己也意外注册了一条 server 流，len(nodes)>0 不会报警，但
+	// nodes[0]==b.id 会。
+	waitUntil(t, func() bool {
+		nodes := a.live.ServerNodes("a1")
+		return len(nodes) == 1 && nodes[0] == b.id
+	}, "节点 A 应看到节点 B 是 a1 唯一持有 server 流的节点")
 
 	// client 连节点 A。
 	cli, err := fpim.Dial(context.Background(), fpim.ClientConfig{URL: a.wsURL, App: "a1", Token: "tok-1", OS: "linux"})
@@ -302,6 +311,22 @@ func TestImTwoNodesEndToEnd(t *testing.T) {
 		}
 		return false
 	}, "server 应收到原因为 replaced 的 Disconnected 事件")
+
+	// 顶号还必须正确处理注册表：握手脚本把旧连接标识返回进被顶替列表这件
+	// 事本身，不等于它已经真的把旧条目从 fp:im:{app:subject}:conn 里删掉。
+	// 如果脚本只顶对了本地连接、关对了旧 ws，却没删对注册表条目（或者删错了
+	// 标识），旧条目会残留成一条指向节点 A 的死记录：后续推送会对着这条死
+	// 记录去 Publish，节点 A 早已没有这条连接，SPUBLISH 的订阅者数会是 0，
+	// 但如果同一次 PushMany 里还命中了 cli2 那条真实连接，Nodes 计数依然会
+	// 让业务方以为"全部送达"——这类账目不平的问题不会体现在①-⑥的任何一条
+	// 断言上，只有专门查一次会话、核对"注册表里现在到底是谁"才能测到。
+	sess2, err := srv.Sessions(context.Background(), fpim.User("1"))
+	if err != nil {
+		t.Fatalf("顶号之后 srv.Sessions: %v", err)
+	}
+	if len(sess2) != 1 || sess2[0].Node != b.id || sess2[0].ConnID == connID {
+		t.Fatalf("顶号之后注册表应只剩节点 B 上的新连接（旧连接标识 %s 不应再出现），实际 %+v", connID, sess2)
+	}
 
 	// ⑦ 踢人：业务服务主动踢掉该 subject 的全部连接，cli2 应收到被踢的
 	// 关闭码。
