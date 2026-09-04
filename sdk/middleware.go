@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // DefaultCookieName 是默认的会话 cookie 名。
@@ -15,6 +17,12 @@ const DefaultCookieName = "fp_token"
 // 除了 cookie 还要发一个响应头：移动端 / 服务间调用这类非浏览器客户端
 // 不处理 Set-Cookie，光靠 cookie 交接对它们完全无效。
 const RotatedTokenHeader = "X-Fp-New-Token"
+
+// GuestIDHeader 与 fp-im 网关握手帧里承载访客标识的字段是同一个值：
+// 前端生成并持久化的一个 uuid v4，不登录也能用它连 WebSocket。业务方的
+// 普通 HTTP 接口（上传图片、拉历史消息……）要用同一个值认出同一个访客，
+// 就靠这个请求头传过来。
+const GuestIDHeader = "X-Guest-Id"
 
 type identityCtxKey struct{}
 
@@ -46,6 +54,21 @@ type MiddlewareOptions struct {
 	OnRotate func(w http.ResponseWriter, r *http.Request, newToken string)
 	// OnError 覆盖默认的失败响应（默认写 401，响应体不含 token）。
 	OnError func(w http.ResponseWriter, r *http.Request, err error)
+
+	// AllowGuest 开启后，请求没带 token 但带了合法的 GuestIDHeader 时，
+	// 以访客身份放行（Identity.GuestID 非空，UserID 为空），具体权限由
+	// 业务方自己按 fp-im 的 guest 角色再判一次。默认 false：不开的时候，
+	// 带访客头的请求必须和现在完全一样地被拒，不能有任何行为变化。
+	//
+	// 访客标识不经过 fp 签发、也不带签名——它就是前端生成并持久化的一个
+	// 随机 uuid v4，本来就没有"验证"这一步可做。这里只做格式校验。
+	// 它的安全性来自 122 位随机熵：能猜中或偷到别人的访客 id，代价
+	// 跟偷一个真正的登录 token 是同一个量级，所以不需要额外的签名层。
+	// 真正防"客户端批量塞造假 id 骗过统计/占用资源"的防线在 fp-im 网关
+	// 握手处按来源 IP 限流，不是这里——这里只负责"这串字符是不是一个
+	// 合法的 uuid v4"，不负责"这个 id 是不是真的对应一个曾经握手过的
+	// 访客"，因为访客身份的定义本来就是"没有身份提供方能替它作答"。
+	AllowGuest bool
 }
 
 // Middleware 用默认配置返回鉴权中间件。
@@ -73,7 +96,29 @@ func (a *Auth) MiddlewareWith(opts MiddlewareOptions) func(http.Handler) http.Ha
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id, err := a.Validate(r.Context(), opts.TokenFrom(r))
+			token := opts.TokenFrom(r)
+
+			// 令牌优先：没有 token 才考虑访客头。同时带两者时（比如客户端
+			// 刚登录但还没来得及清掉本地存的访客 id）必须走 token 这条路，
+			// 不能把一个已登录用户悄悄降级成访客。
+			if token == "" && opts.AllowGuest {
+				if gid := r.Header.Get(GuestIDHeader); gid != "" {
+					// 只做格式校验，不做签名验证——理由见
+					// MiddlewareOptions.AllowGuest 的注释。
+					if !isUUIDv4(gid) {
+						// 格式不合法直接拒绝，而不是当成"没带凭据"放过去
+						// 继续匿名处理：格式错误意味着调用方（前端或
+						// fp-im 网关）本身有 bug，静默降级会让这个 bug
+						// 混进正常的匿名流量里，很难被人发现。
+						opts.OnError(w, r, ErrUnauthorized)
+						return
+					}
+					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityCtxKey{}, &Identity{GuestID: gid})))
+					return
+				}
+			}
+
+			id, err := a.Validate(r.Context(), token)
 			if err != nil {
 				opts.OnError(w, r, err)
 				return
@@ -171,4 +216,26 @@ func WriteError(w http.ResponseWriter, err error) {
 // defaultOnError 是 Middleware 的默认错误响应，语义见 WriteError。
 func defaultOnError(w http.ResponseWriter, _ *http.Request, err error) {
 	WriteError(w, err)
+}
+
+// isUUIDv4 只接受 8-4-4-4-12、小写、带连字符的标准写法，且版本位必须是 4。
+//
+// 这是 sdk/im/subject.go 里 IsUUIDv4 的复制品，字节级同一份逻辑，故意不
+// import fpim 来复用：fpsdk 是被所有接入方依赖的认证 SDK，fpim 是
+// WebSocket 网关专用的库，反过来依赖会让每一个只想要"认证中间件"的
+// 业务方都被迫拉进整个 WebSocket 依赖树。这是第三份同样的实现（另两份
+// 是 internal/im/model 与 sdk/im），三份的一致性目前没有专门的对照测试
+// 覆盖——sdk/im/subject.go 顶部提到的 internal/integration/im_parity_test.go
+// 尚不存在，且即便日后建了也很可能只覆盖前两份；这份改动只能手工保证
+// 与另外两份字节级一致，改这个函数时请一并检查另外两处。
+//
+// 大写或去掉连字符虽然和标准写法是同一个 uuid，但落到存储层（Redis key /
+// 数据库主键）会生成不同的键，同一个访客就变成了两个人——所以这里直接
+// 拒绝而不是先归一化再解析。
+func isUUIDv4(s string) bool {
+	if len(s) != 36 || strings.ToLower(s) != s {
+		return false
+	}
+	u, err := uuid.Parse(s)
+	return err == nil && u.Version() == 4
 }

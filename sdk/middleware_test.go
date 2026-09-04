@@ -284,6 +284,112 @@ func TestWriteErrorDoesNotEchoCredential(t *testing.T) {
 	}
 }
 
+// TestMiddlewareAllowGuestPassesValidGuestID 覆盖：AllowGuest 开启、访客头
+// 格式合法时，请求被放行，且注入的身份带着这个 GuestID、IsGuest() 为 true。
+func TestMiddlewareAllowGuestPassesValidGuestID(t *testing.T) {
+	env := newStubEnv(t, okValidate("u1", 30_000))
+	var seen Identity
+	h := env.auth.MiddlewareWith(MiddlewareOptions{AllowGuest: true})(okHandler(&seen))
+
+	const gid = "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set(GuestIDHeader, gid)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("合法访客头应放行，实际 code=%d", rec.Code)
+	}
+	if seen.GuestID != gid {
+		t.Fatalf("身份里的 GuestID = %q，期望 %q", seen.GuestID, gid)
+	}
+	if !seen.IsGuest() {
+		t.Fatal("带合法访客头的身份 IsGuest() 应为 true")
+	}
+}
+
+// TestMiddlewareAllowGuestRejectsMalformedGuestID 覆盖三种"看起来像同一个
+// uuid、但格式不是标准写法"的非法形态：大写、去连字符、版本位不是 4。
+// 三种都必须直接拒绝而不是当成无凭据放过——见 MiddlewareOptions.AllowGuest
+// 注释：格式错误意味着调用方（前端/网关）有 bug，静默降级为"匿名/未认证"
+// 会让这个 bug 混进正常流量里，很难被发现。
+func TestMiddlewareAllowGuestRejectsMalformedGuestID(t *testing.T) {
+	env := newStubEnv(t, okValidate("u1", 30_000))
+	h := env.auth.MiddlewareWith(MiddlewareOptions{AllowGuest: true})(okHandler(new(Identity)))
+
+	cases := []struct {
+		name string
+		gid  string
+	}{
+		// 大写：和小写是同一个 uuid，但会生成不同的存储键，同一个访客就变成两个人。
+		{"大写", "6F1C3C2E-4B1A-4D2E-9F0E-7A8B9C0D1E2F"},
+		// 去掉连字符：同上，落到存储层会是不同的键。
+		{"无连字符", "6f1c3c2e4b1a4d2e9f0e7a8b9c0d1e2f"},
+		// 版本位不是 4（这里是 1）：结构合法的 uuid，但不是 v4，同样拒绝。
+		{"版本位非4", "6f1c3c2e-4b1a-1d2e-9f0e-7a8b9c0d1e2f"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			req.Header.Set(GuestIDHeader, c.gid)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("非法访客头 %q 应 401，实际 %d", c.gid, rec.Code)
+			}
+		})
+	}
+}
+
+// TestMiddlewareAllowGuestOffRejectsGuestHeader 确认开关默认关闭这条硬约束：
+// 不开 AllowGuest 时，带合法访客头的请求必须和"完全没带任何凭据"表现完全
+// 一致地被拒——加了这个开关不能让访客头在关闭状态下产生任何行为变化。
+func TestMiddlewareAllowGuestOffRejectsGuestHeader(t *testing.T) {
+	env := newStubEnv(t, okValidate("u1", 30_000))
+	called := false
+	h := env.auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set(GuestIDHeader, "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("AllowGuest 关闭时带访客头仍应 401，实际 %d", rec.Code)
+	}
+	if called {
+		t.Fatal("AllowGuest 关闭时业务 handler 不该被调用")
+	}
+}
+
+// TestMiddlewareTokenTakesPriorityOverGuestID 覆盖"令牌优先"：同时带 token
+// 和访客头时走 token 那条路，访客头被忽略——不能让客户端一次性发出两种
+// 凭据时被降级成访客身份。
+func TestMiddlewareTokenTakesPriorityOverGuestID(t *testing.T) {
+	env := newStubEnv(t, okValidate("u1", 30_000))
+	var seen Identity
+	h := env.auth.MiddlewareWith(MiddlewareOptions{AllowGuest: true})(okHandler(&seen))
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set(GuestIDHeader, "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	if seen.UserID != "u1" {
+		t.Fatalf("同时带 token 和访客头时应走 token 路径，UserID = %q，期望 u1", seen.UserID)
+	}
+	if seen.GuestID != "" {
+		t.Fatalf("走 token 路径时 GuestID 应为空，实际 %q", seen.GuestID)
+	}
+	if seen.IsGuest() {
+		t.Fatal("走 token 路径时 IsGuest() 应为 false")
+	}
+}
+
 // TestWriteErrorNeverEchoesUnderlyingError 覆盖 WriteError 全部五个
 // 哨兵分支加 default，确认响应体永远不包含底层 err 的内容。
 //

@@ -39,7 +39,15 @@ type Identity struct {
 	// Stale 为 true 表示这是 fp 不可达期间返回的陈旧结果。
 	// 业务方可据此拒绝高危操作。
 	Stale bool
+	// GuestID 非空表示这是一个访客请求：没有经过 fp 校验，身份来自请求头
+	// X-Guest-Id（仅 MiddlewareOptions.AllowGuest 开启时才会被采信）。
+	// 与 UserID 互斥——一次请求要么是登录用户要么是访客，不会同时非空。
+	GuestID string
 }
+
+// IsGuest 报告这个身份是否来自访客标识而不是 fp 校验过的 token。
+// id 为 nil 时返回 false，方便在未经检查的调用点直接判断。
+func (id *Identity) IsGuest() bool { return id != nil && id.GuestID != "" }
 
 // Auth 是认证能力。用 (*Client).Auth() 取得，并发安全。
 type Auth struct {
