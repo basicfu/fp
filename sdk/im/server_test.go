@@ -515,3 +515,39 @@ func TestServerDropsFramesWhenQueueFull(t *testing.T) {
 	}
 	unblock() // 收尾：放行卡住的回调，避免消费协程带着阻塞状态进 Close
 }
+
+// TestServerDropsUnknownEventKind 是甲五的回归测试：未知的事件类型（含
+// 未指定的零值）不得被回调出去，尤其不得被当成"断开"。
+//
+// 缺陷版本把未知类型静默映射成断开事件、零日志。网关侧对同一个问题做出
+// 的是**明确相反**的决定，理由就写在 internal/im/hub/deliver.go 的
+// toResponse 里："不能给类型一个断开的默认值再将错就错地发出去，业务方
+// 会把一条其实还活着的连接从在线表里摘掉"。两个包对同一个问题必须给出
+// 同一个答案，这里跟齐网关侧：记警告日志、不回调。
+//
+// 断言方式：先推一条未知类型的事件，紧接着推一条正常的 Connected。
+// 消费协程只有一个、严格按入队顺序处理，所以"收到了 Connected"这件事
+// 本身就证明前面那条未知事件已经被处理过了——此时业务回调只收到一个
+// 事件，就是"未知事件没有被回调出去"的确定性证据，不需要睡一会儿再看。
+func TestServerDropsUnknownEventKind(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	defer s.Close()
+	var mu sync.Mutex
+	var events []Event
+	s.OnEvent(func(_ context.Context, ev Event) { mu.Lock(); events = append(events, ev); mu.Unlock() })
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Event{Event: &fpimv1.Event{
+		Kind: fpimv1.EventKind_EVENT_KIND_UNSPECIFIED, Subject: "u:7", ConnId: "c-unknown"}}})
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Event{Event: &fpimv1.Event{
+		Kind: fpimv1.EventKind_EVENT_KIND_CONNECTED, Subject: "u:7", ConnId: "c-ok"}}})
+
+	waitUntil(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(events) >= 1 }, "应收到那条正常的 Connected 事件")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 || events[0].Kind != EventConnected || events[0].ConnID != "c-ok" {
+		t.Fatalf("未知类型的事件必须被丢弃而不是当成断开回调出去（网关侧同款决定见 hub.toResponse），实际收到 %+v", events)
+	}
+}

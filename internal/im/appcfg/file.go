@@ -29,6 +29,12 @@ type Source struct {
 	// 假通过：机器负载重时，监视协程可能还没来得及跑那次失败的 Reload，
 	// 配置从头到尾没变过，测试照样绿，却什么都没验证到。
 	failedReloads int
+
+	// onReload 在每次成功重载之后被调用，让调用方同步自己那份派生状态。
+	// 目前唯一的用途见 cmd/fp-im：热重载引入一个新 app 之后必须立刻给它
+	// 补上 srv 表追踪，否则这个新 app 的第一条上行消息或连接事件会因为
+	// 转发候选列表为空而被静默丢弃（甲一）。
+	onReload func()
 }
 
 func LoadFile(path string) (*Source, error) {
@@ -77,8 +83,25 @@ func (s *Source) Reload() error {
 	}
 	s.mu.Lock()
 	s.apps, s.mtime = apps, st.ModTime()
+	fn := s.onReload
 	s.mu.Unlock()
+	// 回调在锁外调用：它是调用方给的任意代码，拿着 s.mu 调用它意味着
+	// 回调里任何一次 Get/Apps（都要 RLock）都会自锁死。
+	// LoadFile 首次加载时 fn 必然为 nil——调用方那时还拿不到 *Source，
+	// 也就没机会注册回调，所以"首次加载不触发"是这个写法的自然结果，
+	// 不需要额外的标志位。
+	if fn != nil {
+		fn()
+	}
 	return nil
+}
+
+// OnReload 注册一个在每次成功重载之后被调用的回调，用来同步调用方那份
+// 由配置派生的状态。同一时刻只有一个回调，重复调用会覆盖前一个。
+func (s *Source) OnReload(fn func()) {
+	s.mu.Lock()
+	s.onReload = fn
+	s.mu.Unlock()
 }
 
 func (s *Source) Get(app string) (model.AppConfig, bool) {

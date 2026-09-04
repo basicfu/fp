@@ -505,9 +505,23 @@ func (s *Server) handleEvent(ctx context.Context, ev *fpimv1.Event) {
 		s.log.Warn("fpim: 收到的 Event.subject 解析失败", "subject", ev.GetSubject(), "err", err)
 		return
 	}
-	kind := EventDisconnected
-	if ev.GetKind() == fpimv1.EventKind_EVENT_KIND_CONNECTED {
+	// 未知的事件类型（含未指定的零值）只记警告、不回调，与网关侧
+	// internal/im/hub/deliver.go 的 toResponse 保持同一个决定，理由也是
+	// 同一条：不能给类型一个"断开"的默认值再将错就错地交出去，业务方会
+	// 把一条其实还活着的连接从在线表里摘掉。这种帧真的出现只可能是
+	// SDK 与网关版本不一致（EventKind 是版本兼容面，见 sdk 的
+	// TestImEnumZeroValues），此时静默地按断开处理是最坏的选择：既错、
+	// 又没有任何线索说明发生过版本错位。
+	var kind EventKind
+	switch ev.GetKind() {
+	case fpimv1.EventKind_EVENT_KIND_CONNECTED:
 		kind = EventConnected
+	case fpimv1.EventKind_EVENT_KIND_DISCONNECTED:
+		kind = EventDisconnected
+	default:
+		s.log.Warn("fpim: 收到未知类型的连接事件，已丢弃（大概率 SDK 与 fp-im 版本不一致）",
+			"kind", int32(ev.GetKind()), "subject", ev.GetSubject(), "connId", ev.GetConnId())
+		return
 	}
 	(*fn)(ctx, Event{
 		Kind:    kind,

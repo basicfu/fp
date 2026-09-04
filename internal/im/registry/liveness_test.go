@@ -351,3 +351,102 @@ func TestDropLocalHidesNodeUntilRefresh(t *testing.T) {
 		t.Fatalf("下一次 Refresh 之后应重新看到 im-a 持有 a1，实际 %v", got)
 	}
 }
+
+// TestHeartbeatFieldsCarryTTL 是甲三的回归测试：两张心跳表（节点表与每个
+// app 的服务表）写入的字段必须带字段级过期。
+//
+// 不带的后果：全仓没有任何地方删自己的节点条目（Deregister 只覆盖优雅
+// 关闭），而节点标识每次启动都是新值，所以每一次发版、每一次崩溃都往表里
+// 永久加一个字段；同时每个节点每个心跳周期把这张不断增长的表整个读一遍。
+// 正确性靠时间戳过滤保住了，但这是一条会随时间恶化的热路径。
+func TestHeartbeatFieldsCarryTTL(t *testing.T) {
+	ctx := context.Background()
+	rdb := testsupport.NewTestRedis(t)
+	l := NewLiveness(rdb, "im-a", 3*time.Second, 10*time.Second)
+	// 心跳表的过期时长按判死阈值的倍数算，这里核对的是"确实设了、且量级
+	// 对得上"，不是一个写死的秒数——倍数改了这条断言仍然成立。
+	wantTTL := int64((10 * time.Second * nodeFieldTTLFactor).Seconds())
+
+	if err := l.SetServing(ctx, "a1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Beat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{model.KeyNodes, model.SrvKey("a1")} {
+		ttl, err := rdb.HTTL(ctx, key, "im-a").Result()
+		if err != nil || len(ttl) != 1 {
+			t.Fatalf("读 %s 的字段 TTL 失败：%v %v", key, ttl, err)
+		}
+		if ttl[0] <= 0 || ttl[0] > wantTTL {
+			t.Fatalf("%s 的心跳字段必须带过期（期望约 %d 秒），实际 %d："+
+				"没有过期的话，每次发版/崩溃都会往这张每 3 秒被全量读一遍的表里永久加一个字段",
+				key, wantTTL, ttl[0])
+		}
+	}
+
+	// 服务表还有第二条写入路径：serving 信号触发的 writeServingTable。
+	// 它同样要挂 TTL，否则一个"HSET 出去、下一次心跳之前就崩掉"的进程会
+	// 在服务表里留下永不过期的条目。
+	if err := rdb.HPersist(ctx, model.SrvKey("a1"), "im-a").Err(); err != nil {
+		t.Fatal(err)
+	}
+	l.writeServingTable(ctx)
+	ttl, err := rdb.HTTL(ctx, model.SrvKey("a1"), "im-a").Result()
+	if err != nil || len(ttl) != 1 || ttl[0] <= 0 {
+		t.Fatalf("writeServingTable 写的服务表字段也必须带过期，实际 %v (%v)", ttl, err)
+	}
+}
+
+// TestDeregisterRemovesOwnEntries 覆盖优雅关闭时的即时清理：字段过期是
+// 崩溃场景的兜底（要等满一个 TTL），正常退出时应该立刻把自己从两张表里
+// 删掉，别的节点下一次 Refresh 就看不到我，不必等判死阈值。
+func TestDeregisterRemovesOwnEntries(t *testing.T) {
+	ctx := context.Background()
+	rdb := testsupport.NewTestRedis(t)
+	l := NewLiveness(rdb, "im-a", 3*time.Second, 10*time.Second)
+	if err := l.SetServing(ctx, "a1", true); err != nil {
+		t.Fatal(err)
+	}
+	// 再停掉这条流：everSrv 记着 a1，Deregister 必须照样删它的服务表条目，
+	// 只看当下的 serving 集合会漏删。
+	if err := l.Beat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SetServing(ctx, "a1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Deregister(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := rdb.HExists(ctx, model.KeyNodes, "im-a").Result(); n {
+		t.Fatal("优雅关闭后节点表里不应再有自己的条目")
+	}
+	if n, _ := rdb.HExists(ctx, model.SrvKey("a1"), "im-a").Result(); n {
+		t.Fatal("优雅关闭后服务表里不应再有自己的条目（曾经服务过的 app 也要删）")
+	}
+}
+
+// TestSelfPresentReportsNodeEntry 覆盖 Gap 之后"要不要全量重登记"的判定
+// 依据：设计文档第七节写的前置条件是"发现自己在 fp:im:node 里的条目消失
+// （Redis 重启过、数据没了）"才需要重登记。
+func TestSelfPresentReportsNodeEntry(t *testing.T) {
+	ctx := context.Background()
+	rdb := testsupport.NewTestRedis(t)
+	l := NewLiveness(rdb, "im-a", 3*time.Second, 10*time.Second)
+	if ok, err := l.SelfPresent(ctx); err != nil || ok {
+		t.Fatalf("还没写过心跳时不应报告条目存在：%v %v", ok, err)
+	}
+	if err := l.Beat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := l.SelfPresent(ctx); err != nil || !ok {
+		t.Fatalf("写过心跳之后应报告条目存在：%v %v", ok, err)
+	}
+	if err := rdb.HDel(ctx, model.KeyNodes, "im-a").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := l.SelfPresent(ctx); err != nil || ok {
+		t.Fatalf("条目被删（模拟 Redis 数据丢失）后应报告不存在：%v %v", ok, err)
+	}
+}

@@ -54,7 +54,34 @@ func NewLiveness(c redis.UniversalClient, nodeID string, heartbeat, deadAfter ti
 
 func (l *Liveness) NodeID() string { return l.nodeID }
 
-// Beat 写自己的心跳：节点表一条，每个正在服务的 app 各一条。
+// nodeFieldTTLFactor 是心跳字段过期时长相对判死阈值的倍数，
+// 字段 TTL = deadAfter × 这个倍数（默认判死 10 秒 → 字段 100 秒）。
+//
+// 为什么是"若干倍"而不是等于判死阈值：字段过期不是判死机制——判死由
+// Refresh 读到的时间戳与 cutoff 比较决定，一条过期但还没被删掉的字段
+// 早就不算活的了。字段过期只是垃圾回收：让崩溃/被 kill 的进程（来不及
+// 走 Deregister）留下的条目最终自己消失，否则节点标识每次启动都是新值，
+// 每一次发版、每一次崩溃都往表里永久加一个字段，而每个节点每个心跳周期
+// 还要把这张不断增长的表整个读一遍。
+//
+// 取十倍的理由：每次心跳（默认 3 秒）都会把 TTL 重新刷满，所以只要明显
+// 大于心跳间隔就不会误删活节点；留出十个判死窗口的余量，是为了让"Redis
+// 连续写失败但进程仍然健康"这种情况（写失败时 TTL 刷不上）不会把一个活
+// 节点的条目删掉——真删了也只是让它在别人眼里提前消失，但那属于用一个
+// 垃圾回收机制去影响正确性路径，不值得。倍数再大就失去回收意义了。
+const nodeFieldTTLFactor = 10
+
+// fieldTTL 是写进两张心跳表的字段过期时长。
+func (l *Liveness) fieldTTL() time.Duration { return l.deadAfter * nodeFieldTTLFactor }
+
+// Beat 写自己的心跳：节点表一条，每个正在服务的 app 各一条，都带字段级过期。
+//
+// 字段级过期（HEXPIRE）与连接表用的是同一套机制，但这两张表的键结构与连接
+// 表不同：连接表的键带 Cluster hash tag（fp:im:{app:subject}:conn，每个
+// subject 一个键），而 fp:im:node 与 fp:im:srv:{app} 是不带 hash tag 的
+// 普通键、全集群共用一个。这对 HEXPIRE 没有影响：它和 HSET 一样是单键
+// 命令，Cluster 下只需要这一个键所在的槽，不存在跨槽问题；这里也没有把
+// 两张表的写放进同一个事务/脚本的需求，管道里各自独立发出即可。
 func (l *Liveness) Beat(ctx context.Context) error {
 	ts := l.now().UnixMilli()
 	l.mu.RLock()
@@ -63,10 +90,47 @@ func (l *Liveness) Beat(ctx context.Context) error {
 		apps = append(apps, a)
 	}
 	l.mu.RUnlock()
+	ttl := l.fieldTTL()
 	_, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
 		p.HSet(ctx, model.KeyNodes, l.nodeID, ts)
+		p.HExpire(ctx, model.KeyNodes, ttl, l.nodeID)
 		for _, a := range apps {
 			p.HSet(ctx, model.SrvKey(a), l.nodeID, ts)
+			p.HExpire(ctx, model.SrvKey(a), ttl, l.nodeID)
+		}
+		return nil
+	})
+	return err
+}
+
+// SelfPresent 报告 Redis 的节点表里当前还有没有本节点的条目。
+//
+// 给 Gap（Redis 断线重连）后的重登记判定用：设计文档第七节写的前置条件是
+// "若发现自己在 fp:im:node 里的条目消失（Redis 重启过、数据没了）才需要
+// 全量重登记"。调用方必须在补写心跳**之前**调用它，否则那次心跳会把条目
+// 重新创建出来，这个判断就永远返回 true。
+func (l *Liveness) SelfPresent(ctx context.Context) (bool, error) {
+	return l.c.HExists(ctx, model.KeyNodes, l.nodeID).Result()
+}
+
+// Deregister 删掉本节点在两张心跳表里的条目，优雅关闭时调用。
+//
+// 与字段过期是互补关系而不是重复：字段过期覆盖所有退出方式（含崩溃、被
+// kill），但要等满一个 TTL；这里是正常退出时的即时清理，让别的节点下一次
+// Refresh 就看不到我，不必等判死阈值。everSrv（而不是当下的 serving）是
+// 正确的遍历集合：一个 app 的最后一条流断开后 serving 里已经没有它，只看
+// serving 会漏删它的服务表条目。
+func (l *Liveness) Deregister(ctx context.Context) error {
+	l.mu.RLock()
+	apps := make([]string, 0, len(l.everSrv))
+	for a := range l.everSrv {
+		apps = append(apps, a)
+	}
+	l.mu.RUnlock()
+	_, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
+		p.HDel(ctx, model.KeyNodes, l.nodeID)
+		for _, a := range apps {
+			p.HDel(ctx, model.SrvKey(a), l.nodeID)
 		}
 		return nil
 	})
@@ -140,20 +204,37 @@ func (l *Liveness) Run(ctx context.Context) {
 	// 启动时先跑一轮，和旧实现一样：节点不必等满一个心跳周期才第一次
 	// 在存活表里露面。这一轮同时把服务表按当下真实状态写一遍，覆盖"Run
 	// 启动前已经调过 SetServing"的情形。
-	_ = l.Beat(ctx)
-	_ = l.Refresh(ctx)
+	l.beatAndRefresh(ctx)
 	l.writeServingTable(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = l.Beat(ctx)
-			_ = l.Refresh(ctx)
+			l.beatAndRefresh(ctx)
 			l.writeServingTable(ctx)
 		case <-l.servingSig:
 			l.writeServingTable(ctx)
 		}
+	}
+}
+
+// beatAndRefresh 跑一轮心跳与快照刷新，失败留日志。
+//
+// 这两处错误原先是被 `_ =` 直接丢掉的（交接文档已把它列进"已知不足"）：
+// Redis 故障时存活视图会静默冻结——本节点看到的还是故障前那一份快照，
+// 转发照旧发给早已死掉的节点，而运维这边没有任何信号。
+//
+// 不做退避、不做重试：下一个心跳周期本来就会再跑一次，这里重试只会在
+// Redis 已经不健康的时候雪上加霜。ctx 已经结束时不记日志——那是正常的
+// 进程关闭，此时 Beat/Refresh 必然因为 context canceled 失败，为此喊一声
+// 只会让每次发版的日志里都出现一条无意义的告警。
+func (l *Liveness) beatAndRefresh(ctx context.Context) {
+	if err := l.Beat(ctx); err != nil && ctx.Err() == nil {
+		slog.Warn("registry: 写心跳失败，本节点可能被其它节点判死", "node", l.nodeID, "err", err)
+	}
+	if err := l.Refresh(ctx); err != nil && ctx.Err() == nil {
+		slog.Warn("registry: 刷新存活视图失败，本节点的存活视图已陈旧", "node", l.nodeID, "err", err)
 	}
 }
 
@@ -183,10 +264,16 @@ func (l *Liveness) writeServingTable(ctx context.Context) {
 		return
 	}
 	ts := l.now().UnixMilli()
+	ttl := l.fieldTTL()
 	if _, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
 		for _, a := range apps {
 			if on[a] {
 				p.HSet(ctx, model.SrvKey(a), l.nodeID, ts)
+				// 与 Beat 里同样的字段级过期：这条路径（serving 信号触发）
+				// 可能在两次心跳之间单独写一次服务表，不挂 TTL 的话，
+				// 一个 HSET 出去而下一次心跳之前就崩掉的进程，会在服务表
+				// 里留下一个永不过期的条目。
+				p.HExpire(ctx, model.SrvKey(a), ttl, l.nodeID)
 			} else {
 				p.HDel(ctx, model.SrvKey(a), l.nodeID)
 			}

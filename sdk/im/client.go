@@ -123,6 +123,9 @@ type Client struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	closed atomic.Bool
+	// gaveUp 记录"自动重连已被永久放弃"。调用方自己 Close 不算（那是它
+	// 自己的决定），只有撞上 noAutoReconnect 的关闭码才算。见 GaveUp。
+	gaveUp atomic.Bool
 }
 
 // Dial 拨号、发握手帧、等 hello 回执，三步都同步完成——任何一步失败都
@@ -164,6 +167,38 @@ func (c *Client) OnMessage(fn func([]byte)) { c.onMessage.Store(&fn) }
 // 不出关闭码时是 -1）。同一个 Client 生命周期里可能被调用多次——每次
 // 断线重连都会触发一次，不止第一次。
 func (c *Client) OnClose(fn func(code int)) { c.onClose.Store(&fn) }
+
+// GaveUp 报告 client 是否已经永久放弃自动重连。
+//
+// 为真只有一个原因：收到了 noAutoReconnect 的关闭码（4001 认证失败、
+// 4002 策略拒绝、4003 被踢），SDK 按契约不再重试，等调用方处理（重新
+// 登录换凭据 / 认下被踢 / 检查连接策略）。调用方自己 Close 不算——那是
+// 它自己的决定，不需要 SDK 再报告一次。
+//
+// 为什么需要这个查询方法（甲四）：撞上这三个码时最要命的一种情形是它
+// 发生在**重连尝试**里。那次失败不属于任何一条已建立的连接，调用方在
+// OnClose 里看到的只会是上一次断开的码（节点崩溃时是 -1），而 client
+// 已经永久停了：之后 Send 只会返回底层 ws 库的原始错误，没有任何一处
+// 能告诉调用方"我不会再连回来了"。现在这条放弃会同时通过 OnClose 报出
+// 具体的码、并把这个状态位置真，两条路径调用方用哪条都行。
+func (c *Client) GaveUp() bool { return c.gaveUp.Load() }
+
+// giveUp 把"永久放弃自动重连"变成调用方能观察到的事实：置状态位、记
+// 一条警告日志，notify 为真时再通过 OnClose 把码报出去。
+//
+// notify 的取舍：已建立连接被以这三个码关闭时，runLoop 上面已经用同一个
+// 码回调过一次 OnClose，这里再报一次等于同一件事通知两遍，调用方要么
+// 重复处理要么得自己去重；而重连失败这条路径此前一次都没通知过，必须
+// 补上。所以由调用点决定，而不是无条件通知。
+func (c *Client) giveUp(code int, notify bool) {
+	c.gaveUp.Store(true)
+	c.log.Warn("fpim: 收到不可重连的关闭码，放弃自动重连，等待调用方处理", "code", code)
+	if notify {
+		if fn := c.onClose.Load(); fn != nil && !c.closed.Load() {
+			(*fn)(code)
+		}
+	}
+}
 
 func (c *Client) setWS(ws *websocket.Conn) {
 	c.wsMu.Lock()
@@ -242,6 +277,9 @@ func (c *Client) runLoop(ctx context.Context, ws *websocket.Conn) {
 			return
 		}
 		if noAutoReconnect(code) {
+			// 这条路径上 OnClose 刚刚已经带着同一个 code 回调过了，所以
+			// 只置状态位、不再通知一次。
+			c.giveUp(code, false)
 			return
 		}
 
@@ -272,6 +310,11 @@ func (c *Client) runLoop(ctx context.Context, ws *websocket.Conn) {
 				break
 			}
 			if st := int(websocket.CloseStatus(err)); noAutoReconnect(st) {
+				// 这次放弃发生在重连尝试里，不属于任何一条已建立的连接：
+				// 调用方此前只收到过上一次断开的码（节点崩溃时是 -1），
+				// 如果这里也一声不吭地 return，它永远不会知道 client 已经
+				// 停了。必须通知（notify=true），同时置 GaveUp 状态位。
+				c.giveUp(st, true)
 				return
 			}
 			c.log.Warn("fpim: 重连失败", "err", err)

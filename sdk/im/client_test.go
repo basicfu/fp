@@ -300,3 +300,83 @@ func TestIdleTimeoutReconnectsImmediatelyUnlikeUnavailable(t *testing.T) {
 		t.Fatalf("4005 的重连应明显快于 4004：idle=%v unavailable=%v", idleElapsed, unavailElapsed)
 	}
 }
+
+// TestClientReportsGivingUpDuringReconnect 是甲四的回归测试：重连尝试
+// 阶段撞上不可重连的关闭码（认证失败 / 策略拒绝 / 被踢）时，client 必须
+// 让调用方能发现自己已经永久放弃，而不是一声不吭地停掉。
+//
+// 缺陷版本的行为：重连时收到这三个码直接 return——不调用关闭回调、不置
+// 任何状态位、也没有状态查询方法。调用方最后看到的是上一次断开的码
+// （节点崩溃时是 -1），之后 client 永远不再重连，Send 只会返回底层库的
+// 原始错误。设计文档第四节把"节点崩溃到被判死之间被拒一次"的缓解写成
+// "客户端的重连退避会自然跨过这个窗口"，对采用 reject/limit 策略的应用
+// 这句话是错的：该窗口内重连拿到 4002，client 就此永久死掉。
+func TestClientReportsGivingUpDuringReconnect(t *testing.T) {
+	f, url := newFake(t)
+	c, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	waitHellos(t, f, 1, 2*time.Second)
+
+	codes := make(chan int, 4)
+	c.OnClose(func(code int) { codes <- code })
+	// 下一次握手会被以 4002 拒绝，模拟"节点崩溃、旧连接还没被判死，重连
+	// 撞上连接策略"这个窗口。
+	f.closeWith.Store(ClosePolicyRejected)
+	// 先用一个可重连的码断开，让 client 进入重连循环。
+	f.closeCurrentConnWithCode(CloseUnavailable)
+
+	select {
+	case got := <-codes:
+		if got != CloseUnavailable {
+			t.Fatalf("第一次断开应回调 4004，实际 %d", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("连接被以 4004 关闭后 OnClose 应被调用")
+	}
+	select {
+	case got := <-codes:
+		if got != ClosePolicyRejected {
+			t.Fatalf("重连被 4002 拒绝时应把这个码回调给调用方，实际 %d", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("重连撞上不可重连的关闭码时必须通知调用方：" +
+			"不通知的话调用方看到的还是上一次断开的码，而 client 已经永久不再重连")
+	}
+	waitUntilTrue(t, c.GaveUp, "放弃自动重连之后 GaveUp() 必须为真，调用方才能查出来")
+}
+
+// TestClientGaveUpFalseWhileHealthyAndAfterClose 钉住 GaveUp 的语义边界：
+// 它只反映"自动重连被永久放弃"，正常连着的时候是假，调用方自己 Close 的
+// 也不算放弃（那是调用方自己的决定，不需要 SDK 再报告一次）。
+func TestClientGaveUpFalseWhileHealthyAndAfterClose(t *testing.T) {
+	f, url := newFake(t)
+	c, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitHellos(t, f, 1, 2*time.Second)
+	if c.GaveUp() {
+		t.Fatal("连接正常时 GaveUp() 应为假")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if c.GaveUp() {
+		t.Fatal("调用方自己 Close 不算放弃自动重连，GaveUp() 应仍为假")
+	}
+}
+
+// waitUntilTrue 轮询等待条件成立，超时即失败。
+func waitUntilTrue(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
