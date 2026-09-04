@@ -45,10 +45,10 @@ type AliyunSMS struct {
 // NewAliyunSMS 构造阿里云短信 Provider。
 func NewAliyunSMS(cfg AliyunConfig) (*AliyunSMS, error) {
 	if cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "阿里云短信缺少 accessKeyId 或 accessKeySecret")
+		return nil, domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").WithDesc("阿里云短信缺少 accessKeyId 或 accessKeySecret")
 	}
 	if cfg.SignName == "" {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "阿里云短信缺少 signName")
+		return nil, domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").WithDesc("阿里云短信缺少 signName")
 	}
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = defaultAliyunEndpoint
@@ -122,7 +122,7 @@ func (p *AliyunSMS) Send(_ context.Context, msg Message) error {
 func BuildAliyunRequest(cfg AliyunConfig, msg Message) (phone, signName, templateCode, templateParam string, err error) {
 	templateCode, ok := cfg.Templates[msg.Template]
 	if !ok || templateCode == "" {
-		return "", "", "", "", domain.Errorf(domain.ErrNotFound,
+		return "", "", "", "", domain.Failf(domain.ErrNotFound, domain.CodeSMSTemplateMissing,
 			"模板 %q 未映射到阿里云模板 ID", msg.Template)
 	}
 

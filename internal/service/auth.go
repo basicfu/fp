@@ -72,7 +72,7 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 		return err
 	}
 	if connector.DetectIdentityType(phone) != domain.IdentityTypePhone {
-		return domain.Errorf(domain.ErrInvalidArgument, "手机号格式不正确")
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodePhoneInvalid, "手机号格式不正确")
 	}
 
 	code, err := s.deps.Codes.Issue(ctx, notify.PurposeLogin, phone)
@@ -115,7 +115,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	}
 
 	if !user.CanLogin() {
-		err := domain.Errorf(domain.ErrForbidden, "账号已被冻结或注销")
+		err := accountUnavailableError(user)
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
@@ -225,11 +225,12 @@ func (s *AuthService) recheckLoginable(ctx context.Context, user *domain.User, s
 	}
 	if !fresh.CanLogin() {
 		s.revokeIssued(ctx, sess, domain.RevokeReasonFreeze)
-		return domain.Errorf(domain.ErrForbidden, "账号已被冻结或注销")
+		return accountUnavailableError(fresh)
 	}
 	if fresh.PasswordHash != user.PasswordHash {
 		s.revokeIssued(ctx, sess, domain.RevokeReasonPasswordChanged)
-		return domain.Errorf(domain.ErrForbidden, "账号凭据已变更，请重新登录")
+		return domain.Fail(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录").
+			WithDesc("账号凭据已变更（改密或纪元失配），已强制下线")
 	}
 	return nil
 }
@@ -267,7 +268,7 @@ func (s *AuthService) Logout(ctx context.Context, appID, token string) error {
 	// 不归你"。必须在调用 Revoke 之前拦下来：Revoke 不认应用归属，一旦
 	// 放过去就会把别的应用的会话真的删掉。
 	if lookupErr == nil && sess != nil && sess.AppID != app.ID {
-		return domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期")
+		return domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 
 	if err := s.deps.Sessions.Revoke(ctx, token, domain.RevokeReasonLogout); err != nil {
@@ -325,13 +326,13 @@ func (s *AuthService) connectorFor(ctx context.Context, app *domain.Application,
 func (s *AuthService) enabledConnector(ctx context.Context, app *domain.Application, typ string) (*domain.ApplicationConnector, error) {
 	ac, err := s.deps.Apps.GetConnector(ctx, app.ID, typ)
 	if errors.Is(err, domain.ErrNotFound) {
-		return nil, domain.Errorf(domain.ErrForbidden, "该应用未开放 %s 登录", typ)
+		return nil, domain.Failf(domain.ErrForbidden, domain.CodeConnectorDisabled, "该应用未开放 %s 登录", typ)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if !ac.Enabled {
-		return nil, domain.Errorf(domain.ErrForbidden, "该应用未开放 %s 登录", typ)
+		return nil, domain.Failf(domain.ErrForbidden, domain.CodeConnectorDisabled, "该应用未开放 %s 登录", typ)
 	}
 	return ac, nil
 }
@@ -353,7 +354,7 @@ func (s *AuthService) resolveUser(ctx context.Context, r *connector.Result) (*do
 	user, identity, err := s.deps.Users.FindByIdentity(ctx, r.IdentityType, r.Subject)
 	if errors.Is(err, domain.ErrNotFound) {
 		// 不允许建号且账号不存在：返回与凭据错误一致的错误，避免账号枚举。
-		return nil, nil, domain.Errorf(domain.ErrInvalidCredential, "账号或凭据不正确")
+		return nil, nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "账号或凭据不正确")
 	}
 	return user, identity, err
 }
@@ -400,4 +401,24 @@ func (s *AuthService) writeLog(ctx context.Context, e domain.LoginLog) {
 	if err := s.deps.Logs.Write(ctx, e); err != nil {
 		slog.Error("service: 写入登录日志失败", "err", err)
 	}
+}
+
+// accountUnavailableError 按用户状态给出登录被拒的错误。
+//
+// 按 Status 分流而不是一律返回"已冻结"：当前没有任何生产代码会把用户置成
+// DELETED（状态机允许 PENDING_DELETE → DELETED，但没有地方执行该迁移），
+// PENDING_DELETE 在登录时又会被复活成 ACTIVE，所以实践中只会走到 FROZEN
+// 那一支。留着兜底是为了将来真做了注销任务时**不会把已注销的账号谎报成
+// "已冻结"**——那种谎报会让用户和客服都往错的方向排查。
+//
+// 安全前提：这个错误只在 conn.Authenticate() 成功之后才可能返回，也就是
+// 调用方已经证明了自己知道密码或持有有效验证码，所以暴露"账号被冻结"
+// 不构成账号枚举泄露。不要把这个判断挪到凭据校验之前。
+func accountUnavailableError(u *domain.User) *domain.Error {
+	if u.Status == domain.UserStatusFrozen {
+		return domain.Fail(domain.ErrForbidden, domain.CodeAccountFrozen, "账号已被冻结").
+			WithDesc("user=%s status=%s", u.ID, u.Status)
+	}
+	return domain.Fail(domain.ErrForbidden, domain.CodeAccountUnavailable, "账号当前不可用").
+		WithDesc("user=%s status=%s", u.ID, u.Status)
 }

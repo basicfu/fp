@@ -34,8 +34,8 @@ test('204 无响应体时正常返回而不是抛解析错误', async () => {
   await expect(api.put('/applications/1/connectors/password', { enabled: true })).resolves.toBeUndefined()
 })
 
-test('错误响应取后端的 error 字段作为消息', async () => {
-  stubFetch(new Response(JSON.stringify({ error: '应用不存在' }), {
+test('错误响应取后端的 msg 字段作为消息', async () => {
+  stubFetch(new Response(JSON.stringify({ code: 'APP_NOT_FOUND', msg: '应用不存在' }), {
     status: 404,
     headers: { 'Content-Type': 'application/json' },
   }))
@@ -66,7 +66,7 @@ test('响应体不是 JSON 时退回状态码提示，不抛解析错误', async
 test('401 触发未授权回调并且照样抛错', async () => {
   const onUnauth = vi.fn()
   setUnauthorizedHandler(onUnauth)
-  stubFetch(new Response(JSON.stringify({ error: '未登录' }), { status: 401 }))
+  stubFetch(new Response(JSON.stringify({ code: 'ADMIN_SESSION_INVALID', msg: '管理端登录已过期，请重新登录' }), { status: 401 }))
 
   await expect(api.get('/me')).rejects.toBeInstanceOf(ApiError)
   expect(onUnauth).toHaveBeenCalledOnce()
@@ -118,4 +118,38 @@ test('DELETE 请求方法正确', async () => {
   await api.del('/applications/1')
   const init = spy.mock.calls[0][1] as RequestInit
   expect(init.method).toBe('DELETE')
+})
+
+// 【辨别力】后端的 code 与 detail 必须原样透到 ApiError 上。
+//
+// 只断言 message 的话，一个把 code/detail 丢掉的实现照样全绿——而页面
+// 想按 code 分支（比如账号被冻结时给一个"联系管理员"的入口）就没了依据。
+test('错误响应把 code 与 detail 一并透出来', async () => {
+  stubFetch(
+    new Response(
+      JSON.stringify({
+        code: 'ACCOUNT_FROZEN',
+        msg: '账号已被冻结',
+        detail: '{"desc":"user=01a0 status=FROZEN"}',
+      }),
+      { status: 403, headers: { 'Content-Type': 'application/json' } },
+    ),
+  )
+
+  const err = await api.get('/users/x').catch((e) => e)
+  expect(err).toBeInstanceOf(ApiError)
+  expect(err.status).toBe(403)
+  expect(err.message).toBe('账号已被冻结')
+  expect(err.code).toBe('ACCOUNT_FROZEN')
+  expect(JSON.parse(err.detail).desc).toBe('user=01a0 status=FROZEN')
+})
+
+// 后端没给 code/detail（例如反代返回的非 fp 响应）时退化成空串，
+// 不是 undefined——页面里 err.code === 'X' 这种判断不该撞上 undefined。
+test('缺少 code 与 detail 时退化成空串', async () => {
+  stubFetch(new Response(JSON.stringify({ msg: '出错了' }), { status: 500 }))
+
+  const err = await api.get('/x').catch((e) => e)
+  expect(err.code).toBe('')
+  expect(err.detail).toBe('')
 })

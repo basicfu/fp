@@ -110,11 +110,11 @@ func (s *Sender) AddProvider(p Provider) {
 // 全部供应商都失败时返回最后一次的错误。
 func (s *Sender) Send(ctx context.Context, msg Message) error {
 	if msg.To == "" {
-		return domain.Errorf(domain.ErrInvalidArgument, "接收方不能为空")
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "接收方不能为空")
 	}
 	providers := s.providers[msg.Channel]
 	if len(providers) == 0 {
-		return domain.Errorf(domain.ErrNotFound, "通道 %s 没有配置供应商", msg.Channel)
+		return domain.Failf(domain.ErrNotFound, domain.CodeNotifyProviderMissing, "通道 %s 没有配置供应商", msg.Channel)
 	}
 
 	// 频率限制先于供应商调用，避免被限流的请求也消耗供应商额度。
@@ -125,8 +125,11 @@ func (s *Sender) Send(ctx context.Context, msg Message) error {
 			return err
 		}
 		if !allowed {
-			return domain.Errorf(domain.ErrRateLimited,
-				"发送过于频繁，请 %d 秒后重试", int(retryAfter.Seconds())+1)
+			// retryAfterMs 同时进 msg 与 detail：msg 给终端用户看，detail 里的
+			// 结构化值让接入方能直接做倒计时，不必从文案里正则抠数字。
+			return domain.Failf(domain.ErrRateLimited, domain.CodeRateLimited,
+				"发送过于频繁，请 %d 秒后重试", int(retryAfter.Seconds())+1).
+				WithField("retryAfterMs", retryAfter.Milliseconds())
 		}
 	}
 

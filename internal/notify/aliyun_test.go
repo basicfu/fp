@@ -93,8 +93,11 @@ func TestBuildAliyunRequestParamOrderIsStable(t *testing.T) {
 func TestNewAliyunSMSRequiresCredentials(t *testing.T) {
 	cfg := aliyunCfg()
 	cfg.AccessKeyID = ""
-	if _, err := notify.NewAliyunSMS(cfg); !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	// 缺凭据是**启动配置错误**，不是调用方传错参数——这个错误永远到不了
+	// 终端用户，所以归 INTERNAL 而不是 INVALID_ARGUMENT。
+	var de *domain.Error
+	if _, err := notify.NewAliyunSMS(cfg); !errors.As(err, &de) || de.Code != domain.CodeInternal {
+		t.Fatalf("err = %v, want CodeInternal", err)
 	}
 }
 

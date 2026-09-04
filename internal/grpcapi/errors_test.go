@@ -19,17 +19,17 @@ func TestStatusFromMapsEveryDomainError(t *testing.T) {
 		want codes.Code
 	}{
 		{"nil", nil, codes.OK},
-		{"未找到", domain.Errorf(domain.ErrNotFound, "没有这个用户"), codes.NotFound},
-		{"凭据错误", domain.Errorf(domain.ErrInvalidCredential, "密码不对"), codes.Unauthenticated},
-		{"未授权", domain.Errorf(domain.ErrUnauthorized, "token 无效或已过期"), codes.Unauthenticated},
-		{"禁止", domain.Errorf(domain.ErrForbidden, "应用已停用"), codes.PermissionDenied},
-		{"冲突", domain.Errorf(domain.ErrConflict, "已存在"), codes.AlreadyExists},
-		{"参数非法", domain.Errorf(domain.ErrInvalidArgument, "手机号格式不对"), codes.InvalidArgument},
-		{"被限流", domain.Errorf(domain.ErrRateLimited, "发送太频繁"), codes.ResourceExhausted},
+		{"未找到", domain.Failf(domain.ErrNotFound, domain.CodeInternal, "没有这个用户"), codes.NotFound},
+		{"凭据错误", domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "密码不对"), codes.Unauthenticated},
+		{"未授权", domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "token 无效或已过期"), codes.Unauthenticated},
+		{"禁止", domain.Failf(domain.ErrForbidden, domain.CodeAccountUnavailable, "应用已停用"), codes.PermissionDenied},
+		{"冲突", domain.Failf(domain.ErrConflict, domain.CodeUnionKeyConflict, "已存在"), codes.AlreadyExists},
+		{"参数非法", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "手机号格式不对"), codes.InvalidArgument},
+		{"被限流", domain.Failf(domain.ErrRateLimited, domain.CodeRateLimited, "发送太频繁"), codes.ResourceExhausted},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := statusFrom(c.err)
+			got := StatusFrom(c.err)
 			if c.want == codes.OK {
 				if got != nil {
 					t.Fatalf("nil 错误被映射成了 %v", got)
@@ -50,7 +50,7 @@ func TestStatusFromMapsEveryDomainError(t *testing.T) {
 // 已识别的领域错误可以原样回——那些消息本来就是写给调用方看的。
 func TestStatusFromHidesInternalDetail(t *testing.T) {
 	secret := "pgx: connect postgres://postgres:hunter2@10.9.1.2:15432/fp"
-	got := statusFrom(fmt.Errorf("service: 读取用户: %w", errors.New(secret)))
+	got := StatusFrom(fmt.Errorf("service: 读取用户: %w", errors.New(secret)))
 
 	if status.Code(got) != codes.Internal {
 		t.Fatalf("未识别的错误映射成 %v，期望 Internal", status.Code(got))
@@ -66,7 +66,7 @@ func TestStatusFromHidesInternalDetail(t *testing.T) {
 // 少了这条，一个"什么都返回 Internal 且消息为空"的实现也能让上面两个测试通过——
 // 而那意味着业务方永远分不清"密码错了"和"服务挂了"。
 func TestStatusFromKeepsDomainMessage(t *testing.T) {
-	got := statusFrom(domain.Errorf(domain.ErrRateLimited, "验证码发送太频繁"))
+	got := StatusFrom(domain.Failf(domain.ErrRateLimited, domain.CodeRateLimited, "验证码发送太频繁"))
 	if !strings.Contains(status.Convert(got).Message(), "验证码发送太频繁") {
 		t.Fatalf("领域错误的说明丢了: %q", status.Convert(got).Message())
 	}

@@ -53,10 +53,10 @@ func (c *SMSCodeConnector) Authenticate(ctx context.Context, cfg map[string]any,
 	code := creds.Get("code")
 
 	if !isChineseMobile(phone) {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "手机号格式不正确")
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodePhoneInvalid, "手机号格式不正确")
 	}
 	if code == "" {
-		return nil, domain.Errorf(domain.ErrInvalidArgument, "验证码不能为空")
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "验证码不能为空")
 	}
 
 	if err := c.codes.Verify(ctx, smsCodePurpose, phone, code); err != nil {

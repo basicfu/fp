@@ -479,8 +479,12 @@ func TestLoginRejectsPasswordResetCommittedBetweenCheckAndSessionWrite(t *testin
 			if hook != nil {
 				t.Fatal("钩子没有触发——测试构造已失效，下面的断言不再有意义")
 			}
-			if !errors.Is(err, domain.ErrForbidden) {
-				t.Fatalf("err = %v, want ErrForbidden——改密与签发之间的竞态没有被拦住", err)
+			// 归 TOKEN_INVALID 而不是单独一个"凭据已变更"码：对使用者而言
+			// 改密导致的强制下线和普通的登录过期是同一件事——都要重新登录。
+			// 断言 Code 而不只是哨兵，这样"错误分类"本身也被固定住。
+			var de *domain.Error
+			if !errors.As(err, &de) || de.Code != domain.CodeTokenInvalid {
+				t.Fatalf("err = %v, want CodeTokenInvalid——改密与签发之间的竞态没有被拦住", err)
 			}
 
 			// 最关键的一条：那个已经写进 Redis 的 token 必须被撤销掉。

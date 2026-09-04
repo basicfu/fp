@@ -66,7 +66,7 @@ func (s *authServer) SendLoginCode(ctx context.Context, req *fpv1.SendLoginCodeR
 		return nil, err
 	}
 	if err := s.auth.SendLoginCode(ctx, appID, req.GetPhone()); err != nil {
-		return nil, statusFrom(err)
+		return nil, StatusFrom(err)
 	}
 	return &fpv1.SendLoginCodeResponse{}, nil
 }
@@ -85,7 +85,7 @@ func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.L
 		Mobile:        req.GetMobile(),
 	})
 	if err != nil {
-		return nil, statusFrom(err)
+		return nil, StatusFrom(err)
 	}
 	return &fpv1.LoginResponse{
 		Token:     res.Session.Token,
@@ -100,7 +100,7 @@ func (s *authServer) Logout(ctx context.Context, req *fpv1.LogoutRequest) (*fpv1
 		return nil, err
 	}
 	if err := s.auth.Logout(ctx, appID, req.GetToken()); err != nil {
-		return nil, statusFrom(err)
+		return nil, StatusFrom(err)
 	}
 	return &fpv1.LogoutResponse{}, nil
 }
@@ -112,7 +112,7 @@ func (s *authServer) ValidateToken(ctx context.Context, req *fpv1.ValidateTokenR
 	}
 	res, err := s.auth.ValidateToken(ctx, appID, req.GetToken())
 	if err != nil {
-		return nil, statusFrom(err)
+		return nil, StatusFrom(err)
 	}
 	return &fpv1.ValidateTokenResponse{
 		UserId:    res.Session.UserID.String(),
@@ -151,7 +151,7 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	}
 	app, err := s.apps.GetActiveByAppID(ctx, appIDStr)
 	if err != nil {
-		return statusFrom(err)
+		return StatusFrom(err)
 	}
 
 	// 先订阅再发 ready：反过来的话，客户端收到 ready 就认为推送通道健康、

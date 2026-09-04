@@ -70,10 +70,10 @@ func NewRegistry() *Registry {
 func (r *Registry) Register(c Connector) error {
 	typ := c.Type()
 	if typ == "" {
-		return domain.Errorf(domain.ErrInvalidArgument, "connector 类型不能为空")
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "connector 类型不能为空")
 	}
 	if _, ok := r.m[typ]; ok {
-		return domain.Errorf(domain.ErrConflict, "connector %q 已注册", typ)
+		return domain.Failf(domain.ErrConflict, domain.CodeConnectorAlreadyRegistered, "connector %q 已注册", typ)
 	}
 	r.m[typ] = c
 	return nil
@@ -83,7 +83,7 @@ func (r *Registry) Register(c Connector) error {
 func (r *Registry) Get(typ string) (Connector, error) {
 	c, ok := r.m[typ]
 	if !ok {
-		return nil, domain.Errorf(domain.ErrNotFound, "未知的登录方式 %q", typ)
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeConnectorUnknown, "未知的登录方式 %q", typ)
 	}
 	return c, nil
 }

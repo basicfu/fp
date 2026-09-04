@@ -25,7 +25,7 @@ type countingApps struct {
 func (c *countingApps) VerifySecret(_ context.Context, appID, secret string) (*domain.Application, error) {
 	c.calls.Add(1)
 	if appID != c.appID || secret != c.secret {
-		return nil, domain.Errorf(domain.ErrInvalidCredential, "appId 或 appSecret 不正确")
+		return nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "appId 或 appSecret 不正确")
 	}
 	return &domain.Application{AppID: appID}, nil
 }
