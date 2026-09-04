@@ -222,7 +222,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 
 	<-ctx.Done()
 	log.Info("fp-im 收到退出信号，正在关闭")
-	shutdown(httpSrv, grpcSrv, live, log)
+	shutdown(h, httpSrv, grpcSrv, live, log)
 
 	// 排空而不是只读一次，理由与 cmd/fp/main.go 的 fatalErr 排空一致：
 	// HTTP 与 gRPC 若同时失败，只读一次会让另一个错误永久丢失。
@@ -239,32 +239,53 @@ drain:
 	return errors.Join(errs...)
 }
 
-// shutdown 是收到退出信号之后的全部关闭动作。每一步各给一个独立的时间
+// shutdown 是收到退出信号之后的全部关闭动作。四步各给一个独立的时间
 // 预算，不共用同一个 ctx。
 //
-// 与 cmd/fp/main.go 相同的理由：gRPC 那边要等所有 Connect 长流的 in-flight
-// 请求处理完（imgrpc.Server.Connect 里的 wg.Wait()）才能返回，关闭复杂度比
-// HTTP（只需等存量请求跑完）更高，更容易把预算用满；共用一个 ctx 的话，
-// gRPC 一用满，HTTP 拿到的就是一个已经过期的 ctx，Shutdown 立刻返回超时
-// 错误——排障会被引去查 HTTP，而 HTTP 本身毫无问题，真正原因在 gRPC 那边。
+// 独立预算的理由与 cmd/fp/main.go 相同：gRPC 那边要等所有 Connect 长流的
+// in-flight 请求处理完（imgrpc.Server.Connect 里的 wg.Wait()）才能返回，
+// 关闭复杂度比其它几步高，更容易把预算用满；共用一个 ctx 的话，谁先用满，
+// 后面几步拿到的就是一个已经过期的 ctx，立刻返回超时错误——排障会被引去
+// 查错的地方。
 //
-// 顺序也不能反：先停 gRPC 再停 HTTP。gRPC 这一侧连着业务 server（通过
-// ImService.Connect 长流推事件/收上行），先把它停掉意味着业务 server
-// 不再能收到任何新事件、也无法再下发 Push；随后再关 HTTP，断开 client
-// 的 ws 连接。反过来的话，HTTP 先断，client 连接全部消失，但业务 server
-// 那边的流还开着、可能正在尝试对着已经空无一人的 hub 发 Push，纯属浪费；
-// 更重要的是，先断 client 会让它们立刻发起重连，重连握手落在一个 gRPC 侧
-// 还没停、看似一切正常的节点上，随后这个节点自己也要关闭，这些刚重连上来
-// 的连接会经历一次不必要的二次断开。
-func shutdown(httpSrv *http.Server, grpcSrv *imgrpc.Server, live *registry.Liveness, log *slog.Logger) {
-	gctx, gcancel := context.WithTimeout(context.Background(), shutdownBudget)
-	grpcSrv.Stop(gctx)
-	gcancel()
+// 顺序（乙一之后重新定的）：
+//
+//	① httpSrv.Shutdown：关掉监听、不再接受新的 ws 握手。它对已经建立的
+//	   ws 连接不起任何作用——按 Go 的契约，Shutdown"不等待也不关闭被劫持
+//	   的连接"，而 ws 走的正是劫持，所以这一步返回得很快，也不会打断②。
+//	② 主动关闭本地全部 ws（4004 服务不可用：与 client 自身无关，退避后
+//	   重连，语义正好对应节点下线），然后等它们各自的拆连接流程走完。
+//	   走正常拆连接路径而不是直接砍连接，注册表条目与断开事件才会被正确
+//	   处理。
+//	③ 停 gRPC。必须排在②之后：②发出的断开事件要经业务 server 的
+//	   ImService.Connect 长流才能送出去，先停 gRPC 的话这些事件就没有出口，
+//	   业务方的在线表里会留下一批永远不下线的连接。
+//	④ 删掉自己在两张心跳表里的条目。
+//
+// 这个顺序推翻了本文件此前"先 gRPC 后 HTTP"的写法。当时的理由是"先断
+// client 会让它们立刻重连、落在一个 gRPC 侧还没停的节点上，经历一次不必要
+// 的二次断开"——那条顾虑在这里已经不成立：①已经把本节点的 HTTP 监听关掉
+// 了，重连的 client 根本落不回来，它们会被负载均衡送到别的节点。而"先停
+// gRPC"会直接让②发不出断开事件，代价比那条顾虑大得多。
+func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *registry.Liveness, log *slog.Logger) {
 	hctx, hcancel := context.WithTimeout(context.Background(), shutdownBudget)
 	if err := httpSrv.Shutdown(hctx); err != nil {
 		log.Error("HTTP 优雅关闭超时", "err", err)
 	}
 	hcancel()
+
+	if n := h.CloseLocalConns(model.CloseUnavailable, model.ReasonShutdown); n > 0 {
+		log.Info("正在断开本地 ws 连接", "count", n)
+		wctx, wcancel := context.WithTimeout(context.Background(), shutdownBudget)
+		if left := waitConnsDrained(wctx, h); left > 0 {
+			log.Warn("仍有连接没有在预算内完成拆连接，它们的注册表条目要等 field TTL 过期", "left", left)
+		}
+		wcancel()
+	}
+
+	gctx, gcancel := context.WithTimeout(context.Background(), shutdownBudget)
+	grpcSrv.Stop(gctx)
+	gcancel()
 
 	// 甲三：优雅关闭时删掉自己在节点表与服务表里的条目。
 	//
@@ -279,6 +300,27 @@ func shutdown(httpSrv *http.Server, grpcSrv *imgrpc.Server, live *registry.Liven
 		log.Warn("删除本节点心跳条目失败，等字段过期兜底", "err", err)
 	}
 	dcancel()
+}
+
+// waitConnsDrained 等本地连接表被拆空，返回还剩几条（0 表示全部拆完）。
+//
+// 轮询而不是等一个信号：拆连接由每条连接自己的读循环各自完成，hub 里没有
+// "最后一条走完了"这样一个天然的汇合点，为了关闭这一次性动作在热路径的
+// 连接表上加一个计数信号并不划算。20 毫秒一次，十万连接的节点上拆完通常
+// 也就是几百毫秒，轮询开销可以忽略。
+func waitConnsDrained(ctx context.Context, h *hub.Hub) int {
+	t := time.NewTicker(20 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if n := h.LocalConnCount(); n == 0 {
+			return 0
+		}
+		select {
+		case <-ctx.Done():
+			return h.LocalConnCount()
+		case <-t.C:
+		}
+	}
 }
 
 // trackApps 把配置里当前的每个 app 都加进存活视图的 srv 表追踪集合。

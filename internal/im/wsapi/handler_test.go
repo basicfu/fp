@@ -3,6 +3,7 @@ package wsapi
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -277,4 +278,58 @@ func TestIdleTimeoutDisconnects(t *testing.T) {
 		}
 		return false
 	}, "应发 Disconnected(timeout)")
+}
+
+// TestClientIPUsesRightmostForwardedHop 是乙二的回归测试：信任代理时必须
+// 取转发头的最右一跳。
+//
+// 取最左（原实现）的后果：nginx 默认的
+// `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` 是**追加**
+// 而不是重写，client 自己发来的那一段会原样留在最左边。于是访客限流
+// （设计文档第四节 4.1 称之为"im 对访客的唯一防线"）在标准部署下可以被
+// 一个请求头绕过：每次握手换一个伪造值，限流桶就永远命不中同一个。
+func TestClientIPUsesRightmostForwardedHop(t *testing.T) {
+	cases := []struct {
+		name       string
+		xff        []string
+		trustProxy bool
+		want       string
+	}{
+		{
+			// 这条是绕过限流的实际场景：client 自己带了 1.2.3.4，nginx 把
+			// 真实来源 203.0.113.9 追加在右边。
+			name: "客户端伪造的最左跳不能被采信", xff: []string{"1.2.3.4, 203.0.113.9"},
+			trustProxy: true, want: "203.0.113.9",
+		},
+		{name: "单跳", xff: []string{"203.0.113.9"}, trustProxy: true, want: "203.0.113.9"},
+		{
+			// 多层代理：最右一跳是内层代理的地址，它后面的 client 共用一个
+			// 限流桶——偏严，可接受；偏松（可被绕过）不可接受。
+			name: "多层代理取最右", xff: []string{"1.2.3.4, 10.0.0.7, 10.0.0.8"},
+			trustProxy: true, want: "10.0.0.8",
+		},
+		{
+			// HTTP 允许同名头出现多次，语义等价于按顺序拼接，所以整体最右
+			// 一跳在最后一个头里。用 Header.Get 只能看到第一个头，那恰好是
+			// 最不可信的一段。
+			name: "同名头出现多次时取最后一个头的最右跳", xff: []string{"1.2.3.4", "10.0.0.7, 10.0.0.8"},
+			trustProxy: true, want: "10.0.0.8",
+		},
+		{name: "尾部空白项跳过", xff: []string{"10.0.0.8,  "}, trustProxy: true, want: "10.0.0.8"},
+		{name: "全是空白等于没有转发头", xff: []string{"  "}, trustProxy: true, want: "192.0.2.5"},
+		{name: "不信任代理时忽略转发头", xff: []string{"1.2.3.4, 203.0.113.9"}, trustProxy: false, want: "192.0.2.5"},
+		{name: "没有转发头", xff: nil, trustProxy: true, want: "192.0.2.5"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+			r.RemoteAddr = "192.0.2.5:44444"
+			for _, v := range c.xff {
+				r.Header.Add("X-Forwarded-For", v)
+			}
+			if got := clientIP(r, c.trustProxy); got != c.want {
+				t.Fatalf("clientIP=%q，期望 %q：访客限流的键必须取 client 改不了的那一跳", got, c.want)
+			}
+		})
+	}
 }

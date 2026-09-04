@@ -333,3 +333,82 @@ func TestGapReregisterDoesNotBlockCaller(t *testing.T) {
 		t.Fatalf("两次 Gap 合并成一轮、共 1 条连接，应只登记 1 次，实际 %d 次", hs.calls.Load())
 	}
 }
+
+// TestServeGracefulShutdownClosesWebSockets 是乙一的验收测试：收到退出
+// 信号时，本节点的 ws 连接必须被主动关闭（4004 服务不可用：和 client
+// 自身无关，退避后重连），并且走完整的拆连接路径——注册表条目被删掉、
+// 断开事件被发出。
+//
+// 缺陷版本的行为：关闭时只停 gRPC 和 HTTP，而 http.Server 按 Go 的契约
+// 既不等待也不关闭被劫持的连接（ws 走的正是劫持）。于是每一次发版，
+// 所有 ws 连接都不发关闭帧、不删注册表条目、不发断开事件，进程直接退出：
+// client 只看到连接被硬中断（读不到任何状态码），业务方的在线表里留着
+// 一条永远不会收到断开事件的连接，注册表里留着一条要等 field TTL
+// （默认 30 分钟）才消失的残留条目。设计文档第七节只承诺"节点崩溃时
+// 断开事件不会发出"，从没说每次发版都是这样。
+func TestServeGracefulShutdownClosesWebSockets(t *testing.T) {
+	ctx := context.Background()
+	rdb := testsupport.NewTestRedis(t)
+	appsFile := writeAppsFile(t)
+
+	// 业务 server 接在同一个节点上：断开事件要能被观察到，就必须有一条
+	// 还活着的 server 流——这条流也顺带验证了关闭顺序（先断 ws、再停
+	// gRPC），顺序反了断开事件就没有出口。
+	_, wsURL, grpcAddr, stop := startTestNode(t, testConfig(t, appsFile))
+	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: grpcAddr, AppID: "a1", AppSecret: "s1", Insecure: true})
+	if err != nil {
+		t.Fatalf("fpim.NewServer: %v", err)
+	}
+	defer srv.Close()
+	var mu sync.Mutex
+	var events []fpim.Event
+	srv.OnEvent(func(_ context.Context, ev fpim.Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	})
+	waitUntil(t, srv.StreamHealthy, "业务 server 的接入流应就绪")
+
+	guest := uuid.NewString()
+	cli, err := fpim.Dial(ctx, fpim.ClientConfig{URL: wsURL, App: "a1", Guest: guest, OS: "linux"})
+	if err != nil {
+		t.Fatalf("fpim.Dial: %v", err)
+	}
+	defer cli.Close()
+	codes := make(chan int, 4)
+	cli.OnClose(func(code int) { codes <- code })
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(events) == 1 && events[0].Kind == fpim.EventConnected
+	}, "业务 server 应先收到 Connected 事件")
+
+	connKey := model.ConnKey("a1", "g:"+guest)
+	if n := rdb.HLen(ctx, connKey).Val(); n != 1 {
+		t.Fatalf("关闭之前注册表里应有 1 条连接，实际 %d", n)
+	}
+
+	stop() // 触发优雅关闭，并等 serve 真正返回
+
+	select {
+	case code := <-codes:
+		if code != fpim.CloseUnavailable {
+			t.Fatalf("节点下线时 ws 连接应以 %d（服务不可用：与 client 自身无关，退避后重连）关闭，实际 %d",
+				fpim.CloseUnavailable, code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("节点下线时必须主动关闭 ws 连接：http.Server 既不等待也不关闭被劫持的连接，" +
+			"不主动关的话 client 只会看到连接被硬中断，读不到任何关闭码")
+	}
+
+	// serve 已经返回，拆连接必须在那之前全部走完，所以这里直接断言，
+	// 不需要再轮询等待。
+	if n := rdb.HLen(ctx, connKey).Val(); n != 0 {
+		t.Fatalf("优雅关闭必须走正常拆连接路径删掉注册表条目，实际还剩 %d 条（要等 field TTL 才消失）", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 2 || events[1].Kind != fpim.EventDisconnected {
+		t.Fatalf("优雅关闭必须发出断开事件（否则业务方在线表里留下一条永不下线的连接），实际收到 %+v", events)
+	}
+}

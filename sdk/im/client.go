@@ -46,6 +46,21 @@ const (
 	CloseBackpressure = 1013
 )
 
+// PingInterval 是 client 在一条已建立的连接上发心跳帧的间隔。
+//
+// 它与网关的空闲超时（FP_IM_CONN_IDLE_TIMEOUT，默认 60 秒）是一对配对
+// 常量，关系与 KeepaliveTime/imgrpc.KeepaliveMinTime 完全同构：空闲超时
+// 必须明显大于这个间隔，否则全网每个 client 都会被周期性地空闲超时踢下线
+// ——而 4005 的契约恰恰是"立即重连、不退避"，于是形成一场稳定的重连风暴。
+// 把 20 秒配进空闲超时就足以触发这件事。
+//
+// 这条配对关系分处 sdk/im（不得 import internal/）与 internal/im/config
+// 两个包，任何一边单独看都只是一个孤立的时长常量，改错了 go build/vet/
+// 各自包的测试照样全绿；只有 internal/integration 里同时看得见两边的
+// TestClientPingAndIdleTimeoutPairing 能守住它。导出它而不是留成 runLoop
+// 里的一个字面量，正是为了让那条配对测试有东西可断言。
+const PingInterval = 25 * time.Second
+
 // noAutoReconnect 报告收到某个关闭码之后是否应该放弃自动重连，交由调用方
 // 决定下一步（重新登录 / 认下被踢 / 检查连接策略），而不是反复撞门。
 func noAutoReconnect(code int) bool {
@@ -348,7 +363,7 @@ func (c *Client) readUntilClosed(ctx context.Context, ws *websocket.Conn) int {
 	}()
 	go func() {
 		defer pingWG.Done()
-		t := time.NewTicker(25 * time.Second)
+		t := time.NewTicker(PingInterval)
 		defer t.Stop()
 		for {
 			select {

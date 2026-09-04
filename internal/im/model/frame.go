@@ -48,6 +48,11 @@ const (
 	ReasonReplaced     = "replaced"
 	ReasonRevoked      = "revoked"
 	ReasonBackpressure = "backpressure"
+	// ReasonShutdown：本节点正在优雅关闭（发版、缩容），主动断开这条连接。
+	// 与 ReasonClient/ReasonTimeout 区分开是有意的：业务方看到它就知道
+	// 这次下线与用户行为和这条连接本身都无关，client 会退避后重连回来
+	// （关闭码是 CloseUnavailable），不该据此清理用户的业务状态。
+	ReasonShutdown = "shutdown"
 )
 
 // 帧类型。

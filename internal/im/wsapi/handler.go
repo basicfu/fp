@@ -229,10 +229,27 @@ func (s *server) readLoop(ctx context.Context, app string, sub model.Subject, c 
 		err  error
 	}
 	reads := make(chan readResult)
+	// done 是后台读协程的退出出口（乙四）。没有它会有一处永久泄漏：
+	// 空闲计时器到期与一帧成功读取同时就绪时，select 可能选中计时器分支，
+	// 那个分支里的 `<-reads` 消费掉的是那条**成功**的数据而不是错误；
+	// 读协程于是继续循环、再读一次、这次拿到关闭带来的错误，然后卡在
+	// 对无缓冲 channel 的发送上——readLoop 早已返回，没有任何人会再接收，
+	// 这个协程连同它持有的连接对象永久留在内存里。触发窗口是微秒级，
+	// 但泄漏是永久的、没有上限：一个跑几个月的节点会攒下不确定的一堆。
+	//
+	// 不改成带缓冲的 channel：缓冲只是把窗口挪走（连续两帧同样能填满），
+	// 而且会让"读到的帧一定被处理"这件事变得含糊。给发送加一条退出分支
+	// 才是真正把出口补上。
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		for {
 			_, data, err := c.ws.Read(ctx)
-			reads <- readResult{data, err}
+			select {
+			case reads <- readResult{data, err}:
+			case <-done:
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -315,13 +332,28 @@ func (s *server) teardown(app string, sub model.Subject, c *wsConn, reason strin
 	_ = c.ws.Close(websocket.StatusCode(code), reason)
 }
 
+// clientIP 取用于访客限流的客户端地址。
+//
+// 信任代理时取转发头的**最右**一跳，不是最左（乙二）。最左那一跳是
+// client 自己写进请求头的内容：nginx 的默认写法
+// `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` 是
+// **追加**而不是重写，client 发来的 `X-Forwarded-For: 1.2.3.4` 会原样
+// 留在最左边，代理把真实来源追加在它右边。取最左等于把限流键的选择权
+// 交给被限流的人：每个请求换一个伪造值就绕过了按 IP 的访客限流，而设计
+// 文档第四节 4.1 把这条限流称为"im 对访客的唯一防线"。
+//
+// 最右一跳是"直接连上本网关的那一跳"亲手追加的、client 改不了的值，
+// 所以它是安全的选择。代价是多层代理时它是内层代理的地址而不是真实
+// 客户端地址：那一层后面的所有 client 会共用同一个限流桶，结果是**偏严**
+// （可能误伤，不会被绕过），这个方向的错误可以接受，反过来不行。要拿到
+// 多层代理下真实的客户端地址，正确做法是配置"可信代理跳数/网段"再从右
+// 往左剥，那是另一个功能，本版不做——交接文档里写明了部署条件。
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first, _, ok := strings.Cut(xff, ","); ok {
-				return strings.TrimSpace(first)
-			}
-			return strings.TrimSpace(xff)
+		// 用 Values 而不是 Get：HTTP 允许同名头出现多次，语义上等价于按
+		// 顺序逗号拼接，Get 只会返回第一个头——那恰好是最不可信的那一段。
+		if ip := rightmostForwarded(r.Header.Values("X-Forwarded-For")); ip != "" {
+			return ip
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -329,4 +361,18 @@ func clientIP(r *http.Request, trustProxy bool) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// rightmostForwarded 返回若干个 X-Forwarded-For 头里整体最右的那一跳，
+// 全都是空白时返回空串。
+func rightmostForwarded(values []string) string {
+	for i := len(values) - 1; i >= 0; i-- {
+		hops := strings.Split(values[i], ",")
+		for j := len(hops) - 1; j >= 0; j-- {
+			if hop := strings.TrimSpace(hops[j]); hop != "" {
+				return hop
+			}
+		}
+	}
+	return ""
 }

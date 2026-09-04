@@ -283,6 +283,45 @@ func (h *Hub) sendLocal(app, subject string, payload []byte) int {
 	return n
 }
 
+// CloseLocalConns 给本节点当前登记的每一条连接发关闭信号，返回条数。
+// 优雅关闭时用：http.Server 按 Go 的契约既不等待也不关闭被劫持的连接
+// （ws 走的正是劫持），不主动关的话进程会带着一堆还开着的 ws 直接退出。
+//
+// 这里只发信号而不自己去删连接表：Conn.Close 会让那条连接自己的读循环
+// 醒来，走它平时就在走的拆连接路径（wsapi.teardown：删注册表条目 →
+// hub.RemoveConn 发断开事件 → 关 ws）。绕过这条路径自己删表，等于把
+// 同一件事实现两遍，还会漏掉断开事件。调用方随后用 LocalConnCount 等
+// 这些拆连接真正走完。
+//
+// 锁内只拷贝快照、锁外调用 Close，与 sendLocal 同一个理由：Close 会唤醒
+// 别的协程、可能触发 ws 写，不是快操作。
+func (h *Hub) CloseLocalConns(code int, reason string) int {
+	h.mu.RLock()
+	conns := make([]Conn, 0, len(h.conns))
+	for _, m := range h.conns {
+		for _, e := range m {
+			conns = append(conns, e.conn)
+		}
+	}
+	h.mu.RUnlock()
+	for _, c := range conns {
+		c.Close(code, reason)
+	}
+	return len(conns)
+}
+
+// LocalConnCount 返回本节点当前登记的连接数。优雅关闭时用它判断
+// CloseLocalConns 之后各条连接的拆连接流程是否已经全部走完。
+func (h *Hub) LocalConnCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	n := 0
+	for _, m := range h.conns {
+		n += len(m)
+	}
+	return n
+}
+
 func (h *Hub) closeLocal(app, subject, connID string, code int, reason string) bool {
 	h.mu.RLock()
 	e, ok := h.conns[key(app, subject)][connID]

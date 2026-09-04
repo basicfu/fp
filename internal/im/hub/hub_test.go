@@ -249,3 +249,38 @@ func TestForEachConnCallbackRunsOutsideLock(t *testing.T) {
 		t.Fatal("ForEachConn 的回调里调用 hub 方法导致死锁：回调仍在持锁期间执行")
 	}
 }
+
+// TestCloseLocalConnsSignalsEveryConn 覆盖优雅关闭（乙一）用到的两个入口：
+// CloseLocalConns 给每条本地连接发关闭信号，LocalConnCount 报告还剩几条。
+//
+// 只断言"发了信号"而不断言"连接表被清空"是有意的：真正的拆连接由每条
+// 连接自己的读循环走正常路径完成（删注册表条目、发断开事件、关 ws），
+// hub 这一层如果顺手把表也清了，就等于把同一件事实现两遍，还会漏掉断开
+// 事件。调用方随后用 LocalConnCount 等那条正常路径走完。
+func TestCloseLocalConnsSignalsEveryConn(t *testing.T) {
+	h, _, _, _, _ := hubtest.NewHub()
+	c1 := &hubtest.Conn{ConnID: "c1"}
+	c2 := &hubtest.Conn{ConnID: "c2"}
+	h.AddConn(context.Background(), "a1", model.User("1"), c1, model.ConnMeta{Node: "im-a"}, "")
+	h.AddConn(context.Background(), "a1", model.User("2"), c2, model.ConnMeta{Node: "im-a"}, "")
+	if got := h.LocalConnCount(); got != 2 {
+		t.Fatalf("LocalConnCount 应为 2，实际 %d", got)
+	}
+	if got := h.CloseLocalConns(model.CloseUnavailable, model.ReasonShutdown); got != 2 {
+		t.Fatalf("CloseLocalConns 应关闭 2 条，实际 %d", got)
+	}
+	for _, c := range []*hubtest.Conn{c1, c2} {
+		if c.Closed == nil || c.Closed.Code != model.CloseUnavailable || c.Closed.Reason != model.ReasonShutdown {
+			t.Fatalf("连接 %s 应以 4004/shutdown 关闭，实际 %+v", c.ConnID, c.Closed)
+		}
+	}
+	// 拆连接由各自的读循环完成，hub 自己不删表——这里连接还在表里是对的。
+	if got := h.LocalConnCount(); got != 2 {
+		t.Fatalf("CloseLocalConns 只发信号，不该自己动连接表，实际剩 %d 条", got)
+	}
+	h.RemoveConn(context.Background(), "a1", model.User("1"), "c1", model.ReasonShutdown)
+	h.RemoveConn(context.Background(), "a1", model.User("2"), "c2", model.ReasonShutdown)
+	if got := h.LocalConnCount(); got != 0 {
+		t.Fatalf("拆完之后 LocalConnCount 应为 0，实际 %d", got)
+	}
+}

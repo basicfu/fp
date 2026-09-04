@@ -100,3 +100,23 @@ func TestLoadRejectsFieldTTLBelowOneSecond(t *testing.T) {
 		t.Fatalf("FP_IM_CONN_FIELD_TTL 恰好等于 1s 应该通过：%v", err)
 	}
 }
+
+// TestLoadRejectsIdleTimeoutBelowClientHeartbeat 是乙三的一半：配置加载时
+// 给空闲超时加下界。
+//
+// 另一半（下界这个数字确实等于 client SDK 心跳间隔的两倍）在
+// internal/integration 的 TestClientPingAndIdleTimeoutPairing 里，那里同时
+// 看得见 sdk/im 与本包；本包看不见 sdk/im，只能守住"下界被真的执行了"。
+func TestLoadRejectsIdleTimeoutBelowClientHeartbeat(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FP_IM_CONN_IDLE_TIMEOUT", "20s")
+	if _, err := Load(); err == nil {
+		t.Fatal("空闲超时低于 client 心跳间隔的两倍必须报错：" +
+			"配成 20s 会让全网每个 client 每 20 秒被踢一次并立即重连（4005 的契约就是不退避），形成稳定的重连风暴")
+	}
+	// 恰好等于下界要放行：下界是"允许的最小值"，不是"必须严格大于"。
+	t.Setenv("FP_IM_CONN_IDLE_TIMEOUT", MinIdleTimeout.String())
+	if _, err := Load(); err != nil {
+		t.Fatalf("空闲超时恰好等于下界应放行，实际报错：%v", err)
+	}
+}

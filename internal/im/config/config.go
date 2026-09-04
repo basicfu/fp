@@ -31,6 +31,23 @@ type Config struct {
 	}
 }
 
+// MinIdleTimeout 是 FP_IM_CONN_IDLE_TIMEOUT 的下界：client SDK 心跳间隔
+// 的两倍。
+//
+// 25 秒这个数字是硬编码抄过来的，对应 sdk/im 的 PingInterval——client SDK
+// 在一条已建立的连接上每 25 秒发一次心跳帧。这里不能 import 那个常量：
+// internal/ 不该反过来依赖 sdk 的实现细节，而 sdk/ 也不得 import
+// internal/（见 sdk/arch_test.go），两边只能各写一份。真正把这两个数字
+// 钉在一起的是 internal/integration 里的
+// TestClientPingAndIdleTimeoutPairing——只有那里同时看得见两个包。
+//
+// 为什么要有下界：空闲超时一旦小于等于心跳间隔，全网每个 client 都会被
+// 周期性地空闲超时踢下线，而 4005 的契约恰恰是"立即重连、不退避"，于是
+// 形成一场稳定的重连风暴——配成 20 秒就够了。取两倍而不是刚好一倍，是
+// 为了留出至少一个心跳周期的余量：网络抖动、client 忙、时钟漂移都可能让
+// 某一次心跳晚到，只留一倍余量的话这些正常抖动就会变成断线。
+const MinIdleTimeout = 2 * 25 * time.Second
+
 func Load() (*Config, error) {
 	c := &Config{
 		Env:        envOr("FP_IM_ENV", "DEV"),
@@ -95,6 +112,11 @@ func Load() (*Config, error) {
 	// 立刻过期"——不是"几乎不过期"，效果是每条连接刚握手登记就被 Redis
 	// 删除，client 查不到自己是谁在线，现象极难定位到是这里的配置问题。
 	// 所以这里直接拒绝小于 1 秒的配置，而不是留给运行期悄悄截断。
+	if c.Conn.IdleTimeout < MinIdleTimeout {
+		return nil, fmt.Errorf("config: FP_IM_CONN_IDLE_TIMEOUT 必须 >= %s（client SDK 每 25 秒发一次心跳，"+
+			"空闲超时低于这个量级会让全网 client 被周期性踢下线，而 4005 的契约是立即重连不退避，形成重连风暴），当前为 %s",
+			MinIdleTimeout, c.Conn.IdleTimeout)
+	}
 	if c.Conn.FieldTTL < time.Second {
 		return nil, fmt.Errorf("config: FP_IM_CONN_FIELD_TTL 必须 >= 1s（会被换算成整秒传给 Redis HEXPIRE，小于一秒会截断为 0，语义是立刻删除），当前为 %s", c.Conn.FieldTTL)
 	}

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	imconfig "github.com/basicfu/fp/internal/im/config"
 	"github.com/basicfu/fp/internal/im/imgrpc"
 	"github.com/basicfu/fp/internal/im/model"
 	fpsdk "github.com/basicfu/fp/sdk"
@@ -164,5 +165,27 @@ func TestCredentialMetadataKeysParity(t *testing.T) {
 		t.Fatalf("imgrpc 的 metadata 键(%q/%q)必须与身份平台 grpcapi 用的完全相同，"+
 			"业务方才能用同一对凭据同时接入身份平台与 fp-im 网关",
 			imgrpc.MDAppID, imgrpc.MDAppSecret)
+	}
+}
+
+// TestClientPingAndIdleTimeoutPairing 守住 client 心跳与网关空闲超时这一
+// 对配对关系，与 TestImKeepalivePairing（gRPC 那一对）完全同构。
+//
+// 现象：client SDK 每 PingInterval（25 秒）发一次心跳帧，网关在
+// IdleTimeout 内没收到任何帧就以 4005 关闭连接。空闲超时一旦小到与心跳
+// 间隔同量级，全网每个 client 都会被周期性踢下线，而 4005 的契约恰恰是
+// "立即重连、不退避"——形成一场稳定的重连风暴。把空闲超时配成 20 秒就
+// 足以触发。
+//
+// 两个常量分处 sdk/im（不得 import internal/）与 internal/im/config
+// （不该反过来依赖 sdk 的实现细节）两个包，只有这里同时看得见两边：
+// 单独看任何一边，go build/vet/gofmt 与该包自己的测试都不会报错。
+// config.MinIdleTimeout 里那个 25 秒是硬编码抄过去的，这条断言就是那份
+// 硬编码与真值之间唯一的连接。
+func TestClientPingAndIdleTimeoutPairing(t *testing.T) {
+	if imconfig.MinIdleTimeout < 2*fpim.PingInterval {
+		t.Fatalf("config.MinIdleTimeout(%v) 必须至少是 fpim.PingInterval(%v) 的两倍，"+
+			"否则网关会周期性地把每个 client 以 4005 踢下线，而 4005 的契约是立即重连不退避，形成重连风暴",
+			imconfig.MinIdleTimeout, fpim.PingInterval)
 	}
 }
