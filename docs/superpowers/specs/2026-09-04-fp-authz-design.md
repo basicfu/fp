@@ -34,7 +34,7 @@ fp 现在能回答"你是谁"，回答不了"你能做什么"。每个接入方�
 
 | | Casdoor | fp | 为什么分道 |
 |---|---|---|---|
-| 角色归属 | 组织级 | **应用级** | fp 的应用是**互相独立的项目**（设计文档例子：`app_新项目后台` / `app_xxzj`），不是同一主体下的几个内部系统。B 项目的管理员不该看得见更不该改得动 A 的角色。Casdoor 能放组织级，是因为它假定同组织的应用同属一个主体。<br>注：casbin 层面两者生成的 policy 一样（`p, ADMIN, app_A, ...`，domain 都在），区别只在角色实体存在哪一层、谁能编辑 |
+| 角色归属 | 组织级（全局） | **同样全局** | 早先曾设计成应用级，后改回与 Casdoor 一致。关键理由是「普通用户」这类角色天然跨应用——在商城能下单、在视频能观看，是同一个身份的两面；应用级会强迫每个应用各建一个同名角色，纯属重复。应用专属的角色靠命名约定区分（商城管理员 / 视频管理员）。角色的应用归属由它挂了哪些应用的权限点决定，不由角色自己声明 |
 | 角色与用户的关系存在哪 | `role.Users[]`（角色持有用户列表） | **`user_role.roles[]`（用户持有角色列表）** | fp 的热路径是**每次登录取某人在该应用的角色**，Casdoor 的形状要扫全部角色才能回答；而"谁是管理员"在 fp 只是控制台的偶发查询。另外 Casdoor 给某人分配角色要重写一整行可能装着上千用户的记录，fp 只改一个用户的行 |
 | 用户扩展字段 | User 上的 `Properties`，组织级 | 本期不做，后期做**全局**（与 Casdoor 一致） | 曾考虑做成 per-(用户, 应用)，理由是同一个人在 A 是"商户"、在 B 是"学员"。最终按全局做，与 Casdoor 一致，避免同一份资料散落在多行 |
 
@@ -52,24 +52,31 @@ CREATE TABLE user_extra (
 );
 CREATE INDEX user_extra_app_idx ON user_extra (application_id, first_login_at DESC);
 
--- ② 授权关系。稀疏——没有行表示"跟随应用的默认角色"。
+-- ② 授权关系。**每人一行**，不按应用拆——角色是全局的。
+-- 稀疏：没有行表示"只有各应用的默认角色"。
 CREATE TABLE user_role (
-    user_id        uuid NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
-    application_id uuid NOT NULL REFERENCES application(id) ON DELETE CASCADE,
-    roles          text[] NOT NULL,
-    updated_at     timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_id, application_id)
+    user_id    uuid PRIMARY KEY REFERENCES app_user(id) ON DELETE CASCADE,
+    roles      text[] NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX user_role_roles_idx ON user_role USING gin (roles);
 
--- ③ 角色。per-application。
+-- ③ 角色。**全局**，不带 application_id。
+--
+-- 角色的应用归属由它挂了哪些应用的权限点决定（见 role_permission），
+-- 不由角色本身声明。这让「普通用户」这类天然跨应用的角色只需建一个、
+-- 同时挂上商城与视频的权限点，而不必在每个应用里各建一个同名角色。
+--
+-- 应用专属的角色靠**命名约定**区分：商城管理员 / 视频管理员 / 商城客服。
+-- 这是约定不是约束——没有机制阻止有人建一个不带前缀的「管理员」并挂上
+-- 两个应用的权限。当前只有一个平台管理员，这不构成问题；将来若要做
+-- 应用级的角色隔离，给本表加一个**可空**的 application_id
+-- （NULL = 全局角色，有值 = 只属于该应用）即可，已有数据与判定逻辑都不用改。
 CREATE TABLE role (
-    application_id uuid NOT NULL REFERENCES application(id) ON DELETE CASCADE,
-    key            text NOT NULL,
-    name           text NOT NULL,
-    parent_key     text,
-    created_at     timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (application_id, key)
+    key        text PRIMARY KEY,          -- "商城管理员"
+    name       text NOT NULL,
+    parent_key text REFERENCES role(key) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 
 -- ④ 权限点。
@@ -96,7 +103,7 @@ CREATE TABLE role_permission (
     point_key      text NOT NULL,
     effect         text NOT NULL DEFAULT 'allow',  -- allow | deny
     PRIMARY KEY (application_id, role_key, point_key),
-    FOREIGN KEY (application_id, role_key)  REFERENCES role (application_id, key) ON DELETE CASCADE,
+    FOREIGN KEY (role_key) REFERENCES role (key) ON DELETE CASCADE,
     FOREIGN KEY (application_id, point_key) REFERENCES permission (application_id, key) ON DELETE CASCADE
 );
 
@@ -161,26 +168,43 @@ if rctx.Routes.Match(probe, req.Method, req.URL.Path) {
 fp 用的是不透明 token（随机串 + Redis 会话），不是 JWT——所以不受"签发后改不了"的限制，会话里的角色可以就地更新。
 
 ```
-登录 → 查 user_role
-        ├─ 有行  → 用 roles
-        └─ 无行  → 用 application.default_role_key
+在应用 X 里的有效角色 = 用户的全局角色 ∪ { X 的默认角色 }
+
+登录 → 查 user_role（每人一行，全局）
+     → 并上 application.default_role_key
      → 连同 Epoch 一起刻进 domain.Session
 ```
 
-新注册用户**一行都不写**，天然是默认角色。
+新注册用户 `user_role` **一行都不写**，天然只有该应用的默认角色。
 
-**判定路径完全不碰数据库**：SDK 每次 `Allow` 用的是会话里带回来的角色 + 本地策略表。读 `application.default_role_key` 只在登录那一刻发生一次。
+**判定路径完全不碰数据库**：SDK 每次 `Allow` 用的是会话里带回来的角色 + 本地策略表。读 `default_role_key` 只在登录那一刻发生一次。
 
-**默认角色只在没有显式角色时生效，不做并集。** 并集的话"这个人是什么角色"永远看不全——界面显示 `["order-admin"]`，实际生效的是 `order-admin + normal`，排查时会被坑；而且想让某人**低于**基线就做不到。"所有人至少是 normal"这个诉求用**角色继承**表达更干净：`order-admin.parent_key = normal`，是显式的、界面上看得见的。
-
-**控制台必须区分"默认"与"显式"**：
+**为什么是并集，而不是"没有显式角色时才用默认"**：角色是全局的，如果改成"有显式角色就不用默认"，那么——
 
 ```
-张三    NORMAL（默认）      ← user_role 无行，跟随应用配置
-李四    NORMAL              ← 显式分配
+张三被设为「商城管理员」→ user_role 有行了
+→ 他登录视频时全局角色是 ['商城管理员']
+→ 商城管理员在视频没有任何权限
+→ 张三连视频都看不了了
 ```
 
-两者现在看起来一样但不是一回事：把应用默认角色从 NORMAL 改成 GUEST，张三跟着变、李四不变。不标出来的话，管理员改一次默认角色会莫名其妙影响一批人，界面上完全看不出为什么。给张三显式分配 NORMAL 这个动作因此是有意义的——把"跟随默认"固化成"就是 NORMAL"，控制台要能做。
+给他加一个商城的管理权限，顺手把他看视频的能力弄没了。所以必须并入默认角色。
+
+并集的两个常见顾虑在全局角色下都不成立：
+
+- **"界面看不全"**——控制台显示 `商城管理员 + 普通用户（默认）`，并集是显式可见的
+- **"想让某人低于基线做不到"**——用 deny：给他一个 `黑名单` 角色带 `deny: 视频观看`，deny-override 直接盖掉
+
+**角色不需要按应用过滤。** 会话里刻的是用户的全局角色全集；某个应用的 SDK 本地策略表里只有**在该应用有权限点的角色**，其余角色查不到条目、自然不贡献任何权限。所以张三带着「商城管理员」去视频，那个角色在视频的策略表里根本不存在，等同于没有。
+
+**控制台要区分"默认"与"显式"**：
+
+```
+张三    商城管理员 + 普通用户（默认）
+李四    普通用户（显式）+ 普通用户（默认）→ 显示为 普通用户
+```
+
+把应用默认角色从「普通用户」改成「访客」时，跟随默认的那批人会跟着变。界面上要能看出某个角色是显式分配的还是跟随默认，否则管理员改一次默认角色会莫名其妙影响一批人而看不出原因。
 
 ## 八、策略编译与推送
 
@@ -189,9 +213,17 @@ fp 用的是不透明 token（随机串 + Redis 会话），不是 JWT——所�
 服务端把 `role` + `role_permission` 编译成 casbin policy，用 `GetImplicitPermissionsForUser` **展开角色继承**，推给 SDK 的是每个角色的**隐式权限全集**——一张扁平表：
 
 ```
-order-admin  → allow: [GET:/orders/{id}, POST:/orders]   deny: []
-normal       → allow: [GET:/orders/{id}]                 deny: []
+推给「商城」这个应用的 SDK：
+  商城管理员  → allow: [GET:/orders/{id}, POST:/orders, DELETE:/orders/{id}]  deny: []
+  普通用户    → allow: [GET:/orders/{id}, POST:/orders]                        deny: []
+  黑名单      → allow: []                                                      deny: [POST:/orders]
+
+推给「视频」这个应用的 SDK：
+  普通用户    → allow: [GET:/videos/{id}]                                      deny: []
+  视频管理员  → allow: [GET:/videos/{id}, DELETE:/videos/{id}]                 deny: []
 ```
+
+注意「商城管理员」不出现在视频那份表里——它在视频没有任何 `role_permission` 行。所以张三带着这个角色去视频，查不到条目、不贡献任何权限，等同于没有。**角色是全局的，但每份策略表只装该应用用得上的那些。**
 
 SDK 侧的判定退化成：取用户角色 → 查表 → **有 deny 即拒，有 allow 即过，都没有则拒**（默认拒绝，deny-override）。
 
