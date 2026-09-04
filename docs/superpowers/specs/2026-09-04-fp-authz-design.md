@@ -73,7 +73,7 @@ CREATE INDEX user_role_roles_idx ON user_role USING gin (roles);
 -- 应用级的角色隔离，给本表加一个**可空**的 application_id
 -- （NULL = 全局角色，有值 = 只属于该应用）即可，已有数据与判定逻辑都不用改。
 --
--- key 是身份，**不可修改**；要改显示文字改 name。理由见第七节末。
+-- key 是身份，**不可修改**；要改显示文字改 name。理由见本节末尾的说明。
 CREATE TABLE role (
     id         uuid PRIMARY KEY DEFAULT uuidv7(),
     key        text NOT NULL UNIQUE,           -- "商城管理员"
@@ -88,7 +88,11 @@ CREATE TABLE role (
 -- 而这里 permission 指的是**被授权的那个东西**，role_permission 才是授权。
 -- 对着 Casdoor 文档看本表时注意这个差异。
 --
--- key 是身份，不可修改（它由路由模式推导而来）；name 是显示文字，人维护。
+-- key 可以修改（一条 UPDATE）：role_permission 按 permission_id 引用，
+-- 授权关系自动跟随，只需推一次 PolicyChanged 让 SDK 重拉扁平表。
+-- 改完之后下次上报会如实反映代码——代码里的路由确实是新值就匹配上并
+-- 刷新 last_seen_at；代码里还是旧值就把旧的重新建出来（那个路由真的存在，
+-- 在控制台改成代码不提供的路径本来就是撒谎）。
 CREATE TABLE permission (
     id             uuid PRIMARY KEY DEFAULT uuidv7(),
     application_id uuid NOT NULL REFERENCES application(id) ON DELETE CASCADE,
@@ -125,7 +129,16 @@ UPDATE user_role SET roles = array_remove(roles, $1) WHERE roles @> ARRAY[$1];
 
 GIN 索引直接命中，一条 UPDATE。这条耦合放在 service 层的删除方法里，**并配一条会因为漏做而变红的测试**——与仓库既有的"冻结账号必须连带撤销会话"是同一类处理。
 
-**角色的 `key` 不可修改**（`permission.key` 同理），只允许改 `name`。不是为了省事：改 key 会同时波及 `user_role` 的数组、SDK 策略表的键、以及**已签发会话里刻着的旧 key**——那批用户会在会话刷新前丢掉这个角色。禁掉之后，需要连带清理的操作只剩"删除"一种。
+**`role.key` 不可修改，`permission.key` 可以。** 这个不对称有具体理由，不是任意规定：
+
+| | key 可改 | 为什么 |
+|---|---|---|
+| `role.key` | 否 | `user_role.roles[]` 按**字符串**引用它（没有外键），且**已签发会话里刻着它**——改了之后那批用户会在会话刷新前丢掉这个角色 |
+| `permission.key` | 是 | `role_permission` 按 **id** 引用，授权关系自动跟随；会话里不含权限点 key。改完推一次 `PolicyChanged` 让 SDK 重拉即可 |
+
+也就是说：`role.key` 不可改是选择 `user_role.roles text[]` 的直接后果。哪天它改成按 `role_id` 的关系表，`role.key` 也就能改了。
+
+角色因此只剩"删除"一种需要连带清理的操作。
 
 **`user_application` 改名为 `user_extra` 并瘦身**：原表的 `nickname` / `status` / `extra` 三列自建表起从未被任何代码读写，删除。它们对应的 per-app 用户资料与状态两个功能都还没做，且 per-app `status` 真要启用需要改登录流程同时判全局与应用内状态，不是加列就完事。留着的唯一后果是让下一个人以为有代码在用——这个仓库刚被 `ApplicationStatusDisabled` 坑过一次（有字段、有常量、有 DTO 输出，就是没人写它，直到第三阶段才发现"停用应用"根本触发不了）。
 
