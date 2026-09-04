@@ -28,6 +28,12 @@ type Authenticator struct {
 	cfg     Config
 	mu      sync.Mutex
 	clients map[string]*fpsdk.Client
+	// closed 为 true 后，client 必须硬失败而不是悄悄建一个新连接。
+	// 没有这个标志位，Close() 只是把 clients 表清空，一个在途的握手协程
+	// 只要还调 Verify，就会在"已关闭"的 Authenticator 上重新拉起一条到
+	// fp 的连接——这在进程正在退出时尤其糟糕：一个语义上已经死掉的对象
+	// 又悄悄活了过来。
+	closed bool
 }
 
 func New(cfg Config) (*Authenticator, error) {
@@ -45,6 +51,12 @@ func (a *Authenticator) client(app string) (*fpsdk.Client, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed {
+		// 用 auth.ErrUnavailable 包一层：对调用方（握手代码）来说，
+		// "Authenticator 已关闭"和"身份服务此刻联系不上"是同一种后果——
+		// 都应该拒绝这次握手而不是崩溃，没必要为此新增第三个哨兵错误。
+		return nil, fmt.Errorf("%w: fpauth 已关闭，不再建立新的 fp 连接", auth.ErrUnavailable)
+	}
 	if c, ok := a.clients[app]; ok {
 		return c, nil
 	}
@@ -89,6 +101,7 @@ func translate(err error) error {
 func (a *Authenticator) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.closed = true
 	var errs []error
 	for app, c := range a.clients {
 		if err := c.Close(); err != nil {

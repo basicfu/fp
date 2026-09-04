@@ -40,6 +40,18 @@ func TestLoadFileDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+// TestLoadFileRejectsDuplicateAppID 守住 Reload 里的去重检查：配置文件里
+// 两条记录用了同一个 app_id 必须在加载时就报错，而不是让后写的一条静默
+// 覆盖前一条——那样运维在文件里犯的一个复制粘贴错误会在没有任何提示的
+// 情况下丢掉一个 app 的配置。
+func TestLoadFileRejectsDuplicateAppID(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "apps.json")
+	write(t, p, `{"apps":[{"app_id":"a1","app_secret":"s1"},{"app_id":"a1","app_secret":"s2"}]}`)
+	if _, err := LoadFile(p); err == nil {
+		t.Fatal("重复的 app_id 必须在加载时报错")
+	}
+}
+
 func TestWatchReloadsOnChangeAndKeepsOldOnError(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "apps.json")
 	write(t, p, `{"apps":[{"app_id":"a1","app_secret":"s1"}]}`)
@@ -63,9 +75,20 @@ func TestWatchReloadsOnChangeAndKeepsOldOnError(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	time.Sleep(30 * time.Millisecond)
+
+	time.Sleep(30 * time.Millisecond) // 让 mtime 变化可被观察到（文件系统时间精度）
 	write(t, p, `not json`)
-	time.Sleep(200 * time.Millisecond)
+	// 轮询到"这次失败重载确实被尝试过"，而不是固定睡一段时间就断言：
+	// 固定睡眠是会撒谎的假通过——机器负载重时，监视协程可能在睡眠窗口内
+	// 还没来得及跑这次失败的 Reload，配置从头到尾没变过，测试会照样通过，
+	// 却把"坏文件清空了配置"这个回归完全掩盖掉。
+	deadline = time.Now().Add(3 * time.Second)
+	for src.failedReloadCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("3 秒内没有观察到一次失败的重载尝试")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if _, ok := src.Get("a2"); !ok {
 		t.Fatal("坏文件不能把已加载的配置清空，要保留上一份")
 	}

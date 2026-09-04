@@ -23,6 +23,12 @@ type Source struct {
 	mu    sync.RWMutex
 	apps  map[string]model.AppConfig
 	mtime time.Time
+	// failedReloads 统计 Watch 里累计遇到的重载失败次数。它只服务于测试：
+	// "坏文件不清空已加载配置"这条断言必须先确定性地等到一次失败重载真的
+	// 被尝试过，再去检查配置还在不在——固定睡一段时间再断言是会撒谎的
+	// 假通过：机器负载重时，监视协程可能还没来得及跑那次失败的 Reload，
+	// 配置从头到尾没变过，测试照样绿，却什么都没验证到。
+	failedReloads int
 }
 
 func LoadFile(path string) (*Source, error) {
@@ -119,9 +125,18 @@ func (s *Source) Watch(ctx context.Context, interval time.Duration) {
 			// 不清空 s.apps——坏文件不能把已加载的配置清掉。
 			s.mu.Lock()
 			s.mtime = st.ModTime()
+			s.failedReloads++
 			s.mu.Unlock()
 			continue
 		}
 		slog.Info("appcfg: 已重载", "path", s.path, "apps", len(s.Apps()))
 	}
+}
+
+// failedReloadCount 返回 Watch 累计遇到的重载失败次数。
+// 仅供测试用于确定性地等待"一次失败重载确实被尝试过"，不是公开接口。
+func (s *Source) failedReloadCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.failedReloads
 }
