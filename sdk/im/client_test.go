@@ -22,6 +22,7 @@ type fakeIm struct {
 	auths     []map[string]any
 	conns     atomic.Int32
 	cur       atomic.Pointer[websocket.Conn] // 当前存活的服务端连接，供测试模拟网络切断
+	hellos    atomic.Int32                   // 成功写出 hello 的次数：确认某次握手真正完成，比只看 conns（刚 Accept）更准
 }
 
 func (f *fakeIm) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +46,9 @@ func (f *fakeIm) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = c.Close(websocket.StatusCode(code), "test")
 		return
 	}
-	_ = c.Write(ctx, websocket.MessageText, []byte(`{"t":"hello","conn":"c1"}`))
+	if c.Write(ctx, websocket.MessageText, []byte(`{"t":"hello","conn":"c1"}`)) == nil {
+		f.hellos.Add(1)
+	}
 	for {
 		_, b, err := c.Read(ctx)
 		if err != nil {
@@ -82,6 +85,19 @@ func (f *fakeIm) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (f *fakeIm) dropCurrentConn() {
 	if c := f.cur.Load(); c != nil {
 		_ = c.CloseNow()
+	}
+}
+
+// closeCurrentConnWithCode 在已建立连接之后，以给定关闭码优雅关闭服务端
+// 持有的连接（不像 dropCurrentConn 那样是硬断，而是带上一个具体的关闭
+// 码），用于测试"握手已经成功、连接已经在正常使用一段时间之后，才收到
+// 某个关闭码"这条真实路径——这与"握手阶段就被拒绝"（TestDialFailsOn4001
+// AndDoesNotReconnect 覆盖的那条路径）是两码事：那条路径在 connect() 里
+// 直接返回错误，根本进不了 runLoop 的重连循环；这里模拟的是连接已经跑起
+// 来、readUntilClosed 正在阻塞读的时候才收到关闭帧。
+func (f *fakeIm) closeCurrentConnWithCode(code int) {
+	if c := f.cur.Load(); c != nil {
+		_ = c.Close(websocket.StatusCode(code), "test")
 	}
 }
 
@@ -184,5 +200,103 @@ func TestSendAfterCloseReturnsErrUnavailable(t *testing.T) {
 	}
 	if err := c.Send(context.Background(), []byte(`{}`)); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Close 之后 Send 应返回 ErrUnavailable，实际 %v", err)
+	}
+}
+
+// waitHellos 轮询等待 hellos 计数达到 n，超时则让测试失败。用它而不是
+// sleep，是因为"握手完成"本身就有一个可观察的信号（服务端成功写出
+// hello），没有理由退化成猜一个足够长的睡眠时间。
+func waitHellos(t *testing.T, f *fakeIm, n int32, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for f.hellos.Load() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("等待第 %d 次握手完成超时，实际 hellos=%d", n, f.hellos.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestClientDoesNotReconnectOnKickedAfterEstablishedConnection 覆盖"连接
+// 已经建立并正常用了一段时间之后，才收到不可重连的关闭码"这条路径。
+//
+// 与 TestDialFailsOn4001AndDoesNotReconnect 是两条不同的代码路径：那条
+// 测试里服务端在发 hello 回执之前就关闭，client 的 connect() 直接返回
+// 错误，Dial 直接失败，根本进不了 runLoop 的重连循环——那条判断守的是
+// "握手期间被拒"。这里握手先正常走完（Dial 成功返回），之后才通过已建立
+// 的连接收到关闭帧，真正走到 runLoop 里 `noAutoReconnect(code)` 那个
+// 判断。4001/4002/4003 三个码在 runLoop 里走的是同一行判断
+// （noAutoReconnect 一次性判断三者），这里只挑其中一个（被踢，
+// CloseKicked）代表性验证，另外两个不必重复：只要证明"判断本身在起
+// 作用"，不需要对每个码各测一遍同一行代码。
+func TestClientDoesNotReconnectOnKickedAfterEstablishedConnection(t *testing.T) {
+	f, url := newFake(t)
+	c, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	waitHellos(t, f, 1, 2*time.Second) // 确认握手已经真正完成，不是还在半路上
+
+	codes := make(chan int, 4)
+	c.OnClose(func(code int) { codes <- code })
+	f.closeCurrentConnWithCode(CloseKicked)
+
+	select {
+	case got := <-codes:
+		if got != CloseKicked {
+			t.Fatalf("OnClose 应收到 CloseKicked(%d)，实际 %d", CloseKicked, got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("已建立连接被以 4003 关闭后，OnClose 应被调用")
+	}
+
+	// 这条是"确认没有重连"的否定断言，同 TestDialFailsOn4001AndDoesNotReconnect
+	// 的注释：只能靠等一小段时间后查计数来证伪，没有事件可等。
+	time.Sleep(300 * time.Millisecond)
+	if f.conns.Load() != 1 {
+		t.Fatalf("被踢（4003）不能自动重连，实际连接了 %d 次", f.conns.Load())
+	}
+}
+
+// TestIdleTimeoutReconnectsImmediatelyUnlikeUnavailable 覆盖"4005 立即
+// 重连、不退避"这条契约：对比同一个 Client 先后收到 4005 和 4004 时，
+// 从关闭到下一次握手完成之间的耗时——4005 应当明显更快，因为它跳过了
+// 退避等待，4004 至少要等满一个 minBackoff（200ms）。
+//
+// 用耗时的相对比较和一个宽松的绝对上界，而不是断言某个精确值：本机的
+// 调度、localhost 的 TCP 握手开销都会引入抖动，只要 4005 明显快于
+// 200ms 这个退避下限、且明显快于 4004 那一次，就足以证明"跳过了退避"，
+// 不需要卡在一个可能因为负载而偶尔失败的精确阈值上。
+func TestIdleTimeoutReconnectsImmediatelyUnlikeUnavailable(t *testing.T) {
+	f, url := newFake(t)
+	c, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	waitHellos(t, f, 1, 2*time.Second)
+
+	idleStart := time.Now()
+	f.closeCurrentConnWithCode(CloseIdleTimeout)
+	waitHellos(t, f, 2, 5*time.Second)
+	idleElapsed := time.Since(idleStart)
+
+	unavailStart := time.Now()
+	f.closeCurrentConnWithCode(CloseUnavailable)
+	waitHellos(t, f, 3, 5*time.Second)
+	unavailElapsed := time.Since(unavailStart)
+
+	// 4005 应该远远快于 minBackoff（200ms）：留足够宽的余量（150ms）
+	// 给本机调度/localhost 握手开销，避免在负载较高的机器上误报。
+	if idleElapsed > 150*time.Millisecond {
+		t.Fatalf("4005 应立即重连、不退避，实际耗时 %v", idleElapsed)
+	}
+	// 4004 至少要经过一次 minBackoff（200ms）的等待。
+	if unavailElapsed < 200*time.Millisecond {
+		t.Fatalf("4004 应该退避后再重连，实际耗时 %v 明显短于 200ms 的最小退避", unavailElapsed)
+	}
+	if idleElapsed >= unavailElapsed {
+		t.Fatalf("4005 的重连应明显快于 4004：idle=%v unavailable=%v", idleElapsed, unavailElapsed)
 	}
 }
