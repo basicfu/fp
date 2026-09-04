@@ -555,7 +555,7 @@ func TestLoginCancelsPendingDeletion(t *testing.T) {
 // 登录必须真的写下注册关系，并且幂等。
 //
 // 只断言"两次登录是同一个用户"是不够的：把 EnsureRegistration 整行删掉，
-// 那种写法照样全绿——没有任何断言去看 user_application 里到底有没有行。
+// 那种写法照样全绿——没有任何断言去看 user_extra 里到底有没有行。
 func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
@@ -564,12 +564,12 @@ func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
 
 	var n int
 	if err := e.pool.QueryRow(ctx,
-		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		`SELECT count(*) FROM user_extra WHERE user_id = $1 AND application_id = $2`,
 		first.User.ID, e.app.ID).Scan(&n); err != nil {
 		t.Fatalf("查询注册关系: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("注册关系数 = %d, want 1——登录没有写入 user_application", n)
+		t.Fatalf("注册关系数 = %d, want 1——登录没有写入 user_extra", n)
 	}
 
 	again := e.smsLogin(t, "13800138000")
@@ -577,7 +577,7 @@ func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
 		t.Fatal("两次登录不是同一用户")
 	}
 	if err := e.pool.QueryRow(ctx,
-		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		`SELECT count(*) FROM user_extra WHERE user_id = $1 AND application_id = $2`,
 		first.User.ID, e.app.ID).Scan(&n); err != nil {
 		t.Fatalf("二次查询注册关系: %v", err)
 	}
