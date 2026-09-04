@@ -281,13 +281,20 @@ func TestServerPushInsideOnMessageDoesNotDeadlock(t *testing.T) {
 //
 // 回退验证：把 runOnce 里 Event 分支临时改成 `go s.handleEvent(ctx,
 // b.Event)`（消息仍走队列，但事件绕开队列、自己开一个不受队列约束的
-// goroutine——这是"事件不走同一条队列"最贴近真实的一种误修法，而不是
-// 完全同步内联：后者会直接把读循环本身堵住，读循环在事件回调返回之前
-// 根本读不到后面那条消息，反而无法制造出"消息先于事件被观测到"这个
-// 反例，所以要验证的是"绕开共享队列"这类错误，不是"读循环同步阻塞"
-// 那类错误——问题一的另一条测试已经覆盖了后者）。用这个变体复跑，
-// 本测试如期变红：消息回调在 200ms 内被调用，先于事件回调返回。改回
-// 共享队列后复测转绿。过程记在 fix-batch-2-report.md。
+// goroutine——这是"事件不走同一条队列"最贴近真实的一种误修法）。用这个
+// 变体复跑，本测试如期变红：消息回调在 200ms 内被调用，先于事件回调
+// 返回。改回共享队列后复测转绿。过程记在 fix-batch-2-report.md。
+//
+// 注意：这条测试**只**能抓住"事件不走队列"这个方向的违规。如果改成
+// "事件完全同步内联在读循环里处理"（不开 goroutine、也不入队），由于
+// 读循环是唯一的读取者，事件回调必然在读到下一帧（这里是消息）之前就
+// 跑完，这个方向的测试构造下不可能观测到"消息先于事件"——这不代表
+// 完全同步内联没有问题，只代表这条测试的构造方向抓不住它。另一个方向
+// （消息先到、事件后到，例如 client 发完最后一条消息随即断开）由镜像
+// 测试 TestServerPreservesMessageBeforeEventOrder 覆盖：完全同步内联在
+// 那个方向下会让事件抢在还没处理完的消息前面被观测到，能被抓住。两条
+// 测试合起来才完整覆盖"事件与消息谁先到、谁就该先被观测到"这条双向
+// 契约。
 func TestServerPreservesEventBeforeMessageOrder(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
@@ -297,6 +304,17 @@ func TestServerPreservesEventBeforeMessageOrder(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	release := make(chan struct{})
+	// releaseNow 用 sync.Once 包一层、且用 defer 兜底：如果下面的
+	// select 因为断言失败走 t.Fatal（会 runtime.Goexit，跳过它后面的
+	// 正常收尾代码），必须保证 release 最终还是会被关掉——否则 OnEvent
+	// 回调永远卡在 <-release 里，而它是被 consumeLoop 调用的，Close()
+	// 的 wg.Wait() 会等这个消费协程退出，永远等不到，把整个测试拖入
+	// 死锁而不是干净地报一个 FAIL（回退验证时曾经真的因为漏了这个兜底
+	// 卡死过，教训写在这里）。defer 在这条语句之后注册，比更早注册的
+	// `defer s.Close()` 后出栈，保证释放顺序总是"先放行回调、再关闭"。
+	var releaseOnce sync.Once
+	releaseNow := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseNow()
 	msgDone := make(chan struct{})
 	s.OnEvent(func(_ context.Context, ev Event) {
 		<-release // 卡住，模拟"还没处理完"的事件回调
@@ -325,7 +343,7 @@ func TestServerPreservesEventBeforeMessageOrder(t *testing.T) {
 		// 符合预期：消息还卡在事件后面，尚未被处理。
 	}
 
-	close(release) // 放行事件回调
+	releaseNow() // 放行事件回调
 	waitUntil(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -337,6 +355,96 @@ func TestServerPreservesEventBeforeMessageOrder(t *testing.T) {
 	mu.Unlock()
 	if got[0] != "event" || got[1] != "message" {
 		t.Fatalf("事件应先于消息被观测到，实际顺序 %v", got)
+	}
+}
+
+// TestServerPreservesMessageBeforeEventOrder 是
+// TestServerPreservesEventBeforeMessageOrder 的镜像：反过来构造"先消息、
+// 后事件"的序列，断言事件不能抢在还没处理完的消息前面被观测到。
+//
+// 这个方向对应一个很常见的真实场景：client 发完最后一条消息随即断开
+// 连接，于是入站消息后面紧跟着这条连接的断开事件。如果事件抢先被观测
+// 到，业务方按"收到断开事件就清理会话状态"的常见写法，会在会话状态
+// 已经被清理之后才收到那条消息，相当于把消息丢进了一个已经不存在的
+// 上下文——这正是"事件与消息共用同一条队列"这条约束真正要防的生产
+// 事故之一，不是只为了让测试好看。
+//
+// 这条测试与上面那条互补、缺一不可：上面那条测试的构造方向（先事件后
+// 消息）抓不住"事件完全同步内联处理"这一类违规（读循环是唯一读取者，
+// 事件必然先于下一帧被处理完，无从制造反例）；这条测试反过来，能够
+// 让"事件完全同步内联处理"现出原形——消息卡在队列里等消费协程处理，
+// 而同步内联的事件不需要排队，会在读循环里立刻被处理并被业务侧观测到。
+//
+// 回退验证：把 runOnce 里 Event 分支临时改成 `s.handleEvent(ctx,
+// b.Event)`（完全同步内联，不开 goroutine、也不入队——上面那条测试的
+// 回退验证特意说明这个变体抓不住它，这里反过来验证它能被这条测试抓
+// 住），本测试如期变红：事件回调在 200ms 内被调用完成，抢在还在卡住
+// 的消息回调前面。同时确认上面那条测试在这个变体下仍然是绿的（两条
+// 测试互补：各自只覆盖一个方向，合起来才完整覆盖双向的顺序契约）。
+// 改回共享队列后两条复测都转绿。过程记在 fix-batch-2-report.md。
+func TestServerPreservesMessageBeforeEventOrder(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	defer s.Close()
+
+	var mu sync.Mutex
+	var order []string
+	release := make(chan struct{})
+	// releaseNow 的 sync.Once+defer 兜底，理由与
+	// TestServerPreservesEventBeforeMessageOrder 里同名变量完全一样：
+	// 这里卡住的是 OnMessage 回调，它由 consumeLoop 调用，Close() 的
+	// wg.Wait() 会等这个协程退出——如果下面的 select 因为断言失败走
+	// t.Fatal（Goexit，跳过后面显式的 close(release)），必须靠 defer
+	// 兜底把它放行，否则整个测试会卡死在 defer s.Close() 上，而不是
+	// 干净地报一个 FAIL。这个坑在验证这条测试本身时真的踩过一次。
+	var releaseOnce sync.Once
+	releaseNow := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseNow()
+	eventDone := make(chan struct{})
+	s.OnMessage(func(_ context.Context, in Inbound) error {
+		<-release // 卡住，模拟"还没处理完"的消息回调
+		mu.Lock()
+		order = append(order, "message")
+		mu.Unlock()
+		return nil
+	})
+	s.OnEvent(func(_ context.Context, ev Event) {
+		mu.Lock()
+		order = append(order, "event")
+		mu.Unlock()
+		close(eventDone)
+	})
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+
+	// 真实场景：client 发完最后一条消息随即断开，消息先到、断开事件
+	// 紧随其后。
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Inbound{Inbound: &fpimv1.Inbound{Subject: "u:1", ConnId: "c", Payload: []byte(`1`)}}})
+	stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Event{Event: &fpimv1.Event{Kind: fpimv1.EventKind_EVENT_KIND_DISCONNECTED, Subject: "u:1", ConnId: "c", Reason: "closed", AtMs: 2}}})
+
+	select {
+	case <-eventDone:
+		t.Fatal("事件不应该在消息回调返回之前被观测到——Inbound 与 Event 必须共用" +
+			"同一条队列、由同一个单消费者按入队顺序处理，事件不能绕过还没处理完的" +
+			"消息抢先被处理（真实场景：client 发完最后一条消息随即断开，业务侧若" +
+			"提前看到断开事件清理了会话状态，随后到的消息就会被丢进一个已经清理" +
+			"掉的上下文）")
+	case <-time.After(200 * time.Millisecond):
+		// 符合预期：事件还卡在消息后面，尚未被处理。
+	}
+
+	releaseNow() // 放行消息回调
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) == 2
+	}, "消息与事件都应该被处理")
+
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	if got[0] != "message" || got[1] != "event" {
+		t.Fatalf("消息应先于事件被观测到，实际顺序 %v", got)
 	}
 }
 
@@ -365,7 +473,16 @@ func TestServerDropsFramesWhenQueueFull(t *testing.T) {
 
 	started := make(chan struct{})
 	var once sync.Once
-	block := make(chan struct{}) // 永远不关闭：让消费协程死死卡在第一条消息上
+	block := make(chan struct{}) // 故意不主动关闭：让消费协程死死卡在第一条消息上
+	// blockOnce+defer 兜底：中间任何一个 waitUntil/t.Fatalf 提前失败
+	// （Goexit，跳过下面显式的 close(block)），都必须保证 block 最终
+	// 被放行——否则 consumeLoop 永远卡在这个回调里，defer s.Close() 的
+	// wg.Wait() 等不到它退出，会把测试拖入死锁而不是干净地报 FAIL
+	// （这个坑在验证同一批的另外两条顺序测试时真实踩过一次，这里回头
+	// 一并加固，理由与那两条测试里的 releaseNow 完全一样）。
+	var blockOnce sync.Once
+	unblock := func() { blockOnce.Do(func() { close(block) }) }
+	defer unblock()
 	s.OnMessage(func(_ context.Context, in Inbound) error {
 		once.Do(func() { close(started) })
 		<-block
@@ -396,5 +513,5 @@ func TestServerDropsFramesWhenQueueFull(t *testing.T) {
 	if got := s.DroppedFrames(); got != wantDropped {
 		t.Fatalf("丢弃计数不对：want %d, got %d", wantDropped, got)
 	}
-	close(block) // 收尾：放行卡住的回调，避免消费协程带着阻塞状态进 Close
+	unblock() // 收尾：放行卡住的回调，避免消费协程带着阻塞状态进 Close
 }

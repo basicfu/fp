@@ -65,9 +65,14 @@ FP_IM_HTTP_ADDR=:8082 FP_IM_GRPC_ADDR=:9092 ./scripts/run-im.sh   # 终端 B
 
 ## 第 4 步：起 im-demo，连第二个节点
 
+`main.go` 的 `Insecure` 现在读 `FP_INSECURE`（与 `examples/demo` 一致），默认
+关闭；本机起的 fp-im 的 gRPC 监听（`internal/im/imgrpc`）没配 TLS，只能收
+明文连接，所以本地联调必须显式传 `FP_INSECURE=1`，否则 `im-demo` 会拿默认
+的 TLS 去握手一个只会明文应答的服务端，连不上、只会反复打"建流失败"。
+
 ```bash
 FP_APP_ID=<application.appId> FP_APP_SECRET=<appSecret> FP_IM_ADDR=localhost:9092 \
-  go run ./examples/im-demo
+  FP_INSECURE=1 go run ./examples/im-demo
 ```
 
 **该看到**：`INFO fpim: 流就绪 node=<im2 的 nodeId>`。
@@ -247,7 +252,12 @@ import (
 
 func main() {
 	srv, err := fpim.NewServer(fpim.ServerConfig{
-		Addr: os.Getenv("SRV_ADDR"), AppID: os.Getenv("SRV_APP"), AppSecret: os.Getenv("SRV_SECRET"), Insecure: true,
+		// 跟 main.go 同一条理由：这是一次性工具，但硬编码明文开关一样
+		// 会被照抄进不该照抄的地方，改成读环境变量（本机跑要传
+		// SRV_INSECURE=1，原因见 README 第 4 步：本机 fp-im 的 gRPC
+		// 监听没配 TLS，只收明文）。
+		Addr: os.Getenv("SRV_ADDR"), AppID: os.Getenv("SRV_APP"), AppSecret: os.Getenv("SRV_SECRET"),
+		Insecure: os.Getenv("SRV_INSECURE") == "1",
 	})
 	if err != nil {
 		log.Fatal(err)
