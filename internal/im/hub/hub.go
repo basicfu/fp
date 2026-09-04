@@ -90,6 +90,23 @@ type Hub struct {
 	conns   map[string]map[string]*connEntry // app+"\x00"+subject → connId → entry
 	byToken map[string][]Conn                // app+"\x00"+token → conns（撤销时用）
 	streams map[string][]Stream              // app → streams
+	// teardowns 是"已经从 conns 里摘掉、但断开事件还没发完"的连接数。
+	//
+	// 它存在的唯一理由是优雅关闭要等的那件事比"连接表空了"更晚：RemoveConn
+	// 先在锁内摘表，再在锁外等建立事件处理完（最长 removeConnWait），最后
+	// 才 emit 断开事件。只看连接表的话，一批刚建立、建立事件还没被业务
+	// server 处理完的连接会让排空立刻返回，关闭流程接着停 gRPC，等这些
+	// 连接的断开事件终于发出来时，流已经没了——业务方在线表里留下一条
+	// 永不下线的连接，正是乙一要消灭的症状。
+	//
+	// 计数在锁内自增（与摘表同一个临界区），所以不存在"表里已经没有、
+	// 计数还没加上"的窗口；UnsettledConns 读的是两者之和，任何时刻都不会
+	// 把一条正在拆的连接漏掉。
+	//
+	// 选它而不是"把摘表挪到发完事件之后"：摘表是 RemoveConn 幂等语义的
+	// 支点（谁抢到 delete 谁负责发事件），推迟它就得另造一套去重；而且
+	// 那样做期间连接仍留在路由表里，Push 会继续投给一条正在拆的连接。
+	teardowns int
 }
 
 func New(nodeID string, reg Registry, live Liveness, pub Publisher, apps auth.AppConfigSource) *Hub {
@@ -177,8 +194,18 @@ func (h *Hub) RemoveConn(ctx context.Context, app string, sub model.Subject, con
 				h.byToken[tk] = list
 			}
 		}
+		// 与摘表在同一个临界区里自增，见 teardowns 字段的注释：这条连接从
+		// 现在起到断开事件发完之前，都还没"了结"。
+		h.teardowns++
 	}
 	h.mu.Unlock()
+	if ok {
+		defer func() {
+			h.mu.Lock()
+			h.teardowns--
+			h.mu.Unlock()
+		}()
+	}
 	if !ok {
 		// 这条连接已经被删过（重复调用、或握手替换时先一步被踢掉）：保持
 		// 现有的幂等语义，不发任何事件。这条判断本身不受本次改动影响，
@@ -310,16 +337,33 @@ func (h *Hub) CloseLocalConns(code int, reason string) int {
 	return len(conns)
 }
 
-// LocalConnCount 返回本节点当前登记的连接数。优雅关闭时用它判断
-// CloseLocalConns 之后各条连接的拆连接流程是否已经全部走完。
+// LocalConnCount 返回本节点当前登记在连接表里的连接数。
+//
+// 注意它**不能**单独用来判断"拆连接已经全部走完"：一条连接在 RemoveConn
+// 摘表的那一刻就从这个计数里消失了，而它的断开事件还要等建立事件处理完
+// 之后才发得出去。要等"彻底了结"请用 UnsettledConns。
 func (h *Hub) LocalConnCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	return h.localConnCountLocked()
+}
+
+func (h *Hub) localConnCountLocked() int {
 	n := 0
 	for _, m := range h.conns {
 		n += len(m)
 	}
 	return n
+}
+
+// UnsettledConns 返回"还没有彻底了结"的连接数：仍在连接表里的，加上已经
+// 摘表、但断开事件还没发完的（见 teardowns 字段的注释）。优雅关闭排空
+// 连接时等的就是这个数归零——等到它为 0，才能保证所有断开事件都已经交给
+// 业务 server 的流，之后停 gRPC 才是安全的。
+func (h *Hub) UnsettledConns() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.localConnCountLocked() + h.teardowns
 }
 
 func (h *Hub) closeLocal(app, subject, connID string, code int, reason string) bool {

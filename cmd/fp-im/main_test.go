@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -410,5 +411,39 @@ func TestServeGracefulShutdownClosesWebSockets(t *testing.T) {
 	defer mu.Unlock()
 	if len(events) != 2 || events[1].Kind != fpim.EventDisconnected {
 		t.Fatalf("优雅关闭必须发出断开事件（否则业务方在线表里留下一条永不下线的连接），实际收到 %+v", events)
+	}
+}
+
+// TestGapReregisterTreatsSelfPresentErrorAsMissing 覆盖 SelfPresent 的错误
+// 分支：查不出"自己的节点条目还在不在"时，必须按最坏情况（条目已经没了）
+// 处理，照常做全量重登记。
+//
+// 方向不能反：多做一次重登记的代价是一批限速的写入，漏做一次的代价是这些
+// 连接在注册表里永久不可见、推送对它们恒为"不在线"，直到 client 自己重连。
+// 用 present=true 配 err!=nil 构造，确保测的是"错误压过了返回值"，而不是
+// 恰好因为返回值是 false 才重登记。
+func TestGapReregisterTreatsSelfPresentErrorAsMissing(t *testing.T) {
+	h := hubWithConns(t, 2)
+	hs := &fakeHandshaker{}
+	done := make(chan [2]int, 1)
+	r := &reregistrar{
+		conns: hs,
+		live:  &fakeLiveness{present: true, presentErr: errors.New("redis 不可达")},
+		log:   slog.Default(),
+		onDone: func(total, failed int) {
+			done <- [2]int{total, failed}
+		},
+	}
+	r.onGap(context.Background(), h)
+	select {
+	case got := <-done:
+		if got[0] != 2 {
+			t.Fatalf("查询失败时应按需要重登记处理、登记全部 2 条，实际 total=%d", got[0])
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("重登记 10 秒内没有跑完")
+	}
+	if hs.calls.Load() != 2 {
+		t.Fatalf("应真的跑了 2 条握手，实际 %d 条", hs.calls.Load())
 	}
 }

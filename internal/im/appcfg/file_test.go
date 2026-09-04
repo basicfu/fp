@@ -93,3 +93,69 @@ func TestWatchReloadsOnChangeAndKeepsOldOnError(t *testing.T) {
 		t.Fatal("坏文件不能把已加载的配置清空，要保留上一份")
 	}
 }
+
+// TestOnReloadFiresOncePerSuccessfulReload 守住热重载回调这条机制（复审
+// 建议 2）。
+//
+// 它服务的是甲一的另一半：配置热重载引入一个新 app 之后，必须立刻给它补上
+// srv 表追踪（cmd/fp-im 在这个回调里调 trackApps），否则这个新 app 的第一条
+// 上行/连接事件会因为转发候选列表为空被静默丢弃、永不重发——与启动时不
+// 预追踪的缺陷完全同形，只是触发条件从进程启动换成了热重载。
+//
+// 三条性质各自对应一种真实的错法：
+//   - 成功重载恰好触发一次：漏触发＝新 app 追踪不上；多触发本身无害
+//     （TrackApp 幂等），但说明触发点选错了地方。
+//   - 首次加载不触发：LoadFile 那一刻调用方还拿不到 *Source，也就没机会
+//     注册回调；这条断言钉住的是"不需要额外的标志位"这个前提确实成立。
+//   - 回调在锁外调用：回调里做的第一件事就是 s.Apps()（要 RLock），若在
+//     持写锁期间调用回调，这里会直接死锁。用带超时的 select 收结果，
+//     死锁会变成一条确定的失败而不是把测试挂死。
+func TestOnReloadFiresOncePerSuccessfulReload(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "apps.json")
+	write(t, p, `{"apps":[{"app_id":"a1","app_secret":"s1"}]}`)
+	src, err := LoadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 回调里读一次配置：这既是生产用法（trackApps 就是遍历 Apps()），
+	// 也是"回调在锁外调用"的探针。
+	seen := make(chan []string, 8)
+	src.OnReload(func() { seen <- src.Apps() })
+	if len(seen) != 0 {
+		t.Fatalf("首次加载（LoadFile）不应触发回调，实际触发了 %d 次", len(seen))
+	}
+
+	write(t, p, `{"apps":[{"app_id":"a1","app_secret":"s1"},{"app_id":"a2","app_secret":"s2"}]}`)
+	done := make(chan error, 1)
+	go func() { done <- src.Reload() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("重载应成功：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Reload 5 秒没有返回：回调若在持有写锁时调用，回调里的 Apps()（RLock）会与它死锁")
+	}
+	select {
+	case apps := <-seen:
+		if len(apps) != 2 {
+			t.Fatalf("回调里读到的应是重载后的配置（2 个 app），实际 %v", apps)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("成功重载之后必须触发一次回调：不触发的话，热重载引入的新 app 拿不到 srv 表追踪，" +
+			"它的第一条上行/连接事件会因为转发候选列表为空被静默丢弃")
+	}
+	if len(seen) != 0 {
+		t.Fatalf("一次成功重载只应触发一次回调，实际多触发了 %d 次", len(seen))
+	}
+
+	// 失败的重载不触发：配置没有变，下游没有任何需要同步的东西。
+	write(t, p, `{`)
+	if err := src.Reload(); err == nil {
+		t.Fatal("坏文件必须重载失败")
+	}
+	if len(seen) != 0 {
+		t.Fatalf("重载失败不应触发回调，实际触发了 %d 次", len(seen))
+	}
+}

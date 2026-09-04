@@ -284,3 +284,79 @@ func TestCloseLocalConnsSignalsEveryConn(t *testing.T) {
 		t.Fatalf("拆完之后 LocalConnCount 应为 0，实际 %d", got)
 	}
 }
+
+// TestUnsettledConnsCoversPendingDisconnectEvent 守住优雅关闭排空连接时
+// 等的到底是什么（复审建议 1）。
+//
+// 拆连接的真实流程是：RemoveConn 锁内摘表 → 锁外等建立事件处理完（最长
+// removeConnWait，30 秒）→ 才发断开事件。所以"连接表空了"发生在断开事件
+// 发出**之前**，拿它当排空判据比它承诺的弱一层：滚动发版正赶上一批连接
+// 刚建立、建立事件还没被业务 server 处理完时，排空会立刻返回，关闭流程
+// 接着停 gRPC，等断开事件终于发出来时流已经没了——业务方在线表里留下
+// 一条永不下线的连接。
+//
+// 这条测试用 orderedStream 把"建立事件已经进到 Send 里、但还没返回"这个
+// 中间态精确地摆出来，然后断言：此刻连接表已经空了，而 UnsettledConns
+// 仍然是 1；断开事件正在发送途中时它也仍然是 1；只有等 RemoveConn 真正
+// 返回，它才归零。
+func TestUnsettledConnsCoversPendingDisconnectEvent(t *testing.T) {
+	ctx := context.Background()
+	h, _, _, _, _ := hubtest.NewHub()
+	s := &orderedStream{calling: make(chan *fpimv1.ConnectResponse), proceed: make(chan struct{})}
+	h.AddStream(ctx, "a1", s)
+
+	c := &hubtest.Conn{ConnID: "c1"}
+	addDone := make(chan struct{})
+	go func() {
+		h.AddConn(ctx, "a1", model.User("1"), c, model.ConnMeta{Node: "im-a"}, "")
+		close(addDone)
+	}()
+	// 收下建立事件这次 Send：AddConn 现在卡在 emit 里，entry.established
+	// 还没关闭——这正是"建立事件没处理完"的那一刻。
+	connected := <-s.calling
+	if connected.GetEvent().GetKind() != fpimv1.EventKind_EVENT_KIND_CONNECTED {
+		t.Fatalf("第一条应是建立事件，实际 %+v", connected)
+	}
+
+	rmDone := make(chan struct{})
+	go func() {
+		h.RemoveConn(ctx, "a1", model.User("1"), "c1", model.ReasonShutdown)
+		close(rmDone)
+	}()
+	// 等 RemoveConn 把连接从表里摘掉。它随后会卡在"等建立事件处理完"上。
+	waitForCount(t, func() int { return h.LocalConnCount() }, 0, "RemoveConn 应先把连接从连接表里摘掉")
+
+	if got := h.UnsettledConns(); got != 1 {
+		t.Fatalf("连接已摘表但断开事件还没发出时，UnsettledConns 应为 1，实际 %d："+
+			"排空只看连接表的话会在这里立刻返回，随后停 gRPC 会把断开事件的出口掐掉", got)
+	}
+
+	close(s.proceed) // 放行建立事件的 Send，AddConn 随之完成，RemoveConn 醒来
+	disconnected := <-s.calling
+	if disconnected.GetEvent().GetKind() != fpimv1.EventKind_EVENT_KIND_DISCONNECTED {
+		t.Fatalf("第二条应是断开事件，实际 %+v", disconnected)
+	}
+	// 这里不再断言"断开事件发送途中 UnsettledConns 仍为 1"：proceed 已经
+	// 关闭，上面那次从 calling 的接收一完成，Send 就能立刻跑完返回，
+	// RemoveConn 随之结束——那个断言的成立与否取决于调度器谁先跑，是真正
+	// 的竞态。要断言它得再加一道 per-call 的闸，而上面那条（摘表之后仍为 1）
+	// 已经完整覆盖了这条性质。
+
+	<-addDone
+	<-rmDone
+	if got := h.UnsettledConns(); got != 0 {
+		t.Fatalf("断开事件发完之后 UnsettledConns 应归零，实际 %d", got)
+	}
+}
+
+// waitForCount 轮询等待某个计数达到期望值，超时即失败。
+func waitForCount(t *testing.T, get func() int, want int, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for get() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s（等待计数变成 %d 超时，当前 %d）", msg, want, get())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

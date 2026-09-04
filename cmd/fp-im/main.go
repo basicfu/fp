@@ -302,7 +302,14 @@ func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *re
 	dcancel()
 }
 
-// waitConnsDrained 等本地连接表被拆空，返回还剩几条（0 表示全部拆完）。
+// waitConnsDrained 等本地连接彻底了结，返回还剩几条（0 表示全部拆完）。
+//
+// 判据用 UnsettledConns 而不是 LocalConnCount：后者在 RemoveConn 摘表的
+// 那一刻就归零了，而断开事件要等建立事件处理完之后才发得出去（最长
+// hub.removeConnWait）。用连接表当判据的话，一批刚建立、建立事件还没被
+// 业务 server 处理完的连接会让这里立刻返回，紧接着停 gRPC 把长流掐掉，
+// 那些断开事件最后落到一条死流上——业务方在线表里留下永不下线的连接，
+// 正是乙一要消灭的症状。详见 hub.teardowns 字段的注释。
 //
 // 轮询而不是等一个信号：拆连接由每条连接自己的读循环各自完成，hub 里没有
 // "最后一条走完了"这样一个天然的汇合点，为了关闭这一次性动作在热路径的
@@ -312,12 +319,12 @@ func waitConnsDrained(ctx context.Context, h *hub.Hub) int {
 	t := time.NewTicker(20 * time.Millisecond)
 	defer t.Stop()
 	for {
-		if n := h.LocalConnCount(); n == 0 {
+		if n := h.UnsettledConns(); n == 0 {
 			return 0
 		}
 		select {
 		case <-ctx.Done():
-			return h.LocalConnCount()
+			return h.UnsettledConns()
 		case <-t.C:
 		}
 	}
