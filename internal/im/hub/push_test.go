@@ -58,6 +58,13 @@ func TestPushManyOneLookup(t *testing.T) {
 	if len(pub.sent) != 3 {
 		t.Fatalf("u:1→im-b、u:2→im-b、u:2→im-c 共 3 次喊，实际 %d", len(pub.sent))
 	}
+	// PushMany 存在的理由就是把多个主体的查询合并成一次注册表往返：只看
+	// 最终结果和发布次数保护不了这条性质——退化成逐主体循环查询（甚至
+	// 退化成循环调 Push）时，结果和发布次数完全不变，唯独往返次数会从
+	// 1 涨到 3。必须直接断言调用次数。
+	if reg.lookupManyCalls != 1 {
+		t.Fatalf("PushMany 必须把 3 个主体合并成一次注册表查询，退化成逐个查询会让每次批量推送多花 N 次往返；实际调用了 %d 次", reg.lookupManyCalls)
+	}
 }
 
 // TestPushManyExcludesDeadNodeFromCount 覆盖 Publish 返回订阅者数为 0 的情形：
@@ -147,6 +154,13 @@ func TestEvictReplacedRefs(t *testing.T) {
 // TestEvictDeadRemoteNodeIsNotAnError 覆盖：目标节点返回 0 订阅者（它已经
 // 随进程崩溃，上面那条连接根本不存在了）时，Evict 不当失败处理——不需要
 // 也无法再踢一个不存在的东西，记一条日志即可。
+//
+// 覆盖边界：Evict 没有返回值可断言，这条测试实际只验证了"针对该节点发过
+// 一次 KICK 尝试"，并不能感知"收到 0 订阅者之后走的是哪条分支"——把
+// push.go 里 `if got == 0 { slog.Info(...) }` 这段特判整个删掉，这个测试
+// 依然全绿。这是 Evict 返回 void 这个接口形状带来的固有局限，不是测试
+// 缺陷；如果将来要真正保护这条分支，需要给 Evict 加可观察的输出（比如
+// 返回值或注入的 logger）。
 func TestEvictDeadRemoteNodeIsNotAnError(t *testing.T) {
 	h, _, _, pub := newHub(t)
 	pub.subs = map[string]int64{"im-c": 0}

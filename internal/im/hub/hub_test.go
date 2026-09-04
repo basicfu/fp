@@ -88,12 +88,19 @@ func (s *orderedStream) Send(r *fpimv1.ConnectResponse) error {
 type fakeReg struct {
 	lookup map[string]map[string]model.ConnMeta // subject → connId → meta
 	kicked []registry.ConnRef
+
+	// lookupManyCalls 记录 LookupMany 被调用的次数，供测试断言"多个主体
+	// 合并成一次注册表查询"这条性质：如果调用方退化成逐个主体循环查询
+	// （不管是循环调 Lookup 还是循环调只传一个主体的 LookupMany），这个
+	// 计数器会随主体数一起涨上去，而不是恒为 1。
+	lookupManyCalls int
 }
 
 func (r *fakeReg) Lookup(_ context.Context, _, subject string, _ []string) (map[string]model.ConnMeta, error) {
 	return r.lookup[subject], nil
 }
 func (r *fakeReg) LookupMany(ctx context.Context, app string, subjects []string, live []string) ([]map[string]model.ConnMeta, error) {
+	r.lookupManyCalls++
 	out := make([]map[string]model.ConnMeta, len(subjects))
 	for i, s := range subjects {
 		out[i], _ = r.Lookup(ctx, app, s, live)
