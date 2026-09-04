@@ -164,9 +164,34 @@ func identityFrom(e entry, stale bool) *Identity {
 	}
 }
 
+// RevokeEvent 是暴露给 Options.OnRevoke 的撤销事件，字段与 fp.v1.RevokeEvent
+// 一一对应。不直接暴露 proto 类型：SDK 的公开面不该绑在生成代码上——
+// proto 定义可以随 fp 服务端的迭代改变字段布局甚至类型，那是内部通信
+// 细节，第三方接入方的代码不该因为一次 protoc 重新生成就被迫跟着改。
+type RevokeEvent struct {
+	Tokens  []string
+	UserIDs []string
+	AppID   string // 空表示所有 app
+	Reason  string
+	AtMs    int64
+}
+
 // onRevoke 是撤销事件的处理入口，由 Client 的 Watch 循环调用。
+//
+// 顺序必须是先清缓存、再调用 Options.OnRevoke：反过来的话，回调里如果
+// 去验证这个刚被撤销的 token（例如查一下这个用户还有没有其他会话），
+// 可能会命中还没来得及清空的旧缓存，把一个已撤销的身份当成有效的。
 func (a *Auth) onRevoke(ev *fpv1.RevokeEvent) {
 	a.cache.drop(ev.GetTokens()...)
+	if a.c.opts.OnRevoke != nil {
+		a.c.opts.OnRevoke(RevokeEvent{
+			Tokens:  ev.GetTokens(),
+			UserIDs: ev.GetUserIds(),
+			AppID:   ev.GetAppId(),
+			Reason:  ev.GetReason(),
+			AtMs:    ev.GetAtMs(),
+		})
+	}
 }
 
 // onPurge 丢弃全部缓存，由 Client 的 Watch 循环在收到 WatchPurge 时调用。

@@ -59,6 +59,17 @@ type Options struct {
 
 	// Logger 是 SDK 内部日志。为 nil 时用 slog.Default()。
 	Logger *slog.Logger
+
+	// OnRevoke 在收到 fp 的撤销事件后被调用（本地缓存已先清掉）。
+	// 给需要在撤销发生时做额外动作的宿主进程用，比如 fp-im 关闭持有该
+	// token 的 ws 连接。
+	//
+	// 回调在 watch 流的读循环里同步执行，会阻塞同一条流后续事件的处理——
+	// 一个慢回调等于拖慢整条推送流，回调必须快（例如只做一次非阻塞的
+	// channel 发送/map 查找，重活另起 goroutine）。
+	//
+	// 为 nil 表示不关心，是绝大多数 SDK 使用方的默认状态，不会因此崩溃。
+	OnRevoke func(RevokeEvent)
 }
 
 const (
