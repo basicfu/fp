@@ -29,8 +29,12 @@ func TestPublishReachesOnlyTargetNode(t *testing.T) {
 	defer closeB()
 
 	env := Envelope{Type: TypeMsg, App: "a1", Subject: "u:1", Payload: []byte(`1`)}
-	if err := b.Publish(ctx, "im-a", env); err != nil {
+	n, err := b.Publish(ctx, "im-a", env)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("im-a 恰有一个订阅者，SPUBLISH 应返回 1，实际 %d", n)
 	}
 	select {
 	case sig := <-chA:
@@ -44,6 +48,41 @@ func TestPublishReachesOnlyTargetNode(t *testing.T) {
 	case sig := <-chB:
 		t.Fatalf("im-b 不该收到发给 im-a 的消息：%+v", sig)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestPublishReturnsSubscriberCount 覆盖 Publish 返回值的两种情形：
+// 无人订阅的频道返回 0（hub.Deliver 靠这个判断目标节点已崩溃），
+// 有订阅者的频道返回实际订阅者数。
+func TestPublishReturnsSubscriberCount(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	run, _ := redisx.NewRunner(rdb, 0, 1)
+	defer run.Close()
+	b := New(rdb, run)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	env := Envelope{Type: TypeMsg, App: "a1", Subject: "u:1", Payload: []byte(`1`)}
+	if n, err := b.Publish(ctx, "im-nobody", env); err != nil {
+		t.Fatal(err)
+	} else if n != 0 {
+		t.Fatalf("无人订阅的频道应返回 0，实际 %d", n)
+	}
+
+	ch, closeFn, err := b.Subscribe(ctx, "im-somebody")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFn()
+	if n, err := b.Publish(ctx, "im-somebody", env); err != nil {
+		t.Fatal(err)
+	} else if n != 1 {
+		t.Fatalf("有一个订阅者的频道应返回 1，实际 %d", n)
+	}
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("订阅者 5 秒内没收到消息")
 	}
 }
 
@@ -86,7 +125,7 @@ func TestSubscribeSignalsGapOnReconnect(t *testing.T) {
 
 	// 重连之后订阅要仍然有效，不能只是"报了一次 Gap 就死了"。
 	env := Envelope{Type: TypeMsg, App: "a1", Subject: "u:1", Payload: []byte(`1`)}
-	if err := b.Publish(ctx, "im-gap", env); err != nil {
+	if _, err := b.Publish(ctx, "im-gap", env); err != nil {
 		t.Fatal(err)
 	}
 	select {

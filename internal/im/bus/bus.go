@@ -31,11 +31,22 @@ type Bus struct {
 
 func New(c redis.UniversalClient, run *redisx.Runner) *Bus { return &Bus{c: c, run: run} }
 
-// Publish 走写管道，SPUBLISH 的返回值（订阅者数）没人关心。
-func (b *Bus) Publish(ctx context.Context, nodeID string, env Envelope) error {
-	return b.run.Run(ctx, func(p redis.Pipeliner) {
-		p.SPublish(ctx, model.NodeChannel(nodeID), env.Encode())
+// Publish 走写管道，返回 SPUBLISH 的结果：收到这条消息的订阅者数量。
+// 调用方（hub.Deliver）靠这个数字判断目标节点是否还活着——0 意味着目标节点
+// 没有订阅本频道，要么已崩溃，要么正在重连；调用方据此决定要不要继续沿
+// 候选列表往下试，而不是发出去就不管。
+//
+// Run 保证返回前 fn 里捕获的 Cmd 已经填好结果：默认配置（不攒批）每次 Run
+// 就是一次往返，SPublish 的返回值在 Run 返回后立即可读，不需要额外等待。
+func (b *Bus) Publish(ctx context.Context, nodeID string, env Envelope) (int64, error) {
+	var cmd *redis.IntCmd
+	err := b.run.Run(ctx, func(p redis.Pipeliner) {
+		cmd = p.SPublish(ctx, model.NodeChannel(nodeID), env.Encode())
 	})
+	if err != nil {
+		return 0, err
+	}
+	return cmd.Val(), nil
 }
 
 // Subscribe 订阅本节点频道。返回的 closeFn 幂等。
