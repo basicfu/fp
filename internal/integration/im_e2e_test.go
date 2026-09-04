@@ -87,17 +87,17 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 		}
 	}()
 
-	// 主动为 apps 里声明的每个 app 打开 srv 表追踪。生产代码里这一步是
-	// 惰性的：只有 hub.Deliver 第一次真的需要转发某个 app 的消息时才调用
-	// TrackApp（见 internal/im/hub/deliver.go），这意味着"节点第一次尝试
-	// 转发"这件事本身会撞上"srv 表还没被 Refresh 过"的窗口，第一条消息
-	// 可能因为候选列表为空而被静默丢弃，之后的消息才能路由成功——这条
-	// 窗口在生产里是良性的（丢的是极早期的一条消息，之后自愈），但会让
-	// 这条测试的"轮询等待 A 看到 B"这一步变得不确定该等多久、等的到底是
-	// 不是同一件事。这里提前显式调用 TrackApp，让下面 go live.Run(ctx)
-	// 的首轮 Beat+Refresh 就能把 srv 表读全，把"惰性追踪的自愈窗口"这个
-	// 生产环境本就存在、且已被其它机制兜住的细节，从这条测试要验证的
-	// 主路径里摘出去。
+	// 为 apps 里声明的每个 app 打开 srv 表追踪——这一行现在是**照抄生产
+	// 装配**（cmd/fp-im/main.go 的 trackApps，位置同样在下面那次同步
+	// Refresh 之前），不再是绕开缺陷的补丁。
+	//
+	// 它此前是个补丁：生产代码那时根本没有这一步，追踪只在 hub.Deliver
+	// 第一次需要转发时惰性发生，于是每个 app 的第一条上行/事件必定因为
+	// 候选列表为空被静默丢弃；这里提前调一次，把那个缺陷从测试视野里
+	// 抹平了，还把它注释成"生产里良性"——它不良性，丢的是每个应用在每个
+	// 新节点上的第一条上线通知，永不重发。缺陷已在 cmd/fp-im 修掉（甲一），
+	// 并由 cmd/fp-im 的 TestServeDeliversFirstConnectEventAfterStartup
+	// 直接守着（那条测试跑的是 serve() 本身，不是手抄的装配）。
 	for _, appID := range apps.Apps() {
 		live.TrackApp(appID)
 	}

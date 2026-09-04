@@ -294,6 +294,21 @@ HDEL fp:im:{app:subject}:conn <connId>                    ← Redis 1 次（进�
 deliver(Event{Disconnected, reason}, 0)
 ```
 
+**im 节点优雅关闭**（发版、缩容：收到 SIGTERM/SIGINT）
+
+```
+① 关 HTTP 监听，不再接受新的 ws 握手
+   （http.Server.Shutdown 按 Go 的契约不等待也不关闭被劫持的连接，ws 走的正是劫持，所以它对存量 ws 无效）
+② 主动关闭本地全部 ws：close code 4004（服务不可用 → client 退避后重连到别的节点），
+   reason = "shutdown"；走的是与踢人/背压完全相同的拆连接路径，所以
+   HDEL fp:im:{app:subject}:conn 与 Disconnected 事件都照常发生
+③ 停 gRPC（必须排在②之后：②的断开事件要经业务 server 的 Connect 长流才发得出去）
+④ HDEL fp:im:node 与各 fp:im:srv:{app} 里自己的条目
+```
+
+每一步各有独立的时间预算（默认 10 秒）。业务方会收到 reason 为 `shutdown` 的断开事件，
+它与 `client`/`timeout` 的区别是"与用户行为和这条连接本身都无关，client 马上会重连回来"。
+
 **im 节点崩溃**
 
 ```
@@ -359,7 +374,13 @@ fp-im 对业务方只承诺三句：
 
 1. 对方此刻在线，我立刻递过去一次，并告诉你 `Sent` 还是 `NotOnline`。
 2. 对方上线、下线，我告诉你。
-3. 同一个 subject 的消息，在拓扑不变时是有序的。
+3. 同一个 subject 的**上行**（client→server）消息，在拓扑不变时是有序的。
+
+第三句只对上行成立，**下行（server→client 的 Push）对同一个 subject 不保证顺序**：网关侧
+`imgrpc.Server.Connect` 对流上收到的每条请求各起一个协程并发处理（见那里的注释与
+`Deps.Workers`），先发出的 Push 完全可能后落地。业务方要保证下行顺序，只能自己在 payload 里
+带序号（配方里的 seq），不能依赖网关。上行之所以有序，是因为一条 ws 连接的帧由单个读循环
+串行处理，且 server SDK 侧也是单消费者按入队顺序回调。
 
 不承诺送达、不承诺不重复、不存消息。业务方的闭环配方固定四步：**id 去重 + 落库 + 超时重发 + 上线同步**。
 
@@ -475,7 +496,7 @@ app 级（来自 `AppConfigSource`，热更新）：
 | `node.dead_after` | 10s | 判死阈值 |
 | `conn.field_ttl` | 30m | conn hash 里每个 field 的 TTL |
 | `conn.field_renew` | 10m | 节点对本地连接续期的间隔，必须小于 `conn.field_ttl` 的一半 |
-| `conn.idle_timeout` | 60s | 无帧关闭 |
+| `conn.idle_timeout` | 60s | 无帧关闭。**下界 50s**：client SDK 每 25 秒发一次心跳（`fpim.PingInterval`），空闲超时低于它的两倍会让全网 client 被周期性以 4005 踢下线，而 4005 的契约是"立即重连不退避"，形成稳定的重连风暴。低于下界启动直接失败 |
 | `conn.auth_timeout` | 5s | 握手帧等待 |
 | `conn.send_queue` | 256 | 每连接发送队列长度，满则关闭连接（reason `backpressure`） |
 | `pipeline.flush_interval` | 0 | 写管道攒批时长，0 为不按时长攒 |
