@@ -77,6 +77,10 @@ func handle(ctx context.Context, h *hub.Hub, app string, req *fpimv1.ConnectRequ
 }
 
 func toProto(r hub.PushResult) *fpimv1.PushResult {
+	// 兜底到 UNAVAILABLE 而不是 UNSPECIFIED：hub.PushResult.Status 只有三个
+	// 取值（PushSent/PushNotOnline/PushUnavailable，定义在 push.go），default
+	// 分支对应的正是 hub.PushUnavailable 这个第三种取值，不是"遇到了未知
+	// 状态"的防御性兜底，是有意为之的正常映射。
 	st := fpimv1.PushStatus_PUSH_STATUS_UNAVAILABLE
 	switch r.Status {
 	case hub.PushSent:

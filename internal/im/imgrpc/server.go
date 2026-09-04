@@ -71,14 +71,23 @@ func (s *Server) Connect(stream fpimv1.ImService_ConnectServer) error {
 	ctx := stream.Context()
 	app := appFrom(ctx)
 	snd := &sender{s: stream}
+	// 先发 Ready，再注册进路由器——顺序不能反。AddStream 一返回，这条流就能
+	// 被路由器的其它协程（比如别的连接触发的事件、别的请求处理协程）通过
+	// h.streams[app] 找到并调用 Send；如果先注册再发 Ready，注册完成到这里
+	// 的 Send(Ready) 调用之间存在一个窗口，其它协程可能抢在 Ready 之前抢到
+	// sender 的锁，把一条 Event/Inbound 先写上去。proto 里 Ready 是"流建立后
+	// 的第一帧"这个契约就被破坏了。触发场景不是理论上的：业务 server 重启
+	// 重连时，该 app 下大量在线连接正持续产生事件，很容易撞上这个窗口。
+	// 反过来，注册不依赖"Ready 已发出"这件事——Ready 发送失败直接返回错误，
+	// 连注册都不必做，交换顺序是安全的。
+	if err := snd.Send(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Ready{Ready: &fpimv1.Ready{NodeId: s.deps.Hub.NodeID()}}}); err != nil {
+		return err
+	}
 	// remove 必须可靠地在流结束时被调用——不管是 Recv 出错、client 主动关闭、
 	// 还是这个函数以任何路径返回，否则路由器里会残留一条死流，之后投给它
 	// 的消息全部落空。defer 是唯一能覆盖所有返回路径（含 panic）的写法。
 	remove := s.deps.Hub.AddStream(ctx, app, snd)
 	defer remove()
-	if err := snd.Send(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Ready{Ready: &fpimv1.Ready{NodeId: s.deps.Hub.NodeID()}}}); err != nil {
-		return err
-	}
 	// sem 是并发上限的信号量：拿不到令牌就阻塞等待而不是丢弃请求。
 	sem := make(chan struct{}, s.deps.Workers)
 	// wg 保证 Connect 返回前，所有已经 sem<-struct{}{} 成功、正在处理请求的
