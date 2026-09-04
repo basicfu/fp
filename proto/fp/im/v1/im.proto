@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package fp.im.v1;
+
+option go_package = "github.com/basicfu/fp/sdk/gen/fp/im/v1;fpimv1";
+
+// ImService 是业务 server 接入 fp-im 的唯一入口。
+//
+// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions），
+// im→server 发结果、client 上来的消息和连接事件。
+// 不拆成一元 RPC 的原因与 fp.v1.AuthService.Watch 相同：一条永不空闲的流
+// 让所有调用都走热连接，而且 Inbound/Event 本来就只能推。
+service ImService {
+  rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
+}
+
+// ConnectRequest 是 server 发给 im 的一帧。req_id 由 SDK 生成，
+// im 在 Result 里原样带回，SDK 据此配对；Result 的顺序不保证。
+message ConnectRequest {
+  string req_id = 1;
+  oneof body {
+    PushRequest     push      = 2;
+    PushManyRequest push_many = 3;
+    KickRequest     kick      = 4;
+    SessionsRequest sessions  = 5;
+  }
+}
+
+// ConnectResponse 是 im 发给 server 的一帧。
+// 用 oneof 是为了将来加新事件时旧 SDK 落到 default 忽略即可。
+message ConnectResponse {
+  oneof body {
+    Ready   ready   = 1;
+    Result  result  = 2;
+    Inbound inbound = 3;
+    Event   event   = 4;
+  }
+}
+
+// Ready 是流建立后 im 发的第一帧，此后 Push 才会被处理。
+message Ready {
+  string node_id = 1;
+}
+
+message PushRequest {
+  string subject = 1;
+  bytes  payload = 2;
+}
+
+message PushManyRequest {
+  repeated string subjects = 1;
+  bytes           payload  = 2;
+}
+
+// KickRequest 的 conn_ids 为空表示踢掉该 subject 的全部连接。
+message KickRequest {
+  string          subject  = 1;
+  repeated string conn_ids = 2;
+}
+
+message SessionsRequest {
+  string subject = 1;
+}
+
+enum PushStatus {
+  PUSH_STATUS_UNSPECIFIED = 0;
+  // 此刻有连接，已递给持有它的节点。不代表到达 client 进程。
+  PUSH_STATUS_SENT = 1;
+  PUSH_STATUS_NOT_ONLINE = 2;
+  // Redis 不可用等 im 自身故障。
+  PUSH_STATUS_UNAVAILABLE = 3;
+}
+
+message PushResult {
+  string     subject = 1;
+  PushStatus status  = 2;
+  // 收到这条消息的节点数，Sent 时 >= 1。
+  int32 nodes = 3;
+}
+
+message Session {
+  string conn_id         = 1;
+  string node_id         = 2;
+  string os              = 3;
+  bool   mobile          = 4;
+  int64  connected_at_ms = 5;
+}
+
+// Result 是对某个 ConnectRequest 的应答。error 非空表示整个请求失败，
+// 文案只用于日志，SDK 不据此分支。
+message Result {
+  string              req_id   = 1;
+  string              error    = 2;
+  repeated PushResult pushes   = 3;
+  repeated Session    sessions = 4;
+}
+
+// Inbound 是 client 发上来的一条消息，payload 原样透传。
+message Inbound {
+  string subject = 1;
+  string conn_id = 2;
+  bytes  payload = 3;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED  = 0;
+  EVENT_KIND_CONNECTED    = 1;
+  EVENT_KIND_DISCONNECTED = 2;
+}
+
+// Event 是连接生命周期事件。ua 只在 Connected 里有值，Redis 不存它。
+// reason 只在 Disconnected 里有值：client / timeout / kicked / replaced / revoked / backpressure。
+message Event {
+  EventKind kind    = 1;
+  string    subject = 2;
+  string    conn_id = 3;
+  string    os      = 4;
+  bool      mobile  = 5;
+  string    ua      = 6;
+  string    reason  = 7;
+  int64     at_ms   = 8;
+}

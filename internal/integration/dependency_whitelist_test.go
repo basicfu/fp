@@ -25,6 +25,7 @@ var allowedDirectDependencies = []string{
 	"github.com/alibabacloud-go/darabonba-openapi",
 	"github.com/alibabacloud-go/dysmsapi-20170525/v2",
 	"github.com/alibabacloud-go/tea",
+	"github.com/coder/websocket", // fp-im 的 ws 传输；纯 Go、无间接依赖、ctx 驱动的 API
 	"github.com/go-chi/chi/v5",
 	"github.com/google/uuid",
 	"github.com/hashicorp/golang-lru/v2", // 第二阶段新增：sdk 本地校验结果缓存（cache.go 的 LRU）

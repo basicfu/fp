@@ -22,3 +22,9 @@ export FP_POSTGRES_URL="${PG_BASE}/fp?sslmode=disable"
 export FP_REDIS_URL="${RD_BASE}/0"
 export FP_TEST_POSTGRES_URL="${PG_BASE}/fp_test?sslmode=disable"
 export FP_TEST_REDIS_URL="${RD_BASE}/1"
+
+# fp-im（可选服务）。未显式设置 FP_IM_REDIS_URL 时复用 FP_REDIS_URL，与 fp
+# 共用同一个开发库；FP_IM_FP_ADDR/FP_IM_APPS_FILE 给本机调试用的默认值。
+export FP_IM_REDIS_URL="${FP_IM_REDIS_URL:-$FP_REDIS_URL}"
+export FP_IM_FP_ADDR="${FP_IM_FP_ADDR:-localhost:9090}"
+export FP_IM_APPS_FILE="${FP_IM_APPS_FILE:-./tmp/im-apps.json}"

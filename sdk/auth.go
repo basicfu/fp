@@ -39,7 +39,15 @@ type Identity struct {
 	// Stale 为 true 表示这是 fp 不可达期间返回的陈旧结果。
 	// 业务方可据此拒绝高危操作。
 	Stale bool
+	// GuestID 非空表示这是一个访客请求：没有经过 fp 校验，身份来自请求头
+	// X-Guest-Id（仅 MiddlewareOptions.AllowGuest 开启时才会被采信）。
+	// 与 UserID 互斥——一次请求要么是登录用户要么是访客，不会同时非空。
+	GuestID string
 }
+
+// IsGuest 报告这个身份是否来自访客标识而不是 fp 校验过的 token。
+// id 为 nil 时返回 false，方便在未经检查的调用点直接判断。
+func (id *Identity) IsGuest() bool { return id != nil && id.GuestID != "" }
 
 // Auth 是认证能力。用 (*Client).Auth() 取得，并发安全。
 type Auth struct {
@@ -173,9 +181,34 @@ func identityFrom(e entry, stale bool) *Identity {
 	}
 }
 
+// RevokeEvent 是暴露给 Options.OnRevoke 的撤销事件，字段与 fp.v1.RevokeEvent
+// 一一对应。不直接暴露 proto 类型：SDK 的公开面不该绑在生成代码上——
+// proto 定义可以随 fp 服务端的迭代改变字段布局甚至类型，那是内部通信
+// 细节，第三方接入方的代码不该因为一次 protoc 重新生成就被迫跟着改。
+type RevokeEvent struct {
+	Tokens  []string
+	UserIDs []string
+	AppID   string // 空表示所有 app
+	Reason  string
+	AtMs    int64
+}
+
 // onRevoke 是撤销事件的处理入口，由 Client 的 Watch 循环调用。
+//
+// 顺序必须是先清缓存、再调用 Options.OnRevoke：反过来的话，回调里如果
+// 去验证这个刚被撤销的 token（例如查一下这个用户还有没有其他会话），
+// 可能会命中还没来得及清空的旧缓存，把一个已撤销的身份当成有效的。
 func (a *Auth) onRevoke(ev *fpv1.RevokeEvent) {
 	a.cache.drop(ev.GetTokens()...)
+	if a.c.opts.OnRevoke != nil {
+		a.c.opts.OnRevoke(RevokeEvent{
+			Tokens:  ev.GetTokens(),
+			UserIDs: ev.GetUserIds(),
+			AppID:   ev.GetAppId(),
+			Reason:  ev.GetReason(),
+			AtMs:    ev.GetAtMs(),
+		})
+	}
 }
 
 // onPurge 丢弃全部缓存，由 Client 的 Watch 循环在收到 WatchPurge 时调用。

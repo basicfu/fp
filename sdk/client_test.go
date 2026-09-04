@@ -546,6 +546,65 @@ func TestWatchBackoffDoesNotResetForShortLivedConnection(t *testing.T) {
 	}
 }
 
+// TestOnRevokeCallbackReceivesEvent 守住 Options.OnRevoke 被调用、且事件
+// 字段与 fp.v1.RevokeEvent 一一对应地传递过去——这是 fp-im 关闭被撤销
+// token 对应 ws 连接的唯一入口，回调收不到事件或字段对不上，fp-im 那边
+// 就什么都做不了。
+func TestOnRevokeCallbackReceivesEvent(t *testing.T) {
+	got := make(chan RevokeEvent, 1)
+	env := newStubEnv(t, okValidate("u1", 1000), func(o *Options) {
+		o.OnRevoke = func(ev RevokeEvent) { got <- ev }
+	})
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
+
+	env.pushRevoke(t, &fpv1.RevokeEvent{
+		Tokens: []string{"tok-1"}, AppId: "app-1", Reason: "logout", AtMs: 123,
+	})
+
+	select {
+	case ev := <-got:
+		if len(ev.Tokens) != 1 || ev.Tokens[0] != "tok-1" || ev.AppID != "app-1" ||
+			ev.Reason != "logout" || ev.AtMs != 123 {
+			t.Fatalf("回调收到的事件字段不对：%+v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("5 秒内回调没被调用")
+	}
+}
+
+// TestOnRevokeNilCallbackDoesNotPanic 守住"OnRevoke 为 nil 时不崩"。
+//
+// 绝大多数 SDK 使用方不会设置这个新增的可选字段——旧调用方的 Options
+// 字面量里根本不会出现它，零值就是 nil。onRevoke 在 watch 协程里同步
+// 执行，对 nil 回调发起裸调用会直接 panic，崩掉的是整条推送流的读
+// 循环乃至宿主进程；而且只有在真的收到一条撤销事件时才会触发，
+// 本地冒烟测试很容易碰不到，带着这个隐患一路到生产。
+//
+// 不直接用 recover 去抓 panic，而是断言撤销仍然生效（缓存被清掉、
+// 触发了一次重新回源）：如果 onRevoke 因为 nil 回调 panic，整个 watch
+// 协程会退出，缓存也就再也不会被清掉，下面的轮询会一直等不到，
+// 用它来间接确认"没有崩"，测试本身不必比被测代码更复杂。
+func TestOnRevokeNilCallbackDoesNotPanic(t *testing.T) {
+	var calls atomic.Int32
+	env := newStubEnv(t, func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+		calls.Add(1)
+		return &fpv1.ValidateTokenResponse{UserId: "u1", SessionId: "s1", CacheTtlMs: 300_000}, nil
+	})
+	// 不设置 OnRevoke，保持零值 nil——这是绝大多数调用方的真实场景。
+	env.waitUntil(t, env.client.StreamHealthy, "建流后应变为健康")
+
+	if _, err := env.auth.Validate(context.Background(), "tok"); err != nil {
+		t.Fatalf("预热: %v", err)
+	}
+
+	env.pushRevoke(t, &fpv1.RevokeEvent{Tokens: []string{"tok"}})
+
+	env.waitUntil(t, func() bool {
+		_, err := env.auth.Validate(context.Background(), "tok")
+		return err == nil && calls.Load() == 2
+	}, "nil 回调场景下撤销似乎没有生效——watch 协程可能已经因 panic 退出")
+}
+
 // goroutineCountAfterSettling 反复采样 runtime.NumGoroutine()，等它连续
 // 200ms 不再变化后返回，用于在后台 goroutine 正处于退出过程中的间隙里
 // 拿到一个稳定值，而不是被"还没退出完"的中间态污染基线或结果。
