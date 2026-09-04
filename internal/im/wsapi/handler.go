@@ -281,7 +281,14 @@ func (s *server) readLoop(ctx context.Context, app string, sub model.Subject, c 
 		case <-timer.C:
 			c.Close(model.CloseIdleTimeout, model.ReasonTimeout)
 			<-reads // 等后台读 goroutine 因为写协程做的那次真正关闭而解除阻塞退出，避免泄漏
-			return model.ReasonTimeout
+			// c.Close 是幂等的：如果 hub 在本地计时器到期的这个极窄窗口里
+			// 恰好先一步用别的原因（踢/撤销/背压）关闭了这条连接，上面那次
+			// 调用就是空操作，实际生效的仍然是 hub 那次的 code/reason。这里
+			// 不能沿用写死的 model.ReasonTimeout，必须和读分支一样重新查一次
+			// closure() 记录的真实原因，否则业务方会收到一条原因写错的
+			// 断开事件（明明是被踢却报成 timeout）。
+			_, reason, _ := c.closure()
+			return reason
 		}
 	}
 }
