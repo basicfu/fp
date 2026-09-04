@@ -30,7 +30,7 @@ const applicationColumns = `
 	id, name, slug, app_id, status,
 	idle_timeout_seconds, idle_timeout_mobile_seconds, max_lifetime_seconds,
 	rotate_interval_seconds, extend_interval_seconds, token_cache_ttl_seconds,
-	cookie_domain, redirect_uris, grant_types,
+	cookie_domain, redirect_uris, grant_types, default_role_key,
 	(extract(epoch from created_at) * 1000)::bigint,
 	(extract(epoch from updated_at) * 1000)::bigint`
 
@@ -446,11 +446,38 @@ func scanApplication(r rowScanner) (*domain.Application, error) {
 		&app.ID, &app.Name, &app.Slug, &app.AppID, &app.Status,
 		&app.Session.IdleTimeoutSeconds, &app.Session.IdleTimeoutMobileSeconds, &app.Session.MaxLifetimeSeconds,
 		&app.Session.RotateIntervalSeconds, &app.Session.ExtendIntervalSeconds, &app.Session.TokenCacheTTLSeconds,
-		&app.CookieDomain, &app.RedirectURIs, &app.GrantTypes,
+		&app.CookieDomain, &app.RedirectURIs, &app.GrantTypes, &app.DefaultRoleKey,
 		&app.CreatedAt, &app.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &app, nil
+}
+
+// SetDefaultRole 设置应用的默认角色。
+//
+// 有效角色 = 用户的全局角色 ∪ 该应用的默认角色。传空串表示不设默认角色
+// （那样新用户什么权限都没有——对面向内部的应用是合理的）。
+func (s *ApplicationService) SetDefaultRole(ctx context.Context, id uuid.UUID, roleKey string) (*domain.Application, error) {
+	if roleKey != "" {
+		var n int
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM role WHERE key = $1`, roleKey).Scan(&n); err != nil {
+			return nil, fmt.Errorf("service: 校验默认角色: %w", err)
+		}
+		if n == 0 {
+			return nil, domain.Failf(domain.ErrNotFound, domain.CodeRoleNotFound, "角色 %q 不存在", roleKey)
+		}
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE application SET default_role_key = $2, updated_at = now()
+		WHERE id = $1 RETURNING `+applicationColumns, id, roleKey)
+	app, err := scanApplication(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.Fail(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: 设置默认角色: %w", err)
+	}
+	return app, nil
 }

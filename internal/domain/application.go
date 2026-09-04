@@ -109,10 +109,13 @@ type Application struct {
 	Status       string
 	Session      SessionPolicy
 	CookieDomain string
-	RedirectURIs []string // OIDC 预留
-	GrantTypes   []string // OIDC 预留
-	CreatedAt    int64
-	UpdatedAt    int64
+	// DefaultRoleKey 是该应用的默认角色。有效角色 = 用户的全局角色 ∪ 它。
+	// 空串表示不设默认角色。
+	DefaultRoleKey string
+	RedirectURIs   []string // OIDC 预留
+	GrantTypes     []string // OIDC 预留
+	CreatedAt      int64
+	UpdatedAt      int64
 }
 
 // ApplicationConnector 是某个应用对某种登录方式的启用状态与配置。
