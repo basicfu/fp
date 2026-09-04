@@ -88,3 +88,35 @@ func TestDecodeRejectsTruncatedWithRoute(t *testing.T) {
 		}
 	}
 }
+
+// TestEnvelopeRoundTripHopAbove255 是"游标溢出"缺陷的编解码层回归测试。
+//
+// hub 包里的 TestDeliverRouteLargerThan255DoesNotWrapAround 只断言内存里的
+// Envelope.Hop 字段（它用的假发布器不做任何编码，只是把结构体存起来），
+// 测不到线路格式本身。如果将来有人把 Encode/Decode 里的 hop 字段改回一个
+// 字节（比如"优化"信封体积），hub 那条测试依然会通过——它根本没有经过
+// Encode/Decode 这一步——我们刚修掉的回绕缺陷会在编解码层悄悄回来，且现有
+// 测试集不会变红。这里直接在往返测试里放一个超过 255 的游标值，把"线路上
+// 的游标必须能表示超过 255"这条约束钉在编解码层。
+func TestEnvelopeRoundTripHopAbove255(t *testing.T) {
+	in := Envelope{
+		Type: TypeUp, Hop: 300, App: "a1", Subject: "u:1001", ConnID: "c-1", Extra: "",
+		Route:   []string{"im-b", "im-a", "im-c"},
+		Payload: []byte(`{"x":1}`),
+	}
+	out, err := Decode(in.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Hop != 300 {
+		t.Fatalf("游标在线路上必须能表示超过 255 的值，否则候选列表超过 255 个时会回绕成 0，导致下游从头重试整条列表、消息在节点间无限打转：编码前 Hop=300，解码后却是 %d", out.Hop)
+	}
+	if len(out.Route) != len(in.Route) {
+		t.Fatalf("Route 长度不应该受 Hop 编码方式影响：编码前 %d 个，解码后 %d 个", len(in.Route), len(out.Route))
+	}
+	for i := range in.Route {
+		if out.Route[i] != in.Route[i] {
+			t.Fatalf("Route 顺序必须原样保留：%v → %v", in.Route, out.Route)
+		}
+	}
+}
