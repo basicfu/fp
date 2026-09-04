@@ -136,7 +136,7 @@ test('错误响应把 code 与 detail 一并透出来', async () => {
     ),
   )
 
-  const err = await api.get('/users/x').catch((e) => e)
+  const err = (await api.get('/users/x').catch((e) => e)) as ApiError
   expect(err).toBeInstanceOf(ApiError)
   expect(err.status).toBe(403)
   expect(err.message).toBe('账号已被冻结')
@@ -149,7 +149,7 @@ test('错误响应把 code 与 detail 一并透出来', async () => {
 test('缺少 code 与 detail 时退化成空串', async () => {
   stubFetch(new Response(JSON.stringify({ msg: '出错了' }), { status: 500 }))
 
-  const err = await api.get('/x').catch((e) => e)
+  const err = (await api.get('/x').catch((e) => e)) as ApiError
   expect(err.code).toBe('')
   expect(err.detail).toBe('')
 })
