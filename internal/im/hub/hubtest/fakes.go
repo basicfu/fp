@@ -77,6 +77,17 @@ func (s *Stream) Send(r *fpimv1.ConnectResponse) error {
 	return nil
 }
 
+// GotSnapshot 加锁返回 Got 的快照。Send 可能在 hub 所在的那个 goroutine
+// 里被调用（比如 wsapi 里处理某条 ws 连接的 HTTP handler goroutine），
+// 与测试自己的 goroutine（尤其是 waitUntil 里的轮询）并发——直接裸读
+// Got 字段是一次真实的数据竞争，本包里的 Live 已经为同样的原因（DropLocal
+// 记录）提供了 DroppedSnapshot，Stream 理应保持同样的标准。
+func (s *Stream) GotSnapshot() []*fpimv1.ConnectResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*fpimv1.ConnectResponse(nil), s.Got...)
+}
+
 // Reg 是 hub.Registry 的假实现。
 type Reg struct {
 	// Table 是 subject → connId → meta 的假注册表数据。字段名不叫 Lookup：

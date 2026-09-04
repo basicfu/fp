@@ -2,13 +2,20 @@ package model
 
 import "encoding/json"
 
-// ws 关闭码。4001–4004 是 spec 定义的自定义码，1013 是标准 "try again later"。
+// ws 关闭码。4001–4005 是 spec 定义的自定义码，1013 是标准 "try again later"。
 const (
 	CloseAuthFailed     = 4001
 	ClosePolicyRejected = 4002
 	CloseKicked         = 4003
 	CloseUnavailable    = 4004
-	CloseBackpressure   = 1013
+	// CloseIdleTimeout 是网关因为连接空闲太久主动关闭时用的码。不复用
+	// CloseBackpressure(1013)：背压是"发送队列跟不上、client 应该拉历史
+	// 补漏"，空闲超时是"这条连接太久没有任何帧、网关主动清理"，两者对
+	// client SDK 该做什么（是否退避、是否需要补历史）含义不同，混用会让
+	// SDK 没法区分。也不复用 CloseAuthFailed 等 4001-4004：那几个都已经
+	// 有明确的、不是"空闲"的语义。
+	CloseIdleTimeout  = 4005
+	CloseBackpressure = 1013
 )
 
 // 断开原因，进 Disconnected 事件的 reason 字段。

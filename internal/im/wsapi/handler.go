@@ -50,9 +50,28 @@ type Deps struct {
 
 type server struct{ Deps }
 
+// New 建 wsapi 的 http.Handler。Cfg 里没显式配置的字段给出保守但可用的
+// 默认值，而不是让零值直接生效——这几个零值不是"关闭某个功能"这种无害
+// 的默认，是能直接把网关跑废的地雷：SendQueue=0 会建出无缓冲的发送队列，
+// 一条连接能不能收到第一条推送取决于写协程此刻是否正好卡在 select 上
+// 等着接，失败了 hub 会立刻以背压关掉这条连接，等效于"随机踢人"；
+// AuthTimeout=0 会让 readAuthFrame 里的定时器立刻到期，所有连接握手都
+// 秒拒；IdleTimeout=0 同理会让所有连接秒断。目前测不出这几条是因为唯一
+// 的调用方是本包自己的测试，测试自己已经把这三个字段填好了——一旦接线
+// 任务（cmd 那边组装 Deps）漏填任何一项，会得到"服务起来了但一条连接
+// 都活不下来"这种极难定位的现象，所以在这里兜底而不是等到线上再排查。
 func New(d Deps) http.Handler {
 	if d.Cfg.MaxFrame == 0 {
 		d.Cfg.MaxFrame = 1 << 20
+	}
+	if d.Cfg.AuthTimeout == 0 {
+		d.Cfg.AuthTimeout = 5 * time.Second
+	}
+	if d.Cfg.IdleTimeout == 0 {
+		d.Cfg.IdleTimeout = 60 * time.Second
+	}
+	if d.Cfg.SendQueue == 0 {
+		d.Cfg.SendQueue = 256
 	}
 	return &server{Deps: d}
 }
@@ -191,42 +210,78 @@ func (s *server) resolveSubject(ctx context.Context, af model.AuthFrame, cfg mod
 
 // readLoop 读到连接结束，返回断开原因。
 //
-// 每轮读都给 ctx 单独套一个 IdleTimeout 的 deadline，不额外起定时器：
-// 一旦读超时，ws.Read 自己就会带着 context.DeadlineExceeded 返回。
+// 读操作放在后台 goroutine 里连续进行，不给 c.ws.Read 的 ctx 加 deadline：
+// 和 readAuthFrame 踩过的坑一样，coder/websocket 对 ctx 到期的实现是
+// setupReadTimeout 里注册的 context.AfterFunc(ctx, c.close)——到期时直接把
+// 整条底层连接强制关掉，不发送任何关闭帧。空闲超时如果直接套在这次 Read
+// 的 ctx 上，client 只会看到连接被硬中断，读不到任何状态码，和"被踢
+// 4003/策略拒绝 4002"等其它几条拒绝路径比起来语义不自洽。
 //
-// 读到错误时先看 c.closure()：如果这条连接是被 hub 主动关闭的（踢、撤销、
-// 背压——见 conn.go 里写协程唯一发起 ws.Close 的那个分支），
-// c.closure() 会先于超时/协议错误观察到，用它记录的原因；否则再区分是
-// 超时还是 client 自己断开/协议错误。
+// 改成:空闲计时器到期时，走和 hub 触发的踢人/撤销/背压完全一样的机制——
+// 调用 c.Close(CloseIdleTimeout, ReasonTimeout) 发信号给写协程，由写协程
+// 去做真正的、优雅的 ws.Close（见 conn.go），读循环借着这次真正的关闭
+// 解除阻塞。这样"读循环退出后区分断开原因"完全收敛成一条路径：查
+// c.closure()——不管是 hub 从外部踢的，还是这里自己判定空闲超时，都是
+// 同一个信号、同一次真正的关闭、同一次 closure() 读取。
 func (s *server) readLoop(ctx context.Context, app string, sub model.Subject, c *wsConn) string {
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	reads := make(chan readResult)
+	go func() {
+		for {
+			_, data, err := c.ws.Read(ctx)
+			reads <- readResult{data, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	timer := time.NewTimer(s.Cfg.IdleTimeout)
+	defer timer.Stop()
 	for {
-		rctx, cancel := context.WithTimeout(ctx, s.Cfg.IdleTimeout)
-		_, data, err := c.ws.Read(rctx)
-		cancel()
-		if err != nil {
-			if _, reason, ok := c.closure(); ok {
-				return reason // 被 hub 主动关闭（踢、撤销、背压）
+		select {
+		case r := <-reads:
+			if r.err != nil {
+				if _, reason, ok := c.closure(); ok {
+					return reason // 被 hub 主动关闭（踢、撤销、背压），或本函数自己判定的空闲超时
+				}
+				return model.ReasonClient
 			}
-			if errors.Is(err, context.DeadlineExceeded) {
-				return model.ReasonTimeout
+			// 收到一帧，空闲计时器重新计时。标准的 Timer.Reset 用法：先
+			// Stop，Stop 返回 false 说明 timer 已经触发过或者正好在触发，
+			// 这种情况下要把 C 里可能已经放进去的值排空，否则下一轮
+			// select 会立刻在 <-timer.C 上误判超时。
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
-			return model.ReasonClient
-		}
-		var f model.Frame
-		if json.Unmarshal(data, &f) != nil {
-			continue
-		}
-		switch f.T {
-		case model.FrameMsg:
-			if len(f.P) == 0 {
+			timer.Reset(s.Cfg.IdleTimeout)
+
+			var f model.Frame
+			if json.Unmarshal(r.data, &f) != nil {
 				continue
 			}
-			s.Hub.Deliver(ctx, bus.Envelope{Type: bus.TypeUp, App: app, Subject: sub.String(), ConnID: c.id, Payload: []byte(f.P)})
-		case model.FramePing:
-			// pongFrame 已经是完整帧，走 enqueue 而不是 Send：Send 会再用
-			// msgFrame 包一层，把 {"t":"pong"} 变成
-			// {"t":"msg","p":{"t":"pong"}}，client 就认不出这是心跳回复了。
-			c.enqueue(pongFrame)
+			switch f.T {
+			case model.FrameMsg:
+				if len(f.P) == 0 {
+					continue
+				}
+				s.Hub.Deliver(ctx, bus.Envelope{Type: bus.TypeUp, App: app, Subject: sub.String(), ConnID: c.id, Payload: []byte(f.P)})
+			case model.FramePing:
+				// pongFrame 已经是完整帧，走 enqueue 而不是 Send：Send 会再用
+				// msgFrame 包一层，把 {"t":"pong"} 变成
+				// {"t":"msg","p":{"t":"pong"}}，client 就认不出这是心跳回复了。
+				c.enqueue(pongFrame)
+			}
+		case <-timer.C:
+			c.Close(model.CloseIdleTimeout, model.ReasonTimeout)
+			<-reads // 等后台读 goroutine 因为写协程做的那次真正关闭而解除阻塞退出，避免泄漏
+			return model.ReasonTimeout
 		}
 	}
 }
@@ -242,8 +297,9 @@ func (s *server) teardown(app string, sub model.Subject, c *wsConn, reason strin
 	// 这里的 ws.Close 多数情况下是第二次调用（写协程已经在 conn.go 里替
 	// hub 触发的关闭做过一次真正的 ws.Close 了）：coder/websocket 的 Close
 	// 对重复调用是幂等的（"Additional calls to Close are no-ops"），
-	// 忽略它的返回值是有意的，不是漏掉了错误处理。只有 client 自己断开/
-	// 空闲超时/协议错误这几种场景下 c.closure() 的 ok 会是 false，这次
+	// 忽略它的返回值是有意的，不是漏掉了错误处理。空闲超时现在也走
+	// c.Close(...) 这条信号路径（见 readLoop 的注释），所以只有 client
+	// 自己断开/协议错误这一种场景下 c.closure() 的 ok 会是 false，这次
 	// 调用才是这条连接第一次、也是唯一一次真正的 ws.Close。
 	code, _, ok := c.closure()
 	if !ok {

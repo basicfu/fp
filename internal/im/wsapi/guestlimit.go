@@ -19,6 +19,11 @@ type guestBucket struct {
 
 func NewGuestLimiter() *GuestLimiter { return &GuestLimiter{buckets: map[string]*guestBucket{}} }
 
+// Allow 对全新的 guestID 计数；已见过的 id 不占额度（同一个访客反复重连
+// 不该被限流卡住）。rate<=0（app 没配置 GuestIPRate，或显式配了 0）时，
+// len(b.ids) >= rate 对第一个全新 id 就已经成立，效果是拒绝这个 (app, IP)
+// 下的所有新访客——这是有意的选择：配置缺失时保守拒绝，好过把
+// "没配额度" 悄悄解释成 "不限额度" 而放行未知数量的访客连接。
 func (g *GuestLimiter) Allow(app, ip, guestID string, rate int, now time.Time) bool {
 	k := app + "\x00" + ip
 	g.mu.Lock()

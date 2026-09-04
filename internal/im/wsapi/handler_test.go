@@ -52,6 +52,31 @@ type env struct {
 	apps   hubtest.Apps
 }
 
+// TestNewFillsConfigDefaults 钉住 New 对零值 Config 的兜底：AuthTimeout/
+// IdleTimeout/SendQueue/MaxFrame 任何一项没填，都应该落到设计约定的默认值，
+// 而不是让零值直接生效——零值会把网关跑废（见 handler.go 里 New 的注释），
+// 这条约束不该只靠调用方（本包自己的测试、以及未来 cmd 里的接线代码）
+// 记得手填来保证。
+func TestNewFillsConfigDefaults(t *testing.T) {
+	h := New(Deps{})
+	s, ok := h.(*server)
+	if !ok {
+		t.Fatalf("New 应返回 *server，实际 %T", h)
+	}
+	if s.Cfg.AuthTimeout != 5*time.Second {
+		t.Fatalf("AuthTimeout 默认值应为 5s，实际 %v", s.Cfg.AuthTimeout)
+	}
+	if s.Cfg.IdleTimeout != 60*time.Second {
+		t.Fatalf("IdleTimeout 默认值应为 60s，实际 %v", s.Cfg.IdleTimeout)
+	}
+	if s.Cfg.SendQueue != 256 {
+		t.Fatalf("SendQueue 默认值应为 256，实际 %d", s.Cfg.SendQueue)
+	}
+	if s.Cfg.MaxFrame != 1<<20 {
+		t.Fatalf("MaxFrame 默认值应为 1<<20，实际 %d", s.Cfg.MaxFrame)
+	}
+}
+
 func newEnv(t *testing.T, cfg Config) *env {
 	t.Helper()
 	h, _, _, _, apps := hubtest.NewHub()
@@ -125,15 +150,15 @@ func TestHandshakeWithTokenThenMessageAndPing(t *testing.T) {
 	if err != nil || hello.T != "hello" || hello.Conn == "" {
 		t.Fatalf("应收到 hello 帧，实际 %+v %v", hello, err)
 	}
-	waitUntil(t, func() bool { return len(e.stream.Got) >= 1 }, "server 流应收到 Connected")
-	ev := e.stream.Got[0].GetEvent()
+	waitUntil(t, func() bool { return len(e.stream.GotSnapshot()) >= 1 }, "server 流应收到 Connected")
+	ev := e.stream.GotSnapshot()[0].GetEvent()
 	if ev == nil || ev.Kind != fpimv1.EventKind_EVENT_KIND_CONNECTED || ev.Subject != "u:1" || ev.Os != "ios" || !ev.Mobile || ev.Ua == "" {
 		t.Fatalf("Connected 事件不对：%+v", ev)
 	}
 
 	send(t, c, map[string]any{"t": "msg", "p": map[string]any{"x": 1}})
-	waitUntil(t, func() bool { return len(e.stream.Got) >= 2 }, "server 流应收到 Inbound")
-	in := e.stream.Got[1].GetInbound()
+	waitUntil(t, func() bool { return len(e.stream.GotSnapshot()) >= 2 }, "server 流应收到 Inbound")
+	in := e.stream.GotSnapshot()[1].GetInbound()
 	if in == nil || in.Subject != "u:1" || in.ConnId != hello.Conn || string(in.Payload) != `{"x":1}` {
 		t.Fatalf("Inbound 不对：%+v", in)
 	}
@@ -179,7 +204,8 @@ func TestBadTokenCloses4001AndGuestRules(t *testing.T) {
 		t.Fatalf("开了访客应 hello，实际 %+v %v", f, err)
 	}
 	waitUntil(t, func() bool {
-		return len(e.stream.Got) >= 1 && e.stream.Got[0].GetEvent().Subject == "g:6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"
+		got := e.stream.GotSnapshot()
+		return len(got) >= 1 && got[0].GetEvent().Subject == "g:6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"
 	}, "访客的 Connected 应带 g: 前缀")
 }
 
@@ -219,7 +245,7 @@ func TestKickCloses4003AndEmitsDisconnected(t *testing.T) {
 		t.Fatalf("被顶替应 4003，实际 %v", err)
 	}
 	waitUntil(t, func() bool {
-		for _, g := range e.stream.Got {
+		for _, g := range e.stream.GotSnapshot() {
 			if ev := g.GetEvent(); ev != nil && ev.Kind == fpimv1.EventKind_EVENT_KIND_DISCONNECTED {
 				return ev.Reason == model.ReasonReplaced
 			}
@@ -237,11 +263,14 @@ func TestIdleTimeoutDisconnects(t *testing.T) {
 	defer c.CloseNow()
 	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "tok-1"})
 	_, _ = read(t, c)
-	if _, err := read(t, c); err == nil {
-		t.Fatal("空闲超时应关闭连接")
+	// 断言收紧到具体关闭码，而不是"读会出错"：空闲超时和被踢/策略拒绝
+	// 一样，必须让 client 能分辨出这是网关主动清理而不是网络抖断，否则
+	// SDK 没法判断该退避还是立即重连。
+	if _, err := read(t, c); websocket.CloseStatus(err) != model.CloseIdleTimeout {
+		t.Fatalf("空闲超时应以 4005 关闭，实际 %v", err)
 	}
 	waitUntil(t, func() bool {
-		for _, g := range e.stream.Got {
+		for _, g := range e.stream.GotSnapshot() {
 			if ev := g.GetEvent(); ev != nil && ev.Kind == fpimv1.EventKind_EVENT_KIND_DISCONNECTED {
 				return ev.Reason == model.ReasonTimeout
 			}
