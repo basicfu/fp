@@ -43,7 +43,10 @@ func run() error {
 	defer stop()
 
 	host, _ := os.Hostname()
-	nodeID := model.NewNodeID(host, time.Now())
+	// 拼上进程号：同主机同一毫秒启动的两个 fp-im 进程（本地开发、单机
+	// 双节点预发环境、进程管理器并行拉起多实例都会真的撞上）如果只用
+	// 主机名+时间戳会算出完全相同的节点标识，见 model.NewNodeID 的注释。
+	nodeID := model.NewNodeID(host, os.Getpid(), time.Now())
 
 	rdb, mode, err := redisx.Open(ctx, cfg.RedisURL)
 	if err != nil {
