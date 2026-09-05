@@ -1317,19 +1317,67 @@ func (p *ConfigPublisher) Publish(ctx context.Context, appID uuid.UUID, typ stri
 }
 
 // Subscribe 订阅配置变更。返回的 channel 在 ctx 取消或调用 close 时关闭。
-//
-// 实现结构与 RevokePublisher.Subscribe 完全一致（订阅确认、ctx→Close 的
-// 看门狗、把重订阅转成 Gap），照着它写，两处的坑是同一批。
 func (p *ConfigPublisher) Subscribe(ctx context.Context) (<-chan ConfigSignal, func(), error) {
-	// —— 照搬 revoke.go 的 Subscribe，把 RevokeSignal 换成 ConfigSignal、
-	//    RevokeSignalGap 换成 ConfigSignal{Gap: true}、revokeChannel 换成
-	//    configChannel。解析失败时打 WARN 并跳过那一条，不要中断订阅。
-	_ = slog.Default
-	panic("按 revoke.go 的 Subscribe 实现")
+	sub := p.rdb.Subscribe(ctx, configChannel)
+	// Receive 会阻塞到订阅确认返回，确保这之后发布的消息不会丢。
+	if _, err := sub.Receive(ctx); err != nil {
+		_ = sub.Close()
+		return nil, nil, fmt.Errorf("store: 订阅配置频道: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	// ctx 取消时主动关掉底层订阅，这才是让 reader goroutine 退出的唯一途径：
+	// go-redis 的 reader 跑在 context.TODO() 上，它的输出 channel 只在
+	// PubSub.Close() 时才关。光靠下面 select 里的 <-ctx.Done() 不够——
+	// 完全没有消息流入时，goroutine 会一直阻塞在 range 上。
+	go func() {
+		<-ctx.Done()
+		_ = sub.Close()
+	}()
+
+	out := make(chan ConfigSignal, 64)
+	go func() {
+		defer close(out)
+
+		// resubscribeCount 数的是本循环观察到的 SUBSCRIBE 确认回包，也就是
+		// go-redis 重连的次数。这里能看到的每一条都必然来自重连——真正
+		// "初次订阅"的那条确认已经被上面 sub.Receive(ctx) 同步读走了。
+		resubscribeCount := 0
+
+		for msg := range sub.ChannelWithSubscriptions() {
+			var sig ConfigSignal
+			switch m := msg.(type) {
+			case *redis.Subscription:
+				if m.Kind != "subscribe" {
+					continue
+				}
+				resubscribeCount++
+				slog.Warn("store: Redis 订阅已重建，期间的配置变更事件已丢失",
+					"resubscribeCount", resubscribeCount)
+				sig = ConfigSignal{Gap: true}
+			case *redis.Message:
+				if err := json.Unmarshal([]byte(m.Payload), &sig); err != nil {
+					// 跳过这一条，不中断订阅：一条坏消息不该让整个实例
+					// 从此收不到任何配置变更。
+					slog.Error("store: 解析配置变更事件失败", "err", err)
+					continue
+				}
+			default:
+				continue
+			}
+
+			select {
+			case out <- sig:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return out, func() { cancel(); _ = sub.Close() }, nil
 }
 ```
-
-**实现者注意**：上面那个 `panic` 是占位，实现时必须替换成真正照搬过来的代码。`internal/store` 不受 `sdk/arch_test.go` 的"不得 panic"约束，但留一个 panic 在生产代码里显然不行——**这一步没删干净的话，Step 4 的测试会直接 panic 而不是失败**，很好认。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -1862,34 +1910,113 @@ func NewConfigHub(pub *store.ConfigPublisher) *ConfigHub {
 	return h
 }
 
-// Run / Ready / Subscribe / Close 的结构与 RevokeHub 完全一致，照着写：
-//   - Run：订阅 → 关闭 ready → run(ctx, signals)
-//   - Ready：订阅**真正建立**后才关闭。光靠"建流没报错"不够——
-//     流建立了但服务端还没订上的那段时间里，配置变更会丢，而 SDK 却以为
-//     推送可用。
-//   - Subscribe：登记一个订阅者，返回 channel 与摘除函数（用 sync.Once 包住）
-//   - Close：写锁下关闭全部 channel，让所有 Watch handler 返回；
-//     它存在的唯一理由是让 grpc.Server.GracefulStop 能返回。
+// Run 订阅 Redis 并把信号扇出，直到 ctx 取消。
+func (h *ConfigHub) Run(ctx context.Context) error {
+	signals, closeSub, err := h.pub.Subscribe(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeSub()
+	close(h.ready)
+	h.run(ctx, signals)
+	return nil
+}
+
+// Ready 在订阅**真正建立**之后关闭。
+//
+// 光靠"建流没报错"是不够的：流建立了、但服务端还没订上 Redis 的那段时间里，
+// 配置变更会丢，而 SDK 却以为推送可用。与 RevokeHub.Ready 同一理由。
+func (h *ConfigHub) Ready() <-chan struct{} { return h.ready }
+
+func (h *ConfigHub) run(ctx context.Context, signals <-chan store.ConfigSignal) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig, ok := <-signals:
+			if !ok {
+				return
+			}
+			h.fanout(sig)
+		}
+	}
+}
+
+// Subscribe 登记一个订阅者，返回它的事件 channel 与摘除函数。
+func (h *ConfigHub) Subscribe(appID uuid.UUID) (<-chan ConfigEvent, func()) {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		ch := make(chan ConfigEvent)
+		close(ch)
+		return ch, func() {}
+	}
+	h.next++
+	id := h.next
+	sub := &configSub{appID: appID, ch: make(chan ConfigEvent, configBufferSize)}
+	h.subs[id] = sub
+	h.mu.Unlock()
+
+	// once 包住：Watch handler 里是 defer 调的，而 fanout 摘除时也会删同一个
+	// id，两边都不该因为重复操作而 panic 或误删后来复用的 id。
+	var once sync.Once
+	return sub.ch, func() {
+		once.Do(func() {
+			h.mu.Lock()
+			delete(h.subs, id)
+			h.mu.Unlock()
+		})
+	}
+}
+
+// Close 关闭全部订阅者 channel，让所有 Watch handler 返回。
+//
+// 它存在的唯一理由是让 grpc.Server.GracefulStop 能够返回：Watch 是永不
+// 主动结束的长流，不关掉订阅就没有任何机制能让那些 handler 退出。
+func (h *ConfigHub) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, sub := range h.subs {
+		close(sub.ch)
+	}
+	h.subs = nil
+	h.closed = true
+}
 
 // fanout 把一条信号分发给相关订阅者。
 //
-// **缓冲满就摘掉订阅者**（关掉它的 channel 并从表里删除），不是丢弃这一条
+// **缓冲满就摘掉订阅者**（关掉 channel 并从表里删除），而不是丢弃这一条
 // 信号。丢弃是有洞的：待发的可能是 WEB 分区、被丢的是 DEFAULT，SDK 只会
 // 重拉 WEB。而摘掉的后果被完整兜住——流结束 → SDK 重连 → 收到 ready →
 // 重拉全部配置。与 RevokeHub 缓冲满时的处理同一逻辑。
+//
+// 全程持写锁：摘除要删 map、关 channel，与发送必须互斥，否则会出现
+// "向已关闭的 channel 发送"。配置变更是极低频事件，写锁的代价可以忽略。
 func (h *ConfigHub) fanout(sig store.ConfigSignal) {
-	// 实现要点：
-	//   1. Gap 信号发给**全部**订阅者，ConfigEvent{Type: ""}
-	//   2. 普通信号只发给 sig.AppID 匹配的订阅者
-	//   3. 非阻塞发送；default 分支里关闭 channel、从 subs 删除，并打一条
-	//      WARN（带 appID），说明这条流被摘掉了、SDK 会重连
-	//   4. 摘除要在写锁下做，与读锁互斥，避免"向已关闭的 channel 发送"
-	_ = slog.Default
-	panic("按 RevokeHub.fanout 实现，注意上面四点")
+	ev := ConfigEvent{Type: sig.Type, Seq: sig.Seq}
+	if sig.Gap {
+		// 订阅重建，漏读且不知道漏了哪些——空串让 SDK 重拉全部绑定。
+		ev = ConfigEvent{}
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for id, sub := range h.subs {
+		// Gap 发给所有人；普通信号只发给它自己那个应用。
+		if !sig.Gap && sub.appID != sig.AppID {
+			continue
+		}
+		select {
+		case sub.ch <- ev:
+		default:
+			slog.Warn("grpcapi: 配置事件缓冲已满，摘掉该订阅者；SDK 会重连并重拉配置",
+				"appID", sub.appID)
+			close(sub.ch)
+			delete(h.subs, id)
+		}
+	}
 }
 ```
-
-**实现者注意**：那个 `panic` 是占位，必须替换。`internal/grpcapi` 不受 `sdk/` 的"不得 panic"约束，但留在生产代码里显然不行——没删干净的话 Step 4 的测试会直接 panic，很好认。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -3081,7 +3208,6 @@ func (b *Binding[T]) reload() error {
 // reloadable 是 Client 对各份绑定的全部依赖。Binding[T] 是泛型，
 // 没法直接存进一个切片，只能靠这个非泛型接口。
 type reloadable interface {
-	partition() string
 	reloadFromPush()
 }
 ```
@@ -3384,10 +3510,9 @@ func (b *Binding[T]) raise(err error) {
 	b.c.opts.Logger.Error("fpsdk: 配置重载出错且未注册 OnError", "type", b.typ, "err", err)
 }
 
-// partition / reloadFromPush 实现 reloadable，让 Client 的重载 goroutine
-// 能统一驱动各份绑定。
-func (b *Binding[T]) partition() string { return b.typ }
-
+// reloadFromPush 实现 reloadable，让 Client 的重载 goroutine 统一驱动各份
+// 绑定。刻意不给 partition()——重载是无差别的（见本任务开头的编排说明），
+// 一个只会被写进接口却没人调的方法只会误导下一个人。
 func (b *Binding[T]) reloadFromPush() {
 	values, err := b.c.fetchConfig(b.typ)
 	if err != nil {
@@ -3708,8 +3833,6 @@ func (b *TypeBinding) raise(err error) {
 	b.c.opts.Logger.Error("fpsdk: 配置重载出错且未注册 OnError", "type", b.typ, "err", err)
 }
 
-func (b *TypeBinding) partition() string { return b.typ }
-
 func (b *TypeBinding) reloadFromPush() {
 	values, err := b.c.fetchConfig(b.typ)
 	if err != nil {
@@ -3736,3 +3859,613 @@ Expected: PASS，含 `TestArch*`（`sdk/` 仍未 import `internal/`、仍无 `pa
 git add sdk/bindtype.go sdk/bindtype_test.go
 git commit -m "feat(config): SDK BindType——按分区拉全量，转发给前端"
 ```
+
+---
+
+## Task 13: 控制台——配置中心页
+
+**Files:**
+- Create: `web/src/pages/ConfigCenter.tsx`
+- Test: `web/src/pages/ConfigCenter.test.tsx`
+- Modify: `web/src/lib/types.ts`（DTO 手工镜像）
+- Modify: `web/src/lib/api.ts`（如需新增方法）
+- Modify: `web/src/routes.tsx`（加路由）
+
+**Interfaces:**
+- Consumes: Task 8 的五条 HTTP 路由
+- Produces: 路由 `/applications/:id/config`
+
+**先读 `docs/console.md`** 里那六条与官方文档冲突的前端工具链坑（tsconfig 不许有 `baseUrl`、shadcn 组件名必须带 `@shadcn/` 命名空间、shadcn v4 没有 form 组件、`defineConfig` 要从 `vitest/config` 导入等）。改前端工程配置之前必须读。
+
+**两条硬约束：**
+
+1. **不复用 `DynamicForm`。** 结构差异太大（那是 connector 的单个动态表单，这是带分组、批量保存的列表），而且第三阶段终审查出它的 DOM id 没加命名空间会让同名字段串台——配置项的 key 带点、撞得更狠。新组件**从第一行起就给每个 input 的 id 加上 `cfg-${partition}-${key}` 这样的命名空间**。
+2. **`web/src/lib/types.ts` 是手工镜像，`api.get<T>` 只是类型断言**——字段名与 Go 的 json tag 对不上不会有编译错误，只会在运行时变成 `undefined`。逐字对着 Task 8 的 DTO 抄。
+
+- [ ] **Step 1: 加类型镜像**
+
+`web/src/lib/types.ts` 追加：
+
+```ts
+/** 配置分区。同名 key 在两个分区下是两个独立的配置项。 */
+export type ConfigPartition = 'DEFAULT' | 'WEB'
+
+/** 配置项的值类型。与后端 domain.ConfigValue* 逐字一致。 */
+export type ConfigValueType = 'bool' | 'int' | 'float' | 'string' | 'array' | 'object'
+
+export interface ConfigField {
+  type: ConfigValueType
+  desc: string
+  /** null 表示"未配置"——它仍然是列表上待填的一行，不是不存在。 */
+  value: unknown
+}
+
+export interface ConfigSnapshot {
+  /** 0 表示该分区还没有任何版本。 */
+  seq: number
+  fields: Record<string, ConfigField>
+}
+
+export interface ConfigVersion {
+  seq: number
+  createdAt: number
+}
+
+export interface SaveConfigResponse {
+  seq: number
+}
+```
+
+- [ ] **Step 2: 写失败的测试**
+
+创建 `web/src/pages/ConfigCenter.test.tsx`。**先读 `web/src/pages/ApplicationDetail.test.tsx`**，照它的方式 stub `fetch`（`vi.stubGlobal`）并渲染。注意第三阶段那条教训：vitest 关掉了 `globals`，`@testing-library/react` 的自动 DOM 清理靠裸标识符探测全局 `afterEach`——**每个测试文件必须自己写 `afterEach(cleanup)`**，否则组件测试之间 DOM 互相污染、断言会假红。
+
+```tsx
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+
+afterEach(cleanup)
+
+describe('ConfigCenter', () => {
+  it('未配置的项标出来并计数', async () => {
+    stubConfig({
+      seq: 1,
+      fields: {
+        fee_rate: { type: 'float', desc: '手续费率', value: 0.02 },
+        api_key: { type: 'string', desc: '上游密钥', value: null },
+      },
+    })
+    renderPage()
+
+    // 顶部提示必须给出数量——人是照着它决定还要不要继续配的。
+    expect(await screen.findByText(/1 项未配置/)).toBeTruthy()
+    // 未配置的项本身仍然在列表上（它就是待填的那一行）。
+    expect(screen.getByLabelText('api_key')).toBeTruthy()
+  })
+
+  it('保存时把完整的 fields 全量提交', async () => {
+    const calls: Array<{ method: string; body: unknown }> = []
+    stubConfig(
+      {
+        seq: 1,
+        fields: {
+          a: { type: 'int', desc: '', value: 1 },
+          b: { type: 'int', desc: '', value: 2 },
+        },
+      },
+      calls,
+    )
+    renderPage()
+
+    const input = await screen.findByLabelText('a')
+    await userEvent.clear(input)
+    await userEvent.type(input, '9')
+    await userEvent.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
+    const put = calls.find((c) => c.method === 'PUT')!
+    const body = put.body as { type: string; push: boolean; fields: Record<string, unknown> }
+    expect(body.type).toBe('DEFAULT')
+    // 【辨别力】没被改的 b 也必须在提交里。接口是全量替换——只提交被改过的
+    // 字段的话，b 会在新版本里凭空消失（等于被删了）。
+    expect(Object.keys(body.fields).sort()).toEqual(['a', 'b'])
+  })
+
+  it('生效方式默认是立即推送，可切成仅落库', async () => {
+    const calls: Array<{ method: string; body: unknown }> = []
+    stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } }, calls)
+    renderPage()
+
+    await screen.findByLabelText('a')
+    await userEvent.click(screen.getByLabelText(/仅落库/))
+    await userEvent.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
+    expect((calls.find((c) => c.method === 'PUT')!.body as { push: boolean }).push).toBe(false)
+  })
+
+  it('切换分区会重新拉取', async () => {
+    const urls: string[] = []
+    stubConfigCapturingUrls(urls)
+    renderPage()
+
+    await screen.findByRole('tab', { name: 'WEB' })
+    await userEvent.click(screen.getByRole('tab', { name: 'WEB' }))
+
+    await waitFor(() => expect(urls.some((u) => u.includes('type=WEB'))).toBe(true))
+    // 【辨别力】要断言 DEFAULT 也被拉过——只断言 WEB 的话，
+    // 一个把 type 写死成 WEB 的实现同样会绿。
+    expect(urls.some((u) => u.includes('type=DEFAULT'))).toBe(true)
+  })
+
+  it('删除配置项要二次确认，并说明没有机制能确认它是否还被读取', async () => {
+    stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: '删除 a' }))
+    expect(screen.getByText(/没有机制能确认它是否还被代码读取/)).toBeTruthy()
+  })
+})
+```
+
+`stubConfig` / `stubConfigCapturingUrls` / `renderPage` 是本文件的辅助，照 `ApplicationDetail.test.tsx` 的写法实现（`vi.stubGlobal('fetch', ...)` + `MemoryRouter` 定位到 `/applications/app-1/config`）。
+
+- [ ] **Step 3: 跑测试确认失败**
+
+Run: `cd web && npx vitest run src/pages/ConfigCenter.test.tsx`
+Expected: 模块不存在
+
+- [ ] **Step 4: 写实现**
+
+创建 `web/src/pages/ConfigCenter.tsx`。要点（**照着 `ApplicationDetail.tsx` 的结构与既有 shadcn 组件写**）：
+
+- 组件状态：`partition`（默认 `'DEFAULT'`）、`snapshot`、`draft`（本地编辑中的 fields）、`push`（默认 `true`）
+- `useEffect` 依赖 `[appId, partition]` 拉 `GET .../config?type=${partition}`
+- 分区 tab 用 `role="tab"`，名字就是 `DEFAULT` / `WEB`
+- 顶部提示：`draft` 里 `value === null` 的项数，非 0 时渲染 `{n} 项未配置`（红色）
+- 列表按 key 的**第一段点前缀**分组折叠（`upstream.timeout` 与 `upstream.api_key` 归 `upstream` 组；无点的归"未分组"）
+- 每行按 `type` 渲染控件：`bool` 开关、`int`/`float` 数字输入、`string` 文本框、`array`/`object` 多行文本（内容是 JSON，失焦时 `JSON.parse` 校验，不合法就标红并禁用保存）
+- **每个 input 的 `id` 与 `htmlFor` 都是 `cfg-${partition}-${key}`**，`aria-label` 就是 key（测试靠它定位）
+- 改类型的下拉要二次确认，文案含"旧实例若收到推送会解析失败"
+- `[新建配置项]` 弹窗：key + 类型 + 值 + 备注，**值必填**（没有代码强制它，空着没意义）
+- `[删除]` 用既有的 `ConfirmDialog`，文案含"没有机制能确认它是否还被代码读取；删错了运行中的实例会保持旧值并报错，新起的实例会起不来"
+- `[保存]`：`PUT .../config`，body 是 `{ type: partition, push, fields: draft }`——**永远提交完整的 draft**，接口是全量替换
+
+- [ ] **Step 5: 加路由**
+
+`web/src/routes.tsx` 在 `RequireAuth` 那个 Route 里加：
+
+```tsx
+        <Route path="/applications/:id/config" element={<ConfigCenter />} />
+```
+
+并在 `ApplicationDetail.tsx` 里加一个跳过去的入口链接。
+
+- [ ] **Step 6: 跑测试确认通过**
+
+Run: `cd web && npx vitest run src/pages/ConfigCenter.test.tsx`
+Expected: PASS，五条全绿
+
+- [ ] **Step 7: 变异验证"全量提交"**
+
+把保存时的 body 改成只带被修改过的字段。
+
+Run: `cd web && npx vitest run src/pages/ConfigCenter.test.tsx -t 全量提交`
+Expected: **FAIL**。确认后改回来。
+
+- [ ] **Step 8: 类型检查与构建**
+
+Run: `cd web && npx tsc -b && npm run build`
+Expected: 无错误，`web/dist/` 产出且 `.gitkeep` 仍在（`package.json` 的 build 脚本末尾会重建它）
+
+- [ ] **Step 9: 提交**
+
+```bash
+git add web/src/pages/ConfigCenter.tsx web/src/pages/ConfigCenter.test.tsx web/src/lib/types.ts web/src/routes.tsx web/src/pages/ApplicationDetail.tsx
+git commit -m "feat(config): 控制台配置中心页"
+```
+
+---
+
+## Task 14: 控制台——版本历史与回滚
+
+**Files:**
+- Create: `web/src/pages/ConfigVersions.tsx`
+- Test: `web/src/pages/ConfigVersions.test.tsx`
+- Modify: `web/src/routes.tsx`
+
+**Interfaces:**
+- Consumes: Task 8 的 `/config/versions`、`/config/versions/{seq}`、`/config/rollback`
+- Produces: 路由 `/applications/:id/config/versions`
+
+- [ ] **Step 1: 写失败的测试**
+
+创建 `web/src/pages/ConfigVersions.test.tsx`：
+
+```tsx
+import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+
+afterEach(cleanup)
+
+describe('ConfigVersions', () => {
+  it('列出版本并标出每版改了哪些 key', async () => {
+    stubVersions(
+      [{ seq: 2, createdAt: 1757000000 }, { seq: 1, createdAt: 1756000000 }],
+      {
+        1: { seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } },
+        2: {
+          seq: 2,
+          fields: {
+            a: { type: 'int', desc: '', value: 1 },
+            b: { type: 'int', desc: '', value: 2 },
+          },
+        },
+      },
+    )
+    renderPage()
+
+    // "改了哪些"是相邻两版 diff 出来的，后端不存这个字段。
+    // 【辨别力】v2 里没变的 a 不能出现在改动清单里，否则一个"把整份 fields
+    // 都列成改动"的实现同样会绿。
+    const row = await screen.findByTestId('version-2')
+    expect(row.textContent).toContain('b')
+    expect(row.textContent).not.toContain('a')
+  })
+
+  it('回滚前提示哪些项将变成未配置', async () => {
+    stubVersions(
+      [{ seq: 2, createdAt: 2 }, { seq: 1, createdAt: 1 }],
+      {
+        1: { seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } },
+        2: {
+          seq: 2,
+          fields: {
+            a: { type: 'int', desc: '', value: 1 },
+            b: { type: 'int', desc: '', value: 2 },
+          },
+        },
+      },
+    )
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: '回滚到 v1' }))
+    // v2 才新增的 b 在 v1 里没有——回滚后它会变成未配置，运行中的实例
+    // 保持旧值并报错，新起的实例会缺值起不来。这条提示必须出现。
+    expect(screen.getByText(/回滚后以下配置项将变成未配置/)).toBeTruthy()
+    expect(screen.getByText(/\bb\b/)).toBeTruthy()
+  })
+
+  it('回滚同样要选生效方式', async () => {
+    const calls: Array<{ method: string; body: unknown }> = []
+    stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } }, calls)
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: '回滚到 v1' }))
+    await userEvent.click(screen.getByLabelText(/仅落库/))
+    await userEvent.click(screen.getByRole('button', { name: '确认回滚' }))
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
+    const body = calls.find((c) => c.method === 'POST')!.body as { seq: number; push: boolean }
+    expect(body).toEqual({ type: 'DEFAULT', seq: 1, push: false })
+  })
+})
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `cd web && npx vitest run src/pages/ConfigVersions.test.tsx`
+Expected: 模块不存在
+
+- [ ] **Step 3: 写实现**
+
+创建 `web/src/pages/ConfigVersions.tsx`。要点：
+
+- 分区 tab 同 Task 13
+- `GET .../config/versions?type=X` 拉列表，每行 `data-testid="version-${seq}"`
+- **改了哪些 key = 相邻两版的 `fields` 在前端 diff**（后端不存这个字段）：拉 `seq` 与 `seq-1` 两份快照，比较 key 集合与每个 key 的 `{type, desc, value}`；最老的一版（前一版不存在或已被修剪）标成"初始版本"
+- `[回滚到 vN]` → 弹窗：
+  - 先算出"当前有、vN 没有"的 key 集合，非空时渲染 `回滚后以下配置项将变成未配置：...`
+  - 生效方式单选（默认立即推送）
+  - `[确认回滚]` → `POST .../config/rollback`，body `{ type, seq, push }`
+- 回滚成功后跳回配置中心页
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cd web && npx vitest run src/pages/ConfigVersions.test.tsx`
+Expected: PASS
+
+- [ ] **Step 5: 加路由并跑全部前端测试**
+
+`web/src/routes.tsx` 加 `<Route path="/applications/:id/config/versions" element={<ConfigVersions />} />`。
+
+Run: `cd web && npx vitest run && npx tsc -b`
+Expected: 全绿、类型检查无错
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add web/src/pages/ConfigVersions.tsx web/src/pages/ConfigVersions.test.tsx web/src/routes.tsx
+git commit -m "feat(config): 控制台版本历史与回滚"
+```
+
+---
+
+## Task 15: 端到端穿透
+
+**Files:**
+- Create: `internal/integration/config_test.go`
+
+**Interfaces:**
+- Consumes: 前面全部任务
+
+**这条对应第三阶段最要命的那个教训**：服务端有信息、传输层丢了，而所有测试照绿——因为没有一条测试跨越边界。下面每条都必须穿到 **SDK 出口**（`Load()` 的返回值），断言服务端返回值是不够的。
+
+- [ ] **Step 1: 写失败的测试**
+
+创建 `internal/integration/config_test.go`。**先读同目录下既有的集成测试**，复用那里"起一个真 fp（HTTP + gRPC）+ 一个真 SDK Client"的脚手架。
+
+```go
+package integration_test
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// 改值 → 推送 → SDK 的 Load() 真的变了。
+func TestConfigChangePropagatesToSDK(t *testing.T) {
+	env := newFullEnv(t) // 真 fp + 真 SDK Client
+	ctx := context.Background()
+
+	env.saveConfig(t, "DEFAULT", `{"fee_rate":{"type":"float","desc":"","value":0.02}}`, true)
+
+	type shopCfg struct{ FeeRate float64 }
+	cfg, err := fpsdk.Bind[shopCfg](env.client)
+	if err != nil {
+		t.Fatalf("Bind 失败: %v", err)
+	}
+	if cfg.Load().FeeRate != 0.02 {
+		t.Fatalf("初始值 = %v，期望 0.02", cfg.Load().FeeRate)
+	}
+
+	changed := make(chan float64, 1)
+	cfg.OnChange(func(_, n *shopCfg) { changed <- n.FeeRate })
+
+	// 走**控制台的 HTTP 接口**改值，不要直接调 service——这条测试的价值
+	// 就在于穿过 HTTP → PG → Redis → gRPC → SDK 这一整条链路。
+	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
+		"fee_rate":{"type":"float","desc":"","value":0.05}}}`)
+
+	select {
+	case v := <-changed:
+		if v != 0.05 {
+			t.Fatalf("推送后的值 = %v，期望 0.05", v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待配置推送超时——变更没能穿到 SDK 出口")
+	}
+	if cfg.Load().FeeRate != 0.05 {
+		t.Fatalf("Load() = %v，期望 0.05", cfg.Load().FeeRate)
+	}
+}
+
+// 「仅落库」的另一条腿：不推送，但新起一次 Bind 能拿到新值。
+// 【辨别力】必须同时断言这两件事。只断言"没推送"的话，一个根本没存的
+// 实现也会绿；只断言"新 Bind 拿到了"的话，一个照样推送的实现也会绿。
+func TestSaveWithoutPushIsInvisibleUntilRebind(t *testing.T) {
+	env := newFullEnv(t)
+
+	env.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, true)
+
+	type cfgT struct{ N int }
+	cfg, err := fpsdk.Bind[cfgT](env.client)
+	if err != nil {
+		t.Fatalf("Bind 失败: %v", err)
+	}
+	fired := make(chan struct{}, 1)
+	cfg.OnChange(func(_, _ *cfgT) { fired <- struct{}{} })
+
+	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":false,"fields":{
+		"n":{"type":"int","desc":"","value":2}}}`)
+
+	select {
+	case <-fired:
+		t.Fatal("选了「仅落库」，运行中的绑定不该收到变更")
+	case <-time.After(time.Second):
+	}
+	if got := cfg.Load().N; got != 1 {
+		t.Fatalf("运行中的绑定 N = %d，期望仍是 1", got)
+	}
+
+	// 另一条腿：新起一次 Bind（模拟 pod 重启）必须拿到新值。
+	fresh, err := fpsdk.Bind[cfgT](env.newClient(t))
+	if err != nil {
+		t.Fatalf("重新 Bind 失败: %v", err)
+	}
+	if got := fresh.Load().N; got != 2 {
+		t.Fatalf("新绑定 N = %d，期望 2——值必须真的落库了", got)
+	}
+}
+
+// 改类型的两条路，穿到 SDK 出口（设计文档测试策略第 5 条）。
+//
+// 场景：v2 代码把某项从 int 改成了 object，发版前得先把控制台上的值改成
+// JSON，而这时 v1 还在跑、要的还是那个 int。
+func TestTypeChangeBothPaths(t *testing.T) {
+	type v1Cfg struct{ Timeout int }
+
+	// —— 路径一：选「仅落库」，v1 完全不受影响
+	env := newFullEnv(t)
+	env.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000}}`, true)
+
+	cfg, err := fpsdk.Bind[v1Cfg](env.client)
+	if err != nil {
+		t.Fatalf("Bind 失败: %v", err)
+	}
+	var errs int32
+	cfg.OnError(func(error) { atomic.AddInt32(&errs, 1) })
+
+	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":false,"fields":{
+		"timeout":{"type":"object","desc":"","value":{"ms":5000}}}}`)
+	time.Sleep(time.Second)
+
+	if got := cfg.Load().Timeout; got != 3000 {
+		t.Fatalf("「仅落库」路径：v1 的 Timeout = %d，期望仍是 3000", got)
+	}
+	if n := atomic.LoadInt32(&errs); n != 0 {
+		t.Fatalf("「仅落库」路径：OnError 被调用 %d 次，期望 0 次", n)
+	}
+
+	// —— 路径二：误选「立即推送」，v1 保持旧值 + OnError，**不崩**
+	env2 := newFullEnv(t)
+	env2.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000}}`, true)
+
+	cfg2, err := fpsdk.Bind[v1Cfg](env2.client)
+	if err != nil {
+		t.Fatalf("Bind 失败: %v", err)
+	}
+	raised := make(chan struct{}, 1)
+	cfg2.OnError(func(error) {
+		select {
+		case raised <- struct{}{}:
+		default:
+		}
+	})
+
+	env2.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
+		"timeout":{"type":"object","desc":"","value":{"ms":5000}}}}`)
+
+	select {
+	case <-raised:
+	case <-time.After(5 * time.Second):
+		t.Fatal("「立即推送」路径：解析失败必须触发 OnError")
+	}
+	// 【辨别力】必须断言"值还是旧的"而不只是"报了错"——一个逐字段写入、
+	// 遇错才返回的实现同样会报错，却已经把快照改坏了。
+	if got := cfg2.Load().Timeout; got != 3000 {
+		t.Fatalf("「立即推送」路径：Timeout = %d，解析失败时必须保持旧值 3000", got)
+	}
+
+	// —— 两条路都要能让新版本代码拿到新值
+	type v2Cfg struct {
+		Timeout struct{ Ms int }
+	}
+	fresh, err := fpsdk.Bind[v2Cfg](env2.newClient(t))
+	if err != nil {
+		t.Fatalf("v2 Bind 失败: %v", err)
+	}
+	if fresh.Load().Timeout.Ms != 5000 {
+		t.Fatalf("v2 拿到 %d，期望 5000", fresh.Load().Timeout.Ms)
+	}
+}
+
+// 断线期间的变更，靠"收到 ready 就重拉"补上。
+// 【辨别力】变更必须发生在断线**期间**：断线前改（重连前就拉到了）
+// 或重连后改（有 ConfigChanged 推送）都测不到这个缺口。
+func TestReadyRepullsConfigMissedWhileDisconnected(t *testing.T) {
+	env := newFullEnv(t)
+	env.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, true)
+
+	type cfgT struct{ N int }
+	cfg, err := fpsdk.Bind[cfgT](env.client)
+	if err != nil {
+		t.Fatalf("Bind 失败: %v", err)
+	}
+
+	// 掐断 gRPC 服务端，让 SDK 的 Watch 流断开。
+	env.stopGRPC(t)
+	// 断线**期间**改值：这次的 ConfigChanged 谁也收不到。
+	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
+		"n":{"type":"int","desc":"","value":42}}}`)
+	// 重新起服务端，SDK 会退避重连并收到 ready。
+	env.startGRPC(t)
+
+	deadline := time.Now().Add(15 * time.Second) // 退避最长 30s，这里给足重试窗口
+	for time.Now().Before(deadline) {
+		if cfg.Load().N == 42 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("重连后 N = %d，期望 42——收到 ready 时必须重拉一次配置", cfg.Load().N)
+}
+
+// 分区隔离穿到 SDK 出口。
+// 【辨别力】两个分区的值必须不同，否则"分区对了"和"压根没分区"同结果。
+func TestPartitionIsolationAtSDKBoundary(t *testing.T) {
+	env := newFullEnv(t)
+	env.saveConfig(t, "DEFAULT", `{"site.title":{"type":"string","desc":"","value":"后端"}}`, false)
+	env.saveConfig(t, "WEB", `{"site.title":{"type":"string","desc":"","value":"前端"}}`, false)
+
+	type cfgT struct{ Site siteT }
+	type siteT struct{ Title string }
+
+	cfg, err := fpsdk.Bind[cfgT](env.client)
+	if err != nil {
+		t.Fatalf("Bind 失败: %v", err)
+	}
+	if got := cfg.Load().Site.Title; got != "后端" {
+		t.Fatalf("Bind 拿到 %q，期望 后端", got)
+	}
+
+	web, err := fpsdk.BindType(env.client, "WEB")
+	if err != nil {
+		t.Fatalf("BindType 失败: %v", err)
+	}
+	if got := web.Load()["site.title"]; got != "前端" {
+		t.Fatalf("BindType 拿到 %v，期望 前端", got)
+	}
+}
+```
+
+**实现者注意**：`newFullEnv` / `saveConfig` / `putConfig` / `newClient` / `stopGRPC` / `startGRPC` 要写。前四个照既有集成测试的脚手架扩展；后两个需要能停掉再起一个监听同一端口的 gRPC 服务端——照 `internal/grpcapi/server_test.go` 里起服务端的方式，把 listener 的地址记下来复用。
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `./scripts/test.sh ./internal/integration -run 'TestConfig|TestSaveWithoutPush|TestReadyRepulls|TestPartitionIsolation' -v`
+Expected: 编译失败或断言失败
+
+- [ ] **Step 3: 补齐脚手架直到测试通过**
+
+这一步不写新的产品代码——前 14 个任务已经把功能做完了。这里只写测试脚手架。**如果某条测试暴露出真实缺陷，回到对应的任务修，不要在集成测试里绕过去。**
+
+Run: `./scripts/test.sh ./internal/integration -v`
+Expected: PASS
+
+- [ ] **Step 4: 跑全量测试**
+
+Run: `./scripts/test.sh`
+Expected: PASS
+
+Run: `cd web && npx vitest run && npx tsc -b && npm run build`
+Expected: 全绿
+
+- [ ] **Step 5: 确认 `web/dist/.gitkeep` 仍被版本库跟踪**
+
+Run: `git ls-files web/dist/.gitkeep`
+Expected: 输出 `web/dist/.gitkeep`。它是 `//go:embed all:dist` 在前端未构建时能通过编译的唯一依托——`internal/integration/console_test.go` 有一条测试查的是**索引不是磁盘**，因为危险情形恰恰是"从版本库删了但本地还在"。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add internal/integration/config_test.go
+git commit -m "test(config): 端到端穿透——控制台改值直到 SDK 出口"
+```
+
+---
+
+## 收尾清单
+
+全部任务完成后逐条确认：
+
+- [ ] `./scripts/test.sh` 全绿
+- [ ] `cd web && npx vitest run && npx tsc -b` 全绿
+- [ ] `./scripts/gen.sh` 跑过且产物已提交
+- [ ] 17 处标「辨别力」的测试全部做过变异验证——计划里已经显式写出变异步骤的有 6 处（Task 3/6/9/10/11/13），其余 11 处实现者自己照同样方式做一遍
+- [ ] `sdk/` 仍未 import `internal/`、仍无 `panic`（`./scripts/test.sh ./sdk -run TestArch`）
+- [ ] `docs/superpowers/specs/2026-08-24-fp-foundation-platform-design.md` 第六节已按本模块的四条反转更新（环境维度、本地快照、secret、默认值与校验规则），否则下一个人会读到两份互相矛盾的设计
+- [ ] 写一份交接记录追加到设计文档末尾，照前三个阶段的格式：**没做完的事**、**留给下一阶段的待办**、**计划本身被实现者挑出的缺陷**、**新确立的技术约定**
