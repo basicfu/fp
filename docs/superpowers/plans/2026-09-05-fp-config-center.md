@@ -459,11 +459,22 @@ import (
 
 // newConfigFixture 建一个应用并返回它的 id 与一个 ConfigService。
 // pub 传 nil：本任务只测读，推送在 Task 5。
+//
+// **两个顺序陷阱**：
+//  1. testsupport.NewTestDB 每次调用都会 TRUNCATE 全部业务表。所以拿 pool
+//     和调 newAppService（它内部又调一次 NewTestDB）都必须发生在建应用
+//     **之前**——反过来的话，刚建好的应用会被下一次 TRUNCATE 冲掉，
+//     而报错会是一句与真实原因毫无关系的外键失败。
+//  2. ApplicationService.Create 返回**三个**值 (*domain.Application, secret, error)，
+//     明文密钥只在创建时返回这一次。
+//
+// newAppService 是 application_test.go 里已有的辅助（同属 package service_test），
+// 直接用，不要另建一个 registry。
 func newConfigFixture(t *testing.T) (*service.ConfigService, uuid.UUID) {
 	t.Helper()
 	pool := testsupport.NewTestDB(t)
-	apps := service.NewApplicationService(pool, nil)
-	app, err := apps.Create(context.Background(), "商城", "shop")
+	apps := newAppService(t)
+	app, _, err := apps.Create(context.Background(), "商城", "shop")
 	if err != nil {
 		t.Fatalf("建应用失败: %v", err)
 	}
@@ -4110,9 +4121,14 @@ describe('ConfigVersions', () => {
     // "改了哪些"是相邻两版 diff 出来的，后端不存这个字段。
     // 【辨别力】v2 里没变的 a 不能出现在改动清单里，否则一个"把整份 fields
     // 都列成改动"的实现同样会绿。
-    const row = await screen.findByTestId('version-2')
-    expect(row.textContent).toContain('b')
-    expect(row.textContent).not.toContain('a')
+    //
+    // 断言落在**改动清单这个容器**上，不是整行的 textContent——整行还带着
+    // 版本号、时间戳、按钮文案，用 not.toContain('a') 去查一个单字母会被
+    // 那些文字里任意一个 a 误伤，测试会因为无关的文案改动而假红。
+    // 清单渲染成 <ul data-testid="changed-2">，每个 key 一个 <li>。
+    const changed = await screen.findByTestId('changed-2')
+    const keys = Array.from(changed.querySelectorAll('li')).map((li) => li.textContent)
+    expect(keys).toEqual(['b'])
   })
 
   it('回滚前提示哪些项将变成未配置', async () => {
