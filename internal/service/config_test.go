@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -155,5 +156,194 @@ func TestListVersionsIsDescendingWithoutFields(t *testing.T) {
 		if v.Fields != nil {
 			t.Fatalf("v%d 的 Fields 应当是 nil，列表页不需要整份快照", v.Seq)
 		}
+	}
+}
+
+func TestSaveCreatesSequentialVersions(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	seq1, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"fee_rate": field(domain.ConfigValueFloat, "手续费率", `0.006`),
+	}, false)
+	if err != nil {
+		t.Fatalf("第一次保存失败: %v", err)
+	}
+	if seq1 != 1 {
+		t.Fatalf("首个版本 seq = %d，期望 1", seq1)
+	}
+
+	seq2, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"fee_rate": field(domain.ConfigValueFloat, "手续费率", `0.02`),
+	}, false)
+	if err != nil {
+		t.Fatalf("第二次保存失败: %v", err)
+	}
+	if seq2 != 2 {
+		t.Fatalf("第二个版本 seq = %d，期望 2", seq2)
+	}
+
+	cur, err := svc.Current(ctx, appID, domain.ConfigTypeDefault)
+	if err != nil {
+		t.Fatalf("读当前版本失败: %v", err)
+	}
+	if got := string(cur.Fields["fee_rate"].Value); got != "0.02" {
+		t.Fatalf("当前值 = %s，期望 0.02", got)
+	}
+
+	// 旧版本必须原样还在——回滚全靠它。
+	old, err := svc.Version(ctx, appID, domain.ConfigTypeDefault, 1)
+	if err != nil {
+		t.Fatalf("读 v1 失败: %v", err)
+	}
+	if got := string(old.Fields["fee_rate"].Value); got != "0.006" {
+		t.Fatalf("v1 的值 = %s，期望 0.006", got)
+	}
+}
+
+// 删除配置项就是"新版本的 fields 里没有它"。这条同时验证 Save 是全量替换
+// 而不是合并——如果实现写成了 merge，被删的 key 会留在新版本里。
+func TestSaveIsFullReplacement(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	if _, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"a": field(domain.ConfigValueInt, "", `1`),
+		"b": field(domain.ConfigValueInt, "", `2`),
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	if _, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"a": field(domain.ConfigValueInt, "", `1`),
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	cur, _ := svc.Current(ctx, appID, domain.ConfigTypeDefault)
+	if _, ok := cur.Fields["b"]; ok {
+		t.Fatal("b 已被删除，不该出现在当前版本里")
+	}
+	old, _ := svc.Version(ctx, appID, domain.ConfigTypeDefault, 1)
+	if _, ok := old.Fields["b"]; !ok {
+		t.Fatal("b 必须留在 v1 里，否则回滚恢复不了它")
+	}
+}
+
+// 未配置（value 是 JSON null）与已删除（key 不在 map 里）是两件事。
+// 【辨别力】两种情形必须同时造出来：只造一种的话，把两者混为一谈的实现
+// （比如保存时顺手丢掉 value 为 null 的项）照样会绿。
+func TestSaveKeepsUnsetFieldsDistinctFromDeleted(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	if _, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"unset":   field(domain.ConfigValueString, "还没配", `null`),
+		"deleted": field(domain.ConfigValueInt, "马上删", `1`),
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	if _, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"unset": field(domain.ConfigValueString, "还没配", `null`),
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	cur, _ := svc.Current(ctx, appID, domain.ConfigTypeDefault)
+	f, ok := cur.Fields["unset"]
+	if !ok {
+		t.Fatal("未配置的项必须仍然存在——它是控制台上待填的那一行")
+	}
+	if f.IsSet() {
+		t.Fatal("unset 不该被判成已配置")
+	}
+	if _, ok := cur.Fields["deleted"]; ok {
+		t.Fatal("已删除的项不该出现")
+	}
+}
+
+// 保存时按类型转换，转不过去才报错（弱约束）。
+func TestSaveCoercesValues(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	if _, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"n": field(domain.ConfigValueInt, "", `"3"`),
+	}, false); err != nil {
+		t.Fatalf("字符串 3 应当能存进 int 项: %v", err)
+	}
+	cur, _ := svc.Current(ctx, appID, domain.ConfigTypeDefault)
+	if got := string(cur.Fields["n"].Value); got != "3" {
+		t.Fatalf("存进去的值 = %s，期望规范化成 3", got)
+	}
+
+	_, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"n": field(domain.ConfigValueInt, "", `"abc"`),
+	}, false)
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v，期望包装了 domain.ErrInvalidArgument", err)
+	}
+}
+
+// 分区隔离：两个分区各有各的 seq，改一个不影响另一个。
+// 【辨别力】两个分区的值必须**不同**，否则"分区对了"和"压根没分区"
+// 产出同样的结果。
+func TestSaveIsolatesPartitions(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	if _, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"site.title": field(domain.ConfigValueString, "", `"后端看到的"`),
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	if _, err := svc.Save(ctx, appID, domain.ConfigTypeWeb, map[string]domain.ConfigField{
+		"site.title": field(domain.ConfigValueString, "", `"前端看到的"`),
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	def, _ := svc.Current(ctx, appID, domain.ConfigTypeDefault)
+	web, _ := svc.Current(ctx, appID, domain.ConfigTypeWeb)
+
+	if got := string(def.Fields["site.title"].Value); got != `"后端看到的"` {
+		t.Fatalf("DEFAULT 分区的值 = %s", got)
+	}
+	if got := string(web.Fields["site.title"].Value); got != `"前端看到的"` {
+		t.Fatalf("WEB 分区的值 = %s", got)
+	}
+	// seq 是**分区内**自增：两个分区各写了一次，各自都该是 1。
+	if def.Seq != 1 || web.Seq != 1 {
+		t.Fatalf("DEFAULT seq=%d, WEB seq=%d，期望各自都是 1", def.Seq, web.Seq)
+	}
+}
+
+// 造满上限再多 5 版，断言最老的 5 版被删、其余都在、当前配置不受影响。
+func TestSavePrunesOldVersions(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	total := service.ConfigMaxVersions + 5
+	for i := 1; i <= total; i++ {
+		if _, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+			"n": field(domain.ConfigValueInt, "", fmt.Sprintf("%d", i)),
+		}, false); err != nil {
+			t.Fatalf("第 %d 次保存失败: %v", i, err)
+		}
+	}
+
+	for seq := int64(1); seq <= 5; seq++ {
+		if _, err := svc.Version(ctx, appID, domain.ConfigTypeDefault, seq); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("v%d 应当已被修剪，err = %v", seq, err)
+		}
+	}
+	if _, err := svc.Version(ctx, appID, domain.ConfigTypeDefault, 6); err != nil {
+		t.Fatalf("v6 应当还在: %v", err)
+	}
+	cur, _ := svc.Current(ctx, appID, domain.ConfigTypeDefault)
+	if cur.Seq != int64(total) {
+		t.Fatalf("当前版本 seq = %d，期望 %d", cur.Seq, total)
+	}
+	if got := string(cur.Fields["n"].Value); got != fmt.Sprintf("%d", total) {
+		t.Fatalf("当前值 = %s，期望 %d", got, total)
 	}
 }
