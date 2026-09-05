@@ -29,7 +29,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `internal/store/migrations/00007_config.sql` | `config` 表的建表与回滚 |
+| `internal/store/migrations/00008_config.sql` | `config` 表的建表与回滚 |
 | `internal/domain/config.go` | `Config` / `ConfigField` 类型、分区与类型常量、值的弱转换 |
 | `internal/domain/config_test.go` | 弱转换与 `IsSet` 的表驱动测试 |
 | `internal/store/config.go` | `ConfigPublisher`：`fp:config` 频道的发布与订阅 |
@@ -73,7 +73,7 @@
 ## Task 1: 数据模型与领域类型
 
 **Files:**
-- Create: `internal/store/migrations/00007_config.sql`
+- Create: `internal/store/migrations/00008_config.sql`
 - Create: `internal/domain/config.go`
 - Test: `internal/domain/config_test.go`
 
@@ -92,7 +92,7 @@
 
 - [ ] **Step 1: 写迁移**
 
-创建 `internal/store/migrations/00007_config.sql`：
+创建 `internal/store/migrations/00008_config.sql`：
 
 ```sql
 -- +goose Up
@@ -431,7 +431,7 @@ Expected: PASS。若仓库没有这条测试，改跑 `./scripts/test.sh ./inter
 - [ ] **Step 7: 提交**
 
 ```bash
-git add internal/store/migrations/00007_config.sql internal/domain/config.go internal/domain/config_test.go internal/domain/codes.go
+git add internal/store/migrations/00008_config.sql internal/domain/config.go internal/domain/config_test.go internal/domain/codes.go
 git commit -m "feat(config): 配置中心的表结构与领域类型"
 ```
 
@@ -1495,11 +1495,11 @@ message GetConfigResponse {
 }
 ```
 
-在 `proto/fp/v1/auth.proto` 的 `WatchResponse` 里加一个分支（注意 oneof 的字段号接着往下排，现有最大是 3）：
+在 `proto/fp/v1/auth.proto` 的 `WatchResponse` 里加一个分支。**注意字段号**：main 合入 authz 之后，这个 oneof 已经占到 5（`revoke=1` / `ready=2` / `purge=3` / `policy_changed=4` / `user_role_changed=5`），所以新分支是 **6**，不能复用任何已占用的号——proto 的字段号一旦发布就不能改动或重用。
 
 ```protobuf
     // config_changed 表示某个分区的配置变了，SDK 应当重拉。
-    ConfigChanged config_changed = 4;
+    ConfigChanged config_changed = 6;
 ```
 
 并在同一个文件末尾（或 config.proto 里，二选一——放 auth.proto 更省一次 import）加：
