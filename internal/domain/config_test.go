@@ -40,6 +40,14 @@ func TestCoerceConfigValue(t *testing.T) {
 		// null 一律是"未配置"，任何类型都接受
 		{"null 进 int", domain.ConfigValueInt, `null`, `null`, false},
 		{"null 进 object", domain.ConfigValueObject, `null`, `null`, false},
+
+		// 大整数必须原样保留：转成 any 再转回来会静默舍入到 float64 精度。
+		{"object 里的大整数", domain.ConfigValueObject, `{"id":9007199254740993}`, `{"id":9007199254740993}`, false},
+		{"array 里的大整数", domain.ConfigValueArray, `[9007199254740993]`, `[9007199254740993]`, false},
+		// object 的 key 顺序必须原样保留，不能被重排成字母序。
+		{"object 的 key 顺序", domain.ConfigValueObject, `{"b":1,"a":2}`, `{"b":1,"a":2}`, false},
+		// compact：多余空白要去掉，但内容与顺序不变。
+		{"object 去空白", domain.ConfigValueObject, `{ "b" : 1 }`, `{"b":1}`, false},
 	}
 
 	for _, c := range cases {
@@ -68,8 +76,8 @@ func TestConfigFieldIsSet(t *testing.T) {
 		want bool
 	}{
 		{"已配置", `3`, true},
-		{"配成了 false", `false`, true},   // false 是有效值，不是未配置
-		{"配成了 0", `0`, true},           // 0 同理
+		{"配成了 false", `false`, true}, // false 是有效值，不是未配置
+		{"配成了 0", `0`, true},         // 0 同理
 		{"配成了空串", `""`, true},
 		{"JSON null 是未配置", `null`, false},
 		{"nil 是未配置", ``, false},
