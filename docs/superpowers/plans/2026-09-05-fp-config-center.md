@@ -608,7 +608,7 @@ func (s *ConfigService) Current(ctx context.Context, appID uuid.UUID, typ string
 		return domain.Config{}, err
 	}
 	c, err := s.scanOne(ctx, `
-		SELECT seq, fields, extract(epoch FROM created_at)::bigint
+		SELECT seq, fields, (extract(epoch FROM created_at) * 1000)::bigint
 		FROM config WHERE application_id = $1 AND type = $2
 		ORDER BY seq DESC LIMIT 1`, appID, typ)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -628,7 +628,7 @@ func (s *ConfigService) Version(ctx context.Context, appID uuid.UUID, typ string
 		return domain.Config{}, err
 	}
 	c, err := s.scanOne(ctx, `
-		SELECT seq, fields, extract(epoch FROM created_at)::bigint
+		SELECT seq, fields, (extract(epoch FROM created_at) * 1000)::bigint
 		FROM config WHERE application_id = $1 AND type = $2 AND seq = $3`, appID, typ, seq)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Config{}, domain.Fail(domain.ErrNotFound, domain.CodeConfigVersionNotFound, "配置版本不存在").
@@ -647,7 +647,7 @@ func (s *ConfigService) ListVersions(ctx context.Context, appID uuid.UUID, typ s
 		limit = 20
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT seq, extract(epoch FROM created_at)::bigint
+		SELECT seq, (extract(epoch FROM created_at) * 1000)::bigint
 		FROM config WHERE application_id = $1 AND type = $2
 		ORDER BY seq DESC LIMIT $3`, appID, typ, limit)
 	if err != nil {
@@ -670,8 +670,17 @@ func (s *ConfigService) ListVersions(ctx context.Context, appID uuid.UUID, typ s
 }
 
 // scanOne 跑一条只返回 (seq, fields, created_at) 的查询。
-// 没有行时原样返回 pgx.ErrNoRows，由调用方决定那是错误还是正常状态。
-func (s *ConfigService) scanOne(ctx context.Context, sql string, args ...any) (domain.Config, error) {
+//
+// 它**只负责这三个值**，不去回填 ApplicationID / Type——那两个是调用方
+// 自己传进来的参数，调用方直接填即可。曾经的写法是从 args 里
+// `args[0].(uuid.UUID)` / `args[1].(string)` 反推，那要求"SQL 里 $1/$2 的
+// 顺序、调用点传参顺序、这里写死的下标"三处手工保持一致，而且断言用的是
+// 丢弃 ok 的形式——错位时不会 panic，只会静默填进零值，产出不报错的错误
+// 数据，比崩溃难查得多。
+//
+// 没有行时原样返回 pgx.ErrNoRows（不包装），由调用方决定那是错误还是
+// 正常状态。
+func (s *ConfigService) scanOne(ctx context.Context, sql string, args ...any) (int64, map[string]domain.ConfigField, int64, error) {
 	var (
 		seq       int64
 		raw       []byte
@@ -679,20 +688,15 @@ func (s *ConfigService) scanOne(ctx context.Context, sql string, args ...any) (d
 	)
 	if err := s.pool.QueryRow(ctx, sql, args...).Scan(&seq, &raw, &createdAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Config{}, err
+			return 0, nil, 0, err
 		}
-		return domain.Config{}, fmt.Errorf("service: 查询配置: %w", err)
+		return 0, nil, 0, fmt.Errorf("service: 查询配置: %w", err)
 	}
 	fields := map[string]domain.ConfigField{}
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return domain.Config{}, fmt.Errorf("service: 解析配置 fields: %w", err)
+		return 0, nil, 0, fmt.Errorf("service: 解析配置 fields: %w", err)
 	}
-	appID, _ := args[0].(uuid.UUID)
-	typ, _ := args[1].(string)
-	return domain.Config{
-		ApplicationID: appID, Type: typ, Seq: seq,
-		Fields: fields, CreatedAt: createdAt,
-	}, nil
+	return seq, fields, createdAt, nil
 }
 ```
 
