@@ -1574,17 +1574,17 @@ import (
 // 【辨别力】必须同时造出"已配置"和"未配置"两种项：只造一种的话，
 // 一个不做过滤、把 null 也吐出去的实现照样会绿。
 func TestGetConfigOmitsUnsetFields(t *testing.T) {
-	env := newTestEnv(t) // 复用 auth_service_test.go 里的脚手架
+	e := newGRPCEnv(t)
 	ctx := context.Background()
 
-	if _, err := env.configs.Save(ctx, env.appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
 		"fee_rate": {Type: domain.ConfigValueFloat, Value: json.RawMessage(`0.02`)},
 		"api_key":  {Type: domain.ConfigValueString, Value: json.RawMessage(`null`)},
 	}, false); err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
 
-	resp, err := env.configClient.GetConfig(env.authedCtx(ctx), &fpv1.GetConfigRequest{
+	resp, err := e.configClient.GetConfig(e.authed(ctx), &fpv1.GetConfigRequest{
 		Type: domain.ConfigTypeDefault,
 	})
 	if err != nil {
@@ -1609,17 +1609,17 @@ func TestGetConfigOmitsUnsetFields(t *testing.T) {
 // 分区隔离穿到 gRPC 出口。
 // 【辨别力】两个分区的值必须不同，否则"分区对了"和"压根没分区"同结果。
 func TestGetConfigIsolatesPartitions(t *testing.T) {
-	env := newTestEnv(t)
+	e := newGRPCEnv(t)
 	ctx := context.Background()
 
-	mustSaveTyped(t, env, domain.ConfigTypeDefault, `"后端"`)
-	mustSaveTyped(t, env, domain.ConfigTypeWeb, `"前端"`)
+	mustSaveTyped(t, e, domain.ConfigTypeDefault, `"后端"`)
+	mustSaveTyped(t, e, domain.ConfigTypeWeb, `"前端"`)
 
 	for _, c := range []struct{ typ, want string }{
 		{domain.ConfigTypeDefault, `"后端"`},
 		{domain.ConfigTypeWeb, `"前端"`},
 	} {
-		resp, err := env.configClient.GetConfig(env.authedCtx(ctx), &fpv1.GetConfigRequest{Type: c.typ})
+		resp, err := e.configClient.GetConfig(e.authed(ctx), &fpv1.GetConfigRequest{Type: c.typ})
 		if err != nil {
 			t.Fatalf("%s: GetConfig 失败: %v", c.typ, err)
 		}
@@ -1634,8 +1634,8 @@ func TestGetConfigIsolatesPartitions(t *testing.T) {
 }
 
 func TestGetConfigRejectsUnknownPartition(t *testing.T) {
-	env := newTestEnv(t)
-	_, err := env.configClient.GetConfig(env.authedCtx(context.Background()),
+	e := newGRPCEnv(t)
+	_, err := e.configClient.GetConfig(e.authed(context.Background()),
 		&fpv1.GetConfigRequest{Type: "MOBILE"})
 	if err == nil {
 		t.Fatal("未知分区应当被拒绝")
@@ -1647,8 +1647,8 @@ func TestGetConfigRejectsUnknownPartition(t *testing.T) {
 // 该分区一个版本都没有时返回 version=0 与空对象，不是错误——
 // "还没配过任何东西"是正常状态，SDK 会据此把全部字段算进 missing。
 func TestGetConfigEmptyPartition(t *testing.T) {
-	env := newTestEnv(t)
-	resp, err := env.configClient.GetConfig(env.authedCtx(context.Background()),
+	e := newGRPCEnv(t)
+	resp, err := e.configClient.GetConfig(e.authed(context.Background()),
 		&fpv1.GetConfigRequest{Type: domain.ConfigTypeDefault})
 	if err != nil {
 		t.Fatalf("不该报错: %v", err)
@@ -1662,12 +1662,37 @@ func TestGetConfigEmptyPartition(t *testing.T) {
 }
 ```
 
-**实现者注意**：`newTestEnv` / `authedCtx` / `assertStatusCode` / `mustSaveTyped` 这几个辅助——先读 `internal/grpcapi/auth_service_test.go`，那里已经有等价的脚手架（起服务端、带 app 凭据的 ctx、断言状态码）。**扩展它而不是另写一套**，并给 env 加上 `configs *service.ConfigService` 与 `configClient fpv1.ConfigServiceClient` 两个字段。`mustSaveTyped` 自己写一个三行的辅助：按给定分区存一个 `site.title`。
+**实现者注意——脚手架的真实名字在 `internal/grpcapi/env_test.go`，扩展它，不要另写一套：**
+
+```go
+type grpcEnv struct {
+    client fpv1.AuthServiceClient   // 已有
+    server *Server
+    app    *domain.Application      // e.app.ID 就是 appID（uuid.UUID）
+    appID, secret string            // 这两个是**应用凭据**字符串，不是主键
+    auth *service.AuthService; sessions *service.SessionService
+    accounts *service.AccountService; users *service.UserService
+    apps *service.ApplicationService; pool *pgxpool.Pool; clock *fakeClock
+}
+func newGRPCEnv(t *testing.T) *grpcEnv                                  // bufconn 上起真实服务端
+func (e *grpcEnv) authed(ctx context.Context) context.Context           // 挂上 app 凭据 metadata
+```
+
+**注意 `e.appID` 是应用凭据里的 app_id 字符串，服务端主键要用 `e.app.ID`（uuid.UUID）**——两者不是一回事，传错了 `Save` 会写到一个不存在的应用上。
+
+给 `grpcEnv` 加两个字段并在 `newGRPCEnv` 里一并装配：
+
+```go
+	configs      *service.ConfigService
+	configClient fpv1.ConfigServiceClient
+```
+
+断言 gRPC 状态码照 `auth_service_test.go` 里既有测试的写法（那里已有若干用例可参照）。`mustSaveTyped` 自己写一个三行辅助：按给定分区存一个 `site.title`。
 
 - [ ] **Step 4: 跑测试确认失败**
 
 Run: `./scripts/test.sh ./internal/grpcapi -run TestGetConfig -v`
-Expected: 编译失败（`env.configClient` 不存在）
+Expected: 编译失败（`e.configClient` 不存在）
 
 - [ ] **Step 5: 写实现**
 
@@ -2095,11 +2120,11 @@ git commit -m "feat(config): ConfigHub 把 Redis 配置订阅扇出给 Watch 流
 ```go
 // 保存并选择推送 → Watch 流上收到 ConfigChanged。
 func TestWatchDeliversConfigChanged(t *testing.T) {
-	env := newTestEnv(t)
+	e := newGRPCEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	stream, err := env.authClient.Watch(env.authedCtx(ctx))
+	stream, err := e.client.Watch(e.authed(ctx))
 	if err != nil {
 		t.Fatalf("建流失败: %v", err)
 	}
@@ -2108,7 +2133,7 @@ func TestWatchDeliversConfigChanged(t *testing.T) {
 		t.Fatalf("首条消息应当是 ready，得到 %v / %v", msg, err)
 	}
 
-	if _, err := env.configs.Save(ctx, env.appID, domain.ConfigTypeWeb, map[string]domain.ConfigField{
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeWeb, map[string]domain.ConfigField{
 		"site.title": {Type: domain.ConfigValueString, Value: json.RawMessage(`"商城"`)},
 	}, true); err != nil {
 		t.Fatalf("保存失败: %v", err)
@@ -2134,11 +2159,11 @@ func TestWatchDeliversConfigChanged(t *testing.T) {
 // 【辨别力】两条腿都要断言——这里断言"没推"，Task 11 的 SDK 测试断言
 // "新起一次 Bind 能拿到新值"。只断言前者的话，一个根本没存的实现也会绿。
 func TestWatchSilentWhenPushDisabled(t *testing.T) {
-	env := newTestEnv(t)
+	e := newGRPCEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	stream, err := env.authClient.Watch(env.authedCtx(ctx))
+	stream, err := e.client.Watch(e.authed(ctx))
 	if err != nil {
 		t.Fatalf("建流失败: %v", err)
 	}
@@ -2146,7 +2171,7 @@ func TestWatchSilentWhenPushDisabled(t *testing.T) {
 		t.Fatalf("首条消息应当是 ready，得到 %v / %v", msg, err)
 	}
 
-	if _, err := env.configs.Save(ctx, env.appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
 		"n": {Type: domain.ConfigValueInt, Value: json.RawMessage(`1`)},
 	}, false); err != nil {
 		t.Fatalf("保存失败: %v", err)
