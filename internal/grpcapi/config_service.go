@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
@@ -54,7 +53,3 @@ func (s *configServer) GetConfig(ctx context.Context, req *fpv1.GetConfigRequest
 	}
 	return &fpv1.GetConfigResponse{Version: cfg.Seq, Values: string(raw)}, nil
 }
-
-// 编译期断言：分区常量必须与 domain 的一致。这两处分处 proto 注释与 Go
-// 常量，改一处忘另一处不会有任何编译错误。
-var _ = [...]string{domain.ConfigTypeDefault, domain.ConfigTypeWeb}

@@ -117,3 +117,31 @@ func mustSaveTyped(t *testing.T, e *grpcEnv, typ, jsonValue string) {
 		t.Fatalf("保存分区 %s 失败: %v", typ, err)
 	}
 }
+
+// 停用的应用不该还能拉到配置。
+//
+// 这条守护的是 GetConfig 走 GetActiveByAppID 而不是 GetByAppID——
+// Watch 那条路径历史上正是因为用错而让 status 变成"没人读的死开关"
+// （见 TestWatchRejectsDisabledApplication 附近的注释）。
+func TestGetConfigRejectsDisabledApplication(t *testing.T) {
+	e := newGRPCEnv(t)
+	ctx := context.Background()
+
+	// 先存一份配置，确保失败原因是"应用被停用"而不是"没有配置"。
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"fee_rate": {Type: domain.ConfigValueFloat, Value: json.RawMessage(`0.02`)},
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	e.disableApplication(t)
+
+	_, err := e.configClient.GetConfig(e.authed(ctx), &fpv1.GetConfigRequest{
+		Type: domain.ConfigTypeDefault,
+	})
+	if err == nil {
+		t.Fatal("停用的应用不该能拉到配置")
+	}
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("状态码 = %v，期望 PermissionDenied", got)
+	}
+}
