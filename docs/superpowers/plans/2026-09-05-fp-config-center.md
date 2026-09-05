@@ -1065,7 +1065,7 @@ func TestSavePrunesOldVersions(t *testing.T) {
 Run: `./scripts/test.sh ./internal/service -run TestSavePrunesOldVersions -v`
 Expected: PASS
 
-- [ ] **Step 8: 提交**
+- [ ] **Step 8: 提交**（注意把 `internal/grpcapi/env_test.go` 也 add 上——Step 3 扩展了它，漏掉会是个编译不过的坏提交）
 
 ```bash
 git add internal/service/config.go internal/service/config_test.go
@@ -1471,7 +1471,7 @@ git commit -m "feat(config): 配置变更的 Redis 广播与订阅"
 - Produces:
   - `fpv1.ConfigServiceClient` / `fpv1.ConfigServiceServer`，`GetConfig(GetConfigRequest{Type}) → GetConfigResponse{Version, Values}`
   - `fpv1.WatchResponse_ConfigChanged` 分支与 `fpv1.ConfigChanged{Type, Version}`
-  - `func grpcapi.newConfigServer(cfgs *service.ConfigService, apps appLookup) fpv1.ConfigServiceServer`（包内构造，由 `New` 装配）
+  - `func grpcapi.newConfigServer(cfgs *service.ConfigService, apps AppLookup) fpv1.ConfigServiceServer`（包内构造，由 `New` 装配）
 
 - [ ] **Step 1: 写 proto**
 
@@ -1557,7 +1557,7 @@ Expected: `生成完成。`，`sdk/gen/fp/v1/config.pb.go`、`config_grpc.pb.go`
 创建 `internal/grpcapi/config_service_test.go`。照着 `internal/grpcapi/auth_service_test.go` 的方式起一个真实的 gRPC 服务端与客户端（复用那里已有的测试脚手架，不要另起一套）：
 
 ```go
-package grpcapi_test
+package grpcapi
 
 import (
 	"context"
@@ -1641,7 +1641,10 @@ func TestGetConfigRejectsUnknownPartition(t *testing.T) {
 		t.Fatal("未知分区应当被拒绝")
 	}
 	// 状态码走既有的 StatusFrom 映射，与 HTTP 层的 400 一一对应。
-	assertStatusCode(t, err, codes.InvalidArgument)
+	// 状态码断言照 auth_service_test.go 的内联写法，仓库里没有 assertStatusCode 辅助。
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("状态码 = %v，期望 InvalidArgument", status.Code(err))
+	}
 }
 
 // 该分区一个版本都没有时返回 version=0 与空对象，不是错误——
@@ -1714,10 +1717,10 @@ import (
 type configServer struct {
 	fpv1.UnimplementedConfigServiceServer
 	cfgs *service.ConfigService
-	apps appLookup
+	apps AppLookup
 }
 
-func newConfigServer(cfgs *service.ConfigService, apps appLookup) *configServer {
+func newConfigServer(cfgs *service.ConfigService, apps AppLookup) *configServer {
 	return &configServer{cfgs: cfgs, apps: apps}
 }
 
@@ -1761,7 +1764,7 @@ func (s *configServer) GetConfig(ctx context.Context, req *fpv1.GetConfigRequest
 var _ = [...]string{domain.ConfigTypeDefault, domain.ConfigTypeWeb}
 ```
 
-**`appLookup`**：`auth_service.go` 里已经有一个只含 `GetActiveByAppID` 的接口（见它对 `*service.ApplicationService` 的用法）。复用那个接口名，不要新定义一个同形状的。
+**`AppLookup`**：`auth_service.go` 里已经有一个只含 `GetActiveByAppID` 的接口（见它对 `*service.ApplicationService` 的用法）。复用那个接口名，不要新定义一个同形状的。
 
 在 `internal/grpcapi/server.go` 的 `Deps` 里加 `Configs *service.ConfigService`，并在 `New` 里注册：
 
@@ -1781,7 +1784,7 @@ Expected: PASS，四条全绿
 Run: `./scripts/test.sh ./internal/grpcapi -run TestGetConfigOmitsUnsetFields -v`
 Expected: **FAIL**，报"未配置的 api_key 不该出现在 values 里"。确认后改回来。
 
-- [ ] **Step 8: 提交**
+- [ ] **Step 8: 提交**（注意把 `internal/grpcapi/env_test.go` 也 add 上——Step 3 扩展了它，漏掉会是个编译不过的坏提交）
 
 ```bash
 git add proto/ sdk/gen/ internal/grpcapi/config_service.go internal/grpcapi/config_service_test.go internal/grpcapi/server.go
