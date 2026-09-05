@@ -293,3 +293,120 @@ func TestChiAuthzPolicyUnavailableGoesToOnError(t *testing.T) {
 		t.Fatal("策略未就绪被当成了没权限（403）")
 	}
 }
+
+// 六种路由形态下，chi.Walk 与试匹配的一致性。
+//
+// 上一条测试用的是一棵具体的路由树；这条换个角度，把 chi 里能产生模式差异
+// 的形态逐个过一遍——Route / Mount / 显式尾斜杠 / 根路由 / 通配。差异是单向
+// 的（Walk 加尾斜杠，Match 从不加），normalizePattern 只挂在上报侧就够了，
+// 这条测试是那个判断的依据。哪天升级 chi 把方向改了，这里会先红。
+func TestWalkAndMatchAgreeAcrossShapes(t *testing.T) {
+	h := func(http.ResponseWriter, *http.Request) {}
+
+	shapes := []struct {
+		name  string
+		build func() chi.Router
+		// probe 是一个会命中的具体 URL
+		method, url string
+	}{
+		{"顶层显式带尾斜杠", func() chi.Router {
+			r := chi.NewRouter()
+			r.Get("/orders/", h)
+			return r
+		}, "GET", "/orders/"},
+		{"Route 子路由根", func() chi.Router {
+			r := chi.NewRouter()
+			r.Route("/orders", func(r chi.Router) { r.Get("/", h) })
+			return r
+		}, "GET", "/orders/"},
+		{"Mount 子路由根", func() chi.Router {
+			sub := chi.NewRouter()
+			sub.Get("/", h)
+			r := chi.NewRouter()
+			r.Mount("/orders", sub)
+			return r
+		}, "GET", "/orders/"},
+		{"Mount 带路径参数", func() chi.Router {
+			sub := chi.NewRouter()
+			sub.Get("/{id}", h)
+			r := chi.NewRouter()
+			r.Mount("/orders", sub)
+			return r
+		}, "GET", "/orders/9"},
+		{"根路由", func() chi.Router {
+			r := chi.NewRouter()
+			r.Get("/", h)
+			return r
+		}, "GET", "/"},
+		{"通配后缀", func() chi.Router {
+			r := chi.NewRouter()
+			r.Get("/files/*", h)
+			return r
+		}, "GET", "/files/a/b"},
+	}
+
+	for _, s := range shapes {
+		t.Run(s.name, func(t *testing.T) {
+			r := s.build()
+
+			reported := map[string]bool{}
+			for _, p := range CollectChi(r, "") {
+				reported[p.Key] = true
+			}
+
+			pattern, ok := matchThrough(r, s.method, s.url)
+			if !ok {
+				t.Fatalf("%s %s 匹配不上，测试构造失效", s.method, s.url)
+			}
+			key := PermissionKey(s.method, pattern)
+			if !reported[key] {
+				var all []string
+				for k := range reported {
+					all = append(all, k)
+				}
+				sort.Strings(all)
+				t.Fatalf("判定侧算出 %q，上报侧只有 %v——两侧对不上，这种形态的接口会被静默全拒", key, all)
+			}
+		})
+	}
+}
+
+// 【辨别力】路由压根不存在时，不能回 403。
+//
+// 交给 chi 去回它的 404。在鉴权这里拦下来回 403，会把"URL 写错了"伪装成
+// "没有权限"——排查的人会去翻角色配置，而问题在请求方那边。方法用错（405）
+// 同理。
+func TestChiAuthzUnmatchedRouteIsNotForbidden(t *testing.T) {
+	az := &Authz{}
+	az.setPolicy(&fpv1.AppPolicy{}) // 空策略：任何走到判定的请求都会被拒
+
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := context.WithValue(req.Context(), identityCtxKey{},
+				&Identity{UserID: "u1", Roles: []string{"普通用户"}})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	r.Use(ChiAuthz(az, nil))
+	r.Get("/orders/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	tests := []struct {
+		name, method, url string
+		want              int
+	}{
+		{"路径不存在 → 404", "GET", "/nope", http.StatusNotFound},
+		{"方法不对 → 405", "PUT", "/orders/1", http.StatusMethodNotAllowed},
+		// 对照组：路由存在且匹配上了，空策略下确实该 403
+		{"路由存在但没授权 → 403", "GET", "/orders/1", http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.url, nil))
+			if rec.Code != tt.want {
+				t.Fatalf("状态码 = %d, want %d", rec.Code, tt.want)
+			}
+		})
+	}
+}
