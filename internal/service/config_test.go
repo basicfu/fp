@@ -434,3 +434,71 @@ func TestSaveRejectsWholeBatchOnOneBadField(t *testing.T) {
 		t.Fatal("good 不该落库：同一批里有字段转换失败，整批都不算数")
 	}
 }
+
+// 回滚生成新版本，不删历史。这条同时覆盖设计文档测试策略第 9 条的
+// "版本可精确还原"：v1 的完整快照（含类型、备注、值）必须逐字段复现。
+func TestRollbackCopiesVersionForward(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	// v1：两项
+	mustSave(t, svc, appID, map[string]domain.ConfigField{
+		"a": field(domain.ConfigValueInt, "甲", `1`),
+		"b": field(domain.ConfigValueString, "乙", `"x"`),
+	})
+	// v2：删掉 b
+	mustSave(t, svc, appID, map[string]domain.ConfigField{
+		"a": field(domain.ConfigValueInt, "甲", `1`),
+	})
+	// v3：把 a 改成 object 类型（改类型也只是普通的一次保存）
+	mustSave(t, svc, appID, map[string]domain.ConfigField{
+		"a": field(domain.ConfigValueObject, "甲改了类型", `{"k":1}`),
+	})
+
+	newSeq, err := svc.Rollback(ctx, appID, domain.ConfigTypeDefault, 1, false)
+	if err != nil {
+		t.Fatalf("回滚失败: %v", err)
+	}
+	if newSeq != 4 {
+		t.Fatalf("回滚生成的版本 = %d，期望 4", newSeq)
+	}
+
+	// v1..v3 必须原样都在——回滚是往前追加，不是往回删。
+	for seq := int64(1); seq <= 3; seq++ {
+		if _, err := svc.Version(ctx, appID, domain.ConfigTypeDefault, seq); err != nil {
+			t.Fatalf("v%d 应当仍在: %v", seq, err)
+		}
+	}
+
+	v1, _ := svc.Version(ctx, appID, domain.ConfigTypeDefault, 1)
+	v4, _ := svc.Version(ctx, appID, domain.ConfigTypeDefault, 4)
+	if len(v4.Fields) != len(v1.Fields) {
+		t.Fatalf("v4 有 %d 项，v1 有 %d 项", len(v4.Fields), len(v1.Fields))
+	}
+	for k, want := range v1.Fields {
+		got, ok := v4.Fields[k]
+		if !ok {
+			t.Fatalf("v4 缺少 %q", k)
+		}
+		// 类型和备注也要跟着回去——它们和值一样都在 fields 里、都随版本走。
+		// 这正是"改类型可被回滚撤销"那条设计的执行点。
+		if got.Type != want.Type || got.Desc != want.Desc || string(got.Value) != string(want.Value) {
+			t.Fatalf("v4[%q] = %+v，期望 %+v", k, got, want)
+		}
+	}
+}
+
+func TestRollbackToMissingVersion(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	_, err := svc.Rollback(context.Background(), appID, domain.ConfigTypeDefault, 9, false)
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v，期望包装了 domain.ErrNotFound", err)
+	}
+}
+
+func mustSave(t *testing.T, svc *service.ConfigService, appID uuid.UUID, fields map[string]domain.ConfigField) {
+	t.Helper()
+	if _, err := svc.Save(context.Background(), appID, domain.ConfigTypeDefault, fields, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+}

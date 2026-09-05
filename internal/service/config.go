@@ -248,3 +248,21 @@ func (s *ConfigService) Save(
 	}
 	return seq, nil
 }
+
+// Rollback 把 seq 那一版的 fields 复制成一个新版本，返回新版本号。
+//
+// 复制而不是删除：v7 出了问题回滚到 v6，产出的是 v8，v7 原样留在历史里。
+// 这让"回滚本身"也可被回滚，审计链完整。
+//
+// 走 Save 而不是直接 INSERT ... SELECT：修剪、推送、以及"一次保存 = 一个
+// 版本"这套语义只该有一处实现。多出来的代价只是把 fields 在进程内绕一圈，
+// 一份几十项的 map，可以忽略。
+func (s *ConfigService) Rollback(
+	ctx context.Context, appID uuid.UUID, typ string, seq int64, push bool,
+) (int64, error) {
+	old, err := s.Version(ctx, appID, typ, seq)
+	if err != nil {
+		return 0, err
+	}
+	return s.Save(ctx, appID, typ, old.Fields, push)
+}
