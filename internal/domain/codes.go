@@ -55,8 +55,12 @@ const (
 	CodeInvalidArgument = "INVALID_ARGUMENT"
 	// CodeConnectorConfigInvalid 的 Detail 带 field（出问题的配置项键），
 	// 让控制台将来能把错误定位到具体表单字段上。
-	CodeConnectorConfigInvalid     = "CONNECTOR_CONFIG_INVALID"
-	CodePhoneInvalid               = "PHONE_INVALID"
+	CodeConnectorConfigInvalid = "CONNECTOR_CONFIG_INVALID"
+	// CodeConfigValueInvalid 是配置值按声明类型转换失败。Detail 里带原值与目标类型。
+	CodeConfigValueInvalid = "CONFIG_VALUE_INVALID"
+	// CodeConfigTypeInvalid 覆盖分区与值类型两处的取值不合法。
+	CodeConfigTypeInvalid  = "CONFIG_TYPE_INVALID"
+	CodePhoneInvalid       = "PHONE_INVALID"
 	CodePasswordTooShort           = "PASSWORD_TOO_SHORT"
 	CodePasswordTooLong            = "PASSWORD_TOO_LONG"
 	CodeSlugTaken                  = "SLUG_TAKEN"
@@ -111,6 +115,8 @@ var codeSentinels = map[string]error{
 
 	CodeInvalidArgument:            ErrInvalidArgument,
 	CodeConnectorConfigInvalid:     ErrInvalidArgument,
+	CodeConfigValueInvalid:         ErrInvalidArgument,
+	CodeConfigTypeInvalid:          ErrInvalidArgument,
 	CodePhoneInvalid:               ErrInvalidArgument,
 	CodePasswordTooShort:           ErrInvalidArgument,
 	CodePasswordTooLong:            ErrInvalidArgument,
