@@ -1759,9 +1759,12 @@ func (s *configServer) GetConfig(ctx context.Context, req *fpv1.GetConfigRequest
 	return &fpv1.GetConfigResponse{Version: cfg.Seq, Values: string(raw)}, nil
 }
 
-// 编译期断言：分区常量必须与 domain 的一致。这两处分处 proto 注释与 Go
-// 常量，改一处忘另一处不会有任何编译错误。
-var _ = [...]string{domain.ConfigTypeDefault, domain.ConfigTypeWeb}
+// 【不要写"编译期断言分区常量"那种 var _ = [...]string{...}】——它只在有人
+// 重命名或删除那两个 Go 常量时报错，而 proto 侧的 "DEFAULT"/"WEB" 只是注释
+// 里的自由文本、没有任何符号可供比对，所以它防不住它声称要防的那种漂移，
+// 只会让下一个人以为有守护。跨 sdk/ 与 internal/ 的取值配对统一放在
+// internal/integration（见 Task 9 的 TestConfigValueTypesMatch），那里是
+// 唯一能同时看到两边的地方。
 ```
 
 **`AppLookup`**：`auth_service.go` 里已经有一个只含 `GetActiveByAppID` 的接口（见它对 `*service.ApplicationService` 的用法）。复用那个接口名，不要新定义一个同形状的。
