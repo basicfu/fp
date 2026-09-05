@@ -34,19 +34,6 @@ func newConfigFixture(t *testing.T) (*service.ConfigService, uuid.UUID) {
 	if err != nil {
 		t.Fatalf("建应用失败: %v", err)
 	}
-
-	// 确保 config 表存在（workaround for goose migration issue）
-	ctx := context.Background()
-	_, _ = pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS config (
-			application_id uuid NOT NULL REFERENCES application(id) ON DELETE CASCADE,
-			type text NOT NULL,
-			seq bigint NOT NULL,
-			fields jsonb NOT NULL,
-			created_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (application_id, type, seq)
-		)`)
-
 	return service.NewConfigService(pool, nil), app.ID
 }
 
