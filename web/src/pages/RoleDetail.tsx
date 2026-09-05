@@ -32,6 +32,7 @@ export default function RoleDetail() {
   )
   const grants = useResource(() => api.get<{ grants: RoleGrant[] }>(`/roles/${id}/permissions`), [id])
 
+  const appName = apps.data?.find((a) => a.id === appId)?.name
   const r = role.data?.find((x) => x.id === id)
   const parent = r?.parentId ? role.data?.find((x) => x.id === r.parentId) : undefined
 
@@ -74,7 +75,13 @@ export default function RoleDetail() {
               }}
             >
               <SelectTrigger className="w-56">
-                <SelectValue placeholder="选择一个应用" />
+                {/*
+                  显式给出要显示的文字。base-ui 的 Select.Value 在拿不到
+                  对应 item 的标签时会直接把 value 渲染出来——这里的 value
+                  是应用的 UUID，界面上就成了一串没人认得的十六进制。
+                  从 URL 带着 ?app= 进来时必然如此（选项还没加载）。
+                */}
+                <SelectValue placeholder="选择一个应用">{appName}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {(apps.data ?? []).map((a) => (

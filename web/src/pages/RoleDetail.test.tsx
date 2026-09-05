@@ -200,3 +200,22 @@ test('没选应用时不请求权限点，并提示先选应用', async () => {
   // 只应该有 /roles/r1/permissions（回显用），不该有 /applications/*/permissions
   expect(permCalls.every(([url]) => String(url) === '/admin/api/roles/r1/permissions')).toBe(true)
 })
+
+// 【辨别力】应用选择器要显示应用名，不是 UUID。
+//
+// base-ui 的 Select.Value 在拿不到对应 item 的标签时，会**直接把 value
+// 渲染出来**——这里的 value 是应用的 UUID。从 URL 带着 ?app= 进来时必然
+// 触发（这也是分享链接、刷新页面的正常路径），界面上就成了一串没人认得
+// 的十六进制，管理员根本不知道自己在给哪个应用配权限。
+//
+// 这条是实机跑出来的：单元测试当时全绿，浏览器里显示的是
+// 01a0715a-888a-7137-a08a-f8543be6538e。
+test('应用选择器显示应用名而不是 UUID', async () => {
+  stubFetch([])
+  renderAt('/roles/r1?app=app-1')
+
+  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  const trigger = document.querySelector('[data-slot="select-trigger"]')
+  expect(trigger?.textContent).toContain('商城')
+  expect(trigger?.textContent).not.toContain('app-1')
+})

@@ -212,7 +212,8 @@ function CreateDialog({
               onValueChange={(v) => setParentId(v === NO_PARENT || v === null ? '' : v)}
             >
               <SelectTrigger id="parent">
-                <SelectValue placeholder="不继承" />
+                {/* 同 RoleDetail：value 是 UUID，拿不到标签时会把它直接显示出来。 */}
+                <SelectValue placeholder="不继承">{roles.find((x) => x.id === parentId)?.key}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_PARENT}>不继承</SelectItem>
@@ -292,7 +293,7 @@ function EditDialog({
               onValueChange={(v) => setParentId(v === NO_PARENT || v === null ? '' : v)}
             >
               <SelectTrigger id="edit-parent">
-                <SelectValue placeholder="不继承" />
+                <SelectValue placeholder="不继承">{roles.find((x) => x.id === parentId)?.key}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_PARENT}>不继承</SelectItem>
