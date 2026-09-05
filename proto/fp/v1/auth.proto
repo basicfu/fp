@@ -161,6 +161,8 @@ message WatchResponse {
     // 与 RevokeEvent 的语义相反：撤销是**拒绝**（用户被踢下线），角色变更
     // 只是**刷新**——给某人加个权限不该把他踢下线。
     UserRoleChanged user_role_changed = 5;
+    // config_changed 表示某个分区的配置变了，SDK 应当重拉。
+    ConfigChanged config_changed = 6;
   }
 }
 
@@ -226,4 +228,21 @@ message GetPolicyRequest {}
 
 message GetPolicyResponse {
   AppPolicy policy = 1;
+}
+
+// ConfigChanged 是一次配置变更的通知。
+//
+// 只推信号不推内容：SDK 收到后拉全量。配置项就几十条，拉全量比处理增量的
+// 乱序、丢失、部分应用简单得多——与 PolicyChanged 同一范式。
+message ConfigChanged {
+  // type 指出哪个分区变了。一次保存只动一个分区（版本序列是分区内自增的），
+  // 所以正常情况下这里是单值。
+  //
+  // **空串表示"分区未知，请重拉全部绑定"**：fp 侧的 Redis 订阅重建时会漏读
+  // 事件且不知道漏了哪些（见 store.ConfigSignal.Gap），只能让 SDK 全部重拉。
+  // 这是配置侧对应 WatchPurge 的那条兜底，只是配置不需要"丢弃全部"。
+  string type = 1;
+  // version 仅用于日志与排障。SDK 拉的是"当前版本"而不是"第 version 版"——
+  // 这让丢失一条通知的后果被下一条自动修复。
+  int64 version = 2;
 }

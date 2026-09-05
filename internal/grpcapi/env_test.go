@@ -53,6 +53,12 @@ type grpcEnv struct {
 	apps  *service.ApplicationService
 	pool  *pgxpool.Pool
 	clock *fakeClock
+
+	// configs 用于测试直接调用 Save 造数据；configClient 是 ConfigService 的
+	// gRPC 客户端，跑在同一个 bufconn 服务端上。不接推送（Publisher 为 nil）：
+	// 本任务只测 GetConfig 这个读路径，广播由 Task 7 装配与覆盖。
+	configs      *service.ConfigService
+	configClient fpv1.ConfigServiceClient
 }
 
 // fakeClock 让测试能精确推进服务端时钟。
@@ -97,6 +103,9 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
 	apps := service.NewApplicationService(pool, reg)
+	// Publisher 传 nil：本任务只测 GetConfig 这个读路径，不需要 Redis 广播
+	// （ConfigPublisher 的装配是 Task 7 的范围）。
+	configs := service.NewConfigService(pool, nil)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的
@@ -119,6 +128,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		apps:     apps,
 		pool:     pool,
 		clock:    clk,
+		configs:  configs,
 	}
 
 	// 创建一个启用了 password 与 sms_code 两种登录方式的应用，
@@ -139,7 +149,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	t.Cleanup(cancelRun)
 
-	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub})
+	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs})
 	env.server = srv
 
 	lis := bufconn.Listen(1 << 20)
@@ -167,6 +177,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	env.client = fpv1.NewAuthServiceClient(conn)
+	env.configClient = fpv1.NewConfigServiceClient(conn)
 	return env
 }
 

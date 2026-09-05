@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package fp.v1;
+
+option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
+
+// ConfigService 是 SDK 读取配置的全部契约。
+//
+// 只有一个 RPC：配置项由人在控制台创建，SDK **不上报** schema
+// （设计文档 4.3）。将来要加上报是纯增量，这里再添一个 rpc 即可。
+//
+// 认证方式与 AuthService 相同：metadata 带 fp-app-id 与 fp-app-secret，
+// 由 internal/grpcapi/auth_interceptor.go 统一校验。
+service ConfigService {
+  // GetConfig 拉取该应用某个分区当前的全部配置值。
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+}
+
+message GetConfigRequest {
+  // type 是分区，取值 "DEFAULT" 或 "WEB"。
+  //
+  // 必填且不接受空串：分区之间同名 key 是**不同的配置项**，没有"不传就是
+  // 全部"这种语义——那会逼调用方回答"撞了算谁的"，而这个问题不该存在。
+  string type = 1;
+}
+
+message GetConfigResponse {
+  // version 是该分区的 config.seq。0 表示该分区还没有任何版本。
+  int64 version = 1;
+
+  // values 是一个 JSON 对象 {key: value}，**只含已配置的项**——
+  // fields 里 value 为 JSON null 的（"未配置"）不出现在这里，
+  // 这样 SDK 算 missing 就是"struct 里有、values 里没有"，一句话。
+  //
+  // 刻意用 JSON 字符串而不是 map<string,string>：值是 JSON 原生类型
+  // （数字、布尔、数组、对象），拆成字符串 map 会把它们全退化成待解析的
+  // 字符串，SDK 就得自己实现一遍类型转换——而 encoding/json 本来就会。
+  string values = 2;
+}

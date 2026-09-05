@@ -620,6 +620,7 @@ type WatchResponse struct {
 	//	*WatchResponse_Purge
 	//	*WatchResponse_PolicyChanged
 	//	*WatchResponse_UserRoleChanged
+	//	*WatchResponse_ConfigChanged
 	Event         isWatchResponse_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -707,6 +708,15 @@ func (x *WatchResponse) GetUserRoleChanged() *UserRoleChanged {
 	return nil
 }
 
+func (x *WatchResponse) GetConfigChanged() *ConfigChanged {
+	if x != nil {
+		if x, ok := x.Event.(*WatchResponse_ConfigChanged); ok {
+			return x.ConfigChanged
+		}
+	}
+	return nil
+}
+
 type isWatchResponse_Event interface {
 	isWatchResponse_Event()
 }
@@ -740,6 +750,11 @@ type WatchResponse_UserRoleChanged struct {
 	UserRoleChanged *UserRoleChanged `protobuf:"bytes,5,opt,name=user_role_changed,json=userRoleChanged,proto3,oneof"`
 }
 
+type WatchResponse_ConfigChanged struct {
+	// config_changed 表示某个分区的配置变了，SDK 应当重拉。
+	ConfigChanged *ConfigChanged `protobuf:"bytes,6,opt,name=config_changed,json=configChanged,proto3,oneof"`
+}
+
 func (*WatchResponse_Revoke) isWatchResponse_Event() {}
 
 func (*WatchResponse_Ready) isWatchResponse_Event() {}
@@ -749,6 +764,8 @@ func (*WatchResponse_Purge) isWatchResponse_Event() {}
 func (*WatchResponse_PolicyChanged) isWatchResponse_Event() {}
 
 func (*WatchResponse_UserRoleChanged) isWatchResponse_Event() {}
+
+func (*WatchResponse_ConfigChanged) isWatchResponse_Event() {}
 
 type PolicyChanged struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1173,6 +1190,70 @@ func (x *GetPolicyResponse) GetPolicy() *AppPolicy {
 	return nil
 }
 
+// ConfigChanged 是一次配置变更的通知。
+//
+// 只推信号不推内容：SDK 收到后拉全量。配置项就几十条，拉全量比处理增量的
+// 乱序、丢失、部分应用简单得多——与 PolicyChanged 同一范式。
+type ConfigChanged struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// type 指出哪个分区变了。一次保存只动一个分区（版本序列是分区内自增的），
+	// 所以正常情况下这里是单值。
+	//
+	// **空串表示"分区未知，请重拉全部绑定"**：fp 侧的 Redis 订阅重建时会漏读
+	// 事件且不知道漏了哪些（见 store.ConfigSignal.Gap），只能让 SDK 全部重拉。
+	// 这是配置侧对应 WatchPurge 的那条兜底，只是配置不需要"丢弃全部"。
+	Type string `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
+	// version 仅用于日志与排障。SDK 拉的是"当前版本"而不是"第 version 版"——
+	// 这让丢失一条通知的后果被下一条自动修复。
+	Version       int64 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfigChanged) Reset() {
+	*x = ConfigChanged{}
+	mi := &file_fp_v1_auth_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfigChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfigChanged) ProtoMessage() {}
+
+func (x *ConfigChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfigChanged.ProtoReflect.Descriptor instead.
+func (*ConfigChanged) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ConfigChanged) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *ConfigChanged) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
 var File_fp_v1_auth_proto protoreflect.FileDescriptor
 
 const file_fp_v1_auth_proto_rawDesc = "" +
@@ -1217,13 +1298,14 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\arotated\x18\x04 \x01(\bR\arotated\x12\x1b\n" +
 	"\tnew_token\x18\x05 \x01(\tR\bnewToken\x12\x14\n" +
 	"\x05roles\x18\x06 \x03(\tR\x05roles\"\x0e\n" +
-	"\fWatchRequest\"\xa1\x02\n" +
+	"\fWatchRequest\"\xe0\x02\n" +
 	"\rWatchResponse\x12,\n" +
 	"\x06revoke\x18\x01 \x01(\v2\x12.fp.v1.RevokeEventH\x00R\x06revoke\x12)\n" +
 	"\x05ready\x18\x02 \x01(\v2\x11.fp.v1.WatchReadyH\x00R\x05ready\x12)\n" +
 	"\x05purge\x18\x03 \x01(\v2\x11.fp.v1.WatchPurgeH\x00R\x05purge\x12=\n" +
 	"\x0epolicy_changed\x18\x04 \x01(\v2\x14.fp.v1.PolicyChangedH\x00R\rpolicyChanged\x12D\n" +
-	"\x11user_role_changed\x18\x05 \x01(\v2\x16.fp.v1.UserRoleChangedH\x00R\x0fuserRoleChangedB\a\n" +
+	"\x11user_role_changed\x18\x05 \x01(\v2\x16.fp.v1.UserRoleChangedH\x00R\x0fuserRoleChanged\x12=\n" +
+	"\x0econfig_changed\x18\x06 \x01(\v2\x14.fp.v1.ConfigChangedH\x00R\rconfigChangedB\a\n" +
 	"\x05event\")\n" +
 	"\rPolicyChanged\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\"*\n" +
@@ -1244,7 +1326,10 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x19ReportPermissionsResponse\"\x12\n" +
 	"\x10GetPolicyRequest\"=\n" +
 	"\x11GetPolicyResponse\x12(\n" +
-	"\x06policy\x18\x01 \x01(\v2\x10.fp.v1.AppPolicyR\x06policy2\xe0\x03\n" +
+	"\x06policy\x18\x01 \x01(\v2\x10.fp.v1.AppPolicyR\x06policy\"=\n" +
+	"\rConfigChanged\x12\x12\n" +
+	"\x04type\x18\x01 \x01(\tR\x04type\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion2\xe0\x03\n" +
 	"\vAuthService\x12J\n" +
 	"\rSendLoginCode\x12\x1b.fp.v1.SendLoginCodeRequest\x1a\x1c.fp.v1.SendLoginCodeResponse\x122\n" +
 	"\x05Login\x12\x13.fp.v1.LoginRequest\x1a\x14.fp.v1.LoginResponse\x125\n" +
@@ -1266,7 +1351,7 @@ func file_fp_v1_auth_proto_rawDescGZIP() []byte {
 	return file_fp_v1_auth_proto_rawDescData
 }
 
-var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_fp_v1_auth_proto_goTypes = []any{
 	(*SendLoginCodeRequest)(nil),      // 0: fp.v1.SendLoginCodeRequest
 	(*SendLoginCodeResponse)(nil),     // 1: fp.v1.SendLoginCodeResponse
@@ -1288,39 +1373,41 @@ var file_fp_v1_auth_proto_goTypes = []any{
 	(*ReportPermissionsResponse)(nil), // 17: fp.v1.ReportPermissionsResponse
 	(*GetPolicyRequest)(nil),          // 18: fp.v1.GetPolicyRequest
 	(*GetPolicyResponse)(nil),         // 19: fp.v1.GetPolicyResponse
-	nil,                               // 20: fp.v1.LoginRequest.CredentialsEntry
-	(*RevokeEvent)(nil),               // 21: fp.v1.RevokeEvent
-	(*AppPolicy)(nil),                 // 22: fp.v1.AppPolicy
+	(*ConfigChanged)(nil),             // 20: fp.v1.ConfigChanged
+	nil,                               // 21: fp.v1.LoginRequest.CredentialsEntry
+	(*RevokeEvent)(nil),               // 22: fp.v1.RevokeEvent
+	(*AppPolicy)(nil),                 // 23: fp.v1.AppPolicy
 }
 var file_fp_v1_auth_proto_depIdxs = []int32{
-	20, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
+	21, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
 	4,  // 1: fp.v1.LoginResponse.user:type_name -> fp.v1.UserInfo
-	21, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
+	22, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
 	13, // 3: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
 	14, // 4: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
 	11, // 5: fp.v1.WatchResponse.policy_changed:type_name -> fp.v1.PolicyChanged
 	12, // 6: fp.v1.WatchResponse.user_role_changed:type_name -> fp.v1.UserRoleChanged
-	16, // 7: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
-	22, // 8: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
-	0,  // 9: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
-	2,  // 10: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
-	5,  // 11: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
-	7,  // 12: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
-	9,  // 13: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
-	15, // 14: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
-	18, // 15: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
-	1,  // 16: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
-	3,  // 17: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
-	6,  // 18: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
-	8,  // 19: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
-	10, // 20: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
-	17, // 21: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
-	19, // 22: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
-	16, // [16:23] is the sub-list for method output_type
-	9,  // [9:16] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	20, // 7: fp.v1.WatchResponse.config_changed:type_name -> fp.v1.ConfigChanged
+	16, // 8: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
+	23, // 9: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
+	0,  // 10: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
+	2,  // 11: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
+	5,  // 12: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
+	7,  // 13: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
+	9,  // 14: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
+	15, // 15: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
+	18, // 16: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
+	1,  // 17: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
+	3,  // 18: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
+	6,  // 19: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
+	8,  // 20: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
+	10, // 21: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
+	17, // 22: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
+	19, // 23: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
+	17, // [17:24] is the sub-list for method output_type
+	10, // [10:17] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_fp_v1_auth_proto_init() }
@@ -1335,6 +1422,7 @@ func file_fp_v1_auth_proto_init() {
 		(*WatchResponse_Purge)(nil),
 		(*WatchResponse_PolicyChanged)(nil),
 		(*WatchResponse_UserRoleChanged)(nil),
+		(*WatchResponse_ConfigChanged)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1342,7 +1430,7 @@ func file_fp_v1_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_auth_proto_rawDesc), len(file_fp_v1_auth_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
