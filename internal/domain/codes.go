@@ -66,6 +66,7 @@ const (
 	CodeSlugTaken                  = "SLUG_TAKEN"
 	CodeUnionKeyConflict           = "UNION_KEY_CONFLICT"
 	CodeConnectorAlreadyRegistered = "CONNECTOR_ALREADY_REGISTERED"
+	CodeConfigVersionConflict      = "CONFIG_VERSION_CONFLICT"
 
 	// 授权模块。
 
@@ -136,6 +137,7 @@ var codeSentinels = map[string]error{
 	CodeSlugTaken:                  ErrConflict,
 	CodeUnionKeyConflict:           ErrConflict,
 	CodeConnectorAlreadyRegistered: ErrConflict,
+	CodeConfigVersionConflict:      ErrConflict,
 
 	CodeUserNotFound:           ErrNotFound,
 	CodeIdentityNotFound:       ErrNotFound,

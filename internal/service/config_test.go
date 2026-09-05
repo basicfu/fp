@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -345,5 +346,75 @@ func TestSavePrunesOldVersions(t *testing.T) {
 	}
 	if got := string(cur.Fields["n"].Value); got != fmt.Sprintf("%d", total) {
 		t.Fatalf("当前值 = %s，期望 %d", got, total)
+	}
+}
+
+// 并发保存同一分区时，抢输的那些必须拿到可被 errors.Is 识别的冲突错误，
+// 而不是一个裸的 pgconn 错误——注释里"冲突了重试即可"靠的就是这个。
+func TestSaveConcurrentConflictIsRetryable(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	const n = 8
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+				"n": field(domain.ConfigValueInt, "", fmt.Sprintf("%d", i)),
+			}, false)
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	var ok, conflicts, others int
+	for err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, domain.ErrConflict):
+			conflicts++
+		default:
+			others++
+			t.Errorf("既不是成功也不是 ErrConflict 的错误: %v", err)
+		}
+	}
+	if ok == 0 {
+		t.Fatal("至少要有一次保存成功")
+	}
+	// 关键断言：失败的那些**必须**全是 ErrConflict，一个漏网的裸 pg 错误都不许有。
+	if others != 0 {
+		t.Fatalf("有 %d 次失败没被转成 domain.ErrConflict", others)
+	}
+	t.Logf("成功 %d 次，冲突 %d 次", ok, conflicts)
+}
+
+// 同一次 Save 里只要有一项转换失败，整批拒绝——不允许出现"一半字段生效了"的版本。
+func TestSaveRejectsWholeBatchOnOneBadField(t *testing.T) {
+	_, svc, appID := newConfigFixture(t)
+	ctx := context.Background()
+
+	_, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"good": field(domain.ConfigValueInt, "", `1`),
+		"bad":  field(domain.ConfigValueInt, "", `"abc"`),
+	}, false)
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v，期望包装了 domain.ErrInvalidArgument", err)
+	}
+
+	// 关键：合法的那一项也不能落库——整批拒绝意味着**一个版本都没生成**。
+	cur, err := svc.Current(ctx, appID, domain.ConfigTypeDefault)
+	if err != nil {
+		t.Fatalf("读当前版本失败: %v", err)
+	}
+	if cur.Seq != 0 {
+		t.Fatalf("Seq = %d，期望 0——整批拒绝不该留下任何版本", cur.Seq)
+	}
+	if _, ok := cur.Fields["good"]; ok {
+		t.Fatal("good 不该落库：同一批里有字段转换失败，整批都不算数")
 	}
 }

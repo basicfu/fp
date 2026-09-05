@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/basicfu/fp/internal/domain"
@@ -217,6 +218,12 @@ func (s *ConfigService) Save(
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO config (application_id, type, seq, fields)
 			VALUES ($1, $2, $3, $4)`, appID, typ, seq, raw); err != nil {
+			// INSERT 的主键冲突表示有并发的 Save 抢输了。转换为可被识别的
+			// domain.ErrConflict，让调用方据此重试而不是去解析 pgconn 错误。
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+				return domain.Failf(domain.ErrConflict, domain.CodeConfigVersionConflict, "配置版本冲突，请重试")
+			}
 			return fmt.Errorf("service: 写入配置版本: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
