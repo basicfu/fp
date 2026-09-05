@@ -4181,7 +4181,7 @@ Expected: 模块不存在
 
 - 分区 tab 同 Task 13
 - `GET .../config/versions?type=X` 拉列表，每行 `data-testid="version-${seq}"`
-- **改了哪些 key = 相邻两版的 `fields` 在前端 diff**（后端不存这个字段）：拉 `seq` 与 `seq-1` 两份快照，比较 key 集合与每个 key 的 `{type, desc, value}`；最老的一版（前一版不存在或已被修剪）标成"初始版本"
+- **改了哪些 key = 相邻两版的 `fields` 在前端 diff**（后端不存这个字段）：拉 `seq` 与 `seq-1` 两份快照，比较 key 集合与每个 key 的 `{type, desc, value}`；最老的一版（前一版不存在或已被修剪）标成"初始版本"。改动清单渲染成 `<ul data-testid="changed-${seq}">`，**每个 key 一个 `<li>`**——测试断言的是这个容器里的 li 列表，不是整行文本
 - `[回滚到 vN]` → 弹窗：
   - 先算出"当前有、vN 没有"的 key 集合，非空时渲染 `回滚后以下配置项将变成未配置：...`
   - 生效方式单选（默认立即推送）
