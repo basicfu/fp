@@ -42,6 +42,12 @@ type phase2Services struct {
 	sms       *notify.FakeProvider
 	revokePub *store.RevokePublisher
 	authz     *service.AuthzService
+	// configPub 与 revokePub 同一装配方式：喂给 startServer 里的
+	// grpcapi.Deps.ConfigPub，让 grpcapi.Server 内部的 configHub 有一个
+	// 真实可用的 Redis 订阅源。这里没有任何测试用例读写配置，纯粹是
+	// 为了不让 ConfigHub.Run 在 *store.ConfigPublisher 为 nil 时炸掉
+	// ServeWhenReady——见 internal/grpcapi.Server.Run 的注释。
+	configPub *store.ConfigPublisher
 }
 
 func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Services {
@@ -53,6 +59,7 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 
 	epochs := store.NewEpochStore(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
+	configPub := store.NewConfigPublisher(rdb)
 	sessions := service.NewSessionService(store.NewSessionStore(rdb), revokePub, epochs)
 
 	registry := connector.NewRegistry()
@@ -80,6 +87,7 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	return phase2Services{
 		apps: apps, users: users, sessions: sessions,
 		accounts: accounts, auth: auth, sms: sms, revokePub: revokePub, authz: authz,
+		configPub: configPub,
 	}
 }
 
@@ -176,7 +184,10 @@ func (e *phase2Env) startServer(t *testing.T) {
 	lis := listenAddr(t, e.addr)
 	e.addr = lis.Addr().String()
 
-	srv := grpcapi.New(grpcapi.Deps{Auth: e.auth, Apps: e.apps, Pub: e.revokePub, Authz: e.authz})
+	srv := grpcapi.New(grpcapi.Deps{
+		Auth: e.auth, Apps: e.apps, Pub: e.revokePub, Authz: e.authz,
+		ConfigPub: e.configPub,
+	})
 	e.server = srv
 
 	// runCtx 单独控制 ServeWhenReady 内部那条 Redis 订阅的生命周期，与

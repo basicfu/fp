@@ -23,6 +23,9 @@ type Deps struct {
 	Pub     *store.RevokePublisher
 	Authz   *service.AuthzService
 	Configs *service.ConfigService
+	// ConfigPub 是配置变更的 Redis 广播订阅源，ConfigHub 靠它把配置变更
+	// 中继给所有 Watch 流。与 Pub（撤销）是并列的两条独立中继。
+	ConfigPub *store.ConfigPublisher
 
 	// AppSecretCacheTTL 是应用凭据验证结果的缓存时长，也是 appSecret
 	// 轮换的生效上限。为 0 时取 5 分钟。
@@ -33,6 +36,12 @@ type Deps struct {
 type Server struct {
 	grpc *grpc.Server
 	hub  *RevokeHub
+	// configHub 承担配置变更中继，与 hub（撤销）并列、生命周期编排完全对称。
+	// 经 New 构造的 Server 上恒非 nil；测试里绕开 New、直接构造 &Server{}
+	// 只填 hub 字段的用法（server_test.go 里那些只关心撤销中继时序的测试）
+	// 会让它保持零值 nil——Run/Ready/Shutdown 都据此把"没有配置中继"当成
+	// 合法状态，不参与编排，行为与本任务之前完全一致。
+	configHub *ConfigHub
 }
 
 // KeepaliveMinTime 是服务端能容忍的最短客户端 ping 间隔。
@@ -70,6 +79,7 @@ func New(d Deps) *Server {
 	}
 	verifier := newAppVerifier(d.Apps, ttl)
 	hub := NewRevokeHub(d.Pub)
+	configHub := NewConfigHub(d.ConfigPub)
 
 	srv := grpc.NewServer(
 		grpc.UnaryInterceptor(verifier.UnaryInterceptor),
@@ -94,32 +104,72 @@ func New(d Deps) *Server {
 	fpv1.RegisterAuthServiceServer(srv, NewAuthServer(AuthServerDeps{
 		Auth: d.Auth,
 		Apps: d.Apps, Authz: d.Authz,
-		Hub: hub,
+		Hub: hub, ConfigHub: configHub,
 	}))
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))
 
-	return &Server{grpc: srv, hub: hub}
+	return &Server{grpc: srv, hub: hub, configHub: configHub}
 }
 
-// Run 启动撤销事件中继，阻塞到 ctx 取消。在独立 goroutine 里调用。
+// Run 并行启动撤销事件与配置事件两条中继，阻塞到 ctx 取消，或其中一条
+// 中继提前失败退出。在独立 goroutine 里调用。
+//
+// 两条中继完全独立（各自的 Redis 订阅、各自的 Ready、各自的分发循环），
+// 谁都不等谁、谁失败都不拖累另一条继续尝试——但 ServeWhenReady 只能靠
+// Run 的单个返回值判断"启动是否失败"，所以这里把两次失败合并成一次：
+// 谁先返回非 nil 错误，Run 就立即返回那个错误，不等另一条。
+//
+// 提前返回时另一条中继的 goroutine 可能仍在运行，直到调用方的 ctx 被
+// 取消——这是刻意的：等它一起退出的话，一条已确认失败、另一条尚未失败
+// 也尚未超时的中继会让 Run 挂到 ctx 取消为止，"哪条先坏就该让启动立刻
+// 失败"这条 fail-fast 语义（TestServeWhenReadyReportsSubscribeFailure
+// 等既有测试守着）反而没了。调用方（ServeWhenReady 继而 main.go）在
+// 收到失败后总会很快取消顶层 ctx，遗留 goroutine 的生命窗口因此很短。
+//
+// configHub 为 nil 时（测试直接构造 &Server{} 只填 hub，不经过 New，
+// 只关心撤销这一条中继的时序）视为"没有配置中继"，只跑撤销这一条，
+// 行为与本任务之前完全一致。
 func (s *Server) Run(ctx context.Context) error {
-	return s.hub.Run(ctx)
+	if s.configHub == nil {
+		return s.hub.Run(ctx)
+	}
+	errCh := make(chan error, 2)
+	go func() { errCh <- s.hub.Run(ctx) }()
+	go func() { errCh <- s.configHub.Run(ctx) }()
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Ready 在 hub 确认完成 Redis 订阅后关闭。
+// Ready 在撤销与配置两条中继都确认完成各自的 Redis 订阅后关闭。
 //
 // 调用方必须在开始 Serve 之前等待它：Watch 一旦被 gRPC 分发到就会给
-// 客户端发 ready，SDK 把 ready 当作"此后的撤销不会漏推"的承诺（proto
-// WatchReady 的注释）。hub 自己还没订阅上 Redis 时，这份承诺就是假的——
-// 期间发布的撤销事件永久丢失且没有任何信号提示 SDK 收紧缓存窗口。fp
-// 重启时全部 SDK 同时重连，这个窗口最容易被撞上。完整推导见
-// RevokeHub.Ready。
+// 客户端发 ready，SDK 把 ready 当作"此后的撤销/配置变更不会漏推"的
+// 承诺（proto WatchReady 的注释）。两条中继缺任何一条还没订阅上 Redis，
+// 这份承诺对那一条就是假的——期间发布的事件永久丢失且没有任何信号提示
+// SDK 收紧缓存窗口或重拉配置。fp 重启时全部 SDK 同时重连，这个窗口最
+// 容易被撞上。完整推导见 RevokeHub.Ready 与 ConfigHub.Ready。
+//
+// configHub 为 nil 时只等 hub 这一条，兼容测试直接构造 &Server{} 的用法
+// （见 Run 的注释）。
 //
 // Serve 自己不等这个信号：它的职责只是"接受连接"。等不等、等多久超时、
 // 失败了怎么办，是 ServeWhenReady 的职责——直接调 Serve 的调用方要自己
 // 负责先等这个信号，或者干脆用 ServeWhenReady。
 func (s *Server) Ready() <-chan struct{} {
-	return s.hub.Ready()
+	if s.configHub == nil {
+		return s.hub.Ready()
+	}
+	ready := make(chan struct{})
+	go func() {
+		<-s.hub.Ready()
+		<-s.configHub.Ready()
+		close(ready)
+	}()
+	return ready
 }
 
 // Serve 开始接受连接，阻塞到服务停止。
@@ -127,15 +177,15 @@ func (s *Server) Serve(lis net.Listener) error {
 	return s.grpc.Serve(lis)
 }
 
-// ServeWhenReady 等撤销中继就绪（或提前失败、或超时、或 ctx 被取消）
-// 之后再开始接受连接，阻塞到服务停止。
+// ServeWhenReady 等撤销与配置两条中继都就绪（或其中一条提前失败、或
+// 超时、或 ctx 被取消）之后再开始接受连接，阻塞到服务停止。
 //
 // 顺序不能反：Serve 一旦开始接受连接，Watch 就会给新连上来的 SDK 发
-// ready，而 ready 是"此后的撤销不会漏推"的承诺（见 Ready 的注释）。这个
-// 承诺只有在 hub 已经真正订阅上 Redis 之后才成立——没订阅上时提前开始
-// 接受连接，恰好落在这段窗口里的撤销事件就会无声丢失，SDK 却毫不知情、
-// 不会收紧本地缓存窗口。fp 重启时全部 SDK 同时重连，这个窗口最容易被
-// 撞上。
+// ready，而 ready 是"此后的撤销/配置变更不会漏推"的承诺（见 Ready 的
+// 注释）。这个承诺只有在两条中继都已经真正订阅上 Redis 之后才成立——
+// 任何一条没订阅上时提前开始接受连接，恰好落在那条中继窗口里的事件就
+// 会无声丢失，SDK 却毫不知情、不会收紧本地缓存窗口或重拉配置。fp 重启
+// 时全部 SDK 同时重连，这个窗口最容易被撞上。
 //
 // 这段编排原本直接写在 cmd/fp/main.go 里（起 Run 的 goroutine、等
 // Ready()/Run 失败/超时三选一、再起 Serve 的 goroutine），但 cmd/fp 是
@@ -176,9 +226,9 @@ func (s *Server) ServeWhenReady(ctx context.Context, lis net.Listener, timeout t
 		return nil
 	case <-s.Ready():
 	case err := <-runFailed:
-		return fmt.Errorf("撤销事件中继启动失败: %w", err)
+		return fmt.Errorf("事件中继启动失败: %w", err)
 	case <-time.After(timeout):
-		return errors.New("等待撤销事件中继就绪超时")
+		return errors.New("等待事件中继就绪超时")
 	}
 
 	return s.Serve(lis)
@@ -186,10 +236,17 @@ func (s *Server) ServeWhenReady(ctx context.Context, lis net.Listener, timeout t
 
 // Shutdown 优雅关闭。
 //
-// 顺序不能变：先关 hub 让所有 Watch handler 返回，GracefulStop 才可能结束。
-// 反过来的话 GracefulStop 会等一条永不结束的长流，进程永远停不下来。
+// 顺序不能变：先关 hub 与 configHub，让所有 Watch handler 返回，
+// GracefulStop 才可能结束。反过来的话 GracefulStop 会等一条永不结束的
+// 长流，进程永远停不下来。
+//
+// configHub 为 nil（测试直接构造 &Server{} 只填 hub）时跳过——没有这条
+// 中继，也就没有什么需要关闭，行为与本任务之前完全一致。
 func (s *Server) Shutdown(ctx context.Context) {
 	s.hub.Close()
+	if s.configHub != nil {
+		s.configHub.Close()
+	}
 
 	done := make(chan struct{})
 	go func() {

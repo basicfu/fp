@@ -31,6 +31,8 @@ type AuthServerDeps struct {
 	Auth *service.AuthService
 	// Hub 承担 Watch 流的撤销事件中继，进程内所有流共用同一份。
 	Hub *RevokeHub
+	// ConfigHub 承担 Watch 流的配置变更中继，进程内所有流共用同一份。
+	ConfigHub *ConfigHub
 	// Apps 把 Watch 的调用方 appId（字符串）换成内部 UUID，用于按应用订阅。
 	Apps AppLookup
 	// Authz 处理权限点上报与策略拉取。
@@ -39,15 +41,16 @@ type AuthServerDeps struct {
 
 // NewAuthServer 构造 gRPC 认证服务。
 func NewAuthServer(d AuthServerDeps) fpv1.AuthServiceServer {
-	return &authServer{auth: d.Auth, hub: d.Hub, apps: d.Apps, authz: d.Authz}
+	return &authServer{auth: d.Auth, hub: d.Hub, configHub: d.ConfigHub, apps: d.Apps, authz: d.Authz}
 }
 
 type authServer struct {
 	fpv1.UnimplementedAuthServiceServer
-	auth  *service.AuthService
-	hub   *RevokeHub
-	apps  AppLookup
-	authz *service.AuthzService
+	auth      *service.AuthService
+	hub       *RevokeHub
+	configHub *ConfigHub
+	apps      AppLookup
+	authz     *service.AuthzService
 }
 
 // callerAppID 取出拦截器已认证的 appId。
@@ -162,9 +165,12 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	}
 
 	// 先订阅再发 ready：反过来的话，客户端收到 ready 就认为推送通道健康、
-	// 从而放宽本地缓存窗口，而此刻服务端还没订上，这段时间的撤销全丢。
+	// 从而放宽本地缓存窗口，而此刻服务端还没订上，这段时间的撤销/配置变更
+	// 全丢。撤销与配置两条订阅并列注册，同样必须都在 ready 之前完成。
 	events, unsubscribe := s.hub.Subscribe(app.ID)
 	defer unsubscribe()
+	configEvents, unsubscribeConfig := s.configHub.Subscribe(app.ID)
+	defer unsubscribeConfig()
 
 	if err := stream.Send(&fpv1.WatchResponse{
 		Event: &fpv1.WatchResponse_Ready{Ready: &fpv1.WatchReady{}},
@@ -196,6 +202,19 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 				}
 			}
 			if err := stream.Send(msg); err != nil {
+				return err
+			}
+		case ev, ok := <-configEvents:
+			if !ok {
+				// 缓冲满被摘掉，或 hub 关闭。都是正常结束——SDK 重连后
+				// 会在收到 ready 时重拉配置，不会漏。
+				return nil
+			}
+			if err := stream.Send(&fpv1.WatchResponse{
+				Event: &fpv1.WatchResponse_ConfigChanged{
+					ConfigChanged: &fpv1.ConfigChanged{Type: ev.Type, Version: ev.Seq},
+				},
+			}); err != nil {
 				return err
 			}
 		}

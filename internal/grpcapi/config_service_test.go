@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -143,5 +144,83 @@ func TestGetConfigRejectsDisabledApplication(t *testing.T) {
 	}
 	if got := status.Code(err); got != codes.PermissionDenied {
 		t.Fatalf("状态码 = %v，期望 PermissionDenied", got)
+	}
+}
+
+// 保存并选择推送 → Watch 流上收到 ConfigChanged。
+func TestWatchDeliversConfigChanged(t *testing.T) {
+	e := newGRPCEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream, err := e.client.Watch(e.authed(ctx))
+	if err != nil {
+		t.Fatalf("建流失败: %v", err)
+	}
+	// 先吃掉 ready，确保服务端已经订上，之后的变更不会漏推。
+	if msg, err := stream.Recv(); err != nil || msg.GetReady() == nil {
+		t.Fatalf("首条消息应当是 ready，得到 %v / %v", msg, err)
+	}
+
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeWeb, map[string]domain.ConfigField{
+		"site.title": {Type: domain.ConfigValueString, Value: json.RawMessage(`"商城"`)},
+	}, true); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("收流失败: %v", err)
+		}
+		cc := msg.GetConfigChanged()
+		if cc == nil {
+			continue // 可能先来别的事件类型
+		}
+		if cc.GetType() != domain.ConfigTypeWeb {
+			t.Fatalf("Type = %q，期望 WEB", cc.GetType())
+		}
+		return
+	}
+}
+
+// 「仅落库」不推送。
+// 【辨别力】两条腿都要断言——这里断言"没推"，Task 11 的 SDK 测试断言
+// "新起一次 Bind 能拿到新值"。只断言前者的话，一个根本没存的实现也会绿。
+func TestWatchSilentWhenPushDisabled(t *testing.T) {
+	e := newGRPCEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := e.client.Watch(e.authed(ctx))
+	if err != nil {
+		t.Fatalf("建流失败: %v", err)
+	}
+	if msg, err := stream.Recv(); err != nil || msg.GetReady() == nil {
+		t.Fatalf("首条消息应当是 ready，得到 %v / %v", msg, err)
+	}
+
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+		"n": {Type: domain.ConfigValueInt, Value: json.RawMessage(`1`)},
+	}, false); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	// 保存后不该有任何 ConfigChanged。用一个短超时来观测"什么都没发生"。
+	done := make(chan *fpv1.WatchResponse, 1)
+	go func() {
+		msg, err := stream.Recv()
+		if err == nil {
+			done <- msg
+		}
+		close(done)
+	}()
+	select {
+	case msg := <-done:
+		if msg != nil && msg.GetConfigChanged() != nil {
+			t.Fatal("选了「仅落库」却推送了 ConfigChanged")
+		}
+	case <-time.After(800 * time.Millisecond):
+		// 什么都没来，正是期望
 	}
 }

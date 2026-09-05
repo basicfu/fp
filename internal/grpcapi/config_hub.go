@@ -60,9 +60,21 @@ func NewConfigHub(pub *store.ConfigPublisher) *ConfigHub {
 }
 
 // Run 订阅 Redis 并把信号扇出，直到 ctx 取消。
+//
+// 订阅失败时先看 ctx.Err()：如果失败是因为 ctx 在订阅确认之前就被取消
+// （一次正常的 SIGTERM/Ctrl-C 撞上这个窗口），不算订阅本身出了问题，
+// 返回 nil——与 RevokeHub.Run 同一契约、同一理由：grpcapi.Server.Run 把
+// 两条中继的失败合并成一个返回值，ServeWhenReady 继而 cmd/fp/main.go
+// 靠它是不是 nil 判断这次退出该不该算作故障。这里如果原样透传 ctx 取消
+// 导致的错误，一次操作员或编排系统发起的、完全正常的关闭信号，只要
+// 恰好落在"订阅确认还没收到"这个窗口内，就可能被上报成致命错误。完整
+// 推导见 RevokeHub.Run 的注释。
 func (h *ConfigHub) Run(ctx context.Context) error {
 	signals, closeSub, err := h.pub.Subscribe(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	defer closeSub()

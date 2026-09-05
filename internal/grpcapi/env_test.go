@@ -55,8 +55,11 @@ type grpcEnv struct {
 	clock *fakeClock
 
 	// configs 用于测试直接调用 Save 造数据；configClient 是 ConfigService 的
-	// gRPC 客户端，跑在同一个 bufconn 服务端上。不接推送（Publisher 为 nil）：
-	// 本任务只测 GetConfig 这个读路径，广播由 Task 7 装配与覆盖。
+	// gRPC 客户端，跑在同一个 bufconn 服务端上。configs 接了真实的
+	// ConfigPublisher（与下面装配进 Server 的 configHub 共用同一个测试
+	// Redis），Save(..., push=true) 因此会一路广播到本服务端的 Watch 流——
+	// Task 7 的 TestWatchDeliversConfigChanged 等用例需要这条链路是真的通的，
+	// 不是本任务（GetConfig 读路径）额外造一份假装配。
 	configs      *service.ConfigService
 	configClient fpv1.ConfigServiceClient
 }
@@ -103,9 +106,11 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
 	apps := service.NewApplicationService(pool, reg)
-	// Publisher 传 nil：本任务只测 GetConfig 这个读路径，不需要 Redis 广播
-	// （ConfigPublisher 的装配是 Task 7 的范围）。
-	configs := service.NewConfigService(pool, nil)
+	// configPub 同时喂给 configs（发布配置变更）和 configHub（订阅配置变更）
+	// ——两个方向共用同一个 *store.ConfigPublisher，与上面 revokePub 的
+	// 装配方式、以及生产环境 cmd/fp/main.go 的装配都一致。
+	configPub := store.NewConfigPublisher(rdb)
+	configs := service.NewConfigService(pool, configPub)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的
@@ -137,19 +142,20 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	env.app, env.appID, env.secret = primary.app, primary.appID, primary.secret
 
 	// server 起在这里而不是懒加载，且先等 Ready() 才让测试继续：
-	// ServeWhenReady 内部只有在 hub 真正订阅上 Redis 之后才会关闭 Ready()
-	// 并开始接受连接（见 RevokeHub.Ready 的注释），这里等它，保证
-	// newGRPCEnv 返回之后，任何测试紧接着触发的撤销（比如 Logout）都能被
-	// Watch 流收到，不会因为"服务端到底订上了没"而变得不确定。
+	// ServeWhenReady 内部只有在 hub 与 configHub 都真正订阅上 Redis 之后
+	// 才会关闭 Ready() 并开始接受连接（见 RevokeHub.Ready / ConfigHub.Ready
+	// 的注释），这里等它，保证 newGRPCEnv 返回之后，任何测试紧接着触发的
+	// 撤销（比如 Logout）或配置变更（比如 configs.Save(..., push=true)）
+	// 都能被 Watch 流收到，不会因为"服务端到底订上了没"而变得不确定。
 	//
-	// runCtx 单独控制 ServeWhenReady 内部那条 Redis 订阅的生命周期，与
+	// runCtx 单独控制 ServeWhenReady 内部那两条 Redis 订阅的生命周期，与
 	// 下面 srv.Shutdown 管的 gRPC 服务生命周期分开：Shutdown 只负责关
-	// hub 与 GracefulStop，并不会让内部的 Run 返回，不单独取消 runCtx
-	// 的话每个用例都会在测试进程里永久多留一条 Redis 订阅连接。
+	// hub / configHub 与 GracefulStop，并不会让内部的 Run 返回，不单独
+	// 取消 runCtx 的话每个用例都会在测试进程里永久多留两条 Redis 订阅连接。
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	t.Cleanup(cancelRun)
 
-	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs})
+	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub})
 	env.server = srv
 
 	lis := bufconn.Listen(1 << 20)
@@ -157,7 +163,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	select {
 	case <-srv.Ready():
 	case <-time.After(5 * time.Second):
-		t.Fatal("等待 gRPC 服务的撤销中继就绪超时")
+		t.Fatal("等待 gRPC 服务的事件中继就绪超时")
 	}
 	t.Cleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

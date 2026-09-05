@@ -85,6 +85,9 @@ func run() error {
 	logSvc := service.NewLoginLogService(pool)
 	authzSvc := service.NewAuthzService(pool)
 
+	configPub := store.NewConfigPublisher(rdb)
+	configSvc := service.NewConfigService(pool, configPub)
+
 	// 短信供应商：四项阿里云凭据齐全就用真实供应商——不管是不是生产环境，
 	// 有人就是想在本机联调真实短信通道。凭据不全时：
 	//   - 生产环境：config.Load 已经把这四项收进必填校验，走不到这里；
@@ -175,10 +178,12 @@ func run() error {
 	}()
 
 	grpcSrv := grpcapi.New(grpcapi.Deps{
-		Auth:  authSvc,
-		Apps:  appSvc,
-		Pub:   revokePub,
-		Authz: authzSvc,
+		Auth:      authSvc,
+		Apps:      appSvc,
+		Pub:       revokePub,
+		Authz:     authzSvc,
+		Configs:   configSvc,
+		ConfigPub: configPub,
 	})
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
