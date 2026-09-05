@@ -242,3 +242,34 @@ func scanPermission(row rowScanner) (*domain.Permission, error) {
 	}
 	return &p, nil
 }
+
+// RoleGrant 是一条授权关系：某个角色对某个权限点的效果。
+type RoleGrant struct {
+	PermissionID uuid.UUID
+	Effect       string
+}
+
+// RoleGrants 返回某个角色**直接**持有的授权关系。
+//
+// 刻意不展开继承：控制台的授权编辑器要改的是这个角色自己的那一条，
+// 展开之后人会以为能取消从父角色继承来的授权，而实际取消不了（那条
+// role_permission 属于父角色）。继承的效果由 CompilePolicy 在推送时算，
+// 展示继承来的权限是另一件事，需要单独标注来源，本期不做。
+func (s *AuthzService) RoleGrants(ctx context.Context, roleID uuid.UUID) ([]RoleGrant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT permission_id, effect FROM role_permission WHERE role_id = $1`, roleID)
+	if err != nil {
+		return nil, fmt.Errorf("service: 查询角色的授权关系: %w", err)
+	}
+	defer rows.Close()
+
+	out := []RoleGrant{}
+	for rows.Next() {
+		var g RoleGrant
+		if err := rows.Scan(&g.PermissionID, &g.Effect); err != nil {
+			return nil, fmt.Errorf("service: 扫描授权关系: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}

@@ -115,6 +115,8 @@ func NewRouter(d Deps) http.Handler {
 			// PATCH 而不是 PUT：只改 name 与 parentId，key 是身份、不可改。
 			r.Patch("/roles/{id}", authzH.updateRole)
 			r.Delete("/roles/{id}", authzH.deleteRole)
+			// 授权编辑器回显用：这个角色直接持有哪些权限点。
+			r.Get("/roles/{id}/permissions", authzH.roleGrants)
 			// 授予/收回：effect 为空串表示收回。
 			r.Put("/roles/{id}/permissions/{pid}", authzH.setRolePermission)
 

@@ -359,3 +359,71 @@ func TestSetUserRolesRejectsUnknownRole(t *testing.T) {
 		t.Fatalf("err = %v, want CodeRoleNotFound", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 授权编辑器的回显
+// ---------------------------------------------------------------------------
+
+// RoleGrants 返回这个角色**直接**持有的授权，allow 与 deny 都要回来。
+//
+// 【辨别力】这里刻意让父角色也持有一条授权、并让另一个角色持有同一个
+// 权限点。一个漏加 role_id 条件的查询会把别人的授权也返回，控制台上就会
+// 显示成"这个角色已经授过了"——人看到复选框已勾选，不会再去授，而实际
+// 上这个角色一条都没有。这种错法在只有一个角色的测试里是看不出来的。
+func TestRoleGrantsReturnsOnlyOwnDirectGrants(t *testing.T) {
+	e := newAuthzEnv(t)
+	ctx := context.Background()
+
+	parent := e.mustRole(t, "父角色", nil)
+	child := e.mustRole(t, "子角色", &parent.ID)
+	other := e.mustRole(t, "无关角色", nil)
+
+	view := e.mustPerm(t, "GET:/orders/{id}")
+	del := e.mustPerm(t, "DELETE:/orders/{id}")
+	create := e.mustPerm(t, "POST:/orders")
+	unrelated := e.mustPerm(t, "GET:/videos/{id}")
+
+	e.grant(t, child, view, domain.EffectAllow)
+	e.grant(t, child, del, domain.EffectDeny)
+	e.grant(t, parent, create, domain.EffectAllow)   // 继承来的，不该出现
+	e.grant(t, other, unrelated, domain.EffectAllow) // 别人的，更不该出现
+
+	got, err := e.svc.RoleGrants(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("RoleGrants: %v", err)
+	}
+
+	want := map[uuid.UUID]string{view.ID: domain.EffectAllow, del.ID: domain.EffectDeny}
+	if len(got) != len(want) {
+		t.Fatalf("返回 %d 条 %v, want %d 条——多出来的多半是父角色或别的角色的授权",
+			len(got), got, len(want))
+	}
+	for _, g := range got {
+		w, ok := want[g.PermissionID]
+		if !ok {
+			t.Fatalf("返回了不属于该角色的授权 %v", g)
+		}
+		if g.Effect != w {
+			t.Fatalf("权限点 %s 的 effect = %q, want %q", g.PermissionID, g.Effect, w)
+		}
+	}
+}
+
+// 收回之后就不该再回显。
+func TestRoleGrantsDropsRevoked(t *testing.T) {
+	e := newAuthzEnv(t)
+	ctx := context.Background()
+
+	role := e.mustRole(t, "角色", nil)
+	perm := e.mustPerm(t, "GET:/orders/{id}")
+	e.grant(t, role, perm, domain.EffectAllow)
+	e.grant(t, role, perm, "") // 空串 = 收回
+
+	got, err := e.svc.RoleGrants(ctx, role.ID)
+	if err != nil {
+		t.Fatalf("RoleGrants: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("收回之后仍返回 %v", got)
+	}
+}

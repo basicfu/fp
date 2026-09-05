@@ -350,3 +350,29 @@ func optionalUUID(s string) (*uuid.UUID, error) {
 	}
 	return &id, nil
 }
+
+// roleGrants 返回某个角色直接持有的授权关系，供控制台的授权编辑器回显。
+//
+// 返回的是 permissionId → effect，不含权限点本身的字段：控制台已经通过
+// /applications/{id}/permissions 拿到了那个应用的权限点列表，这里只补
+// "哪些被授了、是 allow 还是 deny"。
+func (h *authzHandler) roleGrants(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	grants, err := h.svc.RoleGrants(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]map[string]string, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, map[string]string{
+			"permissionId": g.PermissionID.String(),
+			"effect":       g.Effect,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"grants": out})
+}
