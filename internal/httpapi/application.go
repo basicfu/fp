@@ -24,21 +24,24 @@ type sessionPolicyDTO struct {
 }
 
 type applicationDTO struct {
-	ID           string           `json:"id"`
-	Name         string           `json:"name"`
-	Slug         string           `json:"slug"`
-	AppID        string           `json:"appId"`
-	Status       string           `json:"status"`
-	CookieDomain string           `json:"cookieDomain"`
-	Session      sessionPolicyDTO `json:"session"`
-	CreatedAt    int64            `json:"createdAt"`
-	UpdatedAt    int64            `json:"updatedAt"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Slug         string `json:"slug"`
+	AppID        string `json:"appId"`
+	Status       string `json:"status"`
+	CookieDomain string `json:"cookieDomain"`
+	// DefaultRoleKey 是该应用的默认角色。有效角色 = 用户的全局角色 ∪ 它。
+	// 空串表示不设默认角色。
+	DefaultRoleKey string           `json:"defaultRoleKey"`
+	Session        sessionPolicyDTO `json:"session"`
+	CreatedAt      int64            `json:"createdAt"`
+	UpdatedAt      int64            `json:"updatedAt"`
 }
 
 func toApplicationDTO(a domain.Application) applicationDTO {
 	return applicationDTO{
 		ID: a.ID.String(), Name: a.Name, Slug: a.Slug, AppID: a.AppID,
-		Status: a.Status, CookieDomain: a.CookieDomain,
+		Status: a.Status, CookieDomain: a.CookieDomain, DefaultRoleKey: a.DefaultRoleKey,
 		Session: sessionPolicyDTO{
 			IdleTimeoutSeconds:       a.Session.IdleTimeoutSeconds,
 			IdleTimeoutMobileSeconds: a.Session.IdleTimeoutMobileSeconds,

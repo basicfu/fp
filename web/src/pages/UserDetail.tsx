@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import UserRolesCard from '@/components/UserRolesCard'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { formatTime } from '@/lib/format'
@@ -128,6 +129,8 @@ export default function UserDetail() {
           </div>
         </CardContent>
       </Card>
+
+      <UserRolesCard userId={id} />
 
       <Card>
         <CardHeader className="flex-row items-center space-y-0">

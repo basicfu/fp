@@ -67,6 +67,18 @@ const (
 	CodeUnionKeyConflict           = "UNION_KEY_CONFLICT"
 	CodeConnectorAlreadyRegistered = "CONNECTOR_ALREADY_REGISTERED"
 
+	// 授权模块。
+
+	CodeRoleNotFound = "ROLE_NOT_FOUND"
+	CodeRoleKeyTaken = "ROLE_KEY_TAKEN"
+	// CodeRoleCycle：角色继承成环。拦在写入时，而不是等到编译策略时才炸——
+	// 那时整个应用的鉴权会一起挂掉，且错误现场离操作现场很远。
+	CodeRoleCycle          = "ROLE_CYCLE"
+	CodePermissionNotFound = "PERMISSION_NOT_FOUND"
+	CodePermissionKeyTaken = "PERMISSION_KEY_TAKEN"
+	// CodePermissionDenied 是 SDK 鉴权失败时返回给业务方的码。
+	CodePermissionDenied = "PERMISSION_DENIED"
+
 	// 资源不存在。
 
 	CodeUserNotFound           = "USER_NOT_FOUND"
@@ -134,6 +146,13 @@ var codeSentinels = map[string]error{
 	CodeSMSTemplateMissing:     ErrNotFound,
 	CodeConfigVersionNotFound:  ErrNotFound,
 	CodeRouteNotFound:          ErrNotFound,
+
+	CodeRoleNotFound:       ErrNotFound,
+	CodeRoleKeyTaken:       ErrConflict,
+	CodeRoleCycle:          ErrInvalidArgument,
+	CodePermissionNotFound: ErrNotFound,
+	CodePermissionKeyTaken: ErrConflict,
+	CodePermissionDenied:   ErrForbidden,
 
 	CodeInternal: ErrInternal,
 }

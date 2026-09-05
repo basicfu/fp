@@ -50,6 +50,10 @@ type IssueInput struct {
 	UA     string
 	// Mobile 决定适用哪一档空闲超时。
 	Mobile bool
+	// Roles 是该用户在本应用的有效角色，由 AuthzService.EffectiveRoles 解析。
+	// 调用方负责传入——SessionService 不依赖 AuthzService，避免两个 service
+	// 互相引用。
+	Roles []string
 }
 
 // Issue 为一次成功的认证签发新会话。
@@ -84,6 +88,7 @@ func (s *SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Sess
 		IP:             in.IP,
 		UA:             in.UA,
 		Mobile:         in.Mobile,
+		Roles:          in.Roles,
 		Epoch:          epoch,
 	}
 	if err := s.store.Put(ctx, sess, idle); err != nil {

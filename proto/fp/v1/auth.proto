@@ -29,6 +29,14 @@ service AuthService {
   // 一元 RPC 与本流复用同一条 TCP/TLS 连接，流长期存在意味着
   // 回源永远走热连接，不会付 2–5ms 的冷连接代价。
   rpc Watch(stream WatchRequest) returns (stream WatchResponse);
+
+  // ReportPermissions 由业务方 SDK 在启动时调用，上报自己的权限点全量快照。
+  // 这是"权限路径从代码变成注册数据"的入口。
+  rpc ReportPermissions(ReportPermissionsRequest) returns (ReportPermissionsResponse);
+
+  // GetPolicy 拉取本应用的完整策略快照。SDK 启动时调一次，
+  // 之后靠 Watch 上的 PolicyChanged 事件触发重拉。
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
 }
 
 // SendLoginCodeRequest 是一次发码请求。
@@ -117,6 +125,14 @@ message ValidateTokenResponse {
   // 哪怕它的 max_lifetime 还有 90 天。
   bool rotated = 4;
   string new_token = 5;
+
+  // roles 是该用户在本应用的**有效角色**（全局角色 ∪ 应用默认角色），
+  // 在签发会话时解析好刻进会话，随每次校验一起回来。
+  //
+  // 这样 SDK 的鉴权判定完全不碰网络：本地只需一份很小的策略表（角色 →
+  // 权限点），用户的角色跟着身份一起来。把 casbin 的 g 规则（用户 → 角色）
+  // 全量下发给每个 SDK 实例是不现实的——它随用户数增长。
+  repeated string roles = 6;
 }
 
 // WatchRequest 是建流请求。
@@ -137,7 +153,24 @@ message WatchResponse {
     WatchReady ready = 2;
     // purge 要求 SDK 丢弃全部缓存。
     WatchPurge purge = 3;
+    // policy_changed 表示本应用的策略变了（改角色、改角色权限、删权限点），
+    // SDK 应当重拉一次 GetPolicy。
+    PolicyChanged policy_changed = 4;
+    // user_role_changed 表示某个用户的角色变了，SDK 应当丢掉他的缓存。
+    //
+    // 与 RevokeEvent 的语义相反：撤销是**拒绝**（用户被踢下线），角色变更
+    // 只是**刷新**——给某人加个权限不该把他踢下线。
+    UserRoleChanged user_role_changed = 5;
   }
+}
+
+message PolicyChanged {
+  // version 是新的策略版本号，SDK 可用它跳过已经拿到的版本。
+  int64 version = 1;
+}
+
+message UserRoleChanged {
+  string user_id = 1;
 }
 
 // WatchReady 表示服务端已就绪。
@@ -159,4 +192,38 @@ message WatchReady {}
 message WatchPurge {
   // reason 只用于日志与排障，SDK 的处理动作与它无关。
   string reason = 1;
+}
+
+// ---------------------------------------------------------------------------
+// 授权
+// ---------------------------------------------------------------------------
+
+message ReportPermissionsRequest {
+  // points 是本次的**全量快照**。
+  //
+  // 快照里没有的权限点**不会被删除**——"消失"的判据是"多久没有任何实例
+  // 报过它"，不是"这次快照里有没有"。业务服务多半多实例，滚动发布时新旧
+  // 版本同时在跑，按快照删除会让权限点在两个状态间反复横跳，还会连带删掉
+  // 授权关系。
+  repeated PermissionPoint points = 1;
+}
+
+message PermissionPoint {
+  // key 形如 "GET:/orders/{id}"，由**匹配到的路由模式**推导，不是原始 URL。
+  string key = 1;
+  // kind：api / menu / button。本期恒为 "api"。
+  string kind = 2;
+  // parent 是父权限点的 key（不是 id，SDK 不知道 id）。本期恒为空。
+  string parent = 3;
+  // name 是显示名，可选。只在权限点首次创建时写入，之后人在控制台维护，
+  // 后续上报不覆盖——否则每次重启，运营填的中文名就没了。
+  string name = 4;
+}
+
+message ReportPermissionsResponse {}
+
+message GetPolicyRequest {}
+
+message GetPolicyResponse {
+  AppPolicy policy = 1;
 }

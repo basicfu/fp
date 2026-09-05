@@ -161,12 +161,41 @@ GIN 索引直接命中，一条 UPDATE。这条耦合放在 service 层的删除
 ```go
 rctx := chi.RouteContext(req.Context())
 probe := chi.NewRouteContext()
-if rctx.Routes.Match(probe, req.Method, req.URL.Path) {
+// 路径必须与 chi 自己用的那个一致：RawPath 非空时用 RawPath。
+// 用 req.URL.Path 是鉴权绕过，见下。
+path := req.URL.RawPath
+if path == "" {
+    path = req.URL.Path
+}
+if rctx.Routes.Match(probe, req.Method, path) {
     pattern := probe.RoutePattern()   // "/orders/{id}"
 }
 ```
 
 嵌套路由与多路径参数都正确：`DELETE /orders/9/items/7` → `/orders/{id}/items/{itemId}`。
+
+**试匹配用的路径必须与 chi 自己用的逐字一致，否则是鉴权绕过。**试匹配失败时中间件放行给 chi 去回 404，所以"试匹配匹不上"与"chi 也匹不上"必须是同一件事；一旦不是，请求直接进 handler，**一次判定都没做**。实施后补测试查出两条：
+
+| 用错的路径 | 后果 |
+|---|---|
+| `req.URL.Path`（解码过） | chi 在 `RawPath` 非空时用 `RawPath`。`GET /orders/a%2Fb` 的 `Path` 是 `/orders/a/b`（两段，匹配不上）、`RawPath` 是 `/orders/a%2Fb`（一段，匹配 `/orders/{id}`）。**任何带百分号编码的 URL 都能绕开鉴权** |
+| `rctx.RoutePath` | 它是 Mount 之后的**剩余**路径、配的是**内层**路由器；而 `rctx.Routes` 只在最外层被赋值一次（chi `mux.go` 的 `ServeHTTP`：有父 context 时直接复用、不重设 `Routes`），永远是**顶层**路由器。拿内层路径匹配顶层路由器，同样匹不上、同样绕过 |
+
+固定用「顶层路由器 + 完整路径」这一对。代价是 Mount 进去的子路由，判定拿到的模式含挂载前缀（`/api/v1/orders/{id}`）——而 `chi.Walk` 顶层路由器给出的也正是这个，两侧仍然一致。
+
+守卫是 `TestHandlerNeverRunsWithoutDecision`：拿一组含编码斜杠、编码点号、重复斜杠的 URL × 七种方法跑一遍，只断言**"handler 跑了就一定判定过"**——不断言该匹配成什么。这条不变式与路径长什么样无关，所以测试也不该依赖具体形态。
+
+**这么做不需要自己实现 RESTful 匹配**（对比 casbin 的 `keyMatch2`）：判定用的就是分发该请求的那个匹配器，不可能出现"路由这么匹、鉴权那么匹"的分歧。判定本身退化成精确字符串比较。
+
+**代价是一条不变式：`Collect`（上报）与试匹配（判定）必须产出同一个字符串。**对不上就是静默全拒——本地策略表查不到条目即默认拒绝，没有任何报错指向真实原因。
+
+上面这段手工实测**漏了这条不变式**，实施后补测试才发现两侧确实对不上：
+
+| | `chi.Walk`（上报） | 试匹配（判定） |
+|---|---|---|
+| `r.Route("/orders", …)` 里的 `r.Get("/", …)` | `/orders/` | `/orders` |
+
+命中的正是 REST 里最常见的列表与创建接口。逐个探过六种路由形态（顶层显式尾斜杠 / `Route` 子路由根 / `Mount` 子路由根 / `Mount` 带参数 / 根路由 / 通配后缀），差异是**单向**的：`chi.Walk` 会加尾斜杠，试匹配从不加。所以归一化只挂在上报侧（`normalizePattern`），判定侧加了也是测不出差别的死代码。`TestWalkAndMatchAgreeAcrossShapes` 把这六种形态固化成守卫。
 
 ## 六、权限点的生命周期
 
@@ -297,15 +326,18 @@ func (a *Authz) Allow(ctx context.Context, userID, method, pattern string) (bool
 标准库那一行是实话：**它给不了自动化**。用 `ServeMux` 的人直接调 `Allow` 并传自己的资源字符串，权限点用 `Declare` 手动声明。这不是缺陷，是那个框架本身没有路由模式这个东西——文档要写明，不假装能自动搞定。
 
 ```go
-// 上报
-fpsdk.CollectChi(router, fpsdk.StripPrefix("/api/v1"))
-fpsdk.CollectGin(engine)
-fpsdk.Declare([]Point{...})   // 手动；以后的菜单按钮也走这个
+// 适配器各自成包，上报与判定共用同一个对象
+a := fpchi.New(client.Authz(), fpchi.StripPrefix("/api/v1"))
+r.Use(a.Middleware())                        // 鉴权
+_ = client.ReportPermissions(ctx, a.Collect(r))  // 上报
 
-// 鉴权
-fpsdk.ChiAuthz(client)   // 中间件
-ok, err := fp.Authz().Allow(ctx, userID, "GET", "/orders/{id}")  // 直接调
+// 不用适配器时直接调
+ok, err := client.Authz().Allow(ctx, "GET", "/orders/{id}")
 ```
+
+**适配器必须独立成包**（`sdk/fpchi`，而不是 `package fpsdk`）。写在 fpsdk 里的话，所有接入方 import fpsdk 都会把 chi 连进自己的二进制——用 gin 的、用裸 net/http 的一并遭殃。`go build` 对此一声不吭，只有 `go list -deps ./sdk` 看得见。`sdk/arch_test.go` 的 `TestSDKDoesNotImportWebFrameworks` 守着这条。
+
+**上报与判定必须共用一个 Adapter**，因为 `StripPrefix` 这类配置会改变 key：只在一侧配就是静默全拒。收进一个对象后，这种错法不存在。
 
 `StripPrefix` 的作用是让分组推导有意义（`/api/v1/orders/{id}` 不该被归到 `api` 组）。本期不做分组，但前缀配置现在就留，避免以后要求所有接入方改初始化代码。
 
@@ -344,16 +376,47 @@ message PermissionPoint {
 1. **判定逻辑穷举。** SDK 侧的判定是纯函数（角色集 × 权限点 → 允许/拒绝），把 allow/deny/都没有/多角色叠加/deny-override 全部列成表驱动测试。这是本模块唯一有真实逻辑的地方，必须测死。
 2. **默认角色的两条分支。** `user_role` 有行 vs 无行，分别断言解析出的角色。**辨别力要求**：无行那条的前置必须让应用配了一个与显式角色不同的默认角色，否则"用了默认"和"用了显式"产出同样结果，测不出顺序写反。
 3. **角色继承展开。** `order-admin.parent = normal`，断言推给 SDK 的 `order-admin` 条目里**包含 normal 的权限点**。只测服务端 casbin 的返回值不够——要断言推出去的那份扁平表。
-4. **路由模式提取。** chi 适配器对嵌套路由、多路径参数、以及未匹配路径的行为。第五节的实测要固化成测试。
+4. **路由模式提取。** chi 适配器对嵌套路由、多路径参数、以及未匹配路径的行为。第五节的实测要固化成测试。**最要紧的是上报侧与判定侧产出同一个 key**——这条实施时被跳过了，补做时立刻查出尾斜杠不一致（见第五节）。未匹配路径必须交给 chi 回 404/405，不能在鉴权处回 403，否则"URL 写错了"会伪装成"没有权限"。
 5. **上报的三条规则。** 快照缺失不删；`manual` 不被触碰；`name`/`parent` 人工改过后不被覆盖。第三条的**辨别力要求**：必须先人工改过 `name` 再上报一次，断言改动还在——直接测"上报写入 name"是测不到覆盖问题的。
 6. **过渡中的判据。** 用可控时钟，断言"阈值内不算消失"与"超过阈值算消失"，以及"重新上报后回到正常"。
 7. **删权限点连带删授权。** 断言外键真的级联了，而不是只在应用层删了一次。
 8. **端到端穿透。** 改一个人的角色 → 断言 SDK 侧下一次 `Allow` 的结果变了。这条对应第三阶段发现的那类缺陷：只测服务端返回值不够，要穿到 SDK 出口。
 9. **变异验证。** 上述每条标注「辨别力」的测试，实现时都要把实现改坏跑一次确认真的变红。第三阶段有一条测试正是靠这个步骤才被发现是假绿的。
 
+## 十一之二、性能实测与 casbin 对照
+
+判定在 SDK 进程内、每个请求跑一次，所以值得量。以下都在同一台机器上跑（`sdk/authz_bench_test.go`、`sdk/fpchi/bench_test.go`，casbin 侧是等价模型的独立基准）。
+
+**判定本身**，策略 50 角色 × 500 权限、用户持有 5 个角色：
+
+| | 每次判定 | 分配 |
+|---|---|---|
+| fp（编译成 map 后查找） | **96 ns** | **0 B / 0 次** |
+| casbin `Enforce` + `keyMatch2` | 1,969,144 ns | 2.79 MB / 35,303 次 |
+| casbin，把 `keyMatch2` 换成 `==` | 180,407 ns | 506 KB / 3,517 次 |
+| casbin `CachedEnforcer`，同一 URL 反复打 | 107 ns | 144 B / 5 次 |
+| casbin `CachedEnforcer`，每次不同 id | 1,928,868 ns | 2.79 MB / 35,294 次 |
+
+差距的来源不是 `keyMatch2`（它只占约十倍），而是 casbin 的通用机制：`enforcer.go` 的 `enforce` 会**遍历每一条 policy** 并对每条求值一次 matcher 表达式（第 725 行的循环）。matcher 是可配置的任意表达式，所以无法建索引——这是可配置性的价格，不是实现缺陷。fp 只支持一种策略形状，因此能把它编译成 map。
+
+**缓存那一行要特别看**：`CachedEnforcer` 的键是原始 URL，而 RESTful 的 URL 每个 id 都不同，于是 `/orders/1`、`/orders/2` 条条未命中——缓存在这个场景下等于没有。107 ns 那行只在同一个 URL 反复打时成立。fp 不需要缓存就比它的缓存命中还快，因为路径在进 map 之前已经被 chi 归约成了模式。
+
+**这不是说 fp 比 casbin 好。** casbin 做的事多得多：ABAC、自定义匹配函数、优先级与多种 effect、domain、filtered adapter、watcher。fp 实现的是其中恰好一种形状。结论只在本用例内成立：**功能权限 + RESTful 路径 + 角色继承在服务端展开**这个组合下，不引入 casbin 是对的。
+
+**框架侧的开销**（500 个资源 / 2500 条路由）：试匹配 332 ns、72 B、5 次分配（`RouteContext` 已池化；未池化时是 680 B、17 次）。整条中间件相对不挂鉴权的同一棵树，净增约 200–300 ns 与 4 次分配。
+
+两处优化都是被基准逼出来的，不是预先猜的：
+
+- `AllowRoles` 原先每次判定都把整份策略从 proto 转成 `[]RolePolicy` 再线性扫描——开销随**整份策略**大小涨（3.9 µs / 3.4 KB 每请求），与这个用户持有几个角色无关。改成在 `setPolicy` 时编译一次，96 ns / 零分配，**快 40 倍**。
+- 试匹配每次 `chi.NewRouteContext()`，17 次分配白白翻倍了路由开销。用 `sync.Pool` 池化（chi 自己也是这么做的）。
+
 ## 十二、新增依赖
 
-`github.com/casbin/casbin/v2` —— **仅服务端**。需要在 `internal/integration/dependency_whitelist_test.go` 的白名单里登记一行并说明用途。SDK 侧不引入任何新依赖（`sdk/arch_test.go` 的分层约束仍然成立）。
+**实施结果：零新增依赖。** 设计时预留了 `github.com/casbin/casbin/v2`（仅服务端，用于展开角色继承），实施时发现不需要——展开继承就是沿 `parent_id` 往上走一遍并让子角色的直接授权优先，二十行的事（见 `internal/service/policy.go` 的 `effectiveFor`）。为此引入 casbin 及其传递依赖，换来的只是同一个循环。
+
+真正需要 casbin 的是**数据范围**（本期非目标）——那时它的 `model.conf` 表达力才值这个依赖。届时再引入，且只在服务端：SDK 侧的判定是一张扁平表上的 map 查找，永远不需要 casbin。
+
+判定逻辑落在 `sdk/authzcore`，服务端与 SDK 共用同一份实现。选这个位置是因为：`sdk/` 不得 import `internal/`（`sdk/arch_test.go`），`internal/` 不宜 import sdk 的业务包，而 `sdk/gen` 是 buf 的 clean 目标（手写文件会被下次 `./scripts/gen.sh` 删掉——实施时真踩到了这一脚）。
 
 ## 十三、实施顺序建议
 

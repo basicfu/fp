@@ -584,7 +584,7 @@ func TestEnsureRegistrationIsIdempotent(t *testing.T) {
 
 	var n int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM user_application WHERE user_id = $1 AND application_id = $2`,
+		`SELECT count(*) FROM user_extra WHERE user_id = $1 AND application_id = $2`,
 		u.ID, app.ID).Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}

@@ -36,9 +36,31 @@ const sampleSession: UserSession = {
   idleExpiresAt: 1700100000000,
 }
 
+// UserRolesCard 挂载时会各拉一次这三个（角色卡片自己的数据）。它们与本文件
+// 关心的用户/设备/日志三条线无关，但会**吃掉排队的响应**——按顺序排的
+// mockResolvedValueOnce 被角色卡片先取走几个，后面每条断言就都对错了位。
+// 所以在这里按 URL 单独应答，不进队列，让排队的响应仍然一一对应到
+// 那些测试真正在断言的请求上。
+const rolesCardStubs: Record<string, unknown> = {
+  '/admin/api/users/user-1/roles': { roles: [] },
+  '/admin/api/roles': [],
+  '/admin/api/applications': [],
+}
+
 function stubFetchSequence(...responses: Response[]) {
-  const fn = vi.fn()
-  for (const r of responses) fn.mockResolvedValueOnce(r)
+  // 不能用 mockResolvedValueOnce 排队再加一个兜底 mockImplementation：
+  // 排队的响应会被**先**取走，角色卡片照样能抢到队首那个。必须让 URL
+  // 分发优先于队列，所以队列自己维护。
+  const queue = [...responses]
+  const fn = vi.fn((url: string, init?: RequestInit) => {
+    const method = init?.method ?? 'GET'
+    if (method === 'GET' && url in rolesCardStubs) {
+      return Promise.resolve(new Response(JSON.stringify(rolesCardStubs[url]), { status: 200 }))
+    }
+    const next = queue.shift()
+    if (!next) return Promise.reject(new Error(`测试没有为 ${method} ${url} 准备响应`))
+    return Promise.resolve(next)
+  })
   vi.stubGlobal('fetch', fn)
   return fn
 }

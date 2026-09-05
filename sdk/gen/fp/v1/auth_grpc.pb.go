@@ -19,11 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AuthService_SendLoginCode_FullMethodName = "/fp.v1.AuthService/SendLoginCode"
-	AuthService_Login_FullMethodName         = "/fp.v1.AuthService/Login"
-	AuthService_Logout_FullMethodName        = "/fp.v1.AuthService/Logout"
-	AuthService_ValidateToken_FullMethodName = "/fp.v1.AuthService/ValidateToken"
-	AuthService_Watch_FullMethodName         = "/fp.v1.AuthService/Watch"
+	AuthService_SendLoginCode_FullMethodName     = "/fp.v1.AuthService/SendLoginCode"
+	AuthService_Login_FullMethodName             = "/fp.v1.AuthService/Login"
+	AuthService_Logout_FullMethodName            = "/fp.v1.AuthService/Logout"
+	AuthService_ValidateToken_FullMethodName     = "/fp.v1.AuthService/ValidateToken"
+	AuthService_Watch_FullMethodName             = "/fp.v1.AuthService/Watch"
+	AuthService_ReportPermissions_FullMethodName = "/fp.v1.AuthService/ReportPermissions"
+	AuthService_GetPolicy_FullMethodName         = "/fp.v1.AuthService/GetPolicy"
 )
 
 // AuthServiceClient is the client API for AuthService service.
@@ -49,6 +51,12 @@ type AuthServiceClient interface {
 	// 一元 RPC 与本流复用同一条 TCP/TLS 连接，流长期存在意味着
 	// 回源永远走热连接，不会付 2–5ms 的冷连接代价。
 	Watch(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WatchRequest, WatchResponse], error)
+	// ReportPermissions 由业务方 SDK 在启动时调用，上报自己的权限点全量快照。
+	// 这是"权限路径从代码变成注册数据"的入口。
+	ReportPermissions(ctx context.Context, in *ReportPermissionsRequest, opts ...grpc.CallOption) (*ReportPermissionsResponse, error)
+	// GetPolicy 拉取本应用的完整策略快照。SDK 启动时调一次，
+	// 之后靠 Watch 上的 PolicyChanged 事件触发重拉。
+	GetPolicy(ctx context.Context, in *GetPolicyRequest, opts ...grpc.CallOption) (*GetPolicyResponse, error)
 }
 
 type authServiceClient struct {
@@ -112,6 +120,26 @@ func (c *authServiceClient) Watch(ctx context.Context, opts ...grpc.CallOption) 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AuthService_WatchClient = grpc.BidiStreamingClient[WatchRequest, WatchResponse]
 
+func (c *authServiceClient) ReportPermissions(ctx context.Context, in *ReportPermissionsRequest, opts ...grpc.CallOption) (*ReportPermissionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportPermissionsResponse)
+	err := c.cc.Invoke(ctx, AuthService_ReportPermissions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *authServiceClient) GetPolicy(ctx context.Context, in *GetPolicyRequest, opts ...grpc.CallOption) (*GetPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetPolicyResponse)
+	err := c.cc.Invoke(ctx, AuthService_GetPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AuthServiceServer is the server API for AuthService service.
 // All implementations must embed UnimplementedAuthServiceServer
 // for forward compatibility.
@@ -135,6 +163,12 @@ type AuthServiceServer interface {
 	// 一元 RPC 与本流复用同一条 TCP/TLS 连接，流长期存在意味着
 	// 回源永远走热连接，不会付 2–5ms 的冷连接代价。
 	Watch(grpc.BidiStreamingServer[WatchRequest, WatchResponse]) error
+	// ReportPermissions 由业务方 SDK 在启动时调用，上报自己的权限点全量快照。
+	// 这是"权限路径从代码变成注册数据"的入口。
+	ReportPermissions(context.Context, *ReportPermissionsRequest) (*ReportPermissionsResponse, error)
+	// GetPolicy 拉取本应用的完整策略快照。SDK 启动时调一次，
+	// 之后靠 Watch 上的 PolicyChanged 事件触发重拉。
+	GetPolicy(context.Context, *GetPolicyRequest) (*GetPolicyResponse, error)
 	mustEmbedUnimplementedAuthServiceServer()
 }
 
@@ -159,6 +193,12 @@ func (UnimplementedAuthServiceServer) ValidateToken(context.Context, *ValidateTo
 }
 func (UnimplementedAuthServiceServer) Watch(grpc.BidiStreamingServer[WatchRequest, WatchResponse]) error {
 	return status.Error(codes.Unimplemented, "method Watch not implemented")
+}
+func (UnimplementedAuthServiceServer) ReportPermissions(context.Context, *ReportPermissionsRequest) (*ReportPermissionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportPermissions not implemented")
+}
+func (UnimplementedAuthServiceServer) GetPolicy(context.Context, *GetPolicyRequest) (*GetPolicyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPolicy not implemented")
 }
 func (UnimplementedAuthServiceServer) mustEmbedUnimplementedAuthServiceServer() {}
 func (UnimplementedAuthServiceServer) testEmbeddedByValue()                     {}
@@ -260,6 +300,42 @@ func _AuthService_Watch_Handler(srv interface{}, stream grpc.ServerStream) error
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AuthService_WatchServer = grpc.BidiStreamingServer[WatchRequest, WatchResponse]
 
+func _AuthService_ReportPermissions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportPermissionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).ReportPermissions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_ReportPermissions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).ReportPermissions(ctx, req.(*ReportPermissionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuthService_GetPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).GetPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_GetPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).GetPolicy(ctx, req.(*GetPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AuthService_ServiceDesc is the grpc.ServiceDesc for AuthService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -282,6 +358,14 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ValidateToken",
 			Handler:    _AuthService_ValidateToken_Handler,
+		},
+		{
+			MethodName: "ReportPermissions",
+			Handler:    _AuthService_ReportPermissions_Handler,
+		},
+		{
+			MethodName: "GetPolicy",
+			Handler:    _AuthService_GetPolicy_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

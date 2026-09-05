@@ -25,6 +25,7 @@ const sampleApp: Application = {
   appId: 'appid-xyz',
   status: 'ACTIVE',
   cookieDomain: '',
+  defaultRoleKey: '',
   session: {
     idleTimeoutSeconds: 604800,
     idleTimeoutMobileSeconds: 0,

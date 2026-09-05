@@ -21,6 +21,7 @@ type Deps struct {
 	Sessions *service.SessionService
 	Logs     *service.LoginLogService
 	Registry *connector.Registry
+	Authz    *service.AuthzService
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -53,6 +54,7 @@ func NewRouter(d Deps) http.Handler {
 	appH := &applicationHandler{svc: d.Apps}
 	userH := &userHandler{users: d.Users, accounts: d.Accounts, sessions: d.Sessions, logs: d.Logs}
 	connH := &connectorHandler{registry: d.Registry}
+	authzH := &authzHandler{svc: d.Authz, apps: d.Apps}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -104,6 +106,28 @@ func NewRouter(d Deps) http.Handler {
 			r.Delete("/users/{id}/sessions", userH.revokeAllSessions)
 			r.Delete("/users/{id}/sessions/{sid}", userH.revokeSession)
 			r.Get("/users/{id}/login-logs", userH.listLoginLogs)
+			r.Get("/users/{id}/roles", authzH.getUserRoles)
+			r.Put("/users/{id}/roles", authzH.setUserRoles)
+
+			// 授权：角色是全局的，权限点属于应用。
+			r.Get("/roles", authzH.listRoles)
+			r.Post("/roles", authzH.createRole)
+			// PATCH 而不是 PUT：只改 name 与 parentId，key 是身份、不可改。
+			r.Patch("/roles/{id}", authzH.updateRole)
+			r.Delete("/roles/{id}", authzH.deleteRole)
+			// 授权编辑器回显用：这个角色直接持有哪些权限点。
+			r.Get("/roles/{id}/permissions", authzH.roleGrants)
+			// 授予/收回：effect 为空串表示收回。
+			r.Put("/roles/{id}/permissions/{pid}", authzH.setRolePermission)
+
+			r.Get("/applications/{id}/permissions", authzH.listPermissions)
+			r.Post("/applications/{id}/permissions", authzH.createPermission)
+			r.Patch("/applications/{id}/default-role", authzH.setDefaultRole)
+			r.Patch("/permissions/{pid}", authzH.updatePermission)
+			r.Delete("/permissions/{pid}", authzH.deletePermission)
+			// 删除前必须先调它并提示"当前有 N 个角色持有它"——没有可逆的
+			// 停用态，删除就是真删（连带删授权关系）。
+			r.Get("/permissions/{pid}/holders", authzH.permissionHolders)
 		})
 	})
 

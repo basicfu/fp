@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
@@ -561,4 +563,18 @@ func TestUpdateRejectsWhenNoFieldsGiven(t *testing.T) {
 	if _, err := svc.Update(ctx, app.ID, nil, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
+}
+
+// newAppServiceWith 在指定 pool 上构造 ApplicationService，供需要共用同一个
+// pool 的测试使用（例如授权测试要在同一个库里建用户与角色）。
+func newAppServiceWith(t *testing.T, pool *pgxpool.Pool) *service.ApplicationService {
+	t.Helper()
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewPassword(nil)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
+	}
+	return service.NewApplicationService(pool, reg)
 }

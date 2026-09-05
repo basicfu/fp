@@ -396,10 +396,12 @@ func (s *UserService) TouchIdentityLogin(ctx context.Context, identityID uuid.UU
 
 // EnsureRegistration 确保用户在该应用下有注册关系。可重复调用。
 //
-// 注意：user_application 上没有也不允许有 role 列（设计文档 5.5）。
+// 角色不在这张表上——它落在 user_role（全局，每人一行）。设计文档 5.5 那条
+// 「严禁添加 role 列」防的是授权模块交付之前的过渡态，现在授权已交付，
+// 其意图（不留过渡态、直接接 casbin）由 user_role 满足。
 func (s *UserService) EnsureRegistration(ctx context.Context, userID, appID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO user_application (user_id, application_id)
+		INSERT INTO user_extra (user_id, application_id)
 		VALUES ($1, $2)
 		ON CONFLICT (user_id, application_id) DO NOTHING`, userID, appID)
 	if err != nil {

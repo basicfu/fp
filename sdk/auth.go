@@ -36,6 +36,9 @@ type Identity struct {
 	// RotatedTo 非空时，**必须**把这个新 token 下发给客户端（换 cookie /
 	// 回响应头）。不下发的话，该会话会在 fp 的轮换过渡期结束后被登出。
 	RotatedTo string
+	// Roles 是该用户在本应用的有效角色（全局角色 ∪ 应用默认角色），
+	// 由 fp 在签发会话时解析好，随每次校验一起回来。鉴权判定用它。
+	Roles []string
 	// Stale 为 true 表示这是 fp 不可达期间返回的陈旧结果。
 	// 业务方可据此拒绝高危操作。
 	Stale bool
@@ -113,6 +116,7 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 			userID:    res.GetUserId(),
 			sessionID: res.GetSessionId(),
 			rotatedTo: res.GetNewToken(),
+			roles:     res.GetRoles(),
 		}
 		// cache_ttl_ms == 0 表示"不要缓存"。put 内部会原样忽略，
 		// 这里不做任何"没给就用默认值"的兜底——那正是契约禁止的事。
@@ -177,6 +181,7 @@ func identityFrom(e entry, stale bool) *Identity {
 		UserID:    e.userID,
 		SessionID: e.sessionID,
 		RotatedTo: e.rotatedTo,
+		Roles:     e.roles,
 		Stale:     stale,
 	}
 }

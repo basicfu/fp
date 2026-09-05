@@ -482,8 +482,15 @@ type ValidateTokenResponse struct {
 	//
 	// 不回传的后果：该会话在过渡期（默认 30 秒）结束后被登出，
 	// 哪怕它的 max_lifetime 还有 90 天。
-	Rotated       bool   `protobuf:"varint,4,opt,name=rotated,proto3" json:"rotated,omitempty"`
-	NewToken      string `protobuf:"bytes,5,opt,name=new_token,json=newToken,proto3" json:"new_token,omitempty"`
+	Rotated  bool   `protobuf:"varint,4,opt,name=rotated,proto3" json:"rotated,omitempty"`
+	NewToken string `protobuf:"bytes,5,opt,name=new_token,json=newToken,proto3" json:"new_token,omitempty"`
+	// roles 是该用户在本应用的**有效角色**（全局角色 ∪ 应用默认角色），
+	// 在签发会话时解析好刻进会话，随每次校验一起回来。
+	//
+	// 这样 SDK 的鉴权判定完全不碰网络：本地只需一份很小的策略表（角色 →
+	// 权限点），用户的角色跟着身份一起来。把 casbin 的 g 规则（用户 → 角色）
+	// 全量下发给每个 SDK 实例是不现实的——它随用户数增长。
+	Roles         []string `protobuf:"bytes,6,rep,name=roles,proto3" json:"roles,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -553,6 +560,13 @@ func (x *ValidateTokenResponse) GetNewToken() string {
 	return ""
 }
 
+func (x *ValidateTokenResponse) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
 // WatchRequest 是建流请求。
 //
 // 目前无字段：应用身份来自 metadata，不在消息体里重复。
@@ -604,6 +618,8 @@ type WatchResponse struct {
 	//	*WatchResponse_Revoke
 	//	*WatchResponse_Ready
 	//	*WatchResponse_Purge
+	//	*WatchResponse_PolicyChanged
+	//	*WatchResponse_UserRoleChanged
 	Event         isWatchResponse_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -673,6 +689,24 @@ func (x *WatchResponse) GetPurge() *WatchPurge {
 	return nil
 }
 
+func (x *WatchResponse) GetPolicyChanged() *PolicyChanged {
+	if x != nil {
+		if x, ok := x.Event.(*WatchResponse_PolicyChanged); ok {
+			return x.PolicyChanged
+		}
+	}
+	return nil
+}
+
+func (x *WatchResponse) GetUserRoleChanged() *UserRoleChanged {
+	if x != nil {
+		if x, ok := x.Event.(*WatchResponse_UserRoleChanged); ok {
+			return x.UserRoleChanged
+		}
+	}
+	return nil
+}
+
 type isWatchResponse_Event interface {
 	isWatchResponse_Event()
 }
@@ -692,11 +726,118 @@ type WatchResponse_Purge struct {
 	Purge *WatchPurge `protobuf:"bytes,3,opt,name=purge,proto3,oneof"`
 }
 
+type WatchResponse_PolicyChanged struct {
+	// policy_changed 表示本应用的策略变了（改角色、改角色权限、删权限点），
+	// SDK 应当重拉一次 GetPolicy。
+	PolicyChanged *PolicyChanged `protobuf:"bytes,4,opt,name=policy_changed,json=policyChanged,proto3,oneof"`
+}
+
+type WatchResponse_UserRoleChanged struct {
+	// user_role_changed 表示某个用户的角色变了，SDK 应当丢掉他的缓存。
+	//
+	// 与 RevokeEvent 的语义相反：撤销是**拒绝**（用户被踢下线），角色变更
+	// 只是**刷新**——给某人加个权限不该把他踢下线。
+	UserRoleChanged *UserRoleChanged `protobuf:"bytes,5,opt,name=user_role_changed,json=userRoleChanged,proto3,oneof"`
+}
+
 func (*WatchResponse_Revoke) isWatchResponse_Event() {}
 
 func (*WatchResponse_Ready) isWatchResponse_Event() {}
 
 func (*WatchResponse_Purge) isWatchResponse_Event() {}
+
+func (*WatchResponse_PolicyChanged) isWatchResponse_Event() {}
+
+func (*WatchResponse_UserRoleChanged) isWatchResponse_Event() {}
+
+type PolicyChanged struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// version 是新的策略版本号，SDK 可用它跳过已经拿到的版本。
+	Version       int64 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PolicyChanged) Reset() {
+	*x = PolicyChanged{}
+	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PolicyChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PolicyChanged) ProtoMessage() {}
+
+func (x *PolicyChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PolicyChanged.ProtoReflect.Descriptor instead.
+func (*PolicyChanged) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PolicyChanged) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+type UserRoleChanged struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UserRoleChanged) Reset() {
+	*x = UserRoleChanged{}
+	mi := &file_fp_v1_auth_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UserRoleChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UserRoleChanged) ProtoMessage() {}
+
+func (x *UserRoleChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UserRoleChanged.ProtoReflect.Descriptor instead.
+func (*UserRoleChanged) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *UserRoleChanged) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
 
 // WatchReady 表示服务端已就绪。
 //
@@ -711,7 +852,7 @@ type WatchReady struct {
 
 func (x *WatchReady) Reset() {
 	*x = WatchReady{}
-	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	mi := &file_fp_v1_auth_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -723,7 +864,7 @@ func (x *WatchReady) String() string {
 func (*WatchReady) ProtoMessage() {}
 
 func (x *WatchReady) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	mi := &file_fp_v1_auth_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -736,7 +877,7 @@ func (x *WatchReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchReady.ProtoReflect.Descriptor instead.
 func (*WatchReady) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{11}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{13}
 }
 
 // WatchPurge 要求 SDK 丢弃**全部**缓存条目。
@@ -758,7 +899,7 @@ type WatchPurge struct {
 
 func (x *WatchPurge) Reset() {
 	*x = WatchPurge{}
-	mi := &file_fp_v1_auth_proto_msgTypes[12]
+	mi := &file_fp_v1_auth_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -770,7 +911,7 @@ func (x *WatchPurge) String() string {
 func (*WatchPurge) ProtoMessage() {}
 
 func (x *WatchPurge) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[12]
+	mi := &file_fp_v1_auth_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -783,7 +924,7 @@ func (x *WatchPurge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchPurge.ProtoReflect.Descriptor instead.
 func (*WatchPurge) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{12}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *WatchPurge) GetReason() string {
@@ -791,6 +932,245 @@ func (x *WatchPurge) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+type ReportPermissionsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// points 是本次的**全量快照**。
+	//
+	// 快照里没有的权限点**不会被删除**——"消失"的判据是"多久没有任何实例
+	// 报过它"，不是"这次快照里有没有"。业务服务多半多实例，滚动发布时新旧
+	// 版本同时在跑，按快照删除会让权限点在两个状态间反复横跳，还会连带删掉
+	// 授权关系。
+	Points        []*PermissionPoint `protobuf:"bytes,1,rep,name=points,proto3" json:"points,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportPermissionsRequest) Reset() {
+	*x = ReportPermissionsRequest{}
+	mi := &file_fp_v1_auth_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportPermissionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportPermissionsRequest) ProtoMessage() {}
+
+func (x *ReportPermissionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportPermissionsRequest.ProtoReflect.Descriptor instead.
+func (*ReportPermissionsRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ReportPermissionsRequest) GetPoints() []*PermissionPoint {
+	if x != nil {
+		return x.Points
+	}
+	return nil
+}
+
+type PermissionPoint struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// key 形如 "GET:/orders/{id}"，由**匹配到的路由模式**推导，不是原始 URL。
+	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	// kind：api / menu / button。本期恒为 "api"。
+	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	// parent 是父权限点的 key（不是 id，SDK 不知道 id）。本期恒为空。
+	Parent string `protobuf:"bytes,3,opt,name=parent,proto3" json:"parent,omitempty"`
+	// name 是显示名，可选。只在权限点首次创建时写入，之后人在控制台维护，
+	// 后续上报不覆盖——否则每次重启，运营填的中文名就没了。
+	Name          string `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionPoint) Reset() {
+	*x = PermissionPoint{}
+	mi := &file_fp_v1_auth_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionPoint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionPoint) ProtoMessage() {}
+
+func (x *PermissionPoint) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionPoint.ProtoReflect.Descriptor instead.
+func (*PermissionPoint) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *PermissionPoint) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *PermissionPoint) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *PermissionPoint) GetParent() string {
+	if x != nil {
+		return x.Parent
+	}
+	return ""
+}
+
+func (x *PermissionPoint) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type ReportPermissionsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportPermissionsResponse) Reset() {
+	*x = ReportPermissionsResponse{}
+	mi := &file_fp_v1_auth_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportPermissionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportPermissionsResponse) ProtoMessage() {}
+
+func (x *ReportPermissionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportPermissionsResponse.ProtoReflect.Descriptor instead.
+func (*ReportPermissionsResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{17}
+}
+
+type GetPolicyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPolicyRequest) Reset() {
+	*x = GetPolicyRequest{}
+	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPolicyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPolicyRequest) ProtoMessage() {}
+
+func (x *GetPolicyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPolicyRequest.ProtoReflect.Descriptor instead.
+func (*GetPolicyRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{18}
+}
+
+type GetPolicyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Policy        *AppPolicy             `protobuf:"bytes,1,opt,name=policy,proto3" json:"policy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPolicyResponse) Reset() {
+	*x = GetPolicyResponse{}
+	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPolicyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPolicyResponse) ProtoMessage() {}
+
+func (x *GetPolicyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPolicyResponse.ProtoReflect.Descriptor instead.
+func (*GetPolicyResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *GetPolicyResponse) GetPolicy() *AppPolicy {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
 }
 
 var File_fp_v1_auth_proto protoreflect.FileDescriptor
@@ -827,7 +1207,7 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x05token\x18\x01 \x01(\tR\x05token\"\x10\n" +
 	"\x0eLogoutResponse\",\n" +
 	"\x14ValidateTokenRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"\xa8\x01\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\"\xbe\x01\n" +
 	"\x15ValidateTokenResponse\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1d\n" +
 	"\n" +
@@ -835,24 +1215,44 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\fcache_ttl_ms\x18\x03 \x01(\x03R\n" +
 	"cacheTtlMs\x12\x18\n" +
 	"\arotated\x18\x04 \x01(\bR\arotated\x12\x1b\n" +
-	"\tnew_token\x18\x05 \x01(\tR\bnewToken\"\x0e\n" +
-	"\fWatchRequest\"\x9c\x01\n" +
+	"\tnew_token\x18\x05 \x01(\tR\bnewToken\x12\x14\n" +
+	"\x05roles\x18\x06 \x03(\tR\x05roles\"\x0e\n" +
+	"\fWatchRequest\"\xa1\x02\n" +
 	"\rWatchResponse\x12,\n" +
 	"\x06revoke\x18\x01 \x01(\v2\x12.fp.v1.RevokeEventH\x00R\x06revoke\x12)\n" +
 	"\x05ready\x18\x02 \x01(\v2\x11.fp.v1.WatchReadyH\x00R\x05ready\x12)\n" +
-	"\x05purge\x18\x03 \x01(\v2\x11.fp.v1.WatchPurgeH\x00R\x05purgeB\a\n" +
-	"\x05event\"\f\n" +
+	"\x05purge\x18\x03 \x01(\v2\x11.fp.v1.WatchPurgeH\x00R\x05purge\x12=\n" +
+	"\x0epolicy_changed\x18\x04 \x01(\v2\x14.fp.v1.PolicyChangedH\x00R\rpolicyChanged\x12D\n" +
+	"\x11user_role_changed\x18\x05 \x01(\v2\x16.fp.v1.UserRoleChangedH\x00R\x0fuserRoleChangedB\a\n" +
+	"\x05event\")\n" +
+	"\rPolicyChanged\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\x03R\aversion\"*\n" +
+	"\x0fUserRoleChanged\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\"\f\n" +
 	"\n" +
 	"WatchReady\"$\n" +
 	"\n" +
 	"WatchPurge\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason2\xc8\x02\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"J\n" +
+	"\x18ReportPermissionsRequest\x12.\n" +
+	"\x06points\x18\x01 \x03(\v2\x16.fp.v1.PermissionPointR\x06points\"c\n" +
+	"\x0fPermissionPoint\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06parent\x18\x03 \x01(\tR\x06parent\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\"\x1b\n" +
+	"\x19ReportPermissionsResponse\"\x12\n" +
+	"\x10GetPolicyRequest\"=\n" +
+	"\x11GetPolicyResponse\x12(\n" +
+	"\x06policy\x18\x01 \x01(\v2\x10.fp.v1.AppPolicyR\x06policy2\xe0\x03\n" +
 	"\vAuthService\x12J\n" +
 	"\rSendLoginCode\x12\x1b.fp.v1.SendLoginCodeRequest\x1a\x1c.fp.v1.SendLoginCodeResponse\x122\n" +
 	"\x05Login\x12\x13.fp.v1.LoginRequest\x1a\x14.fp.v1.LoginResponse\x125\n" +
 	"\x06Logout\x12\x14.fp.v1.LogoutRequest\x1a\x15.fp.v1.LogoutResponse\x12J\n" +
 	"\rValidateToken\x12\x1b.fp.v1.ValidateTokenRequest\x1a\x1c.fp.v1.ValidateTokenResponse\x126\n" +
-	"\x05Watch\x12\x13.fp.v1.WatchRequest\x1a\x14.fp.v1.WatchResponse(\x010\x01B*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
+	"\x05Watch\x12\x13.fp.v1.WatchRequest\x1a\x14.fp.v1.WatchResponse(\x010\x01\x12V\n" +
+	"\x11ReportPermissions\x12\x1f.fp.v1.ReportPermissionsRequest\x1a .fp.v1.ReportPermissionsResponse\x12>\n" +
+	"\tGetPolicy\x12\x17.fp.v1.GetPolicyRequest\x1a\x18.fp.v1.GetPolicyResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
 
 var (
 	file_fp_v1_auth_proto_rawDescOnce sync.Once
@@ -866,45 +1266,61 @@ func file_fp_v1_auth_proto_rawDescGZIP() []byte {
 	return file_fp_v1_auth_proto_rawDescData
 }
 
-var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_fp_v1_auth_proto_goTypes = []any{
-	(*SendLoginCodeRequest)(nil),  // 0: fp.v1.SendLoginCodeRequest
-	(*SendLoginCodeResponse)(nil), // 1: fp.v1.SendLoginCodeResponse
-	(*LoginRequest)(nil),          // 2: fp.v1.LoginRequest
-	(*LoginResponse)(nil),         // 3: fp.v1.LoginResponse
-	(*UserInfo)(nil),              // 4: fp.v1.UserInfo
-	(*LogoutRequest)(nil),         // 5: fp.v1.LogoutRequest
-	(*LogoutResponse)(nil),        // 6: fp.v1.LogoutResponse
-	(*ValidateTokenRequest)(nil),  // 7: fp.v1.ValidateTokenRequest
-	(*ValidateTokenResponse)(nil), // 8: fp.v1.ValidateTokenResponse
-	(*WatchRequest)(nil),          // 9: fp.v1.WatchRequest
-	(*WatchResponse)(nil),         // 10: fp.v1.WatchResponse
-	(*WatchReady)(nil),            // 11: fp.v1.WatchReady
-	(*WatchPurge)(nil),            // 12: fp.v1.WatchPurge
-	nil,                           // 13: fp.v1.LoginRequest.CredentialsEntry
-	(*RevokeEvent)(nil),           // 14: fp.v1.RevokeEvent
+	(*SendLoginCodeRequest)(nil),      // 0: fp.v1.SendLoginCodeRequest
+	(*SendLoginCodeResponse)(nil),     // 1: fp.v1.SendLoginCodeResponse
+	(*LoginRequest)(nil),              // 2: fp.v1.LoginRequest
+	(*LoginResponse)(nil),             // 3: fp.v1.LoginResponse
+	(*UserInfo)(nil),                  // 4: fp.v1.UserInfo
+	(*LogoutRequest)(nil),             // 5: fp.v1.LogoutRequest
+	(*LogoutResponse)(nil),            // 6: fp.v1.LogoutResponse
+	(*ValidateTokenRequest)(nil),      // 7: fp.v1.ValidateTokenRequest
+	(*ValidateTokenResponse)(nil),     // 8: fp.v1.ValidateTokenResponse
+	(*WatchRequest)(nil),              // 9: fp.v1.WatchRequest
+	(*WatchResponse)(nil),             // 10: fp.v1.WatchResponse
+	(*PolicyChanged)(nil),             // 11: fp.v1.PolicyChanged
+	(*UserRoleChanged)(nil),           // 12: fp.v1.UserRoleChanged
+	(*WatchReady)(nil),                // 13: fp.v1.WatchReady
+	(*WatchPurge)(nil),                // 14: fp.v1.WatchPurge
+	(*ReportPermissionsRequest)(nil),  // 15: fp.v1.ReportPermissionsRequest
+	(*PermissionPoint)(nil),           // 16: fp.v1.PermissionPoint
+	(*ReportPermissionsResponse)(nil), // 17: fp.v1.ReportPermissionsResponse
+	(*GetPolicyRequest)(nil),          // 18: fp.v1.GetPolicyRequest
+	(*GetPolicyResponse)(nil),         // 19: fp.v1.GetPolicyResponse
+	nil,                               // 20: fp.v1.LoginRequest.CredentialsEntry
+	(*RevokeEvent)(nil),               // 21: fp.v1.RevokeEvent
+	(*AppPolicy)(nil),                 // 22: fp.v1.AppPolicy
 }
 var file_fp_v1_auth_proto_depIdxs = []int32{
-	13, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
+	20, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
 	4,  // 1: fp.v1.LoginResponse.user:type_name -> fp.v1.UserInfo
-	14, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
-	11, // 3: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
-	12, // 4: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
-	0,  // 5: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
-	2,  // 6: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
-	5,  // 7: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
-	7,  // 8: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
-	9,  // 9: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
-	1,  // 10: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
-	3,  // 11: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
-	6,  // 12: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
-	8,  // 13: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
-	10, // 14: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
-	10, // [10:15] is the sub-list for method output_type
-	5,  // [5:10] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	21, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
+	13, // 3: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
+	14, // 4: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
+	11, // 5: fp.v1.WatchResponse.policy_changed:type_name -> fp.v1.PolicyChanged
+	12, // 6: fp.v1.WatchResponse.user_role_changed:type_name -> fp.v1.UserRoleChanged
+	16, // 7: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
+	22, // 8: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
+	0,  // 9: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
+	2,  // 10: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
+	5,  // 11: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
+	7,  // 12: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
+	9,  // 13: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
+	15, // 14: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
+	18, // 15: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
+	1,  // 16: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
+	3,  // 17: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
+	6,  // 18: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
+	8,  // 19: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
+	10, // 20: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
+	17, // 21: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
+	19, // 22: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
+	16, // [16:23] is the sub-list for method output_type
+	9,  // [9:16] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_fp_v1_auth_proto_init() }
@@ -917,6 +1333,8 @@ func file_fp_v1_auth_proto_init() {
 		(*WatchResponse_Revoke)(nil),
 		(*WatchResponse_Ready)(nil),
 		(*WatchResponse_Purge)(nil),
+		(*WatchResponse_PolicyChanged)(nil),
+		(*WatchResponse_UserRoleChanged)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -924,7 +1342,7 @@ func file_fp_v1_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_auth_proto_rawDesc), len(file_fp_v1_auth_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

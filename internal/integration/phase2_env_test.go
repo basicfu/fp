@@ -41,6 +41,7 @@ type phase2Services struct {
 	auth      *service.AuthService
 	sms       *notify.FakeProvider
 	revokePub *store.RevokePublisher
+	authz     *service.AuthzService
 }
 
 func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Services {
@@ -70,14 +71,15 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	sender.AddProvider(sms)
 
 	accounts := service.NewAccountService(users, sessions, epochs, logs)
+	authz := service.NewAuthzService(pool)
 	auth := service.NewAuthService(service.AuthDeps{
 		Apps: apps, Users: users, Sessions: sessions, Logs: logs,
-		Registry: registry, Notifier: sender, Codes: codes,
+		Registry: registry, Notifier: sender, Codes: codes, Authz: authz,
 	})
 
 	return phase2Services{
 		apps: apps, users: users, sessions: sessions,
-		accounts: accounts, auth: auth, sms: sms, revokePub: revokePub,
+		accounts: accounts, auth: auth, sms: sms, revokePub: revokePub, authz: authz,
 	}
 }
 
@@ -174,7 +176,7 @@ func (e *phase2Env) startServer(t *testing.T) {
 	lis := listenAddr(t, e.addr)
 	e.addr = lis.Addr().String()
 
-	srv := grpcapi.New(grpcapi.Deps{Auth: e.auth, Apps: e.apps, Pub: e.revokePub})
+	srv := grpcapi.New(grpcapi.Deps{Auth: e.auth, Apps: e.apps, Pub: e.revokePub, Authz: e.authz})
 	e.server = srv
 
 	// runCtx 单独控制 ServeWhenReady 内部那条 Redis 订阅的生命周期，与
@@ -284,8 +286,14 @@ func (e *phase2Env) updateSessionPolicy(t *testing.T, mutate func(*domain.Sessio
 // 不是绕开 SDK 直接调用 service。
 func (e *phase2Env) login(t *testing.T) (token string, userID uuid.UUID, sessionID string) {
 	t.Helper()
+	return e.loginWithPhone(t, randomPhase2Phone())
+}
+
+// loginWithPhone 用指定手机号登录。同一个手机号多次登录得到的是**同一个
+// 用户**，供需要"改完角色再登一次"的测试使用。
+func (e *phase2Env) loginWithPhone(t *testing.T, phone string) (token string, userID uuid.UUID, sessionID string) {
+	t.Helper()
 	ctx := context.Background()
-	phone := randomPhase2Phone()
 
 	if err := e.sdk.Auth().SendLoginCode(ctx, phone); err != nil {
 		t.Fatalf("SendLoginCode: %v", err)
