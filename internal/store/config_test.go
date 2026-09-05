@@ -59,3 +59,58 @@ func TestConfigPublishNoSubscriberIsNotAnError(t *testing.T) {
 		t.Fatalf("无订阅者时广播不该报错: %v", err)
 	}
 }
+
+// TestConfigSubscribeSurfacesResubscribeAsGap 守住"丢事件必须可观测"。
+//
+// go-redis 会在连接抖动时静默重连并重发 SUBSCRIBE，既不报错也不关 channel。
+// 没有这个信号的话，丢事件这件事在整个系统里不留任何痕迹——日志里没有、
+// 监控里没有、SDK 看到的流状态也一切正常，配置就永远停在旧版本上。
+//
+// 制造重连的方式与 revoke_test.go 的 TestSubscribeSurfacesResubscribeAsGap
+// 相同：用 CLIENT KILL 掐掉订阅连接（拿 CLIENT LIST TYPE pubsub 找到它）。
+// 断开后必须在合理时间内收到一条 Gap == true 的信号。两个辅助函数
+// pubsubClientIDs / waitForNewPubsubClientID 定义在 revoke_test.go，
+// 同属 store_test 包，这里直接复用。
+func TestConfigSubscribeSurfacesResubscribeAsGap(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	pub := store.NewConfigPublisher(rdb)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 先拍一张"订阅前"的 pubsub 连接快照，subscribe 之后用差集找出新出现的
+	// 那一条——而不是假设列表里只有一条。
+	before := pubsubClientIDs(t, rdb)
+
+	signals, closeFn, err := pub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer closeFn()
+
+	id := waitForNewPubsubClientID(t, rdb, before)
+
+	// 用 ID 过滤的新式 CLIENT KILL：即使因为时序问题 0 条匹配也不报错，
+	// 但这里显式检查杀掉的连接数，确保我们真的打中了目标。
+	killed, err := rdb.ClientKillByFilter(ctx, "ID", id).Result()
+	if err != nil {
+		t.Fatalf("CLIENT KILL ID %s: %v", id, err)
+	}
+	if killed == 0 {
+		t.Fatalf("CLIENT KILL ID %s 没有杀掉任何连接", id)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case sig := <-signals:
+			if sig.Gap {
+				return // 收到缺口信号，符合预期
+			}
+			// 理论上此时不该收到别的信号；忽略并继续等待，避免测试因为
+			// 无关消息的到达顺序而误判。
+		case <-deadline:
+			t.Fatal("5 秒内没有收到 Gap 信号——订阅重建没有被检测到，" +
+				"丢事件这件事在整个系统里将不留任何痕迹")
+		}
+	}
+}
