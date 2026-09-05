@@ -374,18 +374,37 @@ func CoerceConfigValue(valueType string, raw json.RawMessage) (json.RawMessage, 
 		}
 		// 不是 JSON 字符串（比如填了个裸数字 3），把原文当字符串收下。
 		return json.Marshal(string(s))
-	case ConfigValueArray:
-		var v []any
-		if err := json.Unmarshal(s, &v); err != nil {
+	case ConfigValueArray, ConfigValueObject:
+		// 先探测它能不能解成对应的形状（array 不能是 object，反之亦然），
+		// 然后把**原始字节**compact 一下存进去，**不要**经过
+		// []any / map[string]any 转一圈再 Marshal 回来。
+		//
+		// 转一圈有两个静默的破坏：
+		//  1. Go 把 any 里的 JSON 数字一律解成 float64，只能精确到 2^53。
+		//     {"id":9007199254740993} 会被舍成 ...992 且 err 为 nil——
+		//     雪花 ID、UnixNano() 这类值进了配置就被改写，毫无信号。
+		//     这与"3.7 存进 int 必须报错、不能静默截断"是同一类事故。
+		//  2. map 重新序列化会把 object 的 key 按字母序重排，字节级 diff
+		//     （版本历史那条）会被无意义的重排干扰。
+		if valueType == ConfigValueArray {
+			var probe []any
+			if err := json.Unmarshal(s, &probe); err != nil {
+				return fail(err)
+			}
+		} else {
+			var probe map[string]any
+			if err := json.Unmarshal(s, &probe); err != nil {
+				return fail(err)
+			}
+		}
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, s); err != nil {
 			return fail(err)
 		}
-		return json.Marshal(v)
-	default: // ConfigValueObject
-		var v map[string]any
-		if err := json.Unmarshal(s, &v); err != nil {
-			return fail(err)
-		}
-		return json.Marshal(v)
+		return buf.Bytes(), nil
+	default:
+		return nil, Fail(ErrInvalidArgument, CodeConfigTypeInvalid, "配置项类型不合法").
+			WithDesc("未知类型 %q", valueType)
 	}
 }
 ```
