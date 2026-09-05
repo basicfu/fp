@@ -84,6 +84,9 @@ func TestAuthServiceSurface(t *testing.T) {
 		"Logout":        {false, false},
 		"ValidateToken": {false, false},
 		"Watch":         {true, true},
+		// 授权模块新增：上报权限点、拉取策略快照。
+		"ReportPermissions": {false, false},
+		"GetPolicy":         {false, false},
 	}
 
 	methods := svc.Methods()

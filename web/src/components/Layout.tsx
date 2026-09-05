@@ -5,6 +5,7 @@ import { useAuth } from '@/lib/auth'
 const nav = [
   { to: '/applications', label: '应用' },
   { to: '/users', label: '用户' },
+  { to: '/roles', label: '角色' },
 ]
 
 export default function Layout() {

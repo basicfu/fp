@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
@@ -34,8 +36,9 @@ type Client struct {
 	conn *grpc.ClientConn
 	rpc  fpv1.AuthServiceClient
 
-	// auth 在 New 里构造一次，之后不再替换，因此无需同步保护。
-	auth *Auth
+	// auth 与 authz 在 New 里构造一次，之后不再替换，因此无需同步保护。
+	auth  *Auth
+	authz *Authz
 
 	// streamUp 是推送流的健康状态。它驱动缓存窗口的收紧，
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
@@ -47,6 +50,56 @@ type Client struct {
 
 // Auth 返回认证能力。多次调用返回同一个实例。
 func (c *Client) Auth() *Auth { return c.auth }
+
+// Authz 返回鉴权入口。判定完全在本地完成、不走网络。
+func (c *Client) Authz() *Authz { return c.authz }
+
+// refreshPolicy 重拉一次策略快照。
+//
+// 拉失败只记日志、不动本地已有的快照：一次网络抖动不该让整个应用的鉴权
+// 从"按上一份策略判定"退化成"全部拒绝"。策略是慢变数据，用旧一点的
+// 远好过没有。
+func (c *Client) refreshPolicy(ctx context.Context) {
+	res, err := c.rpc.GetPolicy(ctx, &fpv1.GetPolicyRequest{})
+	if status.Code(err) == codes.Unimplemented {
+		// 这个 fp 部署没启用授权模块。安静跳过，不要当成故障反复告警——
+		// 每次重连都刷一条 WARN 会把真正的问题淹掉。Allow 会一直返回
+		// ErrPolicyUnavailable，业务方按自己的降级策略处理。
+		return
+	}
+	if err != nil {
+		c.opts.Logger.Warn("fpsdk: 拉取策略失败，继续沿用本地快照", "err", err)
+		return
+	}
+	c.authz.setPolicy(res.GetPolicy())
+	c.opts.Logger.Info("fpsdk: 策略已更新", "version", res.GetPolicy().GetVersion(),
+		"roles", len(res.GetPolicy().GetRoles()))
+}
+
+// ReportPermissions 把本服务的权限点全量快照上报给 fp。
+//
+// 通常在启动时调一次，配合 sdk/fpchi 之类的框架适配器：
+//
+//	a := fpchi.New(client.Authz(), fpchi.StripPrefix("/api/v1"))
+//	_ = client.ReportPermissions(ctx, a.Collect(router))
+//
+// 快照里没有的权限点**不会被 fp 删除**——它们会在控制台上转为"过渡中"
+// 并显示已经多久没被上报，由人决定要不要清理。这是为了容忍滚动发布时
+// 新旧版本同时在跑、交替上报。
+func (c *Client) ReportPermissions(ctx context.Context, points []PermissionPoint) error {
+	pts := make([]*fpv1.PermissionPoint, 0, len(points))
+	for _, p := range points {
+		kind := p.Kind
+		if kind == "" {
+			kind = PermissionKindAPI
+		}
+		pts = append(pts, &fpv1.PermissionPoint{
+			Key: p.Key, Kind: kind, Parent: p.Parent, Name: p.Name,
+		})
+	}
+	_, err := c.rpc.ReportPermissions(ctx, &fpv1.ReportPermissionsRequest{Points: pts})
+	return translate(err)
+}
 
 // New 建立与 fp 的连接并启动推送流。
 func New(opts Options) (*Client, error) {
@@ -91,6 +144,7 @@ func New(opts Options) (*Client, error) {
 	// c.auth（收到第一条 ready/revoke/purge 就会），构造顺序反了就是
 	// nil 解引用——而且只在恰好有事件到达时才崩，本地测试多半复现不出来。
 	c.auth = &Auth{c: c, cache: cch}
+	c.authz = &Authz{}
 
 	c.wg.Add(1)
 	go func() {
@@ -218,14 +272,25 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 			// 只有收到 ready 才置为健康：此前服务端可能还没订上撤销频道，
 			// 那段时间的事件会丢，而 SDK 若已认为健康就不会收紧缓存窗口。
 			gotReady = true
+			// 流就绪后拉一次策略：新实例启动、以及每次重连之后，本地都要有
+			// 一份可用的快照，否则 Allow 会一直返回"没能判定"。
+			c.refreshPolicy(ctx)
 		case msg.GetRevoke() != nil:
 			c.auth.onRevoke(msg.GetRevoke())
 		case msg.GetPurge() != nil:
 			c.opts.Logger.Warn("fpsdk: 按服务端要求清空校验缓存",
 				"reason", msg.GetPurge().GetReason())
 			c.auth.onPurge()
+			// 订阅重连后可能漏了策略变更，一并重拉。
+			c.refreshPolicy(ctx)
+		case msg.GetPolicyChanged() != nil:
+			c.refreshPolicy(ctx)
+		case msg.GetUserRoleChanged() != nil:
+			// 只丢这个用户的缓存，不影响他的登录态——角色变更是**刷新**
+			// 而不是撤销。下次校验时 fp 会带回新角色。
+			c.auth.cache.dropUser(msg.GetUserRoleChanged().GetUserId())
 		default:
-			// 未知事件类型（将来的 ConfigChanged / PolicyChanged）。
+			// 未知事件类型（将来的 ConfigChanged 等）。
 			// 忽略，不要报错——oneof 的向前兼容就靠这里。
 		}
 	}

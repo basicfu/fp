@@ -18,9 +18,10 @@ import (
 
 // Deps 是 gRPC 服务需要的全部依赖。
 type Deps struct {
-	Auth *service.AuthService
-	Apps *service.ApplicationService
-	Pub  *store.RevokePublisher
+	Auth  *service.AuthService
+	Apps  *service.ApplicationService
+	Pub   *store.RevokePublisher
+	Authz *service.AuthzService
 
 	// AppSecretCacheTTL 是应用凭据验证结果的缓存时长，也是 appSecret
 	// 轮换的生效上限。为 0 时取 5 分钟。
@@ -91,8 +92,8 @@ func New(d Deps) *Server {
 	)
 	fpv1.RegisterAuthServiceServer(srv, NewAuthServer(AuthServerDeps{
 		Auth: d.Auth,
-		Apps: d.Apps,
-		Hub:  hub,
+		Apps: d.Apps, Authz: d.Authz,
+		Hub: hub,
 	}))
 
 	return &Server{grpc: srv, hub: hub}
