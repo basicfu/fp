@@ -23,7 +23,19 @@ type ConfigSignal struct {
 	// 这是悲观判断不是确知：重建时未必真的丢了东西。但 fp 无从分辨，
 	// 只能按最坏情况处理。与 RevokeSignalGap 是同一件事的两种后果——
 	// 撤销那边要求丢弃全部缓存，配置这边只要求重拉。
-	Gap bool
+	//
+	// **json:"-" 不是可选的。** 这个字段只能由本地的重订阅判定产生，
+	// 绝不能跨网络传输：没有这个 tag 的话，Publish 会把 "Gap":false 写上
+	// wire，而 Subscribe 又把收到的普通消息直接 Unmarshal 进本结构体——
+	// 任何拿到 Redis PUBLISH 权限的人只要发一条 {"Gap":true} 就能伪造出
+	// 一个与真实断连无法区分的信号，绕开 resubscribeCount / slog.Warn
+	// 那条唯一的痕迹，触发全量配置重拉风暴。
+	//
+	// revoke.go 天然没有这个问题：它把信号类型（RevokeSignal{Kind,Event}）
+	// 与过网类型（domain.RevokeEvent）分成两个 struct，Kind 从不参与任何
+	// JSON 编解码。这里把两者揉进了一个 struct，就必须靠 tag 把本地字段
+	// 挡在 wire 之外。
+	Gap bool `json:"-"`
 
 	AppID uuid.UUID `json:"appId"`
 	// Type 是分区，取值见 domain.ConfigType*。

@@ -1,7 +1,10 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -112,5 +115,51 @@ func TestConfigSubscribeSurfacesResubscribeAsGap(t *testing.T) {
 			t.Fatal("5 秒内没有收到 Gap 信号——订阅重建没有被检测到，" +
 				"丢事件这件事在整个系统里将不留任何痕迹")
 		}
+	}
+}
+
+// Gap 只能由本地的重订阅判定产生，绝不能跨网络传过来。
+// 少了 json:"-" 的话，任何有 PUBLISH 权限的人发一条 {"Gap":true} 就能
+// 伪造出与真实断连无法区分的信号，触发全量配置重拉风暴。
+func TestConfigGapNeverCrossesTheWire(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	pub := store.NewConfigPublisher(rdb)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// ① Publish 出去的 JSON 里不能有 Gap 字段。
+	raw, err := json.Marshal(store.ConfigSignal{AppID: uuid.New(), Type: domain.ConfigTypeWeb, Seq: 1})
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if bytes.Contains(bytes.ToLower(raw), []byte(`"gap"`)) {
+		t.Fatalf("Gap 被序列化上了 wire: %s", raw)
+	}
+
+	// ② 伪造一条带 Gap 的普通消息，订阅方必须把它当成普通事件（Gap=false）。
+	ch, closeSub, err := pub.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("订阅失败: %v", err)
+	}
+	defer closeSub()
+
+	appID := uuid.New()
+	forged := fmt.Sprintf(`{"Gap":true,"gap":true,"appId":%q,"type":%q,"seq":999}`,
+		appID.String(), domain.ConfigTypeWeb)
+	if err := rdb.Publish(ctx, "fp:config", forged).Err(); err != nil {
+		t.Fatalf("发伪造消息失败: %v", err)
+	}
+
+	select {
+	case sig := <-ch:
+		if sig.Gap {
+			t.Fatal("伪造的 {\"Gap\":true} 被当成了真的缺口信号——Gap 必须是本地判定，不能来自 wire")
+		}
+		if sig.AppID != appID || sig.Seq != 999 {
+			t.Fatalf("普通字段没解对: %+v", sig)
+		}
+	case <-ctx.Done():
+		t.Fatal("等待事件超时")
 	}
 }
