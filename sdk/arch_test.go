@@ -159,3 +159,38 @@ func TestExamplesDoNotImportInternal(t *testing.T) {
 				"引用 internal/ 会让照抄样例的接入方拿到一个编译不过的项目")
 	})
 }
+
+// TestSDKDoesNotImportWebFrameworks 守住"fpsdk 本身不绑定任何 Web 框架"。
+//
+// 授权的框架适配器（chi、以后的 gin/echo）必须各自成包，例如 sdk/fpchi。
+// 如果适配器直接写在 package fpsdk 里，**所有**接入方 import fpsdk 时都会
+// 把那个路由库连进自己的二进制——用 gin 的人被迫拖上 chi，用裸 net/http
+// 的人也一样。这不是理论风险：chi 适配器最初就是写在 package fpsdk 里的，
+// go build 一声不吭，go list -deps ./sdk 才看得见。
+//
+// 只查非测试文件：适配器包自己的测试当然要 import 它适配的那个框架。
+func TestSDKDoesNotImportWebFrameworks(t *testing.T) {
+	// 适配器包自身是例外——它们存在的意义就是依赖某个框架。
+	adapterDirs := map[string]bool{"fpchi": true}
+
+	frameworks := []string{
+		"github.com/go-chi/chi",
+		"github.com/gin-gonic/gin",
+		"github.com/labstack/echo",
+		"github.com/gofiber/fiber",
+		"github.com/gorilla/mux",
+	}
+
+	root := archTestDir(t)
+	skip := map[string]bool{"gen": true}
+	for d := range adapterDirs {
+		skip[d] = true
+	}
+	walkNonTestGoFiles(t, root, skip, func(path string, file *ast.File, _ *token.FileSet) {
+		for _, fw := range frameworks {
+			assertNoImportOf(t, path, file, fw,
+				"fpsdk 是所有接入方都要 import 的包，绑定某个 Web 框架会让用别的框架的人"+
+					"被迫把它连进二进制。框架适配器请各自成包（见 sdk/fpchi）")
+		}
+	})
+}

@@ -78,9 +78,10 @@ func (c *Client) refreshPolicy(ctx context.Context) {
 
 // ReportPermissions 把本服务的权限点全量快照上报给 fp。
 //
-// 通常在启动时调一次，配合 CollectChi 之类的适配器：
+// 通常在启动时调一次，配合 sdk/fpchi 之类的框架适配器：
 //
-//	_ = client.ReportPermissions(ctx, fpsdk.CollectChi(router, "/api/v1"))
+//	a := fpchi.New(client.Authz(), fpchi.StripPrefix("/api/v1"))
+//	_ = client.ReportPermissions(ctx, a.Collect(router))
 //
 // 快照里没有的权限点**不会被 fp 删除**——它们会在控制台上转为"过渡中"
 // 并显示已经多久没被上报，由人决定要不要清理。这是为了容忍滚动发布时

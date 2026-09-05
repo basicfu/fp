@@ -161,16 +161,33 @@ GIN 索引直接命中，一条 UPDATE。这条耦合放在 service 层的删除
 ```go
 rctx := chi.RouteContext(req.Context())
 probe := chi.NewRouteContext()
-if rctx.Routes.Match(probe, req.Method, req.URL.Path) {
+// 路径必须与 chi 自己用的那个一致：RawPath 非空时用 RawPath。
+// 用 req.URL.Path 是鉴权绕过，见下。
+path := req.URL.RawPath
+if path == "" {
+    path = req.URL.Path
+}
+if rctx.Routes.Match(probe, req.Method, path) {
     pattern := probe.RoutePattern()   // "/orders/{id}"
 }
 ```
 
 嵌套路由与多路径参数都正确：`DELETE /orders/9/items/7` → `/orders/{id}/items/{itemId}`。
 
+**试匹配用的路径必须与 chi 自己用的逐字一致，否则是鉴权绕过。**试匹配失败时中间件放行给 chi 去回 404，所以"试匹配匹不上"与"chi 也匹不上"必须是同一件事；一旦不是，请求直接进 handler，**一次判定都没做**。实施后补测试查出两条：
+
+| 用错的路径 | 后果 |
+|---|---|
+| `req.URL.Path`（解码过） | chi 在 `RawPath` 非空时用 `RawPath`。`GET /orders/a%2Fb` 的 `Path` 是 `/orders/a/b`（两段，匹配不上）、`RawPath` 是 `/orders/a%2Fb`（一段，匹配 `/orders/{id}`）。**任何带百分号编码的 URL 都能绕开鉴权** |
+| `rctx.RoutePath` | 它是 Mount 之后的**剩余**路径、配的是**内层**路由器；而 `rctx.Routes` 只在最外层被赋值一次（chi `mux.go` 的 `ServeHTTP`：有父 context 时直接复用、不重设 `Routes`），永远是**顶层**路由器。拿内层路径匹配顶层路由器，同样匹不上、同样绕过 |
+
+固定用「顶层路由器 + 完整路径」这一对。代价是 Mount 进去的子路由，判定拿到的模式含挂载前缀（`/api/v1/orders/{id}`）——而 `chi.Walk` 顶层路由器给出的也正是这个，两侧仍然一致。
+
+守卫是 `TestHandlerNeverRunsWithoutDecision`：拿一组含编码斜杠、编码点号、重复斜杠的 URL × 七种方法跑一遍，只断言**"handler 跑了就一定判定过"**——不断言该匹配成什么。这条不变式与路径长什么样无关，所以测试也不该依赖具体形态。
+
 **这么做不需要自己实现 RESTful 匹配**（对比 casbin 的 `keyMatch2`）：判定用的就是分发该请求的那个匹配器，不可能出现"路由这么匹、鉴权那么匹"的分歧。判定本身退化成精确字符串比较。
 
-**代价是一条不变式：`CollectChi`（上报）与试匹配（判定）必须产出同一个字符串。**对不上就是静默全拒——本地策略表查不到条目即默认拒绝，没有任何报错指向真实原因。
+**代价是一条不变式：`Collect`（上报）与试匹配（判定）必须产出同一个字符串。**对不上就是静默全拒——本地策略表查不到条目即默认拒绝，没有任何报错指向真实原因。
 
 上面这段手工实测**漏了这条不变式**，实施后补测试才发现两侧确实对不上：
 
@@ -309,15 +326,18 @@ func (a *Authz) Allow(ctx context.Context, userID, method, pattern string) (bool
 标准库那一行是实话：**它给不了自动化**。用 `ServeMux` 的人直接调 `Allow` 并传自己的资源字符串，权限点用 `Declare` 手动声明。这不是缺陷，是那个框架本身没有路由模式这个东西——文档要写明，不假装能自动搞定。
 
 ```go
-// 上报
-fpsdk.CollectChi(router, fpsdk.StripPrefix("/api/v1"))
-fpsdk.CollectGin(engine)
-fpsdk.Declare([]Point{...})   // 手动；以后的菜单按钮也走这个
+// 适配器各自成包，上报与判定共用同一个对象
+a := fpchi.New(client.Authz(), fpchi.StripPrefix("/api/v1"))
+r.Use(a.Middleware())                        // 鉴权
+_ = client.ReportPermissions(ctx, a.Collect(r))  // 上报
 
-// 鉴权
-fpsdk.ChiAuthz(client)   // 中间件
-ok, err := fp.Authz().Allow(ctx, userID, "GET", "/orders/{id}")  // 直接调
+// 不用适配器时直接调
+ok, err := client.Authz().Allow(ctx, "GET", "/orders/{id}")
 ```
+
+**适配器必须独立成包**（`sdk/fpchi`，而不是 `package fpsdk`）。写在 fpsdk 里的话，所有接入方 import fpsdk 都会把 chi 连进自己的二进制——用 gin 的、用裸 net/http 的一并遭殃。`go build` 对此一声不吭，只有 `go list -deps ./sdk` 看得见。`sdk/arch_test.go` 的 `TestSDKDoesNotImportWebFrameworks` 守着这条。
+
+**上报与判定必须共用一个 Adapter**，因为 `StripPrefix` 这类配置会改变 key：只在一侧配就是静默全拒。收进一个对象后，这种错法不存在。
 
 `StripPrefix` 的作用是让分组推导有意义（`/api/v1/orders/{id}` 不该被归到 `api` 组）。本期不做分组，但前缀配置现在就留，避免以后要求所有接入方改初始化代码。
 
