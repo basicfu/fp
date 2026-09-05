@@ -33,26 +33,67 @@ func PermissionKey(method, pattern string) string {
 // 刻意做成不依赖任何外部状态的纯函数：这是整个授权模块唯一有真实逻辑的
 // 地方，纯函数才能穷举测试。
 func Allow(roles []RolePolicy, roleKeys []string, permissionKey string) bool {
-	held := make(map[string]bool, len(roleKeys))
-	for _, k := range roleKeys {
-		held[k] = true
-	}
+	return Compile(roles).Allow(roleKeys, permissionKey)
+}
 
-	allowed := false
+// Snapshot 是编译好的策略。判定时**零分配**：角色与权限点都进了 map。
+//
+// 存在的理由是热路径的形状：判定每个请求跑一次，而策略几分钟才换一次。
+// 早先 SDK 每次判定都把整份策略从 proto 转成 []RolePolicy 再线性扫描，
+// 开销随**整份策略**的大小涨（50 角色 × 500 权限时是 3.9µs / 3.4KB
+// 每请求），而不是随这个用户持有的角色数涨。编译一次之后，判定只跟
+// 用户持有几个角色有关。
+type Snapshot struct {
+	roles map[string]roleSets
+}
+
+type roleSets struct {
+	allow map[string]struct{}
+	deny  map[string]struct{}
+}
+
+// Compile 把角色列表编译成可反复判定的快照。策略更新时调一次。
+func Compile(roles []RolePolicy) *Snapshot {
+	s := &Snapshot{roles: make(map[string]roleSets, len(roles))}
 	for _, rp := range roles {
-		if !held[rp.RoleKey] {
-			continue
+		// 同一个 roleKey 出现多次时合并，不是后者覆盖前者——覆盖会悄悄
+		// 丢掉前一条里的 deny，而 deny 丢失是放行，不是拒绝。
+		sets, ok := s.roles[rp.RoleKey]
+		if !ok {
+			sets = roleSets{allow: map[string]struct{}{}, deny: map[string]struct{}{}}
+		}
+		for _, a := range rp.Allow {
+			sets.allow[a] = struct{}{}
 		}
 		for _, d := range rp.Deny {
-			if d == permissionKey {
-				// deny 一票否决，不必再看其余角色。
-				return false
-			}
+			sets.deny[d] = struct{}{}
 		}
-		for _, al := range rp.Allow {
-			if al == permissionKey {
-				allowed = true
-			}
+		s.roles[rp.RoleKey] = sets
+	}
+	return s
+}
+
+// Allow 判定持有 roleKeys 的用户能否使用 permissionKey。
+//
+// 规则与 Compile 之前完全一致：**有 deny 即拒，有 allow 即过，都没有则拒**。
+// nil 快照一律拒绝——调用方应当在此之前就用"策略未就绪"把请求拦下，
+// 这里兜底成默认拒绝而不是放行。
+func (s *Snapshot) Allow(roleKeys []string, permissionKey string) bool {
+	if s == nil {
+		return false
+	}
+	allowed := false
+	for _, k := range roleKeys {
+		sets, ok := s.roles[k]
+		if !ok {
+			continue
+		}
+		if _, denied := sets.deny[permissionKey]; denied {
+			// deny 一票否决，不必再看其余角色。
+			return false
+		}
+		if _, ok := sets.allow[permissionKey]; ok {
+			allowed = true
 		}
 	}
 	// 不能在找到 allow 时提前 return：后面的角色可能带 deny，而 deny-override

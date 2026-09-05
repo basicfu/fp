@@ -27,8 +27,10 @@ var ErrNoIdentity = errors.New("fpsdk: context 中没有已认证的身份")
 // 角色随 token 校验一起回来。这是设计原则 2（不走网络）的落地——若每次
 // 鉴权都调一次 fp，每个请求会多一次往返，且 fp 挂则所有业务方全挂。
 type Authz struct {
-	mu     sync.RWMutex
-	policy *fpv1.AppPolicy
+	mu       sync.RWMutex
+	version  int64
+	compiled *authzcore.Snapshot
+	ready    bool
 }
 
 // Allow 判定当前请求的用户能否对 (method, pattern) 执行操作。
@@ -58,24 +60,31 @@ func (a *Authz) Allow(ctx context.Context, method, pattern string) (bool, error)
 // AllowRoles 用显式给出的角色做判定，供不使用 fpsdk 认证中间件的调用方使用。
 func (a *Authz) AllowRoles(roles []string, method, pattern string) (bool, error) {
 	a.mu.RLock()
-	pol := a.policy
+	snap, ready := a.compiled, a.ready
 	a.mu.RUnlock()
 
-	if pol == nil {
+	if !ready {
 		return false, ErrPolicyUnavailable
 	}
-	// 生成类型转成 authzcore 的纯结构：判定逻辑不绑定 proto 的演进。
-	rp := make([]authzcore.RolePolicy, 0, len(pol.GetRoles()))
-	for _, r := range pol.GetRoles() {
-		rp = append(rp, authzcore.RolePolicy{RoleKey: r.GetRoleKey(), Allow: r.GetAllow(), Deny: r.GetDeny()})
-	}
-	return authzcore.Allow(rp, roles, authzcore.PermissionKey(method, pattern)), nil
+	return snap.Allow(roles, authzcore.PermissionKey(method, pattern)), nil
 }
 
 // setPolicy 替换本地策略快照。由策略推送与启动时的全量拉取调用。
+//
+// **编译在这里做，不在判定里做**：策略几分钟才换一次，判定每个请求跑一次。
+// 早先每次判定都把整份策略从 proto 转一遍再线性扫描，开销随整份策略的大小
+// 涨（50 角色 × 500 权限时每请求 3.9µs、3.4KB），与这个用户持有几个角色无关。
 func (a *Authz) setPolicy(p *fpv1.AppPolicy) {
+	rp := make([]authzcore.RolePolicy, 0, len(p.GetRoles()))
+	for _, r := range p.GetRoles() {
+		rp = append(rp, authzcore.RolePolicy{RoleKey: r.GetRoleKey(), Allow: r.GetAllow(), Deny: r.GetDeny()})
+	}
+	snap := authzcore.Compile(rp)
+
 	a.mu.Lock()
-	a.policy = p
+	a.compiled = snap
+	a.version = p.GetVersion()
+	a.ready = true
 	a.mu.Unlock()
 }
 
@@ -83,10 +92,7 @@ func (a *Authz) setPolicy(p *fpv1.AppPolicy) {
 func (a *Authz) PolicyVersion() int64 {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.policy == nil {
-		return 0
-	}
-	return a.policy.Version
+	return a.version
 }
 
 // PermissionKindAPI 是本期唯一启用的权限点种类。menu / button 留给以后。

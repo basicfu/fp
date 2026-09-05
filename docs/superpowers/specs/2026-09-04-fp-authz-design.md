@@ -383,6 +383,33 @@ message PermissionPoint {
 8. **端到端穿透。** 改一个人的角色 → 断言 SDK 侧下一次 `Allow` 的结果变了。这条对应第三阶段发现的那类缺陷：只测服务端返回值不够，要穿到 SDK 出口。
 9. **变异验证。** 上述每条标注「辨别力」的测试，实现时都要把实现改坏跑一次确认真的变红。第三阶段有一条测试正是靠这个步骤才被发现是假绿的。
 
+## 十一之二、性能实测与 casbin 对照
+
+判定在 SDK 进程内、每个请求跑一次，所以值得量。以下都在同一台机器上跑（`sdk/authz_bench_test.go`、`sdk/fpchi/bench_test.go`，casbin 侧是等价模型的独立基准）。
+
+**判定本身**，策略 50 角色 × 500 权限、用户持有 5 个角色：
+
+| | 每次判定 | 分配 |
+|---|---|---|
+| fp（编译成 map 后查找） | **96 ns** | **0 B / 0 次** |
+| casbin `Enforce` + `keyMatch2` | 1,969,144 ns | 2.79 MB / 35,303 次 |
+| casbin，把 `keyMatch2` 换成 `==` | 180,407 ns | 506 KB / 3,517 次 |
+| casbin `CachedEnforcer`，同一 URL 反复打 | 107 ns | 144 B / 5 次 |
+| casbin `CachedEnforcer`，每次不同 id | 1,928,868 ns | 2.79 MB / 35,294 次 |
+
+差距的来源不是 `keyMatch2`（它只占约十倍），而是 casbin 的通用机制：`enforcer.go` 的 `enforce` 会**遍历每一条 policy** 并对每条求值一次 matcher 表达式（第 725 行的循环）。matcher 是可配置的任意表达式，所以无法建索引——这是可配置性的价格，不是实现缺陷。fp 只支持一种策略形状，因此能把它编译成 map。
+
+**缓存那一行要特别看**：`CachedEnforcer` 的键是原始 URL，而 RESTful 的 URL 每个 id 都不同，于是 `/orders/1`、`/orders/2` 条条未命中——缓存在这个场景下等于没有。107 ns 那行只在同一个 URL 反复打时成立。fp 不需要缓存就比它的缓存命中还快，因为路径在进 map 之前已经被 chi 归约成了模式。
+
+**这不是说 fp 比 casbin 好。** casbin 做的事多得多：ABAC、自定义匹配函数、优先级与多种 effect、domain、filtered adapter、watcher。fp 实现的是其中恰好一种形状。结论只在本用例内成立：**功能权限 + RESTful 路径 + 角色继承在服务端展开**这个组合下，不引入 casbin 是对的。
+
+**框架侧的开销**（500 个资源 / 2500 条路由）：试匹配 332 ns、72 B、5 次分配（`RouteContext` 已池化；未池化时是 680 B、17 次）。整条中间件相对不挂鉴权的同一棵树，净增约 200–300 ns 与 4 次分配。
+
+两处优化都是被基准逼出来的，不是预先猜的：
+
+- `AllowRoles` 原先每次判定都把整份策略从 proto 转成 `[]RolePolicy` 再线性扫描——开销随**整份策略**大小涨（3.9 µs / 3.4 KB 每请求），与这个用户持有几个角色无关。改成在 `setPolicy` 时编译一次，96 ns / 零分配，**快 40 倍**。
+- 试匹配每次 `chi.NewRouteContext()`，17 次分配白白翻倍了路由开销。用 `sync.Pool` 池化（chi 自己也是这么做的）。
+
 ## 十二、新增依赖
 
 **实施结果：零新增依赖。** 设计时预留了 `github.com/casbin/casbin/v2`（仅服务端，用于展开角色继承），实施时发现不需要——展开继承就是沿 `parent_id` 往上走一遍并让子角色的直接授权优先，二十行的事（见 `internal/service/policy.go` 的 `effectiveFor`）。为此引入 casbin 及其传递依赖，换来的只是同一个循环。

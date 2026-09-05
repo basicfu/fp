@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -158,10 +159,17 @@ func routePattern(req *http.Request) (string, bool) {
 	if rctx == nil || rctx.Routes == nil {
 		return "", false
 	}
-	probe := chi.NewRouteContext()
+	probe := probePool.Get().(*chi.Context)
+	defer func() {
+		probe.Reset()
+		probePool.Put(probe)
+	}()
+
 	if !rctx.Routes.Match(probe, req.Method, routingPath(req)) {
 		return "", false
 	}
+	// RoutePattern() 返回的是字符串（拼接后已是独立副本），可以在 probe
+	// 归还池子之后继续使用。
 	return probe.RoutePattern(), true
 }
 
@@ -228,3 +236,10 @@ func trimPrefix(route, prefix string) string {
 	}
 	return trimmed
 }
+
+// probePool 复用试匹配用的 RouteContext。
+//
+// 试匹配每个请求跑一次，chi.NewRouteContext 加上 Match 过程中 URLParams
+// 的增长实测是 17 次分配、约 680B——白白翻倍了路由开销（chi 自己走的那次
+// 匹配用的是它内部的 sync.Pool，我们这次是额外的）。这里照它的做法池化。
+var probePool = sync.Pool{New: func() any { return chi.NewRouteContext() }}
