@@ -361,50 +361,91 @@ func waitUntilTimeout(t *testing.T, timeout time.Duration, cond func() bool, msg
 	t.Fatal(msg)
 }
 
-// pubsubClientIDPattern 从一行 CLIENT LIST 输出里取 id=<数字> 字段。
-var pubsubClientIDPattern = regexp.MustCompile(`\bid=(\d+)`)
+// pubsubClientLinePattern 从一行 CLIENT LIST 输出里取 id=<数字> 与
+// db=<数字> 两个字段。CLIENT LIST 的字段顺序固定（id 在前、db 在
+// age/idle/flags 之后），一条正则按这个顺序两段匹配即可，不需要分别编译
+// 两条正则再各自扫一遍。
+var pubsubClientLinePattern = regexp.MustCompile(`\bid=(\d+)\b.*\bdb=(\d+)\b`)
 
-// killPubSubConnection 找到 rdb 上唯一一条 TYPE pubsub 的连接并杀掉它，模拟
-// 一次 Redis 订阅抖动（故障转移、网络毛刺）——go-redis 会静默重连并重发
-// SUBSCRIBE。
+// killPubSubConnection 找到 rdb 所在库上全部 TYPE pubsub 的连接并逐一杀掉，
+// 模拟一次 Redis 订阅抖动（故障转移、网络毛刺）——go-redis 会静默重连并
+// 重发 SUBSCRIBE。
 //
-// 用 TYPE pubsub 过滤、且只在"确认此刻恰好只有一条"时才动手：杀错连接会把
-// 会话存储也一起断掉，那样测出来的是"Redis 挂了"而不是"订阅抖动了"。
+// 按 db 过滤、且杀掉本库内的全部（而不是曾经的"确认此刻恰好只有一条"）：
 //
-// 轮询等待恰好一条，而不是假设第一次查询就已经如此：前一个测试收尾时，
-// cancelRun 只是发出取消信号，并不等 RevokeHub.Run 内部的 goroutine 真正
-// 退出、真正关掉它那条 Redis 订阅连接（这条不等待的取舍与 grpcEnv 一致，
-// 见 stopFp 的注释）；轮询把这段极短的收尾尾巴吸收掉，避免本函数在前一个
-// 测试的订阅连接还没来得及关闭时，把"两条"误判为异常而失败，也避免在
-// 找不到目标时误杀一条不相关的连接。
+//   - **按 db 过滤**：CLIENT LIST TYPE pubsub 是 Redis 服务器级命令，
+//     不区分调用方连的是哪个逻辑库，共享同一个 Redis 实例的其他进程
+//     （本机其他测试、其他服务）留下的 pubsub 连接会混进结果里。用
+//     rdb.Options().DB 拿到本测试自己连的库号，按 db=<该库号> 过滤掉
+//     跨库的噪音，不用指望"环境里没有别的进程"这个测不了、也不该测的
+//     前提。
+//
+//   - **杀本库内的全部，不再要求恰好一条**：Task 7（配置中心推送）之后，
+//     一个 fp 实例结构性地同时持有两条常驻订阅——RevokeHub（撤销）与
+//     ConfigHub（配置），且都落在同一个逻辑库里。这意味着哪怕上面的 db
+//     过滤把跨库/跨进程的噪音全部排除掉，本库里"恰好一条"这个断言也
+//     永远不可能再成立：稳定就是两条。继续要求恰好一条，会让这个
+//     helper 在任何环境下都无法用完这条轮询窗口，只会超时。
+//
+//     全杀而不是挑一条杀，是因为这个 helper 本来只关心撤销那一条（本
+//     函数存在的唯一理由是给 TestRedisSubscriptionBlipDoesNotSilentlyLoseRevocations
+//     制造"撤销订阅断线重连"），但两条连接对 CLIENT LIST 来说彼此没有
+//     任何可靠区分特征（都是同一个 fp 进程发起、同一个 db、同一种
+//     客户端库），专门去猜哪条是撤销、哪条是配置既做不到、也没必要：
+//     两条一起断开，RevokeHub 那条照样会重连并触发 Gap→Purge，正是该
+//     测试要验证的效果；ConfigHub 那条重连触发的 Gap 是良性的——它只是
+//     让 SDK 多做一次"重拉全部配置"，该测试没有任何断言绑定配置状态。
+//     这个写法还有一个好处：以后如果再加第三条常驻订阅，这个 helper
+//     不需要再改。
+//
+// 轮询等待"本库至少一条"，而不是假设第一次查询就已经如此：前一个测试
+// 收尾时，cancelRun 只是发出取消信号，并不等 RevokeHub.Run / ConfigHub.Run
+// 内部的 goroutine 真正退出、真正关掉它们各自的 Redis 订阅连接（这条不
+// 等待的取舍与 grpcEnv 一致，见 stopFp 的注释）；轮询把这段极短的收尾
+// 尾巴吸收掉，避免在上一个测试的订阅连接还没来得及关闭、本测试自己的
+// 连接还没建立完成之间的窗口里，把瞬时的 0 条误判为异常而失败。
+//
+// 不改 store.RevokePublisher / store.ConfigPublisher 去给连接打名字
+// （CLIENT SETNAME）以便精确区分：这是一个测试 helper 的定位需求，为它
+// 去改生产代码投入产出不成比例，按 db 过滤 + 全杀已经能确定性地达到
+// 这个 helper 的目的。
 func killPubSubConnection(t *testing.T, rdb *redis.Client) {
 	t.Helper()
 	ctx := context.Background()
+	wantDB := fmt.Sprintf("%d", rdb.Options().DB)
 
-	var id string
+	var ids []string
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		raw, err := rdb.Do(ctx, "CLIENT", "LIST", "TYPE", "pubsub").Text()
 		if err != nil {
 			t.Fatalf("CLIENT LIST TYPE pubsub: %v", err)
 		}
-		lines := nonEmptyLines(raw)
-		if len(lines) == 1 {
-			m := pubsubClientIDPattern.FindStringSubmatch(lines[0])
+		ids = ids[:0]
+		for _, line := range nonEmptyLines(raw) {
+			m := pubsubClientLinePattern.FindStringSubmatch(line)
 			if m == nil {
-				t.Fatalf("CLIENT LIST 输出解析不出 id: %q", lines[0])
+				t.Fatalf("CLIENT LIST 输出解析不出 id/db: %q", line)
 			}
-			id = m[1]
+			if m[2] != wantDB {
+				continue // 跨库/跨进程的噪音连接，不是本测试自己的订阅。
+			}
+			ids = append(ids, m[1])
+		}
+		if len(ids) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("等待恰好一条 pubsub 连接超时，当前有 %d 条：%q", len(lines), raw)
+			t.Fatalf("等待本库（db=%s）至少一条 pubsub 连接超时，"+
+				"当前 TYPE pubsub 全量输出：%q", wantDB, raw)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if err := rdb.ClientKillByFilter(ctx, "ID", id).Err(); err != nil {
-		t.Fatalf("CLIENT KILL ID %s: %v", id, err)
+	for _, id := range ids {
+		if err := rdb.ClientKillByFilter(ctx, "ID", id).Err(); err != nil {
+			t.Fatalf("CLIENT KILL ID %s: %v", id, err)
+		}
 	}
 }
 

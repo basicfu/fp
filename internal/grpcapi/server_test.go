@@ -174,6 +174,65 @@ func TestReadyWaitsForSubscriptionToComplete(t *testing.T) {
 	}
 }
 
+// TestServerReadyWaitsForBothHubs 守住 Server.Ready() 这一层编排本身——
+// 不是 RevokeHub 或 ConfigHub 各自的 Ready()（那两个分别由
+// TestReadyWaitsForSubscriptionToComplete 与
+// TestConfigHubReadyWaitsForSubscriptionToComplete 守着），而是
+// grpcapi/server.go 里把两者结合起来的 Server.Ready：必须等 hub 与
+// configHub **都**订阅上 Redis 才关闭。
+//
+// 缺口是怎么发现的：本文件里上面这些 fakeSubscriber 时序测试全部只给
+// &Server{grpc: grpc.NewServer(), hub: hub} 传 hub、不传 configHub——
+// 命中的正是 Server.Ready 里"configHub == nil 就退化成只等 hub"这条
+// 兼容分支（为了不动这些测试、不让它们在 configHub 上 panic 而加的），
+// 于是"两个都要等"这段代码从未被任何既有测试真正跑过：把
+// Server.Ready 改成直接 return s.hub.Ready()、完全不管 configHub，
+// 这些测试依然全绿。
+//
+// 这条测试同时传两个 fake，专门堵死这个缺口：hub 的订阅立刻放行（模拟
+// "撤销那条已经订阅上了"，不是本测试要卡的那条），configHub 的订阅卡住
+// （模拟"配置那条还没订阅上"）。用 Server.Run 驱动两个 hub（而不是分别
+// 手调 hub.Run/configHub.Run）：被测的是 Server.Ready 与 Server.Run 的
+// 组合，不是绕开它们、另起一套平行调用。
+//
+// 变异验证：把 Server.Ready 改成 `if s.configHub == nil { ... }; return
+// s.hub.Ready()`（即无条件只等 hub），第一段断言会立刻失败——hub 那条
+// 早就 ready 了，configHub 还卡着，Server.Ready() 却已经关闭。
+func TestServerReadyWaitsForBothHubs(t *testing.T) {
+	revokeFake := &fakeSubscriber{proceed: make(chan struct{})}
+	close(revokeFake.proceed) // hub 这条"立刻订阅成功"，不是本测试要卡的那条。
+	hub := newRevokeHub()
+	hub.pub = revokeFake
+
+	configFake := &fakeConfigSubscriber{proceed: make(chan struct{})}
+	configHub := newConfigHub()
+	configHub.pub = configFake
+
+	srv := &Server{grpc: grpc.NewServer(), hub: hub, configHub: configHub}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Run(ctx) }()
+
+	select {
+	case <-srv.Ready():
+		t.Fatal("configHub 的订阅还卡着，Server.Ready() 就已经关闭了——" +
+			"没有真正等两条中继都就绪")
+	case <-time.After(200 * time.Millisecond):
+		// 符合预期：hub 早就 ready 了，但 configHub 还没有，Server 整体
+		// 不该 ready。
+	}
+
+	close(configFake.proceed) // 放行，模拟配置那条 Redis 订阅确认刚刚返回。
+
+	select {
+	case <-srv.Ready():
+		// 符合预期：两条中继都 ready 了。
+	case <-time.After(2 * time.Second):
+		t.Fatal("放行 configHub 之后 Server.Ready() 仍未关闭")
+	}
+}
+
 // TestRunReturnsNilWhenCanceledDuringSubscribe 守住 Run 的返回值契约：
 // ctx 在 h.subscribe 成功返回之前就被取消，Run 必须返回 nil，不能把
 // 这次取消当成订阅失败往上报。

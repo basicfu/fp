@@ -167,6 +167,30 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	// 先订阅再发 ready：反过来的话，客户端收到 ready 就认为推送通道健康、
 	// 从而放宽本地缓存窗口，而此刻服务端还没订上，这段时间的撤销/配置变更
 	// 全丢。撤销与配置两条订阅并列注册，同样必须都在 ready 之前完成。
+	//
+	// 这条顺序目前只靠代码审查与这段注释守着，没有自动化测试覆盖，是刻意
+	// 的取舍而不是遗漏：这两行 Subscribe 与下面 stream.Send(ready) 之间
+	// 是三条连续语句，中间没有任何 I/O 或调度点——Go 保证它们按书写顺序
+	// 执行，能让这个顺序被破坏的唯一方式是有人以后把代码改乱（比如把
+	// Subscribe 挪到 Send 后面），而不是运行时的时序竞争。给生产代码里的
+	// 这几行插入一个只为测试存在的钩子（比如显式的 sync 点）去确定性地
+	// 命中"注册前/注册后"这个窗口，对这么窄、纯进程内的一段代码来说得不
+	// 偿失：钩子本身就是新的复杂度与出错面，换来的只是把"读注释就能看懂
+	// 的顺序保证"重新用测试断言一遍。
+	//
+	// 这也不是 Ready()/ServeWhenReady 守护的那类窗口的同等风险搬了个地方：
+	// hub/configHub 对 Redis 的订阅是进程启动时各自一次性建立的（Run 里），
+	// 到任何一条 Watch 流走到这里时，Server.Ready() 已经保证两条 Redis
+	// 订阅都确认完成——ServeWhenReady 不等它关闭就不会开始 Serve，见
+	// server.go 的注释。这里的 Subscribe(app.ID) 不再触达 Redis，只是把
+	// 这一条流的 channel 登记进 hub/configHub 各自进程内的订阅者表，供
+	// fanout 按 appID 找到它。真正"服务端还没订阅上 Redis 就发了 ready"
+	// 这个高危窗口，已经被 D/E 两组测试
+	// （TestReadyWaitsForSubscriptionToComplete、
+	// TestConfigHubReadyWaitsForSubscriptionToComplete、
+	// TestServerReadyWaitsForBothHubs）在更上游堵死；这里剩下的只是"进程内
+	// map 登记"与"发一条消息"这两个动作谁先谁后，写代码的人只要不把顺序
+	// 倒过来就没有问题。
 	events, unsubscribe := s.hub.Subscribe(app.ID)
 	defer unsubscribe()
 	configEvents, unsubscribeConfig := s.configHub.Subscribe(app.ID)
