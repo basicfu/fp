@@ -966,6 +966,18 @@ func (s *ConfigService) Save(
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO config (application_id, type, seq, fields)
 			VALUES ($1, $2, $3, $4)`, appID, typ, seq, raw); err != nil {
+			// 唯一约束冲突 = 另一个请求刚抢到同一个 seq。转成
+			// domain.ErrConflict，调用方才能用 errors.Is 认出"这是可重试的"。
+			// 不转的话，注释里那句"冲突了重试即可"就没有任何机制支撑——
+			// 调用方拿到的是一个裸 *pgconn.PgError，errors.Is 对
+			// ErrConflict / ErrInvalidArgument / ErrInternal 全部为 false。
+			// 与 application.go 的 Create 处理 slug 冲突是同一套（见那里的
+			// pgUniqueViolation 常量）。
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+				return domain.Failf(domain.ErrConflict, domain.CodeConfigVersionConflict,
+					"配置版本冲突，请重试")
+			}
 			return fmt.Errorf("service: 写入配置版本: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
