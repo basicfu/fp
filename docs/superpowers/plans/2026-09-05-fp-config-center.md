@@ -2381,3 +2381,1358 @@ Expected: PASS
 git add internal/httpapi/ cmd/fp/main.go
 git commit -m "feat(config): 控制台的配置中心 HTTP 路由"
 ```
+
+---
+
+## Task 9: SDK 反射——从 struct 推导 key 与类型
+
+**Files:**
+- Create: `sdk/configspec.go`
+- Test: `sdk/configspec_test.go`
+- Create: `internal/integration/configtype_test.go`
+
+**Interfaces:**
+- Consumes: 无（纯本地反射，不碰网络）
+- Produces（包内，不导出）：
+  - `type fieldSpec struct { Key string; Type string; Index []int; Duration bool }`
+  - `func specsOf(t reflect.Type) ([]fieldSpec, error)` —— 按 key 字典序返回
+  - `func toSnake(s string) string`
+  - 常量 `cfgTypeBool/Int/Float/String/Array/Object`
+
+**这是本模块唯一有真实算法的地方，必须测死。** 它同时是 `MissingConfigError` 那份清单的来源——人照着它在控制台建配置项，推错一个类型，人就建错一个。
+
+- [ ] **Step 1: 写失败的测试**
+
+创建 `sdk/configspec_test.go`：
+
+```go
+package fpsdk
+
+import (
+	"reflect"
+	"testing"
+	"time"
+)
+
+func TestToSnake(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"FeeRate", "fee_rate"},
+		{"APIKey", "api_key"},       // 连续大写的缩写不能拆成 a_p_i_key
+		{"UserID", "user_id"},       // 结尾的缩写
+		{"HTTPSProxy", "https_proxy"},
+		{"ID", "id"},
+		{"Timeout", "timeout"},
+		{"MaxConns2", "max_conns2"},
+	}
+	for _, c := range cases {
+		if got := toSnake(c.in); got != c.want {
+			t.Errorf("toSnake(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
+type upstreamCfg struct {
+	Timeout time.Duration
+	APIKey  string
+}
+
+type providerCfg struct {
+	Name string
+	Rate float64
+}
+
+type specCfg struct {
+	FeeRate   float64
+	Enabled   bool
+	Name      string
+	Limits    []int
+	Extra     map[string]string
+	Upstream  upstreamCfg            // 嵌套 struct = 分组
+	Providers []providerCfg          // 切片一律 array，不递归展开
+	Raw       providerCfg `fp:"json"` // 标了 json 就整体当 object
+	unexported int                    //nolint:unused // 必须被跳过
+}
+
+func TestSpecsOf(t *testing.T) {
+	specs, err := specsOf(reflect.TypeOf(specCfg{}))
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+
+	got := map[string]fieldSpec{}
+	for _, s := range specs {
+		got[s.Key] = s
+	}
+
+	want := map[string]string{
+		"fee_rate":          cfgTypeFloat,
+		"enabled":           cfgTypeBool,
+		"name":              cfgTypeString,
+		"limits":            cfgTypeArray,
+		"extra":             cfgTypeObject,
+		"upstream.timeout":  cfgTypeInt, // Duration 走 int（毫秒）
+		"upstream.api_key":  cfgTypeString,
+		"providers":         cfgTypeArray,
+		"raw":               cfgTypeObject,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("推导出 %d 项：%v，期望 %d 项", len(got), keysOf(got), len(want))
+	}
+	for k, wantType := range want {
+		s, ok := got[k]
+		if !ok {
+			t.Fatalf("缺少 key %q", k)
+		}
+		if s.Type != wantType {
+			t.Errorf("%q 的类型 = %q，期望 %q", k, s.Type, wantType)
+		}
+	}
+
+	// 【辨别力】Duration 必须被标出来，且它的 fp 类型是 int。
+	// 只断言"类型是 int"是不够的——一个先判 Kind（int64）后判具体类型的
+	// 实现同样会给出 int，却丢掉了毫秒换算，值会变成纳秒。
+	if !got["upstream.timeout"].Duration {
+		t.Fatal("upstream.timeout 必须标记为 Duration，否则毫秒换算会丢")
+	}
+	if got["fee_rate"].Duration {
+		t.Fatal("fee_rate 不是 Duration")
+	}
+
+	// 排序稳定：MissingConfigError 的清单靠它才不会每次启动顺序都不同。
+	for i := 1; i < len(specs); i++ {
+		if specs[i-1].Key >= specs[i].Key {
+			t.Fatalf("specs 未按 key 升序：%q 在 %q 之前", specs[i-1].Key, specs[i].Key)
+		}
+	}
+}
+
+func TestSpecsOfRejectsUnsupported(t *testing.T) {
+	type badPtr struct{ P *int }
+	type badChan struct{ C chan int }
+	type badFunc struct{ F func() }
+	type badIface struct{ I any }
+
+	for _, v := range []any{badPtr{}, badChan{}, badFunc{}, badIface{}} {
+		if _, err := specsOf(reflect.TypeOf(v)); err == nil {
+			t.Errorf("%T 应当被拒绝，不能静默跳过", v)
+		}
+	}
+}
+
+func TestSpecsOfRejectsNonStruct(t *testing.T) {
+	if _, err := specsOf(reflect.TypeOf(42)); err == nil {
+		t.Fatal("非 struct 应当被拒绝")
+	}
+}
+
+func keysOf(m map[string]fieldSpec) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `./scripts/test.sh ./sdk -run 'TestToSnake|TestSpecsOf' -v`
+Expected: 编译失败，`undefined: toSnake`
+
+- [ ] **Step 3: 写实现**
+
+创建 `sdk/configspec.go`：
+
+```go
+package fpsdk
+
+import (
+	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
+	"unicode"
+)
+
+// fp 的配置类型。**不带任何一门语言的特性**——没有 duration，因为其他
+// 语言没这个概念；Go 的 time.Duration 是本 SDK 按毫秒当 int 处理的私事。
+//
+// 这几个字符串是**线上契约**，必须与服务端 internal/domain 的
+// ConfigValue* 逐字相同。两处分处 sdk/ 与 internal/（sdk 不得 import
+// internal），任何一边单独看都只是几个孤立的字符串常量，改错了
+// go build / vet / 全量测试照样全绿。配对由 internal/integration 里的
+// TestConfigValueTypesMatch 守护——那是唯一能同时看到两个包的地方。
+const (
+	cfgTypeBool   = "bool"
+	cfgTypeInt    = "int"
+	cfgTypeFloat  = "float"
+	cfgTypeString = "string"
+	cfgTypeArray  = "array"
+	cfgTypeObject = "object"
+)
+
+// durationType 缓存 time.Duration 的反射类型，供 fpTypeOf 做**具体类型**
+// 判断——它必须发生在 Kind 判断之前，见 fpTypeOf 的注释。
+var durationType = reflect.TypeOf(time.Duration(0))
+
+// fieldSpec 是 struct 里一个可绑定字段的规格。
+type fieldSpec struct {
+	// Key 是配置项在 fp 上的键，如 "upstream.timeout"。
+	Key string
+	// Type 是 fp 类型，取值见上面的 cfgType* 常量。
+	Type string
+	// Index 是 reflect.Value.FieldByIndex 用的字段索引路径。
+	Index []int
+	// Duration 为 true 时，拉到的整数按**毫秒**解释，填进字段前乘
+	// time.Millisecond。
+	Duration bool
+}
+
+// specsOf 反射 t 推导出全部可绑定字段，按 key 升序返回。
+//
+// 排序不是审美：MissingConfigError 的清单直接来自它，不排序的话 Go 的
+// map 遍历顺序会让每次启动打出的清单顺序都不同，人对着控制台一项项建的
+// 时候极易漏项。
+func specsOf(t reflect.Type) ([]fieldSpec, error) {
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("fpsdk: 只能绑定 struct，得到 %s", t)
+	}
+	var out []fieldSpec
+	if err := collectSpecs(t, "", nil, &out); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+func collectSpecs(t reflect.Type, prefix string, index []int, out *[]fieldSpec) error {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		// 未导出字段跳过：反射既读不到也写不进，它不可能是配置项。
+		if !f.IsExported() {
+			continue
+		}
+		key := prefix + toSnake(f.Name)
+		// 拷一份再 append：append 可能复用底层数组，
+		// 兄弟字段的路径会互相踩。
+		path := append(append([]int{}, index...), i)
+
+		// 标了 fp:"json" 的 struct 整体当一个 object，不展开成分组。
+		// 供应商列表那种拆不动的结构走这条。
+		if f.Tag.Get("fp") == "json" {
+			*out = append(*out, fieldSpec{Key: key, Type: cfgTypeObject, Index: path})
+			continue
+		}
+
+		// 未标 tag 的嵌套 struct 是**分组**，递归展开成 父.子 的 key。
+		// time.Duration 不是 struct，落不到这里；time.Time 会——但它不在
+		// 支持的类型里，展开后它的字段全是未导出的，会得到一个空分组。
+		// 这属于"用了不该用的类型"，交给下面的 fpTypeOf 报错更清楚，
+		// 所以这里先排除掉标准库里那个唯一常见的误用。
+		if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeOf(time.Time{}) {
+			if err := collectSpecs(f.Type, key+".", path, out); err != nil {
+				return err
+			}
+			continue
+		}
+
+		typ, isDur, err := fpTypeOf(f.Type)
+		if err != nil {
+			return fmt.Errorf("fpsdk: 字段 %s: %w", key, err)
+		}
+		*out = append(*out, fieldSpec{Key: key, Type: typ, Index: path, Duration: isDur})
+	}
+	return nil
+}
+
+// fpTypeOf 把 Go 类型映射成 fp 类型。
+func fpTypeOf(t reflect.Type) (string, bool, error) {
+	// **必须先判具体类型再判 Kind。** time.Duration 底层是 int64，
+	// 顺序反了它会被当成普通整数，毫秒换算整个丢掉——配的 3000 会变成
+	// 3 微秒，而且不报任何错。
+	if t == durationType {
+		return cfgTypeInt, true, nil
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		return cfgTypeBool, false, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return cfgTypeInt, false, nil
+	case reflect.Float32, reflect.Float64:
+		return cfgTypeFloat, false, nil
+	case reflect.String:
+		return cfgTypeString, false, nil
+	case reflect.Slice, reflect.Array:
+		return cfgTypeArray, false, nil
+	case reflect.Map:
+		return cfgTypeObject, false, nil
+	default:
+		// 指针、interface、chan、func 一律报错，不静默跳过——静默跳过会让
+		// 一个本该被配置的字段永远停在零值，且没有任何迹象。
+		return "", false, fmt.Errorf("不支持的类型 %s", t)
+	}
+}
+
+// toSnake 把 Go 字段名转成 snake_case 的 key。
+//
+// 连续大写要当成一个缩写整体处理：APIKey → api_key 而不是 a_p_i_key，
+// UserID → user_id，HTTPSProxy → https_proxy。
+func toSnake(s string) string {
+	r := []rune(s)
+	var b strings.Builder
+	b.Grow(len(r) + 4)
+	for i, c := range r {
+		if unicode.IsUpper(c) {
+			// 在两种位置插下划线：① 前一个字符不是大写（词边界）；
+			// ② 前一个是大写但后一个是小写（缩写结束，如 HTTPSProxy 的 P）。
+			if i > 0 && (!unicode.IsUpper(r[i-1]) ||
+				(i+1 < len(r) && unicode.IsLower(r[i+1]))) {
+				b.WriteByte('_')
+			}
+			b.WriteRune(unicode.ToLower(c))
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `./scripts/test.sh ./sdk -run 'TestToSnake|TestSpecsOf' -v`
+Expected: PASS
+
+- [ ] **Step 5: 变异验证 Duration 那条**
+
+把 `fpTypeOf` 里的 `if t == durationType` 整块删掉（让它落到 `reflect.Int64` 分支）。
+
+Run: `./scripts/test.sh ./sdk -run TestSpecsOf -v`
+Expected: **FAIL**，报"upstream.timeout 必须标记为 Duration"。确认后改回来。
+
+- [ ] **Step 6: 写跨包常量配对测试**
+
+创建 `internal/integration/configtype_test.go`：
+
+```go
+package integration_test
+
+import (
+	"testing"
+
+	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/sdk"
+)
+
+// fp 类型的取值是线上契约，服务端（internal/domain）与 SDK（sdk/）各存了
+// 一份字符串常量。sdk 不得 import internal，两边单独看都只是孤立常量，
+// 改错一个 go build / vet / 全量测试照样全绿——这里是唯一能同时看到两个
+// 包的地方。与 TestKeepaliveTimingIsCompatible 是同一类守护。
+func TestConfigValueTypesMatch(t *testing.T) {
+	for _, s := range fpsdk.ExportedConfigTypes() {
+		if !domain.IsConfigValueType(s) {
+			t.Errorf("SDK 的类型 %q 服务端不认", s)
+		}
+	}
+	// 反向也要查：服务端多出一个类型而 SDK 不认，控制台上能建、
+	// SDK 拉下来解析不了。
+	for _, s := range []string{
+		domain.ConfigValueBool, domain.ConfigValueInt, domain.ConfigValueFloat,
+		domain.ConfigValueString, domain.ConfigValueArray, domain.ConfigValueObject,
+	} {
+		if !containsString(fpsdk.ExportedConfigTypes(), s) {
+			t.Errorf("服务端的类型 %q SDK 不认", s)
+		}
+	}
+}
+
+func containsString(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+```
+
+在 `sdk/export_test.go`（若无则新建）里导出给测试用的入口。**注意**：`internal/integration` 是外部包，`export_test.go` 只对 `sdk` 包自己的测试可见——所以这个导出得放在**非测试文件**里。放 `sdk/configspec.go` 末尾：
+
+```go
+// ExportedConfigTypes 返回 SDK 认识的全部 fp 类型。
+//
+// 导出它只为一个目的：让 internal/integration 能核对它与服务端
+// domain.IsConfigValueType 的取值集合一致（见 TestConfigValueTypesMatch）。
+// 业务方用不到这个函数。
+func ExportedConfigTypes() []string {
+	return []string{cfgTypeBool, cfgTypeInt, cfgTypeFloat,
+		cfgTypeString, cfgTypeArray, cfgTypeObject}
+}
+```
+
+- [ ] **Step 7: 跑配对测试**
+
+Run: `./scripts/test.sh ./internal/integration -run TestConfigValueTypesMatch -v`
+Expected: PASS
+
+- [ ] **Step 8: 确认分层约束没被破坏**
+
+Run: `./scripts/test.sh ./sdk -run TestArch -v`
+Expected: PASS（`sdk/` 仍未 import `internal/`，仍无 `panic`）
+
+- [ ] **Step 9: 提交**
+
+```bash
+git add sdk/configspec.go sdk/configspec_test.go internal/integration/configtype_test.go
+git commit -m "feat(config): SDK 反射——从 struct 推导 key 与 fp 类型"
+```
+
+---
+
+## Task 10: SDK Bind 与 MissingConfigError
+
+**Files:**
+- Create: `sdk/config.go`
+- Test: `sdk/config_test.go`
+- Modify: `sdk/client.go`（持有 `ConfigServiceClient`）
+
+**Interfaces:**
+- Consumes: Task 9 的 `specsOf` / `fieldSpec`；Task 6 的 `fpv1.ConfigServiceClient`
+- Produces:
+  - `func Bind[T any](c *Client) (*Binding[T], error)`
+  - `func (b *Binding[T]) Load() *T`
+  - `type MissingConfigError struct { Keys []string; Types map[string]string }` + `Error() string`
+  - 包内：`func fillStruct[T any](specs []fieldSpec, values map[string]json.RawMessage) (*T, []string, error)`
+
+- [ ] **Step 1: 写失败的测试**
+
+创建 `sdk/config_test.go`：
+
+```go
+package fpsdk
+
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+	"time"
+)
+
+type bindCfg struct {
+	FeeRate  float64
+	Enabled  bool
+	Upstream bindUpstream
+	Limits   []int
+}
+
+type bindUpstream struct {
+	Timeout time.Duration
+	APIKey  string
+}
+
+func TestFillStructAppliesValues(t *testing.T) {
+	specs, err := specsOf(reflect.TypeOf(bindCfg{}))
+	if err != nil {
+		t.Fatalf("specsOf 失败: %v", err)
+	}
+	values := map[string]json.RawMessage{
+		"fee_rate":         json.RawMessage(`0.02`),
+		"enabled":          json.RawMessage(`true`),
+		"upstream.timeout": json.RawMessage(`3000`),
+		"upstream.api_key": json.RawMessage(`"sk-live"`),
+		"limits":           json.RawMessage(`[1,2,3]`),
+	}
+
+	got, missing, err := fillStruct[bindCfg](specs, values)
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("不该有缺失项: %v", missing)
+	}
+	if got.FeeRate != 0.02 || !got.Enabled || got.Upstream.APIKey != "sk-live" {
+		t.Fatalf("填充结果不对: %+v", got)
+	}
+	// 【辨别力】3000 必须变成 3 秒而不是 3000 纳秒。断言具体时长，
+	// 不要只断言"非零"——丢掉毫秒换算的实现同样是非零。
+	if got.Upstream.Timeout != 3*time.Second {
+		t.Fatalf("Timeout = %v，期望 3s（3000 毫秒）", got.Upstream.Timeout)
+	}
+	if !reflect.DeepEqual(got.Limits, []int{1, 2, 3}) {
+		t.Fatalf("Limits = %v", got.Limits)
+	}
+}
+
+// 缺失项一次列全，且缺失的字段留 Go 零值。
+// 【辨别力】必须缺**两项**：只缺一项的话，"报第一个就 return"的实现也会绿。
+func TestFillStructReportsAllMissing(t *testing.T) {
+	specs, _ := specsOf(reflect.TypeOf(bindCfg{}))
+	values := map[string]json.RawMessage{
+		"fee_rate": json.RawMessage(`0.02`),
+		"enabled":  json.RawMessage(`true`),
+		"limits":   json.RawMessage(`[]`),
+	}
+
+	got, missing, err := fillStruct[bindCfg](specs, values)
+	if err != nil {
+		t.Fatalf("缺值不是错误，应当由调用方决定: %v", err)
+	}
+	want := []string{"upstream.api_key", "upstream.timeout"}
+	if !reflect.DeepEqual(missing, want) {
+		t.Fatalf("missing = %v，期望 %v（升序、两项都在）", missing, want)
+	}
+	if got.FeeRate != 0.02 {
+		t.Fatal("已配置的字段仍应被填上")
+	}
+	if got.Upstream.Timeout != 0 || got.Upstream.APIKey != "" {
+		t.Fatal("缺失的字段应当留 Go 零值")
+	}
+}
+
+// 类型对不上是错误，不是缺失——旧代码遇到"有人把 int 改成了 object"
+// 必须报错，不能当成没配。
+func TestFillStructRejectsMismatchedType(t *testing.T) {
+	specs, _ := specsOf(reflect.TypeOf(bindCfg{}))
+	values := map[string]json.RawMessage{
+		"fee_rate":         json.RawMessage(`{"a":1}`), // 该是数字
+		"enabled":          json.RawMessage(`true`),
+		"upstream.timeout": json.RawMessage(`3000`),
+		"upstream.api_key": json.RawMessage(`"x"`),
+		"limits":           json.RawMessage(`[]`),
+	}
+	if _, _, err := fillStruct[bindCfg](specs, values); err == nil {
+		t.Fatal("类型对不上必须报错")
+	}
+}
+
+func TestMissingConfigErrorMessageListsEveryKeyWithType(t *testing.T) {
+	err := &MissingConfigError{
+		Keys:  []string{"fee_rate", "upstream.api_key"},
+		Types: map[string]string{"fee_rate": cfgTypeFloat, "upstream.api_key": cfgTypeString},
+	}
+	msg := err.Error()
+	for _, want := range []string{"fee_rate", "float", "upstream.api_key", "string"} {
+		if !contains(msg, want) {
+			t.Errorf("错误信息里缺少 %q：\n%s", want, msg)
+		}
+	}
+}
+
+func contains(s, sub string) bool { return len(s) >= len(sub) && strings.Contains(s, sub) }
+```
+
+（测试文件 import 补 `"strings"`。）
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `./scripts/test.sh ./sdk -run 'TestFillStruct|TestMissingConfigError' -v`
+Expected: 编译失败，`undefined: fillStruct`
+
+- [ ] **Step 3: 写实现**
+
+创建 `sdk/config.go`：
+
+```go
+package fpsdk
+
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// MissingConfigError 表示有配置项在 fp 上还没有值。
+//
+// **它是人在控制台建配置项的唯一依据**（本模块不做 SDK 上报），所以必须
+// 一次列全、且带上每一项该建成什么类型——漏一项就要多跑一轮"起→失败"。
+type MissingConfigError struct {
+	// Keys 是全部缺失的配置项，升序。
+	Keys []string
+	// Types 是每个 key 对应的 fp 类型，人照着它在控制台选类型。
+	Types map[string]string
+}
+
+func (e *MissingConfigError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "fpsdk: %d 个配置项尚未在 fp 上配置，请到控制台创建并填值：", len(e.Keys))
+	for _, k := range e.Keys {
+		fmt.Fprintf(&b, "\n  %-24s (%s)", k, e.Types[k])
+	}
+	return b.String()
+}
+
+// Binding 是一份绑定到 T 的配置快照。并发安全。
+type Binding[T any] struct {
+	c     *Client
+	typ   string
+	specs []fieldSpec
+
+	// snap 是当前快照。用 atomic.Pointer 换指针而不是就地改字段：
+	// Load() 拿到的必须是**跨字段一致**的一份，一次请求内不会出现
+	// A 字段是新值、B 字段是旧值。
+	snap atomic.Pointer[T]
+
+	mu       sync.Mutex
+	onChange func(old, new *T)
+	onError  func(error)
+}
+
+// Load 返回当前快照。返回的指针指向的内容**不得修改**——它被所有
+// goroutine 共享。
+func (b *Binding[T]) Load() *T { return b.snap.Load() }
+
+// Bind 拉取 DEFAULT 分区的配置并填进 T。
+//
+// 任意字段在 fp 上没有值时返回 *MissingConfigError，但 **binding 照样返回**，
+// 缺失的字段留 Go 零值——SDK 不替业务方决定能不能带伤启动。
+func Bind[T any](c *Client) (*Binding[T], error) {
+	var zero T
+	specs, err := specsOf(reflect.TypeOf(zero))
+	if err != nil {
+		return nil, err
+	}
+	b := &Binding[T]{c: c, typ: ConfigTypeDefault, specs: specs}
+	if err := b.reload(); err != nil {
+		var miss *MissingConfigError
+		if !asMissing(err, &miss) {
+			return nil, err
+		}
+		c.registerBinding(b)
+		return b, err
+	}
+	c.registerBinding(b)
+	return b, nil
+}
+
+// fillStruct 按 specs 把 values 填进一个新的 T。
+//
+// 返回的 missing 是**升序**的全部缺失 key，一次给全。缺值不是 error——
+// 是不是致命由调用方判断。类型对不上才是 error。
+func fillStruct[T any](specs []fieldSpec, values map[string]json.RawMessage) (*T, []string, error) {
+	out := new(T)
+	v := reflect.ValueOf(out).Elem()
+
+	var missing []string
+	for _, s := range specs {
+		raw, ok := values[s.Key]
+		if !ok {
+			missing = append(missing, s.Key)
+			continue
+		}
+		field := v.FieldByIndex(s.Index)
+
+		if s.Duration {
+			// 拉到的整数按**毫秒**解释。fp 侧不知道 duration 这回事，
+			// 单位约定只活在这一行和文档里。
+			var ms int64
+			if err := json.Unmarshal(raw, &ms); err != nil {
+				return nil, nil, fmt.Errorf("fpsdk: 配置项 %s 解析失败: %w", s.Key, err)
+			}
+			field.SetInt(int64(time.Duration(ms) * time.Millisecond))
+			continue
+		}
+		if err := json.Unmarshal(raw, field.Addr().Interface()); err != nil {
+			return nil, nil, fmt.Errorf("fpsdk: 配置项 %s 解析失败: %w", s.Key, err)
+		}
+	}
+	// specs 已经是升序的（specsOf 保证），missing 因此天然升序。
+	return out, missing, nil
+}
+```
+
+`reload()` / `registerBinding` / `asMissing` 在 Task 11 补齐。本任务先给一个只做"拉一次并填充"的 `reload`：
+
+```go
+// reload 拉一次当前配置并替换快照。Task 11 会给它加上变更比较与回调。
+func (b *Binding[T]) reload() error {
+	values, err := b.c.fetchConfig(b.typ)
+	if err != nil {
+		return err
+	}
+	snap, missing, err := fillStruct[T](b.specs, values)
+	if err != nil {
+		return err
+	}
+	b.snap.Store(snap)
+	if len(missing) > 0 {
+		types := make(map[string]string, len(missing))
+		for _, s := range b.specs {
+			types[s.Key] = s.Type
+		}
+		return &MissingConfigError{Keys: missing, Types: types}
+	}
+	return nil
+}
+```
+
+`sdk/client.go`：
+- `Client` 加 `cfgRPC fpv1.ConfigServiceClient`，`New` 里 `cfgRPC: fpv1.NewConfigServiceClient(conn)`
+- 加 `ConfigTypeDefault = "DEFAULT"` / `ConfigTypeWeb = "WEB"` 两个导出常量（业务方调 `BindType` 要用）
+- 加 `fetchConfig(typ string) (map[string]json.RawMessage, error)`：调 `GetConfig`，把 `Values` 这个 JSON 字符串解成 map
+- 加 `registerBinding(r reloadable)` 与 `reloadable` 接口（Task 11 用到，这里先立起来）：
+
+```go
+// reloadable 是 Client 对各份绑定的全部依赖。Binding[T] 是泛型，
+// 没法直接存进一个切片，只能靠这个非泛型接口。
+type reloadable interface {
+	partition() string
+	reloadFromPush()
+}
+```
+
+`asMissing` 是 `errors.As` 的一层包装，放 `sdk/config.go`。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `./scripts/test.sh ./sdk -run 'TestFillStruct|TestMissingConfigError' -v`
+Expected: PASS
+
+- [ ] **Step 5: 变异验证 missing 列全**
+
+把 `fillStruct` 里的 `missing = append(missing, s.Key); continue` 改成 `return out, []string{s.Key}, nil`。
+
+Run: `./scripts/test.sh ./sdk -run TestFillStructReportsAllMissing -v`
+Expected: **FAIL**，报 missing 只有一项。确认后改回来。
+
+- [ ] **Step 6: 变异验证 Duration 换算**
+
+把 `field.SetInt(int64(time.Duration(ms) * time.Millisecond))` 改成 `field.SetInt(ms)`。
+
+Run: `./scripts/test.sh ./sdk -run TestFillStructAppliesValues -v`
+Expected: **FAIL**，报 `Timeout = 3µs，期望 3s`。确认后改回来。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add sdk/config.go sdk/config_test.go sdk/client.go
+git commit -m "feat(config): SDK Bind 与一次列全的 MissingConfigError"
+```
+
+---
+
+## Task 11: SDK 热更新、OnChange 与 OnError
+
+**Files:**
+- Modify: `sdk/config.go`
+- Modify: `sdk/client.go`
+- Test: `sdk/config_test.go`
+
+**Interfaces:**
+- Consumes: Task 10 的 `Binding[T]` / `fillStruct`；Task 7 推来的 `fpv1.ConfigChanged`
+- Produces:
+  - `func (b *Binding[T]) OnChange(fn func(old, new *T))`
+  - `func (b *Binding[T]) OnError(fn func(error))`
+  - 包内：`func applyValues[T any](base *T, specs []fieldSpec, values map[string]json.RawMessage) (*T, []string, error)`
+  - `Client` 的重载编排：`cfgReload chan struct{}`（缓冲 1）+ 一个消费 goroutine
+
+**重载的编排（先看这段，它决定了下面所有代码的形状）：**
+
+`Client` 开**一个** goroutine 消费一个**缓冲为 1** 的信号 channel，每次唤醒就重载**全部**绑定。三个理由：
+
+1. **不能在 `watchOnce` 的收流循环里同步重载**——`GetConfig` 是一次网络往返，会把撤销事件的投递一起卡住。
+2. **不能每收到一条就起一个 goroutine**——两次重载并发跑，先发起的可能后返回，把旧快照盖到新快照上。单 goroutine 天然串行。
+3. **缓冲满就丢弃信号是安全的**：待处理的那次重载拉的是"**当前**版本"而不是"第 N 版"，它一定会带上被丢掉那条信号对应的变更。
+
+**为什么无差别重载全部绑定而不按分区分派**：一个进程最多两份绑定（`DEFAULT` + `WEB`），多拉一次 `GetConfig` 的代价可以忽略；而"快照没变就不触发 `OnChange`"这条规则保证了不相关的那份绑定不会产生任何回调。换来的是彻底不用处理 `ConfigChanged.Type` 为空串（订阅缺口）这种分支。
+
+- [ ] **Step 1: 写失败的测试**
+
+追加到 `sdk/config_test.go`：
+
+```go
+// 快照没变就不换指针、不触发 OnChange。
+// 同分区里别人改了你不关心的 key 也会推给你——不比较的话，别人配置一次
+// 你的连接池就重建一次。
+func TestReloadWithoutChangeDoesNotFire(t *testing.T) {
+	b := newTestBinding(t, map[string]json.RawMessage{
+		"fee_rate":         json.RawMessage(`0.02`),
+		"enabled":          json.RawMessage(`true`),
+		"upstream.timeout": json.RawMessage(`3000`),
+		"upstream.api_key": json.RawMessage(`"k"`),
+		"limits":           json.RawMessage(`[]`),
+	})
+	before := b.Load()
+
+	var calls int
+	b.OnChange(func(_, _ *bindCfg) { calls++ })
+
+	// 推一份内容完全相同的配置。
+	b.applyForTest(t, sameValues(before))
+
+	if calls != 0 {
+		t.Fatalf("OnChange 被调用了 %d 次，内容没变时应当是 0 次", calls)
+	}
+	if b.Load() != before {
+		t.Fatal("内容没变时不该换指针")
+	}
+}
+
+func TestReloadFiresOnChangeWithOldAndNew(t *testing.T) {
+	b := newTestBinding(t, baseValues())
+
+	var gotOld, gotNew *bindCfg
+	b.OnChange(func(o, n *bindCfg) { gotOld, gotNew = o, n })
+
+	v := baseValues()
+	v["fee_rate"] = json.RawMessage(`0.05`)
+	b.applyForTest(t, v)
+
+	if gotOld == nil || gotNew == nil {
+		t.Fatal("OnChange 没被调用")
+	}
+	if gotOld.FeeRate != 0.02 || gotNew.FeeRate != 0.05 {
+		t.Fatalf("old=%v new=%v，期望 0.02 → 0.05", gotOld.FeeRate, gotNew.FeeRate)
+	}
+	if b.Load().FeeRate != 0.05 {
+		t.Fatal("快照没被替换")
+	}
+}
+
+// key 消失（被删或回滚导致）→ 保持旧值 + OnError，**绝不清成零值**。
+// 清零值是危险的：fee_rate=0 就是免手续费。
+func TestReloadKeepsOldValueWhenKeyDisappears(t *testing.T) {
+	b := newTestBinding(t, baseValues())
+
+	var errs int
+	b.OnError(func(error) { errs++ })
+
+	v := baseValues()
+	delete(v, "fee_rate")
+	b.applyForTest(t, v)
+
+	if got := b.Load().FeeRate; got != 0.02 {
+		t.Fatalf("FeeRate = %v，key 消失时必须保持旧值 0.02", got)
+	}
+	if errs != 1 {
+		t.Fatalf("OnError 被调用 %d 次，期望 1 次", errs)
+	}
+}
+
+// 解析失败（有人把 int 改成了 object）→ 保持**整份**旧快照 + OnError，
+// 进程不崩、也不半解析。
+//
+// 【辨别力】必须断言"值还是旧的"而不只是"报了错"——一个先逐字段写入、
+// 遇到错误再返回的实现同样会报错，却已经把前面几个字段换掉了，
+// 快照的跨字段一致性已经破了。
+func TestReloadKeepsWholeSnapshotOnParseFailure(t *testing.T) {
+	b := newTestBinding(t, baseValues())
+	before := b.Load()
+
+	var errs int
+	b.OnError(func(error) { errs++ })
+
+	v := baseValues()
+	v["enabled"] = json.RawMessage(`true`)
+	v["fee_rate"] = json.RawMessage(`{"a":1}`) // 类型对不上
+	v["upstream.api_key"] = json.RawMessage(`"changed"`)
+	b.applyForTest(t, v)
+
+	if b.Load() != before {
+		t.Fatal("解析失败时必须保持整份旧快照，指针都不该换")
+	}
+	if b.Load().Upstream.APIKey != "k" {
+		t.Fatal("同一批里合法的字段也不该被写进去——那会破坏跨字段一致性")
+	}
+	if errs != 1 {
+		t.Fatalf("OnError 被调用 %d 次，期望 1 次", errs)
+	}
+}
+
+// 没挂 OnError 时不静默：打 ERROR 日志。
+func TestReloadLogsWhenNoErrorHandler(t *testing.T) {
+	var logged int
+	b := newTestBindingWithLogger(t, baseValues(), func(msg string) { logged++ })
+
+	v := baseValues()
+	v["fee_rate"] = json.RawMessage(`{"a":1}`)
+	b.applyForTest(t, v)
+
+	if logged == 0 {
+		t.Fatal("没挂 OnError 时必须打 ERROR 日志，不能静默")
+	}
+}
+
+func baseValues() map[string]json.RawMessage {
+	return map[string]json.RawMessage{
+		"fee_rate":         json.RawMessage(`0.02`),
+		"enabled":          json.RawMessage(`true`),
+		"upstream.timeout": json.RawMessage(`3000`),
+		"upstream.api_key": json.RawMessage(`"k"`),
+		"limits":           json.RawMessage(`[]`),
+	}
+}
+```
+
+**实现者注意**：`newTestBinding` / `newTestBindingWithLogger` / `applyForTest` / `sameValues` 是本任务要写的测试辅助。它们**绕开网络**——直接构造一个 `Binding[bindCfg]`（`specs` 由 `specsOf` 得到、`snap` 预置好），`applyForTest` 直接调那个"拿到 values 之后做的全部事情"的内部方法。把那段逻辑从 `reload()` 里拆成一个独立方法（比如 `applySnapshot(values map[string]json.RawMessage)`），`reload()` 只负责取数再调它——这样测试完全不需要 gRPC，跑得快也稳。
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `./scripts/test.sh ./sdk -run TestReload -v`
+Expected: 编译失败
+
+- [ ] **Step 3: 写实现**
+
+`sdk/config.go`：
+
+```go
+// applyValues 在 base 的副本上按 specs 应用 values，返回新快照与缺失的 key。
+//
+// 从 base 出发而不是从零值出发，是"key 消失时保持旧值"这条规则的执行点：
+// 重载时 base 是当前快照，values 里没有的 key 就原样保留旧值；首次绑定时
+// base 是零值，效果与"填不上就留零值"一致。
+//
+// 任何一个字段解析失败就整体返回 error，**绝不返回半成品**——调用方拿到
+// error 后保持整份旧快照，跨字段一致性因此不会被破坏。
+func applyValues[T any](base *T, specs []fieldSpec, values map[string]json.RawMessage) (*T, []string, error) {
+	out := new(T)
+	if base != nil {
+		*out = *base // 浅拷贝：配置里只有值类型、切片与 map，写入时整体替换，
+		             // 不会出现两份快照共享同一个被就地修改的底层数组。
+	}
+	v := reflect.ValueOf(out).Elem()
+
+	var missing []string
+	for _, s := range specs {
+		raw, ok := values[s.Key]
+		if !ok {
+			missing = append(missing, s.Key)
+			continue
+		}
+		field := v.FieldByIndex(s.Index)
+		if s.Duration {
+			var ms int64
+			if err := json.Unmarshal(raw, &ms); err != nil {
+				return nil, nil, fmt.Errorf("fpsdk: 配置项 %s 解析失败: %w", s.Key, err)
+			}
+			field.SetInt(int64(time.Duration(ms) * time.Millisecond))
+			continue
+		}
+		if err := json.Unmarshal(raw, field.Addr().Interface()); err != nil {
+			return nil, nil, fmt.Errorf("fpsdk: 配置项 %s 解析失败: %w", s.Key, err)
+		}
+	}
+	return out, missing, nil
+}
+
+// fillStruct 是首次绑定用的入口：从零值出发。
+func fillStruct[T any](specs []fieldSpec, values map[string]json.RawMessage) (*T, []string, error) {
+	return applyValues[T](nil, specs, values)
+}
+
+// OnChange 注册变更回调。只在快照**真的变了**时触发，old 与 new 都非 nil。
+// 重复调用会替换掉上一个回调。
+func (b *Binding[T]) OnChange(fn func(old, new *T)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onChange = fn
+}
+
+// OnError 注册错误回调。触发条件是 4.4 那两条：某个 key 消失、或解析失败。
+// 两种情况下快照都保持不变——所以这些事**不**走 OnChange。
+//
+// 没注册时 SDK 打 ERROR 日志，不静默。
+func (b *Binding[T]) OnError(fn func(error)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onError = fn
+}
+
+// applySnapshot 是拿到 values 之后做的全部事情：应用、比较、必要时换指针
+// 并回调。测试直接调它，绕开网络。
+func (b *Binding[T]) applySnapshot(values map[string]json.RawMessage) {
+	old := b.snap.Load()
+	next, missing, err := applyValues(old, b.specs, values)
+	if err != nil {
+		// 解析失败：整份旧快照原样留着，一个字段都不动。
+		b.raise(err)
+		return
+	}
+	if len(missing) > 0 {
+		// key 消失：上面的 applyValues 已经让它们保持了旧值，这里只报错。
+		b.raise(&MissingConfigError{Keys: missing, Types: b.typeMap()})
+	}
+	// 内容没变就不换指针、不回调——同分区里别人改了你不关心的 key
+	// 也会推给你，不比较的话别人配置一次你的连接池就重建一次。
+	if old != nil && reflect.DeepEqual(*old, *next) {
+		return
+	}
+	b.snap.Store(next)
+
+	b.mu.Lock()
+	fn := b.onChange
+	b.mu.Unlock()
+	if fn != nil && old != nil {
+		fn(old, next)
+	}
+}
+
+// raise 把错误交给 OnError；没注册就打 ERROR 日志，绝不静默。
+func (b *Binding[T]) raise(err error) {
+	b.mu.Lock()
+	fn := b.onError
+	b.mu.Unlock()
+	if fn != nil {
+		fn(err)
+		return
+	}
+	b.c.opts.Logger.Error("fpsdk: 配置重载出错且未注册 OnError", "type", b.typ, "err", err)
+}
+
+// partition / reloadFromPush 实现 reloadable，让 Client 的重载 goroutine
+// 能统一驱动各份绑定。
+func (b *Binding[T]) partition() string { return b.typ }
+
+func (b *Binding[T]) reloadFromPush() {
+	values, err := b.c.fetchConfig(b.typ)
+	if err != nil {
+		b.raise(err)
+		return
+	}
+	b.applySnapshot(values)
+}
+```
+
+`sdk/client.go`：
+
+```go
+// cfgReload 是配置重载的唤醒信号，缓冲为 1。
+//
+// 缓冲满就丢弃是**安全的**：待处理的那次重载拉的是"当前版本"而不是
+// "第 N 版"，它一定会带上被丢掉那条信号对应的变更。
+//
+// 用单 goroutine 消费而不是每条信号起一个：两次重载并发跑的话，先发起的
+// 可能后返回，把旧快照盖到新快照上。
+```
+
+在 `Client` 上加：
+
+```go
+	bindMu    sync.Mutex
+	bindings  []reloadable
+	cfgReload chan struct{}
+```
+
+`New` 里初始化 `cfgReload: make(chan struct{}, 1)`，并再起一个 goroutine：
+
+```go
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.runConfigReload(ctx)
+	}()
+```
+
+```go
+// runConfigReload 串行地重载全部绑定，直到 ctx 取消。
+func (c *Client) runConfigReload(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.cfgReload:
+			c.bindMu.Lock()
+			bs := append([]reloadable(nil), c.bindings...)
+			c.bindMu.Unlock()
+			for _, b := range bs {
+				b.reloadFromPush()
+			}
+		}
+	}
+}
+
+// requestConfigReload 请求一次重载。非阻塞——已经有待处理的信号就直接返回。
+func (c *Client) requestConfigReload() {
+	select {
+	case c.cfgReload <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) registerBinding(r reloadable) {
+	c.bindMu.Lock()
+	c.bindings = append(c.bindings, r)
+	c.bindMu.Unlock()
+}
+```
+
+`watchOnce` 的两处：
+
+```go
+		case msg.GetReady() != nil:
+			// ...既有的 purge 与 streamUp 逻辑保持不变...
+
+			// 重拉一次配置。断线期间发布的 ConfigChanged 一条都收不到，
+			// 光靠"下一次变更"来补会让配置无限期停在旧值——这是配置侧
+			// 对应 WatchPurge 的兜底，只是配置不需要"丢弃全部"，重拉即可。
+			// 首次连接也走这条，此时各绑定刚拉过一次，重载会发现内容没变、
+			// 不触发任何回调，无害。
+			c.requestConfigReload()
+
+		case msg.GetConfigChanged() != nil:
+			// 无差别重载全部绑定，不按 Type 分派：一个进程最多两份绑定，
+			// 多拉一次 GetConfig 的代价可以忽略，而"快照没变就不触发
+			// OnChange"保证了不相关的那份不会产生回调。换来的是彻底不用
+			// 处理 Type 为空串（fp 侧订阅缺口）这个分支。
+			c.requestConfigReload()
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `./scripts/test.sh ./sdk -run TestReload -v`
+Expected: PASS，五条全绿
+
+- [ ] **Step 5: 变异验证"解析失败保持整份旧快照"**
+
+把 `applyValues` 改成遇错时返回已经填了一半的 `out`（即 `return out, missing, err`），并把 `applySnapshot` 改成出错时也 `b.snap.Store(next)`。
+
+Run: `./scripts/test.sh ./sdk -run TestReloadKeepsWholeSnapshotOnParseFailure -v`
+Expected: **FAIL**，报"解析失败时必须保持整份旧快照"。确认后改回来。
+
+- [ ] **Step 6: 变异验证"内容没变不回调"**
+
+把 `applySnapshot` 里的 `reflect.DeepEqual` 那个 early-return 删掉。
+
+Run: `./scripts/test.sh ./sdk -run TestReloadWithoutChangeDoesNotFire -v`
+Expected: **FAIL**，报 `OnChange 被调用了 1 次`。确认后改回来。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add sdk/config.go sdk/client.go sdk/config_test.go
+git commit -m "feat(config): SDK 热更新、OnChange 与 OnError"
+```
+
+---
+
+## Task 12: SDK BindType
+
+**Files:**
+- Create: `sdk/bindtype.go`
+- Test: `sdk/bindtype_test.go`
+
+**Interfaces:**
+- Consumes: Task 11 的 `reloadable` / `Client.fetchConfig` / `Client.registerBinding`
+- Produces:
+  - `func BindType(c *Client, typ string) (*TypeBinding, error)`
+  - `func (b *TypeBinding) Load() map[string]any`
+  - `func (b *TypeBinding) OnChange(fn func(old, new map[string]any))`
+  - `func (b *TypeBinding) OnError(fn func(error))`
+
+- [ ] **Step 1: 写失败的测试**
+
+创建 `sdk/bindtype_test.go`：
+
+```go
+package fpsdk
+
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+)
+
+// 值解析成真正的 JSON 类型，不是一堆待解析的字符串——业务方
+// json.Encode 出去直接就是 {"feature.new": true, "limits": [1,2,3]}。
+func TestTypeBindingDecodesNativeJSON(t *testing.T) {
+	b := newTestTypeBinding(t, map[string]json.RawMessage{
+		"feature.new": json.RawMessage(`true`),
+		"limits":      json.RawMessage(`[1,2,3]`),
+		"site":        json.RawMessage(`{"title":"商城"}`),
+		"title":       json.RawMessage(`"商城"`),
+		"n":           json.RawMessage(`3`),
+	})
+
+	got := b.Load()
+	if got["feature.new"] != true {
+		t.Fatalf("feature.new = %#v，期望 bool true 而不是字符串", got["feature.new"])
+	}
+	if !reflect.DeepEqual(got["limits"], []any{float64(1), float64(2), float64(3)}) {
+		t.Fatalf("limits = %#v，期望 []any", got["limits"])
+	}
+	site, ok := got["site"].(map[string]any)
+	if !ok || site["title"] != "商城" {
+		t.Fatalf("site = %#v，期望 map[string]any", got["site"])
+	}
+	if got["title"] != "商城" {
+		t.Fatalf("title = %#v", got["title"])
+	}
+	if got["n"] != float64(3) {
+		t.Fatalf("n = %#v", got["n"])
+	}
+}
+
+// 内容没变不回调，与 Binding[T] 同一条规则。
+func TestTypeBindingWithoutChangeDoesNotFire(t *testing.T) {
+	v := map[string]json.RawMessage{"a": json.RawMessage(`1`)}
+	b := newTestTypeBinding(t, v)
+
+	var calls int
+	b.OnChange(func(_, _ map[string]any) { calls++ })
+	b.applyForTest(t, map[string]json.RawMessage{"a": json.RawMessage(`1`)})
+
+	if calls != 0 {
+		t.Fatalf("OnChange 被调用 %d 次，内容没变时应当是 0 次", calls)
+	}
+}
+
+func TestBindTypeRejectsEmptyPartition(t *testing.T) {
+	// 分区必填：分区之间同名 key 是不同的配置项，没有"不传就是全部"
+	// 这种语义——那会逼调用方回答"撞了算谁的"。
+	if _, err := BindType(nil, ""); err == nil {
+		t.Fatal("空分区应当被拒绝")
+	}
+}
+```
+
+**实现者注意**：`newTestTypeBinding` / `applyForTest` 与 Task 11 的同名辅助同构，直接构造 `TypeBinding` 并调它的 `applySnapshot`，不走网络。
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `./scripts/test.sh ./sdk -run 'TestTypeBinding|TestBindType' -v`
+Expected: 编译失败，`undefined: BindType`
+
+- [ ] **Step 3: 写实现**
+
+创建 `sdk/bindtype.go`：
+
+```go
+package fpsdk
+
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"sync"
+	"sync/atomic"
+)
+
+// TypeBinding 是某个分区的全量配置，不绑定任何 struct。
+//
+// 它的用途是**转发给前端**：拿到 map 之后怎么送出去是业务方的事——
+// 挂个 handler 吐 Load()、或挂 OnChange 用 WebSocket 推，都行。
+// SDK 刻意不提供 HTTP handler，也不让前端直连 fp（fp 是全局单点，
+// 前端流量的量级与 SDK 完全不同）。
+type TypeBinding struct {
+	c   *Client
+	typ string
+
+	snap atomic.Pointer[map[string]any]
+
+	mu       sync.Mutex
+	onChange func(old, new map[string]any)
+	onError  func(error)
+}
+
+// BindType 拉取指定分区的全部配置值。
+//
+// 分区**必填**，没有"不传就是全部"的重载：分区之间同名 key 是不同的
+// 配置项，合并成一个 map 就得回答"撞了算谁的"，而这个问题不该存在。
+func BindType(c *Client, typ string) (*TypeBinding, error) {
+	if typ == "" {
+		return nil, fmt.Errorf("fpsdk: BindType 必须指定分区，如 fpsdk.ConfigTypeWeb")
+	}
+	b := &TypeBinding{c: c, typ: typ}
+	values, err := c.fetchConfig(typ)
+	if err != nil {
+		return nil, err
+	}
+	b.applySnapshot(values)
+	c.registerBinding(b)
+	return b, nil
+}
+
+// Load 返回当前快照。返回的 map **不得修改**——它被所有 goroutine 共享。
+func (b *TypeBinding) Load() map[string]any {
+	m := b.snap.Load()
+	if m == nil {
+		return map[string]any{}
+	}
+	return *m
+}
+
+// OnChange 注册变更回调。只在内容真的变了时触发。
+func (b *TypeBinding) OnChange(fn func(old, new map[string]any)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onChange = fn
+}
+
+// OnError 注册错误回调。没注册时打 ERROR 日志，不静默。
+func (b *TypeBinding) OnError(fn func(error)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onError = fn
+}
+
+func (b *TypeBinding) applySnapshot(values map[string]json.RawMessage) {
+	// 解析成 JSON 原生类型再交出去，而不是原样转发字符串——否则业务方
+	// json.Encode 出来的是 {"feature.new": "true"}，前端还要再转一次。
+	next := make(map[string]any, len(values))
+	for k, raw := range values {
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			b.raise(fmt.Errorf("fpsdk: 配置项 %s 解析失败: %w", k, err))
+			return // 与 Binding[T] 一致：宁可整份保持旧的，也不给半成品
+		}
+		next[k] = v
+	}
+
+	old := b.snap.Load()
+	if old != nil && reflect.DeepEqual(*old, next) {
+		return
+	}
+	b.snap.Store(&next)
+
+	b.mu.Lock()
+	fn := b.onChange
+	b.mu.Unlock()
+	if fn != nil && old != nil {
+		fn(*old, next)
+	}
+}
+
+func (b *TypeBinding) raise(err error) {
+	b.mu.Lock()
+	fn := b.onError
+	b.mu.Unlock()
+	if fn != nil {
+		fn(err)
+		return
+	}
+	b.c.opts.Logger.Error("fpsdk: 配置重载出错且未注册 OnError", "type", b.typ, "err", err)
+}
+
+func (b *TypeBinding) partition() string { return b.typ }
+
+func (b *TypeBinding) reloadFromPush() {
+	values, err := b.c.fetchConfig(b.typ)
+	if err != nil {
+		b.raise(err)
+		return
+	}
+	b.applySnapshot(values)
+}
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `./scripts/test.sh ./sdk -run 'TestTypeBinding|TestBindType' -v`
+Expected: PASS
+
+- [ ] **Step 5: 跑整个 sdk 包并确认分层约束**
+
+Run: `./scripts/test.sh ./sdk`
+Expected: PASS，含 `TestArch*`（`sdk/` 仍未 import `internal/`、仍无 `panic`）
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add sdk/bindtype.go sdk/bindtype_test.go
+git commit -m "feat(config): SDK BindType——按分区拉全量，转发给前端"
+```
