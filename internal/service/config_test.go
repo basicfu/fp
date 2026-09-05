@@ -350,47 +350,63 @@ func TestSavePrunesOldVersions(t *testing.T) {
 }
 
 // 并发保存同一分区时，抢输的那些必须拿到可被 errors.Is 识别的冲突错误，
-// 而不是一个裸的 pgconn 错误——注释里"冲突了重试即可"靠的就是这个。
+// 而不是裸的 pgconn 错误——注释里"冲突了重试即可"靠的就是这个。
+//
+// 为什么要重试整场竞争：这条测试是那段 pgUniqueViolation → ErrConflict
+// 转换的唯一回归守护，可它只有在**真的发生冲突**时才会执行到那段代码。
+// 只断言"失败的都是 ErrConflict"的话，一次零冲突的运行会让测试空转着变绿，
+// 守护悄悄失效。反过来，单跑一轮就硬性要求"必须冲突"又会把调度不确定性
+// 变成随机红。重试有界次数两头都占：正常情况下第一轮就撞上，
+// 而真的连 maxRounds 轮都撞不出冲突时，说明这段转换已经无法被测到，
+// 那本身就该红。
 func TestSaveConcurrentConflictIsRetryable(t *testing.T) {
-	_, svc, appID := newConfigFixture(t)
-	ctx := context.Background()
+	const (
+		goroutines = 8
+		maxRounds  = 5
+	)
 
-	const n = 8
-	errs := make(chan error, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
-				"n": field(domain.ConfigValueInt, "", fmt.Sprintf("%d", i)),
-			}, false)
-			errs <- err
-		}(i)
-	}
-	wg.Wait()
-	close(errs)
+	for round := 1; round <= maxRounds; round++ {
+		_, svc, appID := newConfigFixture(t)
+		ctx := context.Background()
 
-	var ok, conflicts, others int
-	for err := range errs {
-		switch {
-		case err == nil:
-			ok++
-		case errors.Is(err, domain.ErrConflict):
-			conflicts++
-		default:
-			others++
-			t.Errorf("既不是成功也不是 ErrConflict 的错误: %v", err)
+		errs := make(chan error, goroutines)
+		var wg sync.WaitGroup
+		for i := 0; i < goroutines; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				_, err := svc.Save(ctx, appID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
+					"n": field(domain.ConfigValueInt, "", fmt.Sprintf("%d", i)),
+				}, false)
+				errs <- err
+			}(i)
+		}
+		wg.Wait()
+		close(errs)
+
+		var ok, conflicts int
+		for err := range errs {
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, domain.ErrConflict):
+				conflicts++
+			default:
+				// 一个漏网的裸 pg 错误都不许有——这条不受重试影响，
+				// 任何一轮出现都立即失败。
+				t.Fatalf("第 %d 轮：既不是成功也不是 ErrConflict 的错误: %v", round, err)
+			}
+		}
+		if ok == 0 {
+			t.Fatalf("第 %d 轮：至少要有一次保存成功", round)
+		}
+		if conflicts > 0 {
+			t.Logf("第 %d 轮观察到冲突：成功 %d 次，冲突 %d 次", round, ok, conflicts)
+			return // 转换路径已被执行到，测试目的达成
 		}
 	}
-	if ok == 0 {
-		t.Fatal("至少要有一次保存成功")
-	}
-	// 关键断言：失败的那些**必须**全是 ErrConflict，一个漏网的裸 pg 错误都不许有。
-	if others != 0 {
-		t.Fatalf("有 %d 次失败没被转成 domain.ErrConflict", others)
-	}
-	t.Logf("成功 %d 次，冲突 %d 次", ok, conflicts)
+	t.Fatalf("跑满 %d 轮、每轮 %d 个并发，一次冲突都没观察到——"+
+		"pgUniqueViolation → ErrConflict 那段转换没有被任何测试执行到", maxRounds, goroutines)
 }
 
 // 同一次 Save 里只要有一项转换失败，整批拒绝——不允许出现"一半字段生效了"的版本。
