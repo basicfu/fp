@@ -16,14 +16,13 @@
 
 > **代码声明结构，控制台填值，fp 推变更。**
 
-`config_field`（有哪些配置项）的真相在代码里，由 SDK 上报；`config`（值是多少）的真相在控制台。两边各管各的，不会漂移——这正是 3s / xxzj 拷贝后必然漂移的那类问题的解法，与授权模块"权限点由 SDK 上报"是同一个范式。
+代码里的 struct 说"我需要哪些配置项、什么类型"，控制台说"值是多少"。改值不重新编译、不重新发版。
 
 ## 二、范围
 
 **做：**
 
 - SDK 侧的 struct 绑定、启动拉取、热更新、变更回调
-- 配置项 schema 的上报与生命周期管理
 - 控制台的配置表单、版本历史、回滚
 - 前端配置（浏览器 JS 读取）的下发路径
 
@@ -31,26 +30,28 @@
 
 | 项 | 理由 |
 |---|---|
+| SDK 上报 schema | 见 4.3 |
 | 默认值 | 见 4.2 |
 | 环境维度（dev/test/prod） | 见 4.5 |
 | 本地快照文件 | 见 4.6 |
 | secret 类型与落库加密 | 见 4.7 |
 | 校验规则（min/max/oneof） | 见 6.3 |
-| 灰度 / 按实例标签定向下发 | 见 10.3 |
+| 灰度 / 按实例标签定向下发 | 见 9.3 |
+| 变更操作人（`actor_id`） | 见 5.3 |
 
-后四条推翻了主设计文档第六节与 10.3 的原始设想，反转记录集中在第十四节。
+其中环境、快照、secret、默认值与校验规则五条推翻了主设计文档第六节与 10.3 的原始设想，反转记录集中在第十三节。
 
 ## 三、与 Nacos / Apollo 的对照
 
 | | Nacos / Apollo | fp 配置中心 |
 |---|---|---|
 | 配置的单位 | 一整个文件（properties / yaml / json） | 单个配置项 |
-| schema 从哪来 | 没有 schema，配置就是文本 | **SDK 反射 struct 上报** |
+| 有没有 schema | 没有，配置就是文本 | **有**：类型 + 说明，人在控制台维护 |
 | 控制台形态 | 文本编辑器 | 按类型渲染的表单 |
-| 类型安全 | 无，靠客户端解析时才发现 | 保存时就按 `value_type` 转换 |
+| 类型安全 | 无，客户端解析时才发现 | 保存时就按配置项的类型转换 |
 | 灰度发布 | 有（按 IP / label） | 无，用"仅落库、重启生效"替代 |
 
-差别的根源是**配置项带 schema**。Nacos 面对的是任意语言、任意格式的配置文件，只能当文本处理；fp 的接入方是自家 Go 服务，SDK 能反射出结构，因此可以把"裸 JSON 编辑器"换成带类型的表单。代价是不支持"把一整个 yaml 丢进去"，这是刻意的取舍。
+差别的根源是**配置项带类型**。Nacos 面对的是任意语言、任意格式的配置文件，只能当文本处理；fp 的接入方是自家 Go 服务，配置项是可枚举的，因此可以把"裸 JSON 编辑器"换成带类型的表单。代价是不支持"把一整个 yaml 丢进去"，这是刻意的取舍。
 
 ## 四、核心机制
 
@@ -83,6 +84,8 @@ fee := amount * c.FeeRate
 
 **唯一的 tag 是 `fp:"json"`**：标了它的 struct 字段不展开成分组，而是整体作为一个 `object` 类型的配置项，控制台上填一段 JSON。字段固定的结构拆成分组更好编辑，供应商列表那种拆不动的走 JSON。
 
+**为什么不用裸的包级变量**（`var FeeRate float64`）：两道坎都过不去。第一，Go 运行时无法枚举一个包里的变量——`reflect` 只能操作你手上已有的值，没有 `reflect.Package`，runtime 那份符号表也没有公开 API 能列出包级变量并取到地址；能做到的只有编译期代码生成（`stringer` / `wire` 那个路子）。第二，就算生成了，`var FeeRate float64` 被后台 goroutine 写、被请求 goroutine 读就是 data race——Go 内存模型不保证非原子读写安全，编译器可以把它缓存进寄存器，race detector 会直接报。要安全就得包成 atomic，那读法就退回 `FeeRate.Load()`，比 struct 更啰嗦且 key 要手写字符串。
+
 ### 4.2 没有默认值
 
 **`Bind` 时任意字段在 fp 上没有值 → 返回 error，进程起不来。** 不提供默认值机制。
@@ -93,29 +96,32 @@ fee := amount * c.FeeRate
 2. **取消之后，配置只剩一个真相源。** 有默认值就永远要回答"这个值到底来自代码还是 fp"。
 3. **取消之后，字段改名不再是静默事故。** 有默认值时，改字段名 = 新 key 在 fp 上不存在 = 静默回落到默认值，生产上那个被调成 0.02 的费率会悄悄变回 0.006 跑上三天。没有默认值，同一个改名直接让 `Bind` 报错、发布失败——**没有可以静默回退的东西**。
 
-`Bind` 返回的 error 是结构化的，一次列全部缺失的 key，不是报第一个就返回：
+缺失的字段留 Go 零值，`cfg` 照样返回——**SDK 不替业务方决定能不能带伤启动**，愿意继续跑的人自己判断。
+
+### 4.3 配置项从哪来：人建，`Bind` 的报错就是那份清单
+
+**没有 SDK 上报。** 配置项一律由人在控制台创建。
+
+那"该建哪些 key"从哪知道？——`Bind` 的错误信息就是清单。它必须**一次列全**，并带上每一项该建成什么类型：
 
 ```
-fpsdk: 3 个配置项尚未在 fp 上配置，已上报，请到控制台【商城 / 配置中心】填写：
+fpsdk: 3 个配置项尚未在 fp 上配置，请到控制台【商城 / 配置中心 / DEFAULT】创建并填值：
   upstream.api_key   (string)
   upstream.timeout   (int)
   fee_rate           (float)
 ```
 
-缺失的字段留 Go 零值，`cfg` 照样返回——**SDK 不替业务方决定能不能带伤启动**，愿意继续跑的人自己判断。
+类型是 SDK 反射 struct 算出来的（6.1 的映射表）。所以**反射那部分逻辑一条都不能省**——它要干三件事：推导 key、推导类型（只为了生成这份清单）、把拉到的值填进 struct。
 
-### 4.3 上报是控制台表单的唯一来源
+于是首次部署的流程是：**起一次 → 失败 → 照着错误清单在控制台建好并填值 → 再起 → 活**。
 
-取消默认值会撞出一个死锁：代码启动要 fp 上有值 → fp 上有值要控制台上有这个 key → 控制台上有 key 要有人知道该建哪些 key。
+**这条省掉的东西要认：**
 
-破解方式是**把上报和取值拆成两步**：`Bind` 先上报 schema（这步总是成功），再取值（缺值才失败）。于是首次部署有两条路，都通：
+- **手抄有成本。** 50 个配置项要照着错误信息建 50 遍，会抄错。抄错的表现是 `Bind` 一直报缺同一个 key、而控制台上看着"有"（实际是 `upstream.time_out` 这种），只能靠人眼对。
+- **没有对账。** 代码里删掉一个配置项之后，库里那条永远留着，没有任何机制能告诉你"它已经没人读了、可以删"。库会慢慢攒垃圾。
+- **删除没有保护。** 人删掉一个代码还在读的配置项，运行中的实例走 4.4 第二条（保持旧值 + `OnError`），新起的实例直接缺值起不来。兜底还在，但它是事后的。
 
-- **起一次 → 失败 → 控制台上这些项已经自动列出来了、标着「未配置」→ 人填 → 活**
-- 或者人**提前建好**配置项并填值（见 7.1 的「待接入」态），代码一上线直接就能起
-
-这也是"上报到底还有没有必要"的答案：**有，而且它现在是控制台表单的唯一来源。** 不上报的话，人在控制台上凭什么知道要建 `upstream.api_key` 这个 key、它该渲染成什么控件？只能靠人读代码手抄一遍——两份定义必然漂移，就是这个项目要治的病。
-
-上报还顺带提供第二个能力：**对账**——哪些配置项还在被代码引用、哪些已经没人用了可以删（见第七节）。
+**上报将来要加是纯增量**：加一个 `ReportSchema` RPC + 一张记录 `last_seen_at` 的心跳表，`config` 表一列都不用动——因为"`type` / `desc` 归人维护"这条规则在有没有上报时都成立。所以现在砍掉它不堵路。真要加的时候记住一件事：**上报必须是周期性心跳**（比如每 10 分钟一次、阈值 30 分钟），只在 `Bind` 时发一次的话，一批 pod 连跑三天不重启，它自己的配置项就会被判成"无人引用"。
 
 ### 4.4 热更新
 
@@ -137,9 +143,9 @@ cfg.OnChange(func(old, new *ShopConfig) {
 
 三条实现约束，共同的骨架是——**新快照只要不能完整、正确地解析出来，就一律保持旧快照**：
 
-- **快照没变就不换指针、不触发 `OnChange`。** 别人给自己的新 key 配值也会生成新版本、推给你，你拉到的全量里你关心的字段一个都没变。不比较就回调的话，别人配置一次你的连接池重建一次。
-- **某个 key 消失（回滚导致）→ 保持旧值 + 报错，绝不清成零值。** 清零值是危险的（`fee_rate=0` 就是免手续费）。
-- **解析失败（有人把 `value_type` 从 `int` 改成了 `object`）→ 保持旧快照 + 报错。** 旧服务继续用旧值跑下去，不因为配置被改成了新版本代码要的形状而崩掉。这是 6.4「类型可改」那条规则的兜底腿。
+- **快照没变就不换指针、不触发 `OnChange`。** 同一个分区里别人改了你不关心的 key，也会生成新版本、推给你，而你拉到的全量里你关心的字段一个都没变。不比较就回调的话，别人配置一次你的连接池重建一次。
+- **某个 key 消失（被删或回滚导致）→ 保持旧值 + 报错，绝不清成零值。** 清零值是危险的（`fee_rate=0` 就是免手续费）。
+- **解析失败（有人把 `type` 从 `int` 改成了 `object`）→ 保持旧快照 + 报错。** 旧服务继续用旧值跑下去，不因为配置被改成了新版本代码要的形状而崩掉。这是 6.4「类型可改」那条规则的兜底腿。
 
 报错走一个独立的回调：
 
@@ -171,66 +177,105 @@ cfg.OnError(func(err error) { alert(err) })
 
 主设计文档第六节写的是"加密配置项（密钥类，落库加密，UI 上脱敏显示）"。**不做**：不加密落库，控制台明文显示，也不保留"这一项是密钥"的类型标记。
 
-**代价与配套纪律：密钥类配置项必须建成 `type=DEFAULT`，绝不能建成 `WEB`**——否则它会随 `/api/config` 一路吐到浏览器里。secret 标记去掉之后，`type` 分类是唯一的闸。好在 `type` 是建配置项时定死的分类，不是一个随手能勾出泄露的开关（这正是它比 `public` 布尔字段好的地方）。
+**代价与配套纪律：密钥类配置项必须建在 `DEFAULT` 分区，绝不能建在 `WEB`**——否则它会随前端配置一路吐到浏览器里。secret 标记去掉之后，分区是唯一的闸。好在分区是建配置项时定死的，不是一个随手能勾出泄露的开关。
 
-**本模块不解决第三阶段交接事项第 3 条**（connector 的 secret 字段脱敏与落库加密）。那条债务仍然挂着，而且现在多了一个立场冲突：配置中心决定密钥明文存库明文显示，connector 那边原计划是加密+脱敏。两者要么统一到明文、要么统一到加密，**需要单独裁决，不在本模块范围内**。真到加微信 AppSecret 那天必须先解决。
+**本模块不解决第三阶段交接事项第 3 条**（connector 的 secret 字段脱敏与落库加密）。那条债务仍然挂着，而且现在多了一个立场冲突：配置中心决定密钥明文存库明文显示，connector 那边原计划是加密 + 脱敏。两者要么统一到明文、要么统一到加密，**需要单独裁决，不在本模块范围内**。真到加微信 AppSecret 那天必须先解决。
 
 ## 五、数据模型
 
-```sql
--- ① 配置字段 = schema。不含值。
-CREATE TABLE config_field (
-    id             uuid PRIMARY KEY DEFAULT uuidv7(),
-    application_id uuid NOT NULL REFERENCES application(id) ON DELETE CASCADE,
-    key            text NOT NULL,                    -- "upstream.timeout"
-    type           text NOT NULL DEFAULT 'DEFAULT',  -- DEFAULT | WEB，分区
-    value_type     text NOT NULL,                    -- bool|int|float|string|array|object
-    description    text NOT NULL DEFAULT '',         -- 备注，人维护，上报永不覆盖
-    last_seen_at   timestamptz,                      -- NULL = 从未被上报过
-    created_at     timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (application_id, key, type)
-);
+### 5.1 一张表
 
--- ② 值。一次保存一行，装该应用**该分区**全部键值的整快照。
---    当前值 = 该分区 seq 最大那行的 values。
+```sql
+-- 配置的版本快照。一次保存一行，自包含。
 CREATE TABLE config (
-    application_id uuid NOT NULL REFERENCES application(id) ON DELETE CASCADE,
-    type           text NOT NULL,                    -- DEFAULT | WEB
-    seq            bigint NOT NULL,                  -- **分区内**自增：v1 v2 v3
-    values         jsonb NOT NULL,                   -- {"upstream.timeout": 3000, "fee_rate": 0.02}
-    actor_id       uuid NOT NULL REFERENCES admin(id),
-    comment        text NOT NULL DEFAULT '',
+    application_id uuid        NOT NULL REFERENCES application(id) ON DELETE CASCADE,
+    type           text        NOT NULL,   -- DEFAULT | WEB，分区
+    seq            bigint      NOT NULL,   -- 分区内自增：v1 v2 v3
+    fields         jsonb       NOT NULL,   -- {key: {type, desc, value}}
     created_at     timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (application_id, type, seq)
 );
 ```
 
-**唯一键是 `(application_id, key, type)`**，所以 `type` 是**分区**而不是标记：同名 key 在 `DEFAULT` 和 `WEB` 下是**两个独立的配置项，各有各的值和版本历史**。前后端都要用同一份内容时得配两遍——这个代价换来的是零歧义：不必回答"这个值到底属于谁、谁改了会影响谁"。值也因此按分区分开存，`config` 表跟着带 `type`，`seq` 在**分区内**自增（`DEFAULT` 的 v7 与 `WEB` 的 v3 互不相干，各自回滚、各自推送）。
+`fields` 长这样：
 
-**只有两张表。** 没有单独的当前值表（当前值 = 该分区最新一行的 `values`），没有 `changed_keys`（是派生数据，取 seq 与 seq-1 两行 diff 即可，存了就多一处会对不上的地方），没有 `pushed`（生效方式是一次性的动作参数，执行完就完了；而且它长得像"生效了没有"，实际记的是"保存那一刻推没推"，容易被误读）。
-
-**存整快照而不是变更点。** 50 个配置项 × 500 次变更 ≈ 750KB，存储代价可以忽略，换来的是四种操作全都是一行 jsonb 的事：
-
-```sql
--- 当前值
-SELECT values FROM config WHERE application_id = $1 AND type = $2 ORDER BY seq DESC LIMIT 1;
--- v6 那一刻的完整状态
-SELECT values FROM config WHERE application_id = $1 AND type = $2 AND seq = 6;
--- 回滚到 v6（v7 原样保留，不删）
-INSERT INTO config (application_id, type, seq, values, actor_id, comment)
-SELECT application_id, type, $3, values, $4, $5 FROM config
-WHERE application_id = $1 AND type = $2 AND seq = 6;
--- 某个 key 的历史
-SELECT seq, values -> $3 FROM config WHERE application_id = $1 AND type = $2 ORDER BY seq DESC;
+```json
+{
+  "upstream.timeout": {"type": "int",    "desc": "上游超时（毫秒）", "value": 3000},
+  "fee_rate":         {"type": "float",  "desc": "手续费率",        "value": 0.02},
+  "risk.mode":        {"type": "string", "desc": "",                "value": null}
+}
 ```
 
-对比"只存变更点"的时态表设计：那个方案存储更省（750KB → 30KB，省的量毫无意义），但每次读当前值都要 `DISTINCT ON` 加一层 NULL 过滤，还要第三张表和一个复合外键。**用可忽略的存储换掉一整层查询复杂度是划算的。**
+用 map 而不是数组：key 本来就唯一，做 JSON 对象的键最自然，`fields->'upstream.timeout'` 是对象查找而不是遍历，还天然防重复 key。
+
+**两个状态靠 map 本身表达，不需要额外的列：**
+
+- **未配置**：`value` 是 JSON `null`。`Bind` 的 `missing` 就是这些
+- **不存在 / 已删除**：key 根本不在 map 里
+
+**没有单独的 schema 表。** `type` 和 `desc` 是配置项的属性，但它们和 `value` 一样都由人在控制台维护、都该随版本走——回滚就该回到"人当时写下的那一份"，包括类型和说明。把它们拆出去只会制造一个"schema 不回滚、值回滚"的半吊子语义。
+
+### 5.2 为什么是整版快照而不是变更点
+
+另一个候选是时态行：一行一个字段的变更，只写本次真的变了的那几项，查询时 `DISTINCT ON (key)` 取每个 key 的最大 `seq`。它更省存储，但两条决定性的劣势：
+
+**回滚会变成一个能写错的东西。** 时态行的回滚要靠 `seq <= 6` + `DISTINCT ON (key)` + 一层 `deleted` 过滤全都写对才对，写错了产出的是"看起来合理但其实不是 v6"的状态，很难发现。整版快照的回滚是**复制一行**，没有可以写错的地方。
+
+**只有整版快照能安全修剪。** 时态行按 `seq` 删老行会把"某个字段最后一次修改恰好落在老版本里"的那一行删掉，那个字段就凭空消失了；躲开这个（只删后面还有更新行的历史行）又会让老版本的恢复结果变错——**删了什么、坏了什么都不可预期**。整版快照每行自包含，删掉 100 版之前的，后果就一句话：那些版本回滚不了，其余一切照常。
+
+存储代价被上限兜住：50 个配置项一版约 7KB，100 版 700KB，一个应用两个分区 1.4MB。
+
+### 5.3 没有 `actor_id`
+
+不记录"谁改的"。今天 fp 只有一个管理员——`AdminService` 只有 `EnsureBootstrap` / `Login` / `Authenticate` / `Logout`，`internal/httpapi/admin.go` 只有 login / logout / me，**没有任何创建第二个管理员的路径**，主设计里那个"平台管理员"页也还没实现。这一列今天永远是同一个值，零信息量。
+
+将来多管理员落地时补这一列是**无损的**：老数据只有一个可能的取值，加列之后一条 `UPDATE` 回填即可。
+
+版本历史因此记录的是"什么时候、变成了什么"，不记录"谁干的"。
+
+### 5.4 查询
+
+```sql
+-- 当前配置
+SELECT seq, fields FROM config
+WHERE application_id=$1 AND type=$2 ORDER BY seq DESC LIMIT 1;
+
+-- v6 的完整状态
+SELECT fields FROM config WHERE application_id=$1 AND type=$2 AND seq=6;
+
+-- 回滚到 v6：复制一行，type / desc / value 一起回去
+INSERT INTO config (application_id, type, seq, fields)
+SELECT application_id, type, $3, fields FROM config
+WHERE application_id=$1 AND type=$2 AND seq=6;
+
+-- 某个 key 的历史（对象查找，不用展开数组）
+SELECT seq, fields->$3 AS entry, created_at FROM config
+WHERE application_id=$1 AND type=$2 AND fields ? $3 ORDER BY seq DESC;
+
+-- 版本列表；"改了哪些"取相邻两版的 fields 在应用层 diff
+SELECT seq, created_at FROM config
+WHERE application_id=$1 AND type=$2 ORDER BY seq DESC LIMIT 20;
+
+-- 修剪：只保留最近 100 版
+DELETE FROM config WHERE application_id=$1 AND type=$2 AND seq <= $3 - 100;
+```
 
 `seq` 在事务里取该分区的 `MAX(seq)+1`，靠主键约束兜并发；管理操作低频，冲突了重试即可。
 
-**删除配置项**是一次版本变更：删 `config_field` 那行 + 该分区新版本的 `values` 里去掉该 key。历史版本的 `values` 里它还在，所以回滚能把它恢复。删的若是一个从未配过值的项（「待接入」态），`values` 本来就没有它——只删 `config_field` 行，不生成空版本。
+### 5.5 `type` 是分区
 
-**未配置**的判据：`config_field` 有行，但该分区最新 `values` 里没有该 key。SDK 的 `missing` 就是这些。
+主键含 `type`，所以它划出的是**互不相干的分区**：
+
+| | `DEFAULT` | `WEB` |
+|---|---|---|
+| 谁读 | `Bind[T]` 绑的 struct | `BindType(client, "WEB")` |
+| 会不会到浏览器 | 不会 | 会 |
+| 版本序列 | 自己的 v1 v2 v3 | 自己的 v1 v2 v3 |
+
+**同名 key 在两个分区下是两个独立的配置项**，各有各的值、各有各的版本历史。`site.title` 这种前后端都要用的东西**要配两遍**——这个代价换来的是零歧义：不必回答"这个值到底属于谁、改了会影响谁、算谁的版本"。
+
+密钥类必须落在 `DEFAULT`（4.7）。分区是可扩展的枚举（将来可能有 `MOBILE`、`MINIPROGRAM`），SDK 的 API 收 string 而不是 enum，加一个分区不需要改协议。
 
 ## 六、类型系统
 
@@ -238,7 +283,7 @@ SELECT seq, values -> $3 FROM config WHERE application_id = $1 AND type = $2 ORD
 
 fp 的类型系统**不带任何一门语言的特性**——将来接入其他语言时，控制台上看到的必须还是它认得的东西。
 
-| fp `value_type` | Go 侧映射 | 控制台控件 |
+| fp 类型 | Go 侧映射 | 控制台控件 |
 |---|---|---|
 | `bool` | `bool` | 开关 |
 | `int` | 各整数类型；`time.Duration` **按毫秒**当整数处理 | 数字输入 |
@@ -247,7 +292,7 @@ fp 的类型系统**不带任何一门语言的特性**——将来接入其他�
 | `array` | 切片、数组 | JSON 数组 |
 | `object` | `map`、标了 `fp:"json"` 的 struct | JSON 对象 |
 
-**没有 `duration` 类型。** 其他语言没有这个概念。Go 侧 `time.Duration` 仍然能写，但那是 **Go SDK 的私事**：它按毫秒上报成 `int`，解析时乘 `time.Millisecond`，fp 完全不知道有这回事。单位约定写死在文档里，控制台上它就是个整数。
+**没有 `duration` 类型。** 其他语言没有这个概念。Go 侧 `time.Duration` 仍然能写，但那是 **Go SDK 的私事**：它按毫秒当 `int` 处理，解析时乘 `time.Millisecond`，fp 完全不知道有这回事。单位约定写死在文档里，控制台上它就是个整数。
 
 反射时必须**先判具体类型再判 Kind**——`time.Duration` 底层是 `int64`，顺序反了时长会被当成普通整数、丢掉毫秒换算。
 
@@ -255,125 +300,61 @@ fp 的类型系统**不带任何一门语言的特性**——将来接入其他�
 
 ### 6.2 值的存储与传输
 
-`config.values` 里存 **JSON 原生类型**，不是一律字符串：
-
-```json
-{"upstream.timeout": 3000, "fee_rate": 0.02, "feature.new": true, "limits": [1, 2, 3]}
-```
-
-保存时按 `value_type` 转一次，转不过去才报错。于是：
+`fields` 里的 `value` 存 **JSON 原生类型**，不是一律字符串。保存时按该项的 `type` 转一次，转不过去才报错。于是：
 
 - 控制台读回来直接是正确类型
 - SDK 直接 `json.Unmarshal` 到 struct 字段的类型，不需要自己实现类型转换
-- `value_type` **根本不用下发给 SDK**（协议因此少一个字段）
+- 类型**根本不用下发给 SDK**（协议因此少一个字段）
 
-key 是**扁平的点分路径**（`upstream.timeout`）而不是嵌套 JSON。理由是它要和 `config_field.key` 对得上，控制台也按 key 逐项编辑、逐项做 diff。SDK 侧把扁平路径填进嵌套 struct 的那段逻辑本来就要写（要算 `missing`、要处理 `time.Duration`），多一层点路径不增加多少事。
+key 是**扁平的点分路径**（`upstream.timeout`）而不是嵌套 JSON。理由是控制台按 key 逐项编辑、逐项做 diff。SDK 侧把扁平路径填进嵌套 struct 的那段逻辑本来就要写（要算 `missing`、要处理 `time.Duration`），多一层点路径不增加多少事。
 
 ### 6.3 弱约束
 
-**类型是弱约束，不做 min / max / oneof 校验。** 保存时尝试按 `value_type` 转换，`"3"` 填进 `int` 字段照样过，**只有转不过去才提示**。
+**类型是弱约束，不做 min / max / oneof 校验。** 保存时尝试按类型转换，`"3"` 填进 `int` 字段照样过，**只有转不过去才提示**。
 
 范围和枚举的校验交给业务方在 `Bind` 之后自己写一行 if。代价是错值已经落库并推给全线实例了才被发现——这条取舍认了。
 
 ### 6.4 类型可改，改法有规矩
 
-**`value_type` 只在配置项首次创建时由上报写入，之后归人管**——同 `permission.name` / `parent_id` 那条"只在首次创建时由上报写入，之后不覆盖"。
+配置项的 `type` 随时可改（没有上报来跟人抢这个字段，规则很简单）。要改类型的场景长这样：v2 代码把 `upstream.timeout` 从 `int` 改成了一个 `object`，发版前得先把控制台上的值改成 JSON。而这时 v1 还在跑，它要的还是那个 `int`。
 
-这条规则是"支持改类型"的前提。要改类型的场景长这样：v2 代码把 `upstream.timeout` 从 `int` 改成了一个 `object`，发版前得先把控制台上的值改成 JSON。但这时 v1 还在跑、还在上报 `int`：
-
-- 若上报能覆盖 `value_type`，人刚改成 `object`，v1 的下一次上报就把它推回 `int`，值也就存不进去——**改类型这件事根本做不成**
-- 所以上报撞上已存在的配置项时**只刷 `last_seen_at`，不动 `value_type`**
-
-上报的类型与库里不一致时，不覆盖也不阻断，只在控制台上**标一条「代码与配置的类型不一致」的提示**。这条提示本身有用：它正好告诉人"代码里的类型变了，你该去改一下配置"。
-
-改类型的完整流程，和 10.2 的发布协同是同一套：
+改法和 9.2 的发布协同是同一套：
 
 ```
-① 控制台把 value_type 从 int 改成 object，填上 JSON 值
+① 控制台把 upstream.timeout 的类型从 int 改成 object，填上 JSON 值
 ② 保存时选「仅落库，实例重启后生效」→ 不发 ConfigChanged
    → v1 内存里仍是那个 int，照常跑，完全不受影响  ✓
 ③ v2 上线，Bind 拉到 JSON，解析成 object  ✓
-④ v1 全部下线后，「类型不一致」的提示自动消失
 ```
 
 **若②误选了「立即推送」**：v1 拉到全量、解析失败 → 走 4.4 第三条，**保持旧快照 + `OnError` 报错**。旧服务继续用旧值跑下去，不崩——它只是收到一个"配置被改成了我认不得的形状"的信号。这是这条设计的兜底腿，也是为什么 4.4 那条约束不能省。
 
-## 七、配置项的生命周期
+改类型是一次普通的版本变更，因此**可以被回滚撤销**（`type` 就在 `fields` 里，跟着版本走）。
 
-### 7.1 四态，都是算出来的
+## 七、SDK 形态
 
-上报是**全量快照**，但"这次没上报"**不等于**"消失了"——业务服务多半多实例，滚动发布时新旧版本同时在跑，交替上报会让配置项在两个状态间反复横跳。所以判据是"**多久没有任何实例报过它**"，与权限点同理。
-
-**状态不存库：**
-
-| type | last_seen_at | 状态 | 能删吗 |
-|---|---|---|---|
-| `WEB` | 恒 NULL | 前端配置 | 能 |
-| `DEFAULT` | NULL | **待接入**（人已建好，代码还没上报） | 能 |
-| `DEFAULT` | 阈值内 | 正常 | **不能** |
-| `DEFAULT` | 超阈值 | 代码里已无人引用 | 能 |
-
-阈值默认 30 分钟，按应用可配（沿用权限点的那一个）。滚动发布通常几分钟内完成，窗口内两个版本都在报，不会误判。
-
-**「正常」态删不掉**这条同时挡住了一类误操作：v2 还没全量上线就把 v1 还在读的 key 删了。
-
-**「待接入」态**顺带兜住另一个陷阱：手建配置项时 key 抄错了（比如把 `upstream.timeout` 写成 `upstream.time_out`），代码上线后它会一直挂在「待接入」——错误自己会暴露出来，不需要额外的校对机制。
-
-### 7.2 上报的处理规则
-
-**上报只作用于 `DEFAULT` 分区**——`Bind` 绑的 struct 就是后端自己的配置，`WEB` 分区永远是人建的，上报碰都不碰它。
-
-1. 快照里有、`DEFAULT` 分区里也有 → **只刷 `last_seen_at`**
-2. 快照里有、`DEFAULT` 分区里没有 → 在该分区新建，`description` 留空由人填
-3. 快照里没有的**一律不动**——状态是算出来的，不需要写库
-4. `description` 与 `value_type` **只由人维护，上报永不覆盖**（同 `permission.name`；`value_type` 那条的理由见 6.4）
-
-规则 1 的含义是：人提前建好了一个「待接入」的项（4.3），代码上线后上报撞上它，就是**合并**——刷 `last_seen_at` 让它转为「正常」，人填的 `description` 和 `value_type` 原样保留。key 在同一分区里撞上就是同一个配置项。
-
-**多次 `Bind` 必须累积上报并集。** 一个进程里绑两个 struct 时，第二次上报若只带自己那份快照，会让第一份的 key 全部停止刷新 `last_seen_at`、30 分钟后被判成「代码里已无人引用」。SDK 内部维护一张累积的注册表，每次 `Bind` 后重新上报并集。
-
-### 7.3 `type` 是分区，不是标记
-
-唯一键含 `type`（第五节），所以 `type` 划出的是**互不相干的分区**：
-
-| | `DEFAULT` | `WEB` |
-|---|---|---|
-| 配置项从哪来 | SDK 上报，或人提前建 | 只能人建 |
-| 谁读 | `Bind[T]` 绑的 struct | `BindType(client, "WEB")` |
-| 会不会到浏览器 | 不会 | 会 |
-| 生命周期 | 四态（7.1） | 恒为「前端配置」 |
-| 版本序列 | 自己的 v1 v2 v3 | 自己的 v1 v2 v3 |
-
-**同名 key 在两个分区下是两个独立的配置项**，各有各的值、各有各的版本历史。`site.title` 这种前后端都要用的东西**要配两遍**——这个代价换来的是零歧义：不必回答"这个值到底属于谁、改了会影响谁、算谁的版本"。
-
-密钥类必须落在 `DEFAULT`（4.7）。分区是建的时候定的，不是一个随手能勾出泄露的开关——这正是它比一个 `public` 布尔字段安全的地方。
-
-`type` 是可扩展的枚举（将来可能有 `MOBILE`、`MINIPROGRAM`），SDK 的 API 收 string 而不是 enum，加一个分区不需要改协议。
-
-## 八、SDK 形态
-
-### 8.1 两个绑定入口
+### 7.1 两个绑定入口
 
 ```go
-// ① 后端自己用的：绑 struct，读 DEFAULT 分区，参与上报，缺值会报错
+// ① 后端自己用的：绑 struct，读 DEFAULT 分区，缺值会报错
 cfg, err := fpsdk.Bind[ShopConfig](client)
 cfg.Load()                                        // *ShopConfig
 cfg.OnChange(func(old, new *ShopConfig) { ... })
 cfg.OnError(func(err error) { ... })              // 解析失败 / key 消失，见 4.4
 
-// ② 转发给前端的：拉某个分区的全量，不绑 struct、不参与上报、没有缺值概念
+// ② 转发给前端的：拉某个分区的全量，不绑 struct，没有缺值概念
 web, err := fpsdk.BindType(client, "WEB")
 web.Load()                                        // map[string]any
 web.OnChange(func(old, new map[string]any) { ... })
 ```
 
-**`BindType` 必须指定分区**，没有"不传就是全部"的重载——分区之间同名 key 是不同的配置项（7.3），合并成一个 map 就得回答"撞了算谁的"，而这个问题不该存在。
+**`BindType` 必须指定分区**，没有"不传就是全部"的重载——分区之间同名 key 是不同的配置项（5.5），合并成一个 map 就得回答"撞了算谁的"，而这个问题不该存在。
 
 两者是同一套形态（`Load` + `OnChange` + `OnError`），共用同一条 Watch 流、同样遵守「快照没变就不触发」；各自拉自己分区的 `GetConfig`，也各自只响应带着自己分区的 `ConfigChanged`。
 
 **`BindType` 返回 `map[string]any` 而不是 `map[string]string`**：SDK 按 JSON 解析一遍再交出去，业务方 `json.Encode` 出来直接是 `{"feature.new": true, "limits": [1,2,3]}`，而不是一堆 `"true"` / `"[1,2,3]"` 要前端再转一次。
 
-### 8.2 前端读配置
+### 7.2 前端读配置
 
 **SDK 不提供 HTTP handler**，只交出 `map`——传输方式是业务方的事：
 
@@ -391,39 +372,26 @@ web.OnChange(func(old, new map[string]any) {
 
 **为什么不让前端直连 fp**：fp 是全局单点（主设计原则 4），而前端流量的量级是"每个终端用户每次打开页面一次请求"，与 SDK 的量级完全不同；直连还要额外处理 CORS、限流、缓存。走业务后端则 fp 侧零新增接口、零新增流量。这也正是 3s 当年的做法。
 
-### 8.3 实现约束清单
+### 7.3 实现约束清单
 
 1. 快照没变就不换指针、不触发 `OnChange`（4.4）
 2. 某个 key 消失 → 保持旧值 + `OnError`，绝不清成零值（4.4）
 3. 解析失败 → 保持旧快照 + `OnError`，绝不崩、也绝不半解析（4.4 / 6.4）
 4. 没挂 `OnError` 时打 ERROR 日志，不静默（4.4）
-5. 多次 `Bind` 累积上报并集（7.2）
-6. `time.Duration` 反射时先判具体类型再判 Kind（6.1）
-7. `MissingConfigError` 一次列全，不是报第一个就返回（4.2）
+5. `time.Duration` 反射时先判具体类型再判 Kind（6.1）
+6. `MissingConfigError` 一次列全，并带上每项该建成的类型（4.3）——它是人在控制台建配置项的唯一依据，漏一项就要多跑一轮"起→失败"
 
-## 九、协议
+## 八、协议
 
 新建 `ConfigService`，**推送仍走已有的 Watch 长流**（主设计 3.3 定的"一条流统一回源与推送"，`WatchResponse` 的 oneof 早就为此预留了扩展位）。
 
 ```protobuf
 service ConfigService {
-  // ReportSchema 上报本进程绑定的全部配置项。全量快照，与 ReportPermissions 同构。
-  rpc ReportSchema(ReportSchemaRequest) returns (ReportSchemaResponse);
-
-  // GetConfig 拉取该应用当前的全部配置值。
+  // GetConfig 拉取该应用某个分区当前的全部配置值。
+  //
+  // 只有这一个 RPC：配置项由人在控制台创建，SDK 不上报 schema（设计文档 4.3）。
   rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
 }
-
-// ReportSchemaRequest 不带 type：上报只作用于 DEFAULT 分区（7.2）。
-message ReportSchemaRequest {
-  repeated SchemaField fields = 1;   // 全量快照，缺失的一律不删（见 7.2）
-}
-message SchemaField {
-  string key        = 1;             // "upstream.timeout"
-  // value_type 只在配置项首次创建时被采纳，之后归人管（6.4）。
-  string value_type = 2;             // bool|int|float|string|array|object
-}
-message ReportSchemaResponse {}
 
 message GetConfigRequest {
   string type = 1;                   // DEFAULT | WEB，分区
@@ -431,7 +399,9 @@ message GetConfigRequest {
 message GetConfigResponse {
   // version 是该分区的 config.seq。
   int64 version = 1;
-  // values 是整个 JSON 对象，原样来自 config.values。
+  // values 是一个 JSON 对象：{key: value}，只含已配置的项
+  // （fields 里 value 为 null 的不出现）。
+  //
   // 刻意不拆成 map<string,string>：值是 JSON 原生类型，拆开会退化成
   // 一堆待解析的字符串，SDK 就得自己实现一遍类型转换。
   string values = 2;
@@ -446,17 +416,15 @@ message ConfigChanged {
 }
 ```
 
-**`GetConfig` 返回该分区全部的值，由 SDK 自己按 struct 挑并算出 `missing`。** 因此服务端不必记住"哪个实例上报了哪些 key"——无状态，多实例、灰度期新旧版本并存都不用特殊处理。
+**`missing` 由 SDK 自己算**（struct 里有、`values` 里没有的），服务端不返回——它不知道调用方的 struct 长什么样，也不需要知道。
 
-`value_type` 不下发（6.2）：SDK 直接 `json.Unmarshal` 到 struct 字段的类型，解不动就走 4.4 第三条报错。
+## 九、生效方式与发布协同
 
-## 十、生效方式与发布协同
-
-### 10.1 一次保存 = 一个版本
+### 9.1 一次保存 = 一个版本
 
 表单上改多少项都行，点一次保存 → 生成一个版本 → 推一次。**SDK 看不到中间态**（改了 `fee_rate` 还没改 `fee_min` 的那一瞬间）。没有草稿态、没有"编辑中"，不引入 Apollo 那套两阶段发布。
 
-### 10.2 保存时选生效方式
+### 9.2 保存时选生效方式
 
 ```
 [保存]  生效方式：  ◉ 立即推送（默认）
@@ -475,60 +443,50 @@ message ConfigChanged {
 
 **已知漏洞**：v1 pod 如果在这期间因节点故障意外重启，会读到 `bbb`。窗口短、概率低，认了。
 
-回滚同样要选生效方式——回滚就是生成一个新版本，没有例外。
+改类型（6.4）走的也是这条路。回滚同样要选生效方式——回滚就是生成一个新版本，没有例外。
 
-### 10.3 不做灰度下发
+### 9.3 不做灰度下发
 
-按实例标签定向下发（Apollo 的灰度发布）是这个问题唯一严谨的解——新旧实例同时在跑也各拿各的值，没有 10.2 那个漏洞。**本期不做**：它要给表、UI、推送各加一层 label 维度，而"仅落库、重启生效"已经覆盖了滚动发布这个主场景。
+按实例标签定向下发（Apollo 的灰度发布）是这个问题唯一严谨的解——新旧实例同时在跑也各拿各的值，没有 9.2 那个漏洞。**本期不做**：它要给表、UI、推送各加一层 label 维度，而"仅落库、重启生效"已经覆盖了滚动发布这个主场景。
 
 将来要加是纯增量（`config` 加一个可空的 label 维度），已有数据和判定逻辑都不用改。
 
-### 10.4 改名与不兼容变更
+### 9.4 改名与不兼容变更
 
-**改 key（字段改名）是安全的**，因为 fp 上的配置项是"所有在跑版本的并集"，不是某一版代码的镜像：
-
-```
-线上 v1：struct 有 A、B、xxx        fp 上：A、B、xxx
-① 提前建好 bbb 并填值 → fp 上：A、B、xxx、bbb → 新版本 → 推送
-② v1 拉全量 → 按自己的 struct 取 A、B、xxx；bbb 不在 struct 里，忽略 → v1 无感
-③ v2 上线 → 读 bbb ✓，xxx 从此没人上报
-④ 30 分钟后 xxx 转为「代码里已无人引用」→ 人工确认后删除
-```
-
-①那次推送会让 v1 拉一次全量，但解出来的 struct 一个字段都没变——这正是 4.4 那条"快照没变就不触发 `OnChange`"要挡的情况。
+**改 key（字段改名）**：新 key 在 fp 上不存在 → `Bind` 直接报错、发布失败，不会静默跑错值（4.2 第 3 条）。正确做法是发版前先在控制台建好新 key 并填值；旧 key 在全量上线后手动删掉——没有对账机制会提醒你（4.3），得自己记着。
 
 **改语义（key 和类型都没变，意思变了）fp 检测不到**：单位从秒改成毫秒、枚举值换了一批，类型一样、值也合法，只是意思变了。这是**纪律不是机制**：
 
 > **不兼容的语义变更必须换 key。** 与数据库改列语义要新开一列是同一条规矩。
 
-## 十一、控制台
+## 十、控制台
 
 **配置中心页**（选应用）：
 
 - **先切分区**（`DEFAULT` / `WEB` 两个 tab）——版本序列、回滚、推送都是分区内的事，两个分区不该混在一个列表里
-- 配置项列表，按 key 的点前缀折叠分组，每行按 `value_type` 渲染控件
-- 顶部三条醒目提示：**N 项未配置**（红）、**N 项代码与配置的类型不一致**（红，见 6.4）、**N 项代码里已无人引用**（黄）
-- 每行可编辑：值、`description`、`value_type`（`value_type` 归人管，上报不覆盖——见 6.4；改它要二次确认，并提示"旧实例若收到推送会解析失败"）
-- **`type` 不可改。** 它是唯一键的一部分（第五节），改它等于把配置项挪到另一个分区、值也要跟着在两个分区的版本快照间搬家。要换分区就删了重建
-- `[新建配置项]`：key + value_type + 值 + 备注（`type` 由当前所在的 tab 决定）。**建的时候必须同时填值**（没有代码强制它，空着没意义）
-- `[保存]`：选生效方式 + 备注
+- 配置项列表，按 key 的点前缀折叠分组，每行按类型渲染控件
+- 顶部一条醒目提示：**N 项未配置**（红，即 `value` 为 JSON `null` 的那些）
+- 每行可编辑：值、`desc`、`type`（改类型要二次确认，并提示"旧实例若收到推送会解析失败"，见 6.4）
+- `[新建配置项]`：key + 类型 + 值 + 备注（分区由当前所在的 tab 决定）。**建的时候必须同时填值**——没有代码强制它，空着没意义
+- `[删除]`：二次确认，并提示"没有机制能确认它是否还被代码读取；删错了运行中的实例会保持旧值并报错，新起的实例会起不来"
+- `[保存]`：选生效方式
 
-**版本历史 tab**：版本列表（seq / 时间 / 操作人 / 备注 / 本次改了哪些 key）+ 两版 diff + 回滚。"改了哪些"取 seq 与 seq-1 两行 `values` 在应用层 diff，不存字段。
+**版本历史 tab**：版本列表（seq / 时间 / 本次改了哪些 key）+ 两版 diff + 回滚。"改了哪些"取相邻两版的 `fields` 在应用层 diff，不存字段。
 
-**回滚前必须提示"回滚后这些项将变成未配置"**——回滚到 v6 时，v7 才新增的配置项在 v6 的 `values` 里没有，运行中的实例会走 4.4 第二条"保持旧值 + `OnError`"，而新启动的实例会缺值起不来。
+**回滚前必须提示"回滚后这些项将变成未配置"**——回滚到 v6 时，v7 才新增的配置项在 v6 的 `fields` 里没有，运行中的实例会走 4.4 第二条"保持旧值 + `OnError`"，而新启动的实例会缺值起不来。
 
-**不复用 `DynamicForm`。** 结构差异太大（那是 connector 的单个动态表单，这是带分组、状态徽标、批量保存的列表），而且第三阶段终审查出它的 DOM id 没加命名空间会让同名字段串台——配置项的 key 带点、撞得更狠。新组件从第一行起就带命名空间。
+**不复用 `DynamicForm`。** 结构差异太大（那是 connector 的单个动态表单，这是带分组、批量保存的列表），而且第三阶段终审查出它的 DOM id 没加命名空间会让同名字段串台——配置项的 key 带点、撞得更狠。新组件从第一行起就带命名空间。
 
 前端工程配置改动前先读 `docs/console.md` 里那六条与官方文档冲突的坑（第三阶段交接事项第五节）。
 
-## 十二、与现有代码的接触面
+## 十一、与现有代码的接触面
 
 | 位置 | 改动 |
 |---|---|
 | `proto/fp/v1/` | 新增 `config.proto`；`WatchResponse` 的 oneof 加 `ConfigChanged` 分支 |
-| `internal/domain/` | 新增 `ConfigField`、`Config` 及状态判定 |
-| `internal/store/migrations/` | 新增迁移（两张表） |
-| `internal/service/` | 新增 `ConfigService`：上报合并、取值、保存、回滚、删除保护 |
+| `internal/domain/` | 新增 `Config`、`ConfigField`（`fields` 里那个对象的 Go 结构） |
+| `internal/store/migrations/` | 新增迁移（一张表） |
+| `internal/service/` | 新增 `ConfigService`：取值、保存、回滚、删除、修剪、推送 |
 | `internal/grpcapi/` | 新增 `ConfigService` 的 gRPC 实现；推送接入既有 Watch 流 |
 | `internal/httpapi/` | 新增控制台的配置中心路由 |
 | `sdk/` | 新增 `config.go`（反射、绑定、快照、回调）、`bindtype.go` |
@@ -536,71 +494,67 @@ message ConfigChanged {
 
 **不引入新依赖。** 反射、`encoding/json` 都在标准库里，`sdk/arch_test.go` 的分层约束不受影响。
 
-## 十三、测试策略
+## 十二、测试策略
 
 第二、三阶段的教训是"服务端有信息、传输层丢了，而所有测试照绿"，以及"写计划时强调了不等于守住了"。所以下面每一条都要能回答：**哪一条测试会因为违反它而变红？** 标注「辨别力」的，实现时必须做一次**变异验证**——把实现改坏跑一次确认真的变红，再改回来。
 
-1. **反射生成 schema**（表驱动）：各 Go 类型 → `value_type`；`time.Duration` 走 int 毫秒；嵌套 struct 展开成点分组；`fp:"json"` 整体成 object；不支持的类型报错。
+1. **反射生成 key 与类型**（表驱动）：各 Go 类型 → fp 类型；嵌套 struct 展开成点分组；`fp:"json"` 整体成 object；不支持的类型报错。
    **辨别力**：`time.Duration` 那条必须断言毫秒换算，只断言"类型是 int"的话，先判 Kind 后判具体类型的错误实现照样绿。
 
-2. **`missing` 列全。**
-   **辨别力**：至少缺 2 项，断言两项都在——只缺 1 项的话，"报第一个就 return"的实现也会绿。
+2. **`MissingConfigError` 列全、且带类型。**
+   **辨别力**：至少缺 2 项，断言两项都在**且类型正确**——只缺 1 项的话，"报第一个就 return"的实现也会绿；不断言类型的话，人拿着这份清单去控制台会建错类型（4.3 说明了这份清单是唯一依据）。
 
-3. **快照相同不触发 `OnChange`。** 推一次内容完全相同的配置，断言回调 0 次、指针未变。这条对应 10.4 那个"别人配自己的新 key"场景。
+3. **快照相同不触发 `OnChange`。** 推一次内容完全相同的配置，断言回调 0 次、指针未变。
 
 4. **「仅落库、重启生效」。**
    **辨别力**：两条腿都要断言——没有 `ConfigChanged` 发出，**并且**新起一次 `Bind` 能拿到新值。只断言前者的话，"根本没存"的实现也会绿。
 
-5. **上报合并保留人填的 `description` 与 `value_type`。**
-   **辨别力**：必须先人工改过 `description`、把 `value_type` 从 `int` 改成 `object`，再上报一次（上报里仍是 `int`），断言两者都还在。直接测"上报能新建"是测不到覆盖问题的——而这条一旦破了，6.4 的改类型流程整个做不成。
+5. **改类型的两条路（6.4）。** 把某项的类型从 `int` 改成 `object` 并填 JSON 值：
+   - 选「仅落库」→ 断言旧 `Bind` 的 `Load()` 仍是原来那个 int，`OnChange` 与 `OnError` 都没被调用
+   - 选「立即推送」→ 断言旧 `Bind` 的 `Load()` **仍是原来那个 int**（保持旧快照）、`OnError` 被调用了一次、**进程没崩**
 
-6. **多次 `Bind` 累积上报并集。**
-   **辨别力**：绑两个 struct，断言第一个 struct 的 key 在第二次上报后 `last_seen_at` 仍被刷新。只断言"两个 struct 都能取到值"是测不出这个的——取值走的是全量，不受上报影响。
+   **辨别力**：第二条必须断言"值还是旧的"而不只是"报了错"——半解析后把其余字段换掉的实现照样会报错，却已经破坏了快照的一致性。
 
-7. **四态判定**用可控时钟逐态断言，含「阈值内不算消失」与「超过阈值算消失」两条边界；以及**「正常」态删不掉**的保护。
+6. **分区隔离。** 在 `DEFAULT` 和 `WEB` 下建同名 key、配不同的值，断言：`Bind` 拿到 DEFAULT 那个、`BindType(client, "WEB")` 拿到 WEB 那个；改其中一个分区不影响另一个的 `seq`；`ConfigChanged{type:"WEB"}` 不会让 `Bind` 那份重新解析。
+   **辨别力**：两个分区的值必须**不同**，否则"分区对了"和"压根没分区"产出同样结果。
 
-8. **回滚生成新版本而非删除历史**：回滚到 v6 得到 v8，断言 v7 仍在且内容未变。
+7. **`BindType` 的解析**：断言 bool / array / object 解析成了真正的 JSON 类型而不是字符串。
 
-9. **回滚导致某 key 消失时 SDK 保持旧值**，并断言 `OnError` 被调用了一次。
+8. **未配置 vs 已删除。** `value` 为 JSON `null` 的项出现在 `missing` 里且仍在控制台列表中；key 从 `fields` 里移除的项两处都不出现。
+   **辨别力**：两种情形必须同时造出来，只造一种的话，把两者混为一谈的实现（比如都当成删除）会绿。
 
-10. **改类型的两条路（6.4）。** 把 `value_type` 从 `int` 改成 `object` 并填 JSON 值：
-    - 选「仅落库」→ 断言旧 `Bind` 的 `Load()` 仍是原来那个 int，`OnChange` 与 `OnError` 都没被调用
-    - 选「立即推送」→ 断言旧 `Bind` 的 `Load()` **仍是原来那个 int**（保持旧快照）、`OnError` 被调用了一次、**进程没崩**
-    - 两条路下，新起一次 `Bind`（struct 里那个字段已改成 object）都能拿到新值
+9. **版本快照可精确还原。** 造 v1..v5 五次变更（含一次删除、一次重新添加、一次改类型），逐版本断言 `fields` 与写入时一致；回滚到 v3 生成 v6，断言 v6 的 `fields` 与 v3 逐字节相同、且 v4 / v5 仍在。
 
-    **辨别力**：第二条必须断言"值还是旧的"而不只是"报了错"——半解析后把其余字段换掉的实现照样会报错，却已经破坏了快照的一致性。
+10. **修剪。** 造 105 个版本，断言 v1..v5 被删、v6..v105 还在，且当前配置不受影响。
 
-11. **分区隔离。** 在 `DEFAULT` 和 `WEB` 下建同名 key、配不同的值，断言：`Bind` 拿到 DEFAULT 那个、`BindType(client, "WEB")` 拿到 WEB 那个；改其中一个分区不影响另一个的 `seq`；`ConfigChanged{type:"WEB"}` 不会让 `Bind` 那份重新解析。
-    **辨别力**：两个分区的值必须**不同**，否则"分区对了"和"压根没分区"产出同样结果。
+11. **弱类型转换**：`"3"` 存进 `int` 项成功、`"abc"` 失败并给出可读错误。
 
-12. **`BindType` 的解析**：断言 bool / array / object 解析成了真正的 JSON 类型而不是字符串。
+12. **端到端穿透**：控制台改值 → 断言 SDK 侧 `cfg.Load()` 真的变了、`web.Load()` 真的变了。对应第三阶段那条教训——只测服务端返回值不够，要穿到 SDK 出口。
 
-13. **弱类型转换**：`"3"` 存进 `int` 项成功、`"abc"` 失败并给出可读错误。
-
-14. **端到端穿透**：控制台改值 → 断言 SDK 侧 `cfg.Load()` 真的变了、`web.Load()` 真的变了。对应第三阶段那条教训——只测服务端返回值不够，要穿到 SDK 出口。
-
-## 十四、对主设计文档的反转记录
+## 十三、对主设计文档的反转记录
 
 | 主设计文档原文 | 本模块的决定 | 理由 |
 |---|---|---|
 | §6「层级：应用 × 环境（dev/test/prod）」 | **删掉环境维度** | 与"一个 fp 部署 = 一套用户体系"矛盾，环境必须靠部署隔离（4.5） |
 | §6「本地快照文件兜底（fp 挂了业务不挂）」、§10.3「配置：使用本地快照文件」 | **不做快照** | 代价是 fp 不可达期间业务方进程无法重启（4.6） |
-| §6「加密配置项（密钥类，落库加密，UI 上脱敏显示）」 | **不做 secret 类型** | 配套纪律：密钥类必须建成 `DEFAULT`（4.7） |
+| §6「加密配置项（密钥类，落库加密，UI 上脱敏显示）」 | **不做 secret 类型** | 配套纪律：密钥类必须建在 `DEFAULT` 分区（4.7） |
 | §6「配置项带 schema：类型 / **默认值** / **校验规则** / 说明 / 是否加密」 | **无默认值、无校验规则** | 默认值省不下那次人工动作且制造歧义（4.2）；校验规则本期从简（6.3） |
 
 前两条是主设计文档里"fp 挂了业务不挂"这条承诺的实质削弱，第三条是安全面的实质放宽。**都是有意识的取舍，不是遗漏**——但主设计文档第六节应当同步更新，否则下一个人读到的是两份互相矛盾的设计。
 
-## 十五、实施顺序建议
+另外记一笔与授权模块的不对称：**授权模块的权限点由 SDK 上报，配置中心的配置项由人手建**（4.3）。这不是原则上的分歧，只是本期的取舍——上报后加是纯增量。但在两个模块之间来回看的人会注意到这个不一致，值得在实施计划里写明。
 
-1. 数据模型与迁移（两张表）
-2. 服务端：上报合并、四态判定、取值
-3. proto + gRPC：`ConfigService`、`WatchResponse` 加分支
-4. SDK：反射生成 schema、`Bind`、`MissingConfigError`
-5. SDK：热更新、`OnChange`、快照比较
+## 十四、实施顺序建议
+
+1. 数据模型与迁移（一张表）
+2. 服务端：取值、保存、版本、回滚、删除、修剪
+3. proto + gRPC：`ConfigService.GetConfig`、`WatchResponse` 加 `ConfigChanged` 分支
+4. SDK：反射生成 key 与类型、`Bind`、`MissingConfigError`
+5. SDK：热更新、`OnChange`、`OnError`、快照比较
 6. SDK：`BindType`
-7. 服务端：保存 / 版本 / 回滚 / 删除保护 / 生效方式
-8. 控制台：配置项列表与表单
+7. 服务端：推送与生效方式
+8. 控制台：分区 tab、配置项列表与表单、新建与删除
 9. 控制台：版本历史与回滚
-10. 端到端穿透测试（第十三节第 12 条）
+10. 端到端穿透测试（第十二节第 12 条）
 
-1–6 完成时就能验证"改配置不用发版"这个核心命题（用 SQL 直接改 `config` 即可），不必等控制台。
+1–7 完成时就能验证"改配置不用发版"这个核心命题（用 SQL 直接改 `config` 表即可），不必等控制台。
