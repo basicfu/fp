@@ -19,7 +19,7 @@ import (
 func CollectChi(r chi.Routes, stripPrefix string) []PermissionPoint {
 	var out []PermissionPoint
 	_ = chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		pattern := trimPrefix(route, stripPrefix)
+		pattern := normalizePattern(trimPrefix(route, stripPrefix))
 		out = append(out, PermissionPoint{Key: PermissionKey(method, pattern), Kind: PermissionKindAPI})
 		return nil
 	})
@@ -90,7 +90,28 @@ func chiRoutePattern(req *http.Request) (string, bool) {
 	if !rctx.Routes.Match(probe, req.Method, req.URL.Path) {
 		return "", false
 	}
-	return probe.RoutePattern(), true
+	return normalizePattern(probe.RoutePattern()), true
+}
+
+// normalizePattern 抹平上报侧与判定侧的路由模式差异。
+//
+// **两侧必须一字不差，否则鉴权会静默全拒**——本地策略表里查不到对应条目
+// 就是默认拒绝，没有任何报错指向真实原因。
+//
+// 实测发现的差异（见 TestCollectAndMatchProduceSameKey）：注册在子路由根上
+// 的接口——r.Route("/orders", ...) 里的 r.Get("/", ...)，也就是 REST 里最常见
+// 的列表与创建接口——两侧算出来的是：
+//
+//	chi.Walk（上报） → "/orders/"    带尾斜杠
+//	试匹配（判定）   → "/orders"     不带
+//
+// 统一去掉尾斜杠。根路由 "/" 是唯一的例外，它去掉之后就成了空串，
+// 不再是一个能辨认的路径。
+func normalizePattern(pattern string) string {
+	if len(pattern) > 1 && pattern[len(pattern)-1] == '/' {
+		return pattern[:len(pattern)-1]
+	}
+	return pattern
 }
 
 func trimPrefix(route, prefix string) string {
