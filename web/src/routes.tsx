@@ -5,6 +5,8 @@ import Applications from '@/pages/Applications'
 import ApplicationDetail from '@/pages/ApplicationDetail'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
+import Roles from '@/pages/Roles'
+import RoleDetail from '@/pages/RoleDetail'
 import { useAuth } from '@/lib/auth'
 
 /**
@@ -41,6 +43,8 @@ export default function AppRoutes() {
         <Route path="/applications/:id" element={<ApplicationDetail />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
+        <Route path="/roles" element={<Roles />} />
+        <Route path="/roles/:id" element={<RoleDetail />} />
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>

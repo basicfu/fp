@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import ConnectorsPanel from '@/components/ConnectorsPanel'
+import PermissionsPanel from '@/components/PermissionsPanel'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
@@ -86,6 +87,7 @@ export default function ApplicationDetail() {
           <TabsTrigger value="basic">基本信息</TabsTrigger>
           <TabsTrigger value="session">会话策略</TabsTrigger>
           <TabsTrigger value="connectors">登录方式</TabsTrigger>
+          <TabsTrigger value="permissions">权限点</TabsTrigger>
         </TabsList>
 
         <TabsContent value="basic" className="pt-4">
@@ -98,6 +100,10 @@ export default function ApplicationDetail() {
 
         <TabsContent value="connectors" className="pt-4">
           <ConnectorsPanel appId={id} />
+        </TabsContent>
+
+        <TabsContent value="permissions" className="pt-4">
+          <PermissionsPanel app={a} onAppChanged={app.reload} />
         </TabsContent>
       </Tabs>
     </div>

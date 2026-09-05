@@ -19,6 +19,8 @@ export interface Application {
   appId: string
   status: ApplicationStatus
   cookieDomain: string
+  /** 这个应用里每个人自动拥有的角色 key。空串表示不设。 */
+  defaultRoleKey: string
   session: SessionPolicy
   createdAt: number
   updatedAt: number
@@ -96,4 +98,44 @@ export interface LoginLog {
   ip: string
   ua: string
   createdAt: number
+}
+
+// --- 授权 ---------------------------------------------------------------
+
+/** 角色是**全局**的，不属于某个应用。应用归属靠它挂了哪些应用的权限点。 */
+export interface Role {
+  id: string
+  /** key 是身份，创建后不可修改（user_role.roles[] 与已签发会话都按它引用）。 */
+  key: string
+  name: string
+  /** 空串表示没有父角色。 */
+  parentId: string
+  createdAt: number
+}
+
+export type PermissionStatus = 'normal' | 'stale' | 'manual'
+export type PermissionSource = 'app' | 'manual'
+
+export interface PermissionPoint {
+  id: string
+  /** 形如 GET:/orders/{id}。app 上报的由路由自动生成，manual 的由人填。 */
+  key: string
+  name: string
+  kind: string
+  source: PermissionSource
+  /** 算出来的，不存库：normal / stale（过渡中）/ manual。 */
+  status: PermissionStatus
+  /** "过渡中"已经持续了多久，毫秒。其余状态为 0。 */
+  staleForMs: number
+  lastSeenAt: number
+  createdAt: number
+}
+
+/** 授权的效果。空串表示没有授权（收回时也传空串）。 */
+export type Effect = 'allow' | 'deny' | ''
+
+/** 某个角色**直接**持有的一条授权，不含从父角色继承来的。 */
+export interface RoleGrant {
+  permissionId: string
+  effect: Exclude<Effect, ''>
 }
