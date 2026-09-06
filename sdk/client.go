@@ -2,6 +2,8 @@ package fpsdk
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +16,18 @@ import (
 	"google.golang.org/grpc/status"
 
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
+)
+
+// 配置分区。业务方调 BindType（Task 12）时用来指定要绑定哪个分区；
+// Bind 固定绑 ConfigTypeDefault。取值必须与服务端 internal/domain 的
+// ConfigType* 逐字相同——这条配对关系与 KeepaliveTime 那条一样，分处
+// sdk/ 与 internal/ 两个包，任何一边单独看都只是孤立的字符串常量，
+// 靠 internal/integration 的测试守护。
+const (
+	// ConfigTypeDefault 是后端服务读的分区。密钥类配置必须建在这里。
+	ConfigTypeDefault = "DEFAULT"
+	// ConfigTypeWeb 会被业务方转发给浏览器的分区。
+	ConfigTypeWeb = "WEB"
 )
 
 // KeepaliveTime 是客户端向 fp 发送 keepalive ping 的间隔。
@@ -35,6 +49,8 @@ type Client struct {
 	opts Options
 	conn *grpc.ClientConn
 	rpc  fpv1.AuthServiceClient
+	// cfgRPC 是配置中心的 RPC 客户端，供 Bind/BindType 拉取配置用。
+	cfgRPC fpv1.ConfigServiceClient
 
 	// auth 与 authz 在 New 里构造一次，之后不再替换，因此无需同步保护。
 	auth  *Auth
@@ -44,8 +60,47 @@ type Client struct {
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
 	streamUp atomic.Bool
 
+	// bindingsMu 保护 bindings：Bind/BindType 可能在任意 goroutine 里被
+	// 业务方调用，注册与（Task 11 的）推送触发遍历必须互斥。
+	bindingsMu sync.Mutex
+	// bindings 是全部已注册的配置绑定，供收到 ConfigChanged 推送时逐个
+	// 触发重新拉取（Task 11）。Binding[T] 是泛型，没法直接存进切片，
+	// 靠 reloadable 这个非泛型接口。
+	bindings []reloadable
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+// reloadable 是 Client 对各份绑定的全部依赖。Binding[T] 是泛型，
+// 没法直接存进一个切片，只能靠这个非泛型接口。
+type reloadable interface {
+	reloadFromPush()
+}
+
+// registerBinding 记录一份绑定，供收到该分区的 ConfigChanged 推送时
+// （Task 11）触发它重新拉取。
+func (c *Client) registerBinding(r reloadable) {
+	c.bindingsMu.Lock()
+	defer c.bindingsMu.Unlock()
+	c.bindings = append(c.bindings, r)
+}
+
+// fetchConfig 拉取 typ 分区当前的全部已配置值。
+//
+// GetConfig 返回的 Values 是一整个 JSON 对象字符串，且**只含已配置的
+// 项**——未配置的（服务端 value 为 JSON null）不会出现在里面，调用方
+// 据此判断哪些字段缺失。
+func (c *Client) fetchConfig(typ string) (map[string]json.RawMessage, error) {
+	res, err := c.cfgRPC.GetConfig(context.Background(), &fpv1.GetConfigRequest{Type: typ})
+	if err != nil {
+		return nil, translate(err)
+	}
+	values := make(map[string]json.RawMessage)
+	if err := json.Unmarshal([]byte(res.GetValues()), &values); err != nil {
+		return nil, fmt.Errorf("fpsdk: 解析配置分区 %s 失败: %w", typ, err)
+	}
+	return values, nil
 }
 
 // Auth 返回认证能力。多次调用返回同一个实例。
@@ -139,7 +194,12 @@ func New(opts Options) (*Client, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Client{opts: opts, conn: conn, rpc: fpv1.NewAuthServiceClient(conn), cancel: cancel}
+	c := &Client{
+		opts: opts, conn: conn,
+		rpc:    fpv1.NewAuthServiceClient(conn),
+		cfgRPC: fpv1.NewConfigServiceClient(conn),
+		cancel: cancel,
+	}
 	// 必须在启动 watch goroutine 之前构造好：goroutine 一跑起来就可能调
 	// c.auth（收到第一条 ready/revoke/purge 就会），构造顺序反了就是
 	// nil 解引用——而且只在恰好有事件到达时才崩，本地测试多半复现不出来。
