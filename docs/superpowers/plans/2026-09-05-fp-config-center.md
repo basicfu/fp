@@ -3575,8 +3575,7 @@ Expected: 编译失败
 func applyValues[T any](base *T, specs []fieldSpec, values map[string]json.RawMessage) (*T, []string, error) {
 	out := new(T)
 	if base != nil {
-		*out = *base // 浅拷贝：配置里只有值类型、切片与 map，写入时整体替换，
-		             // 不会出现两份快照共享同一个被就地修改的底层数组。
+		*out = *base // 浅拷贝：先假定全部字段都不变，下面按 values 逐个覆盖。
 	}
 	v := reflect.ValueOf(out).Elem()
 
@@ -3595,6 +3594,14 @@ func applyValues[T any](base *T, specs []fieldSpec, values map[string]json.RawMe
 			}
 			field.SetInt(int64(time.Duration(ms) * time.Millisecond))
 			continue
+		}
+		// slice/map 是引用类型：上面 `*out = *base` 的浅拷贝让 field 此刻与 base
+		// 的同名字段共享同一份底层数组/map。encoding/json 解码 slice 时若容量够用
+		// 会**原地复用旧数组**，解码 map 时会直接在已有对象上增删键——两者都会
+		// 连带改写 base，也就是那份此刻可能正被别的 goroutine 通过 Load() 持有、
+		// 被约定为不可变的旧快照。解码前先置零切断共享。
+		if k := field.Kind(); k == reflect.Slice || k == reflect.Map {
+			field.Set(reflect.Zero(field.Type()))
 		}
 		if err := json.Unmarshal(raw, field.Addr().Interface()); err != nil {
 			return nil, nil, fmt.Errorf("fpsdk: 配置项 %s 解析失败: %w", s.Key, err)
