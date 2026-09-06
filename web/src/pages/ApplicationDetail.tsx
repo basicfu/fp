@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams } from 'react-router'
+import { Link, useParams } from 'react-router'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -58,6 +58,12 @@ export default function ApplicationDetail() {
           {applicationStatusLabels[a.status] ?? a.status}
         </Badge>
         <div className="flex-1" />
+        <Link
+          to={`/applications/${id}/config`}
+          className="text-sm text-muted-foreground underline-offset-4 hover:underline"
+        >
+          配置中心
+        </Link>
         <Button variant={a.status === 'ACTIVE' ? 'destructive' : 'default'} onClick={onToggleStatusClick}>
           {a.status === 'ACTIVE' ? '停用应用' : '启用应用'}
         </Button>

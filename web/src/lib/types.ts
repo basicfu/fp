@@ -139,3 +139,34 @@ export interface RoleGrant {
   permissionId: string
   effect: Exclude<Effect, ''>
 }
+
+// --- 配置中心 -------------------------------------------------------------
+
+/** 配置分区。同名 key 在两个分区下是两个独立的配置项，各有各的值与版本序列。 */
+export type ConfigPartition = 'DEFAULT' | 'WEB'
+
+/** 配置项的值类型。与后端 domain.ConfigValue* 逐字一致。 */
+export type ConfigValueType = 'bool' | 'int' | 'float' | 'string' | 'array' | 'object'
+
+export interface ConfigField {
+  type: ConfigValueType
+  desc: string
+  /** null 表示"未配置"——它仍然是列表上待填的一行，不是不存在。 */
+  value: unknown
+}
+
+export interface ConfigSnapshot {
+  /** 0 表示该分区还没有任何版本。 */
+  seq: number
+  fields: Record<string, ConfigField>
+}
+
+/** 与 internal/httpapi/config.go 的 configVersionDTO 对应，供 Task 14 的版本历史页使用。 */
+export interface ConfigVersion {
+  seq: number
+  createdAt: number
+}
+
+export interface SaveConfigResponse {
+  seq: number
+}
