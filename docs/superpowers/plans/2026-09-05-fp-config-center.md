@@ -3063,7 +3063,7 @@ Expected: PASS
 
 - [ ] **Step 8: 确认分层约束没被破坏**
 
-Run: `./scripts/test.sh ./sdk -run TestArch -v`
+Run: `./scripts/test.sh ./sdk -run "TestSDKDoesNotImportInternal|TestSDKHasNoPanic|TestSDKDoesNotImportWebFrameworks" -v`
 Expected: PASS（`sdk/` 仍未 import `internal/`，仍无 `panic`）
 
 - [ ] **Step 9: 提交**
@@ -4008,7 +4008,7 @@ Expected: PASS
 - [ ] **Step 5: 跑整个 sdk 包并确认分层约束**
 
 Run: `./scripts/test.sh ./sdk`
-Expected: PASS，含 `TestArch*`（`sdk/` 仍未 import `internal/`、仍无 `panic`）
+Expected: PASS，含 `TestSDKDoesNotImportInternal` / `TestSDKHasNoPanic` / `TestSDKDoesNotImportWebFrameworks`（`sdk/` 仍未 import `internal/`、仍无 `panic`）。**注意不要写成 `-run TestArch`**——仓库里没有以 TestArch 开头的测试，`go test` 会输出 `ok ... [no tests to run]` 并以 0 退出，是一次假绿。
 
 - [ ] **Step 6: 提交**
 
@@ -4628,6 +4628,6 @@ git commit -m "test(config): 端到端穿透——控制台改值直到 SDK 出�
 - [ ] `cd web && npx vitest run && npx tsc -b` 全绿
 - [ ] `./scripts/gen.sh` 跑过且产物已提交
 - [ ] 17 处标「辨别力」的测试全部做过变异验证——计划里已经显式写出变异步骤的有 6 处（Task 3/6/9/10/11/13），其余 11 处实现者自己照同样方式做一遍
-- [ ] `sdk/` 仍未 import `internal/`、仍无 `panic`（`./scripts/test.sh ./sdk -run TestArch`）
+- [ ] `sdk/` 仍未 import `internal/`、仍无 `panic`（`./scripts/test.sh ./sdk -run "TestSDKDoesNotImportInternal|TestSDKHasNoPanic"`）
 - [ ] `docs/superpowers/specs/2026-08-24-fp-foundation-platform-design.md` 第六节已按本模块的四条反转更新（环境维度、本地快照、secret、默认值与校验规则），否则下一个人会读到两份互相矛盾的设计
 - [ ] 写一份交接记录追加到设计文档末尾，照前三个阶段的格式：**没做完的事**、**留给下一阶段的待办**、**计划本身被实现者挑出的缺陷**、**新确立的技术约定**
