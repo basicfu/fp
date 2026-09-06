@@ -205,7 +205,15 @@ func TestSDKSurvivesFpOutage(t *testing.T) {
 	// 前面三段验证的是"挂了还能活"，这一段验证"活过来了还能好"——一个
 	// 只会降级、不会恢复的 SDK 在生产上等于每次 fp 抖动都留下永久伤疤。
 	e.restartFp(t)
-	waitUntil(t, e.sdk.StreamHealthy, "fp 恢复后，默认客户端的推送流应重新变为健康")
+	// 【既有 flaky，非本分支引入】客户端断线重连按指数退避 200ms→400ms→
+	// 800ms→1.6s→3.2s→6.4s 走（sdk/client.go 的 minBackoff/maxBackoff）；
+	// 上面 (c) 的 sleep(cacheTTL+500ms) 让 restartFp 在断线约 4.6~6.6 秒
+	// 后才发生，正好落在 3.2s→6.4s 这一跳的两侧。若客户端此刻刚进入 6.4s
+	// 的睡眠，下一次真正的重连尝试要到 t≈12.8s 才发生，默认 5 秒超时的
+	// waitUntil 盖不住这一跳，导致约 1/3 概率的偶发失败。20 秒盖过
+	// 12.8s 那一跳，外加 Windows 端口释放的滞后仍有余量。
+	waitUntilTimeout(t, 20*time.Second, e.sdk.StreamHealthy,
+		"fp 恢复后，默认客户端的推送流应重新变为健康")
 
 	// 用一个全新的、从未缓存过的 token：拿旧 token 断言的话，命中的可能
 	// 是某条缓存（哪怕此前已经回源过，也无法排除"其实是命中了缓存"这种
