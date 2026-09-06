@@ -2285,7 +2285,7 @@ git commit -m "feat(config): ConfigChanged 接入 Watch 长流并完成装配"
 
 - [ ] **Step 1: 写失败的测试**
 
-创建 `internal/httpapi/config_test.go`。**先读 `internal/httpapi/application_test.go`**，复用那里已有的建 router、带管理员 cookie 发请求的辅助，不要另起一套。
+创建 `internal/httpapi/config_test.go`（**外部包 `package httpapi_test`**，与该目录既有测试一致）。脚手架在 `internal/httpapi/env_test.go`，就三个，都是**包级函数不是方法**：<br>• `newAdminEnv(t) (http.Handler, string, httpapi.Deps)` —— 返回 handler、管理员 token、以及装配好的 Deps（可用 `deps.Apps` 直接建应用）<br>• `do(t, h, token, method, path, body) *httptest.ResponseRecorder`<br>• `decode(t, rec, v)`
 
 ```go
 package httpapi_test
@@ -2295,91 +2295,153 @@ import (
 	"testing"
 )
 
+
 // 往返：PUT 存进去的东西，GET 能原样拿回来。
 func TestConfigRoundTrip(t *testing.T) {
-	env := newAdminEnv(t) // 复用 application_test.go 的脚手架
-	appID := env.createApp(t, "商城", "shop")
+	h, token, deps := newAdminEnv(t)
+	appID := createTestApp(t, deps)
 
 	body := `{"type":"DEFAULT","push":false,"fields":{
 		"fee_rate":{"type":"float","desc":"手续费率","value":0.02},
 		"api_key":{"type":"string","desc":"上游密钥","value":null}
 	}}`
-	res := env.do(t, http.MethodPut, "/admin/api/applications/"+appID+"/config", body)
-	assertStatus(t, res, http.StatusOK)
-
-	got := env.getJSON(t, "/admin/api/applications/"+appID+"/config?type=DEFAULT")
-	fields := got["fields"].(map[string]any)
-	fee := fields["fee_rate"].(map[string]any)
-	if fee["value"] != 0.02 {
-		t.Fatalf("fee_rate.value = %v，期望 0.02", fee["value"])
+	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+appID+"/config", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if fee["desc"] != "手续费率" {
-		t.Fatalf("desc = %v，期望 手续费率", fee["desc"])
+
+	rec = do(t, h, token, http.MethodGet,
+		"/admin/api/applications/"+appID+"/config?type=DEFAULT", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Seq    int64 `json:"seq"`
+		Fields map[string]struct {
+			Type  string          `json:"type"`
+			Desc  string          `json:"desc"`
+			Value json.RawMessage `json:"value"`
+		} `json:"fields"`
+	}
+	decode(t, rec, &got)
+
+	fee := got.Fields["fee_rate"]
+	if string(fee.Value) != "0.02" {
+		t.Fatalf("fee_rate.value = %s，期望 0.02", fee.Value)
+	}
+	if fee.Desc != "手续费率" {
+		t.Fatalf("desc = %q，期望 手续费率", fee.Desc)
 	}
 	// 未配置的项必须**保留在响应里**——它就是控制台上待填的那一行。
-	api := fields["api_key"].(map[string]any)
-	if api["value"] != nil {
-		t.Fatalf("api_key.value = %v，期望 null", api["value"])
+	api, ok := got.Fields["api_key"]
+	if !ok {
+		t.Fatal("未配置的 api_key 不该从响应里消失，它是控制台上待填的一行")
+	}
+	if string(api.Value) != "null" {
+		t.Fatalf("api_key.value = %s，期望 null", api.Value)
 	}
 }
 
 // 弱转换在路由层也成立：字符串 "3" 存进 int 项返回 200，"abc" 返回 400。
 func TestConfigSaveCoercionAndRejection(t *testing.T) {
-	env := newAdminEnv(t)
-	appID := env.createApp(t, "商城", "shop")
+	h, token, deps := newAdminEnv(t)
+	appID := createTestApp(t, deps)
 	url := "/admin/api/applications/" + appID + "/config"
 
-	ok := env.do(t, http.MethodPut, url,
+	rec := do(t, h, token, http.MethodPut, url,
 		`{"type":"DEFAULT","push":false,"fields":{"n":{"type":"int","desc":"","value":"3"}}}`)
-	assertStatus(t, ok, http.StatusOK)
+	if rec.Code != http.StatusOK {
+		t.Fatalf(`"3" 应当能存进 int 项，status = %d, body = %s`, rec.Code, rec.Body.String())
+	}
 
-	bad := env.do(t, http.MethodPut, url,
+	rec = do(t, h, token, http.MethodPut, url,
 		`{"type":"DEFAULT","push":false,"fields":{"n":{"type":"int","desc":"","value":"abc"}}}`)
-	assertStatus(t, bad, http.StatusBadRequest)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf(`"abc" 应当被拒，status = %d, body = %s`, rec.Code, rec.Body.String())
+	}
 }
 
-// 未知分区 400；未知字段（DisallowUnknownFields）也 400。
+// 未知分区 400；未知字段（decodeJSON 开了 DisallowUnknownFields）也 400。
 func TestConfigRejectsBadRequests(t *testing.T) {
-	env := newAdminEnv(t)
-	appID := env.createApp(t, "商城", "shop")
+	h, token, deps := newAdminEnv(t)
+	appID := createTestApp(t, deps)
 	url := "/admin/api/applications/" + appID + "/config"
 
-	assertStatus(t, env.do(t, http.MethodPut, url,
-		`{"type":"MOBILE","push":false,"fields":{}}`), http.StatusBadRequest)
-
-	assertStatus(t, env.do(t, http.MethodPut, url,
-		`{"type":"DEFAULT","push":false,"fields":{},"typo":1}`), http.StatusBadRequest)
+	if rec := do(t, h, token, http.MethodPut, url,
+		`{"type":"MOBILE","push":false,"fields":{}}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("未知分区 status = %d，期望 400", rec.Code)
+	}
+	if rec := do(t, h, token, http.MethodPut, url,
+		`{"type":"DEFAULT","push":false,"fields":{},"typo":1}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("未知字段 status = %d，期望 400", rec.Code)
+	}
 }
 
 // 版本列表与回滚。
 func TestConfigVersionsAndRollback(t *testing.T) {
-	env := newAdminEnv(t)
-	appID := env.createApp(t, "商城", "shop")
+	h, token, deps := newAdminEnv(t)
+	appID := createTestApp(t, deps)
 	url := "/admin/api/applications/" + appID + "/config"
 
-	env.do(t, http.MethodPut, url, `{"type":"DEFAULT","push":false,"fields":{"n":{"type":"int","desc":"","value":1}}}`)
-	env.do(t, http.MethodPut, url, `{"type":"DEFAULT","push":false,"fields":{"n":{"type":"int","desc":"","value":2}}}`)
+	for _, v := range []string{"1", "2"} {
+		rec := do(t, h, token, http.MethodPut, url,
+			`{"type":"DEFAULT","push":false,"fields":{"n":{"type":"int","desc":"","value":`+v+`}}}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("保存 %s status = %d, body = %s", v, rec.Code, rec.Body.String())
+		}
+	}
 
-	versions := env.getJSONArray(t, url+"/versions?type=DEFAULT")
+	rec := do(t, h, token, http.MethodGet, url+"/versions?type=DEFAULT", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("版本列表 status = %d", rec.Code)
+	}
+	var versions []struct {
+		Seq       int64 `json:"seq"`
+		CreatedAt int64 `json:"createdAt"`
+	}
+	decode(t, rec, &versions)
 	if len(versions) != 2 {
 		t.Fatalf("版本数 = %d，期望 2", len(versions))
 	}
 	// 降序：最新的在最前
-	if versions[0].(map[string]any)["seq"] != float64(2) {
-		t.Fatalf("第一条 seq = %v，期望 2", versions[0].(map[string]any)["seq"])
+	if versions[0].Seq != 2 {
+		t.Fatalf("第一条 seq = %d，期望 2", versions[0].Seq)
 	}
 
-	res := env.do(t, http.MethodPost, url+"/rollback", `{"type":"DEFAULT","seq":1,"push":false}`)
-	assertStatus(t, res, http.StatusOK)
+	rec = do(t, h, token, http.MethodPost, url+"/rollback",
+		`{"type":"DEFAULT","seq":1,"push":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("回滚 status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 
-	cur := env.getJSON(t, url+"?type=DEFAULT")
-	if cur["seq"] != float64(3) {
-		t.Fatalf("回滚后 seq = %v，期望 3", cur["seq"])
+	rec = do(t, h, token, http.MethodGet, url+"?type=DEFAULT", "")
+	var cur struct {
+		Seq    int64 `json:"seq"`
+		Fields map[string]struct {
+			Value json.RawMessage `json:"value"`
+		} `json:"fields"`
 	}
-	n := cur["fields"].(map[string]any)["n"].(map[string]any)
-	if n["value"] != float64(1) {
-		t.Fatalf("回滚后 n = %v，期望 1", n["value"])
+	decode(t, rec, &cur)
+	if cur.Seq != 3 {
+		t.Fatalf("回滚后 seq = %d，期望 3（回滚是往前追加，不是往回删）", cur.Seq)
 	}
+	if got := string(cur.Fields["n"].Value); got != "1" {
+		t.Fatalf("回滚后 n = %s，期望 1", got)
+	}
+}
+
+// createTestApp 建一个应用并返回它的 uuid 主键字符串。
+//
+// newAdminEnv 返回的第三个值是 httpapi.Deps，里面有装配好的 Apps 服务，
+// 直接用它建应用比走 HTTP 再解析响应短得多。
+func createTestApp(t *testing.T, deps httpapi.Deps) string {
+	t.Helper()
+	app, _, err := deps.Apps.Create(context.Background(), "商城", "shop")
+	if err != nil {
+		t.Fatalf("建应用失败: %v", err)
+	}
+	return app.ID.String()
+}
 }
 ```
 
