@@ -54,6 +54,21 @@ function renderPage() {
   )
 }
 
+// 【与 brief 的出入】这条测试、以及它验证的这个链接，都不在 task-13-brief
+// 的范围里——是给 Task 14（版本历史与回滚页）补的入口。Task 14 的 brief
+// 只要求新建 ConfigVersions.tsx 和加路由，没有要求任何地方链接过去；但
+// 路由能访问不等于功能可用，控制台里如果没有入口，管理员根本不知道这个
+// 页面存在，等于白做。这里补一个最小的跳转链接，并用这条测试钉住它的
+// 目标路径，防止以后重构 ConfigCenter 时被无意删掉。
+test('提供入口跳到版本历史页', async () => {
+  stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
+  renderPage()
+
+  await screen.findByLabelText('a')
+  const link = screen.getByRole('link', { name: '版本历史' })
+  expect(link.getAttribute('href')).toBe('/applications/app-1/config/versions')
+})
+
 test('未配置的项标出来并计数', async () => {
   stubConfig({
     seq: 1,

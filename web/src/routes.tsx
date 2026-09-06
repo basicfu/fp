@@ -4,6 +4,7 @@ import Login from '@/pages/Login'
 import Applications from '@/pages/Applications'
 import ApplicationDetail from '@/pages/ApplicationDetail'
 import ConfigCenter from '@/pages/ConfigCenter'
+import ConfigVersions from '@/pages/ConfigVersions'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import Roles from '@/pages/Roles'
@@ -43,6 +44,7 @@ export default function AppRoutes() {
         <Route path="/applications" element={<Applications />} />
         <Route path="/applications/:id" element={<ApplicationDetail />} />
         <Route path="/applications/:id/config" element={<ConfigCenter />} />
+        <Route path="/applications/:id/config/versions" element={<ConfigVersions />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/roles" element={<Roles />} />

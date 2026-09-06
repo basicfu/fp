@@ -306,6 +306,9 @@ export default function ConfigCenter() {
           <h1 className="text-xl font-semibold">配置中心</h1>
         </div>
         <div className="flex-1" />
+        <Button variant="outline" render={<Link to={`/applications/${id}/config/versions`} />}>
+          版本历史
+        </Button>
         <Button variant="outline" onClick={() => setAdding(true)}>
           新建配置项
         </Button>
