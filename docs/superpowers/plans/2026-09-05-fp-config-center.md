@@ -4087,7 +4087,10 @@ export interface SaveConfigResponse {
 ```tsx
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+// 仓库**没有**装 @testing-library/user-event（不在 package.json 里），
+// 用既有的 fireEvent，写法照 ApplicationDetail.test.tsx。
+// 注意：shadcn 的 Select（base-ui）选项的 onClick 依赖 onPointerDown 先置一个 ref，
+// 纯 fireEvent.click 选不中选项，需要先 fireEvent.pointerDown。
 
 
 
@@ -4122,9 +4125,9 @@ test('保存时把完整的 fields 全量提交', async () => {
     renderPage()
 
     const input = await screen.findByLabelText('a')
-    await userEvent.clear(input)
-    await userEvent.type(input, '9')
-    await userEvent.click(screen.getByRole('button', { name: '保存' }))
+    fireEvent.change(input, { target: { value: '' } })
+    fireEvent.change(input, { target: { value: '9' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
     const put = calls.find((c) => c.method === 'PUT')!
@@ -4141,8 +4144,8 @@ test('生效方式默认是立即推送，可切成仅落库', async () => {
     renderPage()
 
     await screen.findByLabelText('a')
-    await userEvent.click(screen.getByLabelText(/仅落库/))
-    await userEvent.click(screen.getByRole('button', { name: '保存' }))
+    fireEvent.click(screen.getByLabelText(/仅落库/))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
     expect((calls.find((c) => c.method === 'PUT')!.body as { push: boolean }).push).toBe(false)
@@ -4154,7 +4157,7 @@ test('切换分区会重新拉取', async () => {
     renderPage()
 
     await screen.findByRole('tab', { name: 'WEB' })
-    await userEvent.click(screen.getByRole('tab', { name: 'WEB' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'WEB' }))
 
     await waitFor(() => expect(urls.some((u) => u.includes('type=WEB'))).toBe(true))
     // 【辨别力】要断言 DEFAULT 也被拉过——只断言 WEB 的话，
@@ -4166,7 +4169,7 @@ test('删除配置项要二次确认，并说明没有机制能确认它是否�
     stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
     renderPage()
 
-    await userEvent.click(await screen.findByRole('button', { name: '删除 a' }))
+    fireEvent.click(await screen.findByRole('button', { name: '删除 a' }))
     expect(screen.getByText(/没有机制能确认它是否还被代码读取/)).toBeTruthy()
   })
 })
@@ -4249,7 +4252,10 @@ git commit -m "feat(config): 控制台配置中心页"
 ```tsx
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+// 仓库**没有**装 @testing-library/user-event（不在 package.json 里），
+// 用既有的 fireEvent，写法照 ApplicationDetail.test.tsx。
+// 注意：shadcn 的 Select（base-ui）选项的 onClick 依赖 onPointerDown 先置一个 ref，
+// 纯 fireEvent.click 选不中选项，需要先 fireEvent.pointerDown。
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -4299,7 +4305,7 @@ test('回滚前提示哪些项将变成未配置', async () => {
     )
     renderPage()
 
-    await userEvent.click(await screen.findByRole('button', { name: '回滚到 v1' }))
+    fireEvent.click(await screen.findByRole('button', { name: '回滚到 v1' }))
     // v2 才新增的 b 在 v1 里没有——回滚后它会变成未配置，运行中的实例
     // 保持旧值并报错，新起的实例会缺值起不来。这条提示必须出现。
     expect(screen.getByText(/回滚后以下配置项将变成未配置/)).toBeTruthy()
@@ -4311,9 +4317,9 @@ test('回滚同样要选生效方式', async () => {
     stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } }, calls)
     renderPage()
 
-    await userEvent.click(await screen.findByRole('button', { name: '回滚到 v1' }))
-    await userEvent.click(screen.getByLabelText(/仅落库/))
-    await userEvent.click(screen.getByRole('button', { name: '确认回滚' }))
+    fireEvent.click(await screen.findByRole('button', { name: '回滚到 v1' }))
+    fireEvent.click(screen.getByLabelText(/仅落库/))
+    fireEvent.click(screen.getByRole('button', { name: '确认回滚' }))
 
     await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
     const body = calls.find((c) => c.method === 'POST')!.body as { seq: number; push: boolean }
