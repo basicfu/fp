@@ -227,3 +227,43 @@ test('数字字段填非法值（int 填 3.7）同样被拦，保存按钮禁用
   expect(await screen.findByText(/不是合法的整数/)).toBeTruthy()
   expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
 })
+
+// 【终审必须修】设计文档 §8 明写"每行可编辑：值、desc、type"，但 desc 一度
+// 只有只读展示，输入框只存在于新建对话框——只在新建时能填一次。改错别字
+// 唯一的路是删除+重建，而删除正是这个页面自己要二次确认、且明说"没有
+// 机制确认它是否还被代码读取"的高风险操作。
+test('可以编辑 desc，保存后提交新值', async () => {
+  const calls: Array<{ method: string; body: unknown }> = []
+  stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '旧备注', value: 1 } } }, calls)
+  renderPage()
+
+  const descInput = await screen.findByLabelText('a 的备注')
+  expect((descInput as HTMLInputElement).value).toBe('旧备注')
+  fireEvent.change(descInput, { target: { value: '新备注' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存' }))
+
+  await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
+  const put = calls.find((c) => c.method === 'PUT')!
+  const body = put.body as { fields: Record<string, { desc: string }> }
+  expect(body.fields.a.desc).toBe('新备注')
+})
+
+// 【终审必须修】设计文档 §2：没有 secret 类型之后，分区是阻止密钥被下发到
+// 浏览器的唯一的闸——但控制台上 DEFAULT 与 WEB 两个 tab 长得完全一样，
+// 切过去没有任何提示。这条测试钉住切到 WEB 时必须出现警示、切回 DEFAULT
+// 后必须消失，防止以后重构把这条提示误删还全绿。
+test('切到 WEB 分区会提示内容会下发到浏览器，切回 DEFAULT 后提示消失', async () => {
+  stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
+  renderPage()
+
+  await screen.findByLabelText('a')
+  expect(screen.queryByText(/会被下发到浏览器/)).toBeNull()
+
+  fireEvent.click(await screen.findByRole('tab', { name: 'WEB' }))
+  expect(await screen.findByText(/会被下发到浏览器/)).toBeTruthy()
+  // 顺带钉住第二个关键信息点：密钥类必须建在 DEFAULT。
+  expect(screen.getByText(/密钥类配置项必须建在 DEFAULT 分区/)).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('tab', { name: 'DEFAULT' }))
+  await waitFor(() => expect(screen.queryByText(/会被下发到浏览器/)).toBeNull())
+})

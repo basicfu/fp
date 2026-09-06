@@ -180,6 +180,11 @@ export default function ConfigCenter() {
     }
   }
 
+  /** 设计文档 §8：desc 每行可编辑，不再是只在新建时能填一次的只读展示。 */
+  function updateDesc(key: string, desc: string) {
+    setDraft((d) => ({ ...d, [key]: { ...d[key], desc } }))
+  }
+
   function updateRawText(key: string, text: string) {
     setRawText((r) => ({ ...r, [key]: text }))
   }
@@ -324,6 +329,13 @@ export default function ConfigCenter() {
         </TabsList>
       </Tabs>
 
+      {partition === 'WEB' && (
+        <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+          WEB 分区的内容会被下发到浏览器：这里的每一项都会由业务方转发给前端代码，任何人打开页面都能看到。
+          密钥类配置项必须建在 DEFAULT 分区——放进 WEB 分区没有任何机制能拦住，值会原样吐给浏览器。
+        </p>
+      )}
+
       {snapshot.loading && <p className="text-sm text-muted-foreground">加载中…</p>}
       {snapshot.error && <p className="text-sm text-destructive">{snapshot.error}</p>}
 
@@ -394,6 +406,7 @@ export default function ConfigCenter() {
                         rawText={rawText[key] ?? ''}
                         error={fieldErrors[key] ?? ''}
                         onValueChange={(v) => updateValue(key, v)}
+                        onDescChange={(d) => updateDesc(key, d)}
                         onRawTextChange={(t) => updateRawText(key, t)}
                         onRawTextBlur={() => commitRawText(key)}
                         onRequestTypeChange={(next) => requestTypeChange(key, next)}
@@ -541,6 +554,7 @@ function FieldRow({
   rawText,
   error,
   onValueChange,
+  onDescChange,
   onRawTextChange,
   onRawTextBlur,
   onRequestTypeChange,
@@ -553,14 +567,19 @@ function FieldRow({
   /** 这一项当前的校验错误文案，''表示没有错误。 */
   error: string
   onValueChange: (value: unknown) => void
+  onDescChange: (desc: string) => void
   onRawTextChange: (text: string) => void
   onRawTextBlur: () => void
   onRequestTypeChange: (next: ConfigValueType) => void
   onRequestDelete: () => void
 }) {
   // 命名空间化：key 本身带点、比 connector 的字段名更容易撞——两个分区
-  // 各自的字段列表若不加区分会共享同一个 DOM id。
-  const domId = `cfg-${partition}-${fieldKey}`
+  // 各自的字段列表若不加区分会共享同一个 DOM id。分隔符用 `--`（而不是
+  // 单个 `-`）：key 本身允许出现 `-`，字段 "a" 的类型下拉
+  // （单分隔符会是 `cfg-DEFAULT-a-type`）会与字段 "a-type" 的值输入框
+  // （`cfg-DEFAULT-a-type`）撞 id——终审记的 Minor。`--` 不会出现在
+  // snake_case 的 key 里，同一撞法不会发生。
+  const domId = `cfg--${partition}--${fieldKey}`
   const unset = field.value === null
   const invalid = error !== ''
 
@@ -572,11 +591,26 @@ function FieldRow({
             <span className="break-all font-mono text-sm">{fieldKey}</span>
             {unset && <Badge variant="destructive">未配置</Badge>}
           </div>
-          {field.desc && <p className="text-xs text-muted-foreground">{field.desc}</p>}
+          <div className="max-w-sm">
+            <Label htmlFor={`${domId}--desc`} className="sr-only">
+              {fieldKey} 的备注
+            </Label>
+            {/* 设计文档 §8：desc 每行可编辑，不是只在新建时能填一次的
+                只读展示——想改一个错别字不该被逼去走"删除+重建"那条路
+                （删除还正是这个页面自己要求二次确认、且明说"没有机制
+                确认它是否还被代码读取"的高风险操作）。 */}
+            <Input
+              id={`${domId}--desc`}
+              value={field.desc}
+              onChange={(e) => onDescChange(e.target.value)}
+              placeholder="备注"
+              className="h-7 text-xs"
+            />
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <TypeSelect
-            id={`${domId}-type`}
+            id={`${domId}--type`}
             ariaLabel={`${fieldKey} 的类型`}
             value={field.type}
             onChange={onRequestTypeChange}
