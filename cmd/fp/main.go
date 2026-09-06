@@ -152,6 +152,7 @@ func run() error {
 			Logs:     logSvc,
 			Registry: registry,
 			Authz:    authzSvc,
+			Configs:  configSvc,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
 			Console:       web.Dist(),

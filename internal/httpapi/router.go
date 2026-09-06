@@ -22,6 +22,7 @@ type Deps struct {
 	Logs     *service.LoginLogService
 	Registry *connector.Registry
 	Authz    *service.AuthzService
+	Configs  *service.ConfigService
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -55,6 +56,7 @@ func NewRouter(d Deps) http.Handler {
 	userH := &userHandler{users: d.Users, accounts: d.Accounts, sessions: d.Sessions, logs: d.Logs}
 	connH := &connectorHandler{registry: d.Registry}
 	authzH := &authzHandler{svc: d.Authz, apps: d.Apps}
+	cfgH := &configHandler{svc: d.Configs}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -97,6 +99,14 @@ func NewRouter(d Deps) http.Handler {
 			r.Put("/applications/{id}/session", appH.updateSession)
 			r.Get("/applications/{id}/connectors", appH.listConnectors)
 			r.Put("/applications/{id}/connectors/{type}", appH.putConnector)
+
+			r.Get("/applications/{id}/config", cfgH.get)
+			// PUT 而不是 PATCH：这是该分区配置的**全量替换**（新建、改值、
+			// 改类型、删除都走它），与 /applications/{id}/session 同一语义。
+			r.Put("/applications/{id}/config", cfgH.save)
+			r.Get("/applications/{id}/config/versions", cfgH.listVersions)
+			r.Get("/applications/{id}/config/versions/{seq}", cfgH.getVersion)
+			r.Post("/applications/{id}/config/rollback", cfgH.rollback)
 
 			r.Get("/users", userH.list)
 			r.Get("/users/{id}", userH.get)

@@ -35,6 +35,7 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 	epochs := store.NewEpochStore(rdb)
 	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs)
 	logs := service.NewLoginLogService(pool)
+	configs := service.NewConfigService(pool, store.NewConfigPublisher(rdb))
 	deps := httpapi.Deps{
 		Admin:    service.NewAdminService(pool, rdb),
 		Apps:     service.NewApplicationService(pool, reg),
@@ -43,6 +44,7 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 		Sessions: sessions,
 		Logs:     logs,
 		Registry: reg,
+		Configs:  configs,
 	}
 
 	ctx := context.Background()
