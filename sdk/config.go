@@ -209,6 +209,23 @@ func (b *Binding[T]) typeMap() map[string]string {
 	return types
 }
 
+// isScalarKind 报告 k 是否是按值传递、不与其他变量共享底层存储的标量
+// 类型——取值与 fpTypeOf 认识的标量集合一致。除此之外的 Kind
+// （Slice/Map/Array/Struct/Interface/Ptr……）都可能与另一份数据共享
+// 底层存储，applyValues 解码前要靠它判断是否需要先置零切断共享。
+func isScalarKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64,
+		reflect.String:
+		return true
+	default:
+		return false
+	}
+}
+
 // applyValues 在 base 的副本上按 specs 应用 values，返回新快照与缺失的 key。
 //
 // 从 base 出发而不是从零值出发，是"key 消失时保持旧值"这条规则的执行点：
@@ -244,13 +261,23 @@ func applyValues[T any](base *T, specs []fieldSpec, values map[string]json.RawMe
 			continue
 		}
 
-		// slice/map 是引用类型：上面 `*out = *base` 的浅拷贝让 field 此刻
-		// 与 base 的同名字段共享同一份底层数组/map。encoding/json 解码
-		// slice 时若容量够用会原地复用旧数组，解码 map 时会直接在已有
-		// 对象上增删键——两者都会连带改写 base（也就是旧快照，此刻可能
-		// 正被别的 goroutine 通过 Load() 持有并读取，被约定为不可变）。
-		// 解码前先置零切断共享，让 Unmarshal 总是分配全新的底层存储。
-		if k := field.Kind(); k == reflect.Slice || k == reflect.Map {
+		// 非标量字段解码前先置零，切断与 base 的共享。
+		//
+		// 上面 `*out = *base` 的浅拷贝让 field 此刻与 base 的同名字段
+		// 共享同一份底层存储——不只是直接的 slice/map：[N]T 这样的数组
+		// 字段本身是值类型会被整体复制，但如果 T 又是 slice（比如
+		// Grid [2][]int），数组拷贝只是逐元素拷贝 slice header，内层的
+		// 底层数组仍然与 base 共享。encoding/json 解码 slice 时若容量
+		// 够用会原地复用旧数组，解码 map 时会直接在已有对象上增删键，
+		// 数组套引用类型时同一逻辑发生在每个元素上——这些都会连带改写
+		// base（也就是旧快照，此刻可能正被别的 goroutine 通过 Load()
+		// 持有并读取，被约定为不可变）。
+		//
+		// 标量（bool/int系/uint系/float系/string）不需要置零：它们按值
+		// 传递，`*out = *base` 已经是独立的副本；不置零还多一层好处——
+		// json.Unmarshal 遇到 JSON null 时会保持目标不变，极端情况下
+		// 这让标量字段能继续留住 base 的旧值，置零反而会丢掉这层保险。
+		if !isScalarKind(field.Kind()) {
 			field.Set(reflect.Zero(field.Type()))
 		}
 		if err := json.Unmarshal(raw, field.Addr().Interface()); err != nil {

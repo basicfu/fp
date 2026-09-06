@@ -609,6 +609,60 @@ func TestReloadDoesNotMutateOldSnapshotSlice(t *testing.T) {
 	}
 }
 
+// arrayOfSliceCfg 是 TestReloadDoesNotMutateOldSnapshotArrayOfSlice 专用
+// 的探针类型。Grid 是"数组套 slice"（[2][]int）：数组本身是值类型，
+// `*out = *base` 会把它整体复制，但复制数组是逐元素复制，每个元素
+// （一个 []int）复制到的只是 slice header（ptr+len+cap），底层数组
+// 仍然与 base 共享——这与顶层直接是 slice 字段（TestReloadDoesNotMutateOldSnapshotSlice
+// 测的 Limits []int）是同一个别名 bug 的另一个入口，只是多包了一层
+// 数组：field.Kind() 在这里是 Array 不是 Slice，只判断
+// Kind()==Slice||Map 的实现完全遮不住它。
+type arrayOfSliceCfg struct {
+	Grid [2][]int
+}
+
+// TestReloadDoesNotMutateOldSnapshotArrayOfSlice 覆盖 Slice/Map 之外的
+// 另一个别名入口：元素是引用类型的数组字段。
+//
+// 【辨别力】新值里 Grid[0] 的元素个数必须**不超过**旧值、内容却不同，
+// 才会命中内层 slice 原地复用旧容量那个分支；Grid[1] 全程不变，确认
+// "没受影响的那部分"不是靠巧合躲过去的，而是真的没被牵连。
+func TestReloadDoesNotMutateOldSnapshotArrayOfSlice(t *testing.T) {
+	specs, err := specsOf(reflect.TypeOf(arrayOfSliceCfg{}))
+	if err != nil {
+		t.Fatalf("specsOf 失败: %v", err)
+	}
+	snap, missing, err := fillStruct[arrayOfSliceCfg](specs, map[string]json.RawMessage{
+		"grid": json.RawMessage(`[[1,2,3],[100]]`),
+	})
+	if err != nil || len(missing) != 0 {
+		t.Fatalf("fillStruct 失败: err=%v missing=%v", err, missing)
+	}
+	b := &Binding[arrayOfSliceCfg]{
+		c:     &Client{opts: Options{Logger: slog.New(slog.DiscardHandler)}},
+		typ:   ConfigTypeDefault,
+		specs: specs,
+	}
+	b.snap.Store(snap)
+
+	old := b.Load()
+	old0Copy := append([]int(nil), old.Grid[0]...)
+	old1Copy := append([]int(nil), old.Grid[1]...)
+
+	b.applySnapshot(map[string]json.RawMessage{
+		"grid": json.RawMessage(`[[9],[100]]`),
+	})
+
+	if !reflect.DeepEqual(old.Grid[0], old0Copy) {
+		t.Fatalf("旧快照的 Grid[0] 被就地改写: %v，期望仍是 %v（不可变快照被击穿）",
+			old.Grid[0], old0Copy)
+	}
+	if !reflect.DeepEqual(old.Grid[1], old1Copy) {
+		t.Fatalf("旧快照的 Grid[1] 被就地改写: %v，期望仍是 %v（未涉及的部分也不该受影响）",
+			old.Grid[1], old1Copy)
+	}
+}
+
 // ---------------------------------------------------------------------
 // 以下两条是热更新编排的端到端覆盖：从真实的 Watch 推流收到事件，到
 // Client 唯一的重载 goroutine 被唤醒、调用 fetchConfig 重新拉取、驱动
@@ -621,13 +675,66 @@ func TestReloadDoesNotMutateOldSnapshotSlice(t *testing.T) {
 // 既有的 stubServer/newStubEnvFull 补上这段链路。
 // ---------------------------------------------------------------------
 
+// waitGetConfigCallsSettle 等 calls（stub 的 getConfig 每被调用一次就加一）
+// 在一段静默期内不再增长，再返回。
+//
+// 用来隔离"这条推送触发的重载"与"首次建流/Bind 顺带触发的重载"：
+// watchOnce 收到首条 ready 会 requestConfigReload 一次（断线兜底，见
+// client.go），这次重载和 Bind() 本身的首次加载之间没有同步点，纯靠
+// 时间线判断"已经结束"并不可靠——如果测试在它还没跑完/还没被调度到
+// 之前就改了服务端版本号再推事件，这次"意外"的重载有几率晚于改版本号
+// 才真正执行，顺手拉到新版本、把本该由被测事件触发的效果提前"偷"走，
+// 让测试即使被测的那条触发路径被删掉也还是绿的（审查已经实测复现过
+// 这种假绿：删掉 ConfigChanged 分支的 requestConfigReload，仅凭 ready
+// 那次意外重载，TestConfigChangedPushTriggersReload 仍然 8/8 通过）。
+// 等调用次数稳定下来，才能确认后续的调用只可能来自测试接下来主动
+// 触发的那条路径。
+func waitGetConfigCallsSettle(t *testing.T, calls *atomic.Int64) {
+	t.Helper()
+	const (
+		settleWindow = 300 * time.Millisecond
+		pollInterval = 10 * time.Millisecond
+		overallLimit = 5 * time.Second
+	)
+	deadline := time.Now().Add(overallLimit)
+	last := calls.Load()
+	stableSince := time.Now()
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("getConfig 调用次数在 %v 内始终没有稳定下来（当前 %d 次）",
+				overallLimit, calls.Load())
+		}
+		time.Sleep(pollInterval)
+		if cur := calls.Load(); cur != last {
+			last = cur
+			stableSince = time.Now()
+			continue
+		}
+		if time.Since(stableSince) >= settleWindow {
+			return
+		}
+	}
+}
+
 // TestConfigChangedPushTriggersReload 守住：收到 ConfigChanged 推送之后，
 // 已注册的 binding 会被自动重新拉取并触发 OnChange。
+//
+// 【隔离性】Bind() 之后、改服务端版本号之前，必须先用
+// waitGetConfigCallsSettle 等"首次建流可能顺带触发的那次重载"彻底落定
+// ——否则那次多余的重载可能晚于 version.Store(2) 才执行，顺手拉到新
+// 版本，让这条测试即使被测的 ConfigChanged 分支被删掉也还是绿的（这不
+// 是猜测：变异验证过，只删 client.go 里 GetConfigChanged 分支的
+// requestConfigReload，不加这个等待时本测试仍然通过；加上之后才会
+// 如预期变红，见 task-11-report.md）。仅仅在 Bind() 之前等
+// StreamHealthy 不够——ready 触发的那次重载可能发生在 Bind()
+// 注册 binding 之后，与 StreamHealthy 的时序无关。
 func TestConfigChangedPushTriggersReload(t *testing.T) {
 	var version atomic.Int64
 	version.Store(1)
+	var getConfigCalls atomic.Int64
 	stub := &stubServer{
 		getConfig: func(*fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error) {
+			getConfigCalls.Add(1)
 			v := version.Load()
 			return &fpv1.GetConfigResponse{Version: v, Values: fmt.Sprintf(`{
 				"fee_rate": %d,
@@ -639,6 +746,7 @@ func TestConfigChangedPushTriggersReload(t *testing.T) {
 		},
 	}
 	env := newStubEnvFull(t, stub)
+	env.waitUntil(t, env.client.StreamHealthy, "初次建流应变为健康")
 
 	b, err := Bind[bindCfg](env.client)
 	if err != nil {
@@ -647,6 +755,12 @@ func TestConfigChangedPushTriggersReload(t *testing.T) {
 	if got := b.Load().FeeRate; got != 1 {
 		t.Fatalf("初次加载 FeeRate = %v，期望 1", got)
 	}
+
+	// 等首次建流的 ready 可能顺带触发的重载彻底落定，见上面的隔离性说明
+	// 与 waitGetConfigCallsSettle 的注释。这一步之后，version.Store(2)
+	// 之前发生的 getConfig 调用已经不会再增加，接下来观察到的调用只可能
+	// 来自下面主动推的 ConfigChanged。
+	waitGetConfigCallsSettle(t, &getConfigCalls)
 
 	var calls int
 	var gotOld, gotNew *bindCfg
