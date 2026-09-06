@@ -195,17 +195,32 @@ export default function ConfigVersions() {
   }
 
   /**
-   * 回滚到 targetSeq 后，"当前有、目标版本没有"的 key——它们会变成未配置。
-   * 判据是 key 存不存在，不是值是否为 null：回滚是整版替换，当前版本
-   * 独有的 key 在目标版本里根本不存在这一条目，效果与被删除等价（运行中
-   * 的实例保持旧值并报错，新起的实例缺值起不来），必须在回滚前说清楚。
+   * 回滚到 targetSeq 后，"当前已配置、目标版本里未配置"的 key——它们会
+   * 变成未配置。判据有两条，**都**算作"会变成未配置"：
+   *
+   *   1. key 在目标版本里根本不存在这一条目（等价于被删除）
+   *   2. key 在目标版本里存在，但 value 是 JSON null——GetConfig/IsSet
+   *      会把这类项过滤掉，SDK 一样报 missing。只判"key 存不存在"会漏
+   *      掉这一种：某项在目标版本里是"已创建但没填值"，回滚后同样起
+   *      不来，却因为 key 还在 map 里而被判定成"没变化"。
+   *
+   * 当前版本里已经是 null 的 key 不算"变成"未配置——它本来就是未配置
+   * 状态，回滚不改变这一点，不必出现在提示里。
+   *
+   * 运行中的实例保持旧值并报错、新起的实例缺值起不来，必须在回滚前说
+   * 清楚。
+   *
+   * 这条判据现在与 ConfigCenter.tsx 里"N 项未配置"横幅的判据
+   * （`f.value === null`）口径一致了：两处对"未配置"的定义曾经不一样
+   * （那边看 value 是否为 null，这里只看 key 是否存在），现在统一。
    */
   function willUnsetKeys(targetSeq: number): UnsetKeysResult {
     const curr = currentSnapshot()
     const target = snapshots[targetSeq]
     if (!curr || target?.status !== 'ok') return { known: false }
     const keys = Object.keys(curr.fields)
-      .filter((k) => !(k in target.snapshot.fields))
+      .filter((k) => curr.fields[k].value !== null) // 当前就未配置的不算"变成"
+      .filter((k) => !(k in target.snapshot.fields) || target.snapshot.fields[k].value === null)
       .sort()
     return { known: true, keys }
   }

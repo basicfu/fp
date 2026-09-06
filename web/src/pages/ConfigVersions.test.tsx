@@ -214,6 +214,35 @@ test('回滚前提示哪些项将变成未配置', async () => {
   expect(within(dialog).getByText(/\bb\b/)).toBeTruthy()
 })
 
+// 【终审必须修】上面那条测试只造了"key 在目标版本里根本不存在"这一种
+// 会变成未配置的情形。真实还可达的另一种是：key 在目标版本里存在，但
+// value 是 JSON null（这一项当时"已创建但没填值"）——旧实现只判
+// `!(k in target.fields)`，会把这种情形错判成"没变化"，回滚提示对着一个
+// 会导致新实例起不来的操作完全沉默。ConfigCenter.tsx 的 commitRawText
+// 会在 array/object 的文本框清空时把 value 写成 null 并允许保存，所以
+// v6 填了值、v5 是未配置、从 v6 回滚到 v5 这个场景是真实可达的。
+test('回滚前提示——目标版本里 key 存在但 value 是 null，同样算变成未配置', async () => {
+  stubVersions(
+    [
+      { seq: 2, createdAt: 2 },
+      { seq: 1, createdAt: 1 },
+    ],
+    {
+      // v1（回滚目标）：endpoints 这一项存在于 fields 里，但没填值。
+      1: { seq: 1, fields: { endpoints: { type: 'array', desc: '', value: null } } },
+      // v2（当前版本）：填成了一个非空数组。
+      2: { seq: 2, fields: { endpoints: { type: 'array', desc: '', value: ['a'] } } },
+    },
+  )
+  renderPage()
+
+  fireEvent.click(await findEnabledButton('回滚到 v1'))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText(/回滚后以下配置项将变成未配置/)).toBeTruthy()
+  expect(within(dialog).getByText(/endpoints/)).toBeTruthy()
+})
+
 // 【审查追加】上面这条测试点按钮前先等它变成 enabled（findEnabledButton），
 // 只验证了"数据就绪之后提示是对的"这一侧，从未验证过"数据没就绪之前按钮
 // 确实是 disabled"——把 ConfigVersions.tsx 里的 disabled={!diffsReady}
