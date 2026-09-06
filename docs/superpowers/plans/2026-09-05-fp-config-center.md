@@ -4082,17 +4082,16 @@ export interface SaveConfigResponse {
 
 - [ ] **Step 2: 写失败的测试**
 
-创建 `web/src/pages/ConfigCenter.test.tsx`。**先读 `web/src/pages/ApplicationDetail.test.tsx`**，照它的方式 stub `fetch`（`vi.stubGlobal`）并渲染。注意第三阶段那条教训：vitest 关掉了 `globals`，`@testing-library/react` 的自动 DOM 清理靠裸标识符探测全局 `afterEach`——**每个测试文件必须自己写 `afterEach(cleanup)`**，否则组件测试之间 DOM 互相污染、断言会假红。
+创建 `web/src/pages/ConfigCenter.test.tsx`。**先读 `web/src/pages/ApplicationDetail.test.tsx`**，照它的方式 stub `fetch`（`vi.stubGlobal`）并渲染（`MemoryRouter` + `Routes`/`Route` 定位到带 `:id` 的路径）。<br><br>**测试风格照仓库现状**：用 `import { test, expect, vi, afterEach } from 'vitest'` 与顶层 `test(...)`，**不要用 `describe`/`it`**（vitest 的 `globals` 是关的，且既有页面测试都是这个风格）。收尾用 `afterEach(() => vi.unstubAllGlobals())`。<br><br>**不需要自己写 `afterEach(cleanup)`**——`web/src/test-setup.ts` 已经全局注册过了（那个文件的注释详细解释了为什么必须手动补：`globals` 关闭后 `@testing-library/react` 的自动清理探测恒为 false）。再写一次无害但多余。<br><br>**下面的测试代码块是意图示例**：断言内容是要求，缩进与包裹结构（原本是 `describe` 块）已按上面的风格拆成顶层 `test(...)`，你落地时按 gofmt 之于 Go 的标准整理成符合仓库风格的 TSX 即可，不要照抄可能残留的缩进或多余括号。
 
 ```tsx
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { test, expect, vi, afterEach } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-afterEach(cleanup)
 
-describe('ConfigCenter', () => {
-  it('未配置的项标出来并计数', async () => {
+
+test('未配置的项标出来并计数', async () => {
     stubConfig({
       seq: 1,
       fields: {
@@ -4108,7 +4107,7 @@ describe('ConfigCenter', () => {
     expect(screen.getByLabelText('api_key')).toBeTruthy()
   })
 
-  it('保存时把完整的 fields 全量提交', async () => {
+test('保存时把完整的 fields 全量提交', async () => {
     const calls: Array<{ method: string; body: unknown }> = []
     stubConfig(
       {
@@ -4136,7 +4135,7 @@ describe('ConfigCenter', () => {
     expect(Object.keys(body.fields).sort()).toEqual(['a', 'b'])
   })
 
-  it('生效方式默认是立即推送，可切成仅落库', async () => {
+test('生效方式默认是立即推送，可切成仅落库', async () => {
     const calls: Array<{ method: string; body: unknown }> = []
     stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } }, calls)
     renderPage()
@@ -4149,7 +4148,7 @@ describe('ConfigCenter', () => {
     expect((calls.find((c) => c.method === 'PUT')!.body as { push: boolean }).push).toBe(false)
   })
 
-  it('切换分区会重新拉取', async () => {
+test('切换分区会重新拉取', async () => {
     const urls: string[] = []
     stubConfigCapturingUrls(urls)
     renderPage()
@@ -4163,7 +4162,7 @@ describe('ConfigCenter', () => {
     expect(urls.some((u) => u.includes('type=DEFAULT'))).toBe(true)
   })
 
-  it('删除配置项要二次确认，并说明没有机制能确认它是否还被读取', async () => {
+test('删除配置项要二次确认，并说明没有机制能确认它是否还被读取', async () => {
     stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
     renderPage()
 
@@ -4248,14 +4247,14 @@ git commit -m "feat(config): 控制台配置中心页"
 创建 `web/src/pages/ConfigVersions.test.tsx`：
 
 ```tsx
-import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { test, expect, vi, afterEach } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-afterEach(cleanup)
+afterEach(() => vi.unstubAllGlobals())
 
-describe('ConfigVersions', () => {
-  it('列出版本并标出每版改了哪些 key', async () => {
+
+test('列出版本并标出每版改了哪些 key', async () => {
     stubVersions(
       [{ seq: 2, createdAt: 1757000000 }, { seq: 1, createdAt: 1756000000 }],
       {
@@ -4284,7 +4283,7 @@ describe('ConfigVersions', () => {
     expect(keys).toEqual(['b'])
   })
 
-  it('回滚前提示哪些项将变成未配置', async () => {
+test('回滚前提示哪些项将变成未配置', async () => {
     stubVersions(
       [{ seq: 2, createdAt: 2 }, { seq: 1, createdAt: 1 }],
       {
@@ -4307,7 +4306,7 @@ describe('ConfigVersions', () => {
     expect(screen.getByText(/\bb\b/)).toBeTruthy()
   })
 
-  it('回滚同样要选生效方式', async () => {
+test('回滚同样要选生效方式', async () => {
     const calls: Array<{ method: string; body: unknown }> = []
     stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } }, calls)
     renderPage()
