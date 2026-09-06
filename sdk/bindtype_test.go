@@ -2,8 +2,10 @@ package fpsdk
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -272,5 +274,115 @@ func TestBindTypeFailsWithoutRegisteringWhenRPCFails(t *testing.T) {
 	env.client.bindingsMu.Unlock()
 	if n != 0 {
 		t.Fatalf("RPC 失败时不该注册 binding，实际注册了 %d 个", n)
+	}
+}
+
+// TestBindAndBindTypeCoexistReloadIndependently 守住 Bind[T] 与 BindType
+// 共存时的重载编排——这是 Task 11（Binding[T]）与 Task 12（TypeBinding）
+// 两个独立构建的绑定类型的接缝：client.go 的 runConfigReload 注释写着
+// "一个进程最多两份绑定（DEFAULT + WEB）"、"无差别重载全部绑定"，但在
+// 本测试之前没有任何已提交的测试真的同时注册两种绑定类型再驱动一次
+// 重载——config_test.go 只测 Binding[T]，bindtype_test.go（本文件其余
+// 部分）只测 TypeBinding。registerBinding/bindings/reloadable 的分发
+// 逻辑将来被改错（比如改成只重载某一种、或漏掉某一份），不会有任何
+// 测试变红。
+//
+// 断言的核心是最后一步：只有 WEB 分区变了，cfg（DEFAULT）的 OnChange
+// 一次都不该触发、快照指针也不该换。这一步同时钉住两件事：
+//  1. 无差别重载确实把两份绑定都重新拉了一遍（否则 cfg 根本不会被
+//     重新 fetchConfig，也就无从谈起"没变所以不触发"）；
+//  2. 内容没变就不触发回调、不换指针这条规则，在"同一个进程里还有
+//     另一份完全不相关的绑定也在被重载"这个场景下依然成立。
+func TestBindAndBindTypeCoexistReloadIndependently(t *testing.T) {
+	var defaultVersion, webVersion atomic.Int64
+	defaultVersion.Store(1)
+	webVersion.Store(1)
+	var getConfigCalls atomic.Int64
+	stub := &stubServer{
+		getConfig: func(req *fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error) {
+			getConfigCalls.Add(1)
+			switch req.GetType() {
+			case ConfigTypeDefault:
+				v := defaultVersion.Load()
+				return &fpv1.GetConfigResponse{Version: v, Values: fmt.Sprintf(`{
+					"fee_rate": %d,
+					"enabled": true,
+					"upstream.timeout": 3000,
+					"upstream.api_key": "k",
+					"limits": []
+				}`, v)}, nil
+			case ConfigTypeWeb:
+				v := webVersion.Load()
+				return &fpv1.GetConfigResponse{Version: v, Values: fmt.Sprintf(`{"n":%d}`, v)}, nil
+			default:
+				// t.Errorf（不是 Fatalf）：这个闭包跑在 gRPC 请求处理
+				// goroutine 里，Fatal 系列只能从测试自己的 goroutine 调用。
+				t.Errorf("意料之外的分区: %q", req.GetType())
+				return &fpv1.GetConfigResponse{Version: 0, Values: `{}`}, nil
+			}
+		},
+	}
+	env := newStubEnvFull(t, stub)
+	env.waitUntil(t, env.client.StreamHealthy, "初次建流应变为健康")
+
+	cfg, err := Bind[bindCfg](env.client)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	web, err := BindType(env.client, ConfigTypeWeb)
+	if err != nil {
+		t.Fatalf("BindType: %v", err)
+	}
+
+	env.client.bindingsMu.Lock()
+	n := len(env.client.bindings)
+	env.client.bindingsMu.Unlock()
+	if n != 2 {
+		t.Fatalf("Bind + BindType 之后 bindings 长度为 %d，期望 2", n)
+	}
+
+	if got := cfg.Load().FeeRate; got != 1 {
+		t.Fatalf("cfg 初次加载 FeeRate = %v，期望 1", got)
+	}
+	if got := web.Load()["n"]; got != float64(1) {
+		t.Fatalf("web 初次加载 n = %v，期望 1", got)
+	}
+
+	// 等首次建流的 ready 可能顺带触发的重载彻底落定——隔离性理由与
+	// TestConfigChangedPushTriggersReload 完全一致，见
+	// waitGetConfigCallsSettle 的注释：不等的话，那次"顺带"的重载可能
+	// 晚于下面 webVersion.Store(2) 才真正执行，顺手拉到新版本，让这条
+	// 测试即使 ConfigChanged 分支被删掉也还是绿的。
+	waitGetConfigCallsSettle(t, &getConfigCalls)
+
+	var cfgCalls, webCalls int
+	cfg.OnChange(func(_, _ *bindCfg) { cfgCalls++ })
+	web.OnChange(func(_, _ map[string]any) { webCalls++ })
+	cfgBefore := cfg.Load()
+
+	// 只改 WEB 分区，推一条只声明 WEB 变更的 ConfigChanged。
+	webVersion.Store(2)
+	env.stub.events <- &fpv1.WatchResponse{
+		Event: &fpv1.WatchResponse_ConfigChanged{ConfigChanged: &fpv1.ConfigChanged{
+			Type: ConfigTypeWeb, Version: 2,
+		}},
+	}
+
+	env.waitUntil(t, func() bool { return webCalls == 1 },
+		"WEB 分区变更后 web 的 OnChange 应该触发一次")
+	if got := web.Load()["n"]; got != float64(2) {
+		t.Fatalf("web.Load()[\"n\"] = %v，期望 2", got)
+	}
+
+	// 到这里可以确定 cfg 这一轮的重载已经跑完：cfg 在 bindings 里排在
+	// web 前面（先 Bind 后 BindType），runConfigReload 单 goroutine 串行
+	// 执行同一批 bindings（见其注释），web 的 OnChange 触发（上面刚等到）
+	// 必然发生在同一轮里 cfg.reloadFromPush() 已经完整返回之后。
+	// DEFAULT 分区内容没变，cfg 不该有任何动静。
+	if cfgCalls != 0 {
+		t.Fatalf("DEFAULT 分区没变，cfg 的 OnChange 不该被触发，实际 %d 次", cfgCalls)
+	}
+	if cfg.Load() != cfgBefore {
+		t.Fatal("DEFAULT 分区没变，cfg 的快照指针不该换")
 	}
 }
