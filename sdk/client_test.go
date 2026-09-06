@@ -15,15 +15,21 @@ import (
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
 
-// stubServer 是一个可编排的 AuthService 桩。
+// stubServer 是一个可编排的 AuthService + ConfigService 桩。
 type stubServer struct {
 	fpv1.UnimplementedAuthServiceServer
+	fpv1.UnimplementedConfigServiceServer
 
 	validate   func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error)
 	login      func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error)
 	logout     func(*fpv1.LogoutRequest) (*fpv1.LogoutResponse, error)
 	watchReady chan struct{}            // 每次有流建立就发一个信号
 	events     chan *fpv1.WatchResponse // 测试往这里塞事件
+
+	// getConfig 供 Task 10 的 Bind/fetchConfig 测试编排 GetConfig 的返回值。
+	// 未赋值时按 UnimplementedConfigServiceServer 处理（返回 codes.Unimplemented），
+	// 与 login/logout 的既有约定一致——只有明确需要它的测试才配置。
+	getConfig func(*fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error)
 }
 
 func (s *stubServer) ValidateToken(_ context.Context, req *fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
@@ -45,6 +51,15 @@ func (s *stubServer) Logout(_ context.Context, req *fpv1.LogoutRequest) (*fpv1.L
 		return s.UnimplementedAuthServiceServer.Logout(context.Background(), req)
 	}
 	return s.logout(req)
+}
+
+// GetConfig 未被赋值时按 UnimplementedConfigServiceServer 处理
+// （返回 codes.Unimplemented），与 Login/Logout 同一约定。
+func (s *stubServer) GetConfig(_ context.Context, req *fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error) {
+	if s.getConfig == nil {
+		return s.UnimplementedConfigServiceServer.GetConfig(context.Background(), req)
+	}
+	return s.getConfig(req)
 }
 
 func (s *stubServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fpv1.WatchResponse]) error {
@@ -87,6 +102,13 @@ type stubEnv struct {
 // 重新监听"，bufconn 模拟不了"服务端消失又回来"。addr 为空串时监听系统
 // 分配的随机端口。
 //
+// srv 必须实现 AuthServiceServer；若它**同时**实现了 ConfigServiceServer
+// （stubServer 就是这样，Task 10 起）也一并注册到同一个 gRPC 服务端上——
+// New() 里 rpc 与 cfgRPC 是同一个 conn 派生的两个客户端，测试这一侧也得
+// 是同一个监听端口才能反映真实拓扑。gatedReadyServer/rejectingWatchServer
+// 没实现 ConfigServiceServer，类型断言失败就什么都不做，行为与之前完全
+// 一样。
+//
 // 返回真实监听地址（addr 为空串时由系统分配，调用方需要它才能在原地址
 // 重启）与 stop 函数；stop 是同步的，等 Serve 的 goroutine 真正退出才返回。
 func startStub(t *testing.T, addr string, srv fpv1.AuthServiceServer) (realAddr string, stop func()) {
@@ -113,6 +135,9 @@ func startStub(t *testing.T, addr string, srv fpv1.AuthServiceServer) (realAddr 
 
 	grpcServer := grpc.NewServer()
 	fpv1.RegisterAuthServiceServer(grpcServer, srv)
+	if cfgSrv, ok := srv.(fpv1.ConfigServiceServer); ok {
+		fpv1.RegisterConfigServiceServer(grpcServer, cfgSrv)
+	}
 
 	done := make(chan struct{})
 	go func() {
