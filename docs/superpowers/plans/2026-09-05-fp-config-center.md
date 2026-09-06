@@ -956,7 +956,7 @@ func (s *ConfigService) Save(
 
 	// seq 在事务里取 MAX+1，靠主键约束兜并发。管理操作低频，冲突了让调用方
 	// 重试即可，不值得为它引入序列或咨询锁。
-	var seq int64
+
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			SELECT COALESCE(MAX(seq), 0) + 1 FROM config
@@ -2595,8 +2595,12 @@ func (h *configHandler) getVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	var seq int64
-	if _, err := fmt.Sscanf(chi.URLParam(r, "seq"), "%d", &seq); err != nil {
+
+	// 用 strconv.ParseInt 而不是 fmt.Sscanf："%d" 不检查尾部残余字符，
+	// Sscanf("12abc", "%d", &seq) 会静默返回 seq=12, err=nil，让 .../versions/12abc
+	// 这种畸形请求错误地返回 200。
+	seq, err := strconv.ParseInt(chi.URLParam(r, "seq"), 10, 64)
+	if err != nil {
 		writeError(w, domain.Fail(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "版本号不合法"))
 		return
 	}
@@ -2628,7 +2632,7 @@ func (h *configHandler) rollback(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-import 里补 `"fmt"`。
+import 里补 `"strconv"`。另外 UUID 解析用包内已有的 `pathUUID(r, "id")`，不要新写一个 `appIDParam`——同一个包里两份 UUID 解析逻辑是纯重复。
 
 `internal/httpapi/router.go`：`Deps` 加 `Configs *service.ConfigService`，在 `requireAdmin` 那个 Group 里注册：
 
