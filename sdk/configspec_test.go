@@ -172,6 +172,75 @@ func TestSpecsOfIndexResolvesCorrectField(t *testing.T) {
 	}
 }
 
+// TestSpecsOfIndexSurvivesDeepNesting 补审查发现的一个 Important：
+// TestSpecsOfIndexResolvesCorrectField 对"append 复用底层数组导致兄弟
+// 字段路径互相踩"这一类缺陷没有真正的辨别力，是"测试因为巧合而通过"。
+//
+// 【为什么必须嵌套到这个深度，且不能再浅一层】collectSpecs 里那行
+//
+//	path := append(append([]int{}, index...), i)
+//
+// 的双重拷贝看着像多余代码，容易被当"清理"简化成朴素的 append(index, i)。
+// 但用 3 层嵌套（outer.mid.{X,Y}）验证过这条简化：测不出来，
+// TestSpecsOfIndexResolvesCorrectField 那种深度同样测不出来——都是巧合通过。
+// 用一段独立脚本按朴素 append 的路径重放 index 切片的增长过程，
+// 逐层打印 len/cap 才找到真正的边界：
+//
+//	level0 (nil):      len 0 cap 0
+//	level1 (append 1): len 1 cap 1   -- 恰好够，不会新分配时留出多余空间
+//	level2 (append 0): len 2 cap 2   -- 同上
+//	level3 (append 0): len 3 cap 4   -- 从这一层开始 cap > len，出现多余容量
+//
+// 多余容量出现在第 3 层的*结果*里，但真正的兄弟互踩要等*下一层*
+// （第 4 层）两个字段共享这个已经带多余容量的 index 时才会发生：
+// 二者都从同一个 len=3/cap=4 的切片 append，都落在同一个下标 3 上，
+// 后写的直接覆盖先写的，且两个字段的 Index 切片头共享同一块底层数组，
+// 读出来的内容都是最后一次写入的值。所以叶子字段必须是第 4 层
+// （outer.mid.inner.{X,Y}），比先前 3 层的版本再深一层，才能撞上这个边界；
+// 这也是为什么 Pad/Leaf 字段全用单字段 struct 逐层过渡、不能省略中间层。
+type deepLeaf struct {
+	X string
+	Y string
+}
+type deepInner struct{ Leaf deepLeaf }
+type deepMid struct{ Sub deepInner }
+type deepOuter struct {
+	Pad string // 占位，让 L 的下标不是 0，错位时更容易暴露
+	L   deepMid
+}
+
+func TestSpecsOfIndexSurvivesDeepNesting(t *testing.T) {
+	specs, err := specsOf(reflect.TypeOf(deepOuter{}))
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+
+	byKey := map[string][]int{}
+	for _, s := range specs {
+		byKey[s.Key] = s.Index
+	}
+	xi, ok := byKey["l.sub.leaf.x"]
+	if !ok {
+		t.Fatalf("缺 l.sub.leaf.x，实际 keys: %v", specs)
+	}
+	yi, ok := byKey["l.sub.leaf.y"]
+	if !ok {
+		t.Fatalf("缺 l.sub.leaf.y，实际 keys: %v", specs)
+	}
+	if reflect.DeepEqual(xi, yi) {
+		t.Fatalf("两个兄弟字段的 Index 相同（都是 %v）——append 复用了底层数组", xi)
+	}
+
+	// 光断言 Index 不同还不够，要真的按它写值、再读回来确认落在正确的字段上。
+	var v deepOuter
+	rv := reflect.ValueOf(&v).Elem()
+	rv.FieldByIndex(xi).SetString("xx")
+	rv.FieldByIndex(yi).SetString("yy")
+	if v.L.Sub.Leaf.X != "xx" || v.L.Sub.Leaf.Y != "yy" {
+		t.Fatalf("按 Index 写值落错了字段: X=%q Y=%q", v.L.Sub.Leaf.X, v.L.Sub.Leaf.Y)
+	}
+}
+
 func keysOf(m map[string]fieldSpec) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
