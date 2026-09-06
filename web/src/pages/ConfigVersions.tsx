@@ -108,10 +108,24 @@ export default function ConfigVersions() {
   // 之后才回来，把 snapshots 弄成两个分区的数据混在一起——与 useResource
   // 里的 alive 守卫同一个理由。
   useEffect(() => {
+    const list = versions.data
+    // 【竞态修复】"列表本身还没拉回来"（list === null，组件刚挂载、或
+    // 分区刚切换、新分区的列表还在路上）和"列表拉回来了、但确实是空的"
+    // 是两件不同的事，不能塞进同一个 !list 判断——旧版本这里写的是
+    // `if (!list || list.length === 0)`，组件刚挂载时 versions.data 还是
+    // useState 的初始值 null，会落进这个分支把 diffsReady 提前置成
+    // true；等真正的列表到手、这一行第一次出现在页面上时，它的第一次
+    // 渲染用的还是这个"提前置真"的 diffsReady，按钮会先渲染成
+    // disabled=false，下一拍才被"真正"的 setDiffsReady(false) 纠正回去。
+    // 这个"先错后对"的窗口期是真实存在的（用可控延迟的 fetch 复现过，
+    // 见 ConfigVersions.test.tsx），不是理论上的边界情况：一个手速恰好
+    // 卡在这个窗口的管理员，点下去会打开一个基于"当前版本快照还不存在"
+    // 算出来的回滚弹窗。列表还没到手时什么都不做——diffsReady 的初始值
+    // 就是 false，按钮天然保持 disabled，不需要在这里重复断言一遍。
+    if (!list) return
     setSnapshots({})
     setDiffsReady(false)
-    const list = versions.data
-    if (!list || list.length === 0) {
+    if (list.length === 0) {
       setDiffsReady(true)
       return
     }

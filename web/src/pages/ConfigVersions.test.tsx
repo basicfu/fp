@@ -72,6 +72,49 @@ function stubVersions(
   return fn
 }
 
+/**
+ * deferred 造一个可以手动放行的 promise：resolve() 被调用之前，await 它
+ * 的代码会一直挂着。竞态测试用它精确控制"背景快照请求还没回来"这个
+ * 窗口期，而不是靠猜时序（比如插一个 setTimeout）。
+ */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+/**
+ * stubVersionsWithGatedSnapshot 和 stubVersions 一样，但版本详情接口
+ * （GET .../config/versions/{seq}）在 gate resolve 之前一直挂起——列表
+ * 接口（GET .../config/versions）不受影响、立刻返回。这就是竞态本身的
+ * 成因：列表请求天然比详情请求的批量快一整轮异步，用这个 stub 把这个
+ * 窗口期在测试里拉长到可控制的程度，而不是依赖真实网络延迟的偶然性。
+ */
+function stubVersionsWithGatedSnapshot(
+  list: ConfigVersion[],
+  snapshots: Record<number, ConfigSnapshot>,
+  gate: Promise<void>,
+) {
+  const fn = vi.fn(async (url: string) => {
+    const versionMatch = /\/config\/versions\/(\d+)/.exec(url)
+    if (versionMatch) {
+      await gate
+      const seq = Number(versionMatch[1])
+      const snap = snapshots[seq]
+      if (!snap) return jsonResponse({ code: 'CONFIG_VERSION_NOT_FOUND', msg: '配置版本不存在' }, 404)
+      return jsonResponse(snap)
+    }
+    if (url.includes('/config/versions')) {
+      return jsonResponse(list)
+    }
+    throw new Error(`stubVersionsWithGatedSnapshot: 没料到的请求 ${url}`)
+  })
+  vi.stubGlobal('fetch', fn)
+  return fn
+}
+
 /** /applications/:id/config 只放一个占位页——验证"回滚成功后跳回配置中心页"
  * 只需要知道路由确实换了，不需要真的渲染 ConfigCenter 那一整套逻辑（那是
  * Task 13 自己的测试范围）。 */
@@ -171,6 +214,57 @@ test('回滚前提示哪些项将变成未配置', async () => {
   expect(within(dialog).getByText(/\bb\b/)).toBeTruthy()
 })
 
+// 【审查追加】上面这条测试点按钮前先等它变成 enabled（findEnabledButton），
+// 只验证了"数据就绪之后提示是对的"这一侧，从未验证过"数据没就绪之前按钮
+// 确实是 disabled"——把 ConfigVersions.tsx 里的 disabled={!diffsReady}
+// 整段删掉，上面那条测试原封不动地全绿：因为它只关心按钮*最终*变
+// enabled、弹窗*最终*显示对的内容，一个从未被禁用过的按钮同样满足这两条。
+// 这条测试专门补上被删掉也会变红的那一半：用可控延迟的 stub 把"列表已经
+// 渲染、背景快照批量还没回来"这个窗口期在测试里拉长，在窗口期内断言按钮
+// 确实是 disabled，再放行、确认它变 enabled 且弹窗显示的是具体 key 列表
+// 而不是"数据不全"的兜底文案。
+test('背景快照批量还没拉回来之前，[回滚到 vN] 必须保持 disabled；拉回来后显示具体的未配置清单', async () => {
+  const gate = deferred()
+  stubVersionsWithGatedSnapshot(
+    [
+      { seq: 2, createdAt: 2 },
+      { seq: 1, createdAt: 1 },
+    ],
+    {
+      1: { seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } },
+      2: {
+        seq: 2,
+        fields: {
+          a: { type: 'int', desc: '', value: 1 },
+          b: { type: 'int', desc: '', value: 2 },
+        },
+      },
+    },
+    gate.promise,
+  )
+  renderPage()
+
+  // 列表接口不受 gate 影响，行和按钮会先渲染出来——但此刻背景的两份
+  // 快照请求（v2 自己、以及它的前一版 v1）全部还挂在 gate 上没回来。
+  const btn = (await screen.findByRole('button', { name: '回滚到 v1' })) as HTMLButtonElement
+
+  // 【辨别力】这一步是本测试真正守住的东西：删掉 disabled={!diffsReady}
+  // 之后，btn.disabled 在这一刻会是原生默认值 false，这条断言会立刻失败。
+  expect(btn.disabled).toBe(true)
+
+  gate.resolve()
+  await waitFor(() => expect(btn.disabled).toBe(false))
+
+  fireEvent.click(btn)
+  const dialog = await screen.findByRole('dialog')
+  // 数据已经就绪：弹窗必须显示具体的 key 列表，不能是"数据不全，无法
+  // 确认"的兜底文案——那条兜底是留给数据真的取不到的时候用的安全网，
+  // 此刻数据齐了，不该触发。
+  expect(within(dialog).getByText(/回滚后以下配置项将变成未配置/)).toBeTruthy()
+  expect(within(dialog).getByText(/\bb\b/)).toBeTruthy()
+  expect(within(dialog).queryByText(/无法确认/)).toBeNull()
+})
+
 test('回滚同样要选生效方式', async () => {
   const calls: Array<{ method: string; body: unknown }> = []
   stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } }, calls)
@@ -183,6 +277,25 @@ test('回滚同样要选生效方式', async () => {
   await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
   const body = calls.find((c) => c.method === 'POST')!.body as { type: string; seq: number; push: boolean }
   expect(body).toEqual({ type: 'DEFAULT', seq: 1, push: false })
+})
+
+// 【审查追加】上面那条测试断言的是 push:false 这一侧（点了"仅落库"才
+// 确认），从未验证过保持默认"立即推送"不动时，POST body 里的 push 是
+// 不是真的是 true——把实现里的 push: rollbackPush 硬编码成 push: false
+// 之后，上面那条测试依然全绿（它本来就期望 false）。这条测试补 push:true
+// 这一侧：不碰生效方式，直接确认。
+test('回滚保持默认的立即推送不动时，POST body 的 push 是 true', async () => {
+  const calls: Array<{ method: string; body: unknown }> = []
+  stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } }, calls)
+  renderPage()
+
+  fireEvent.click(await findEnabledButton('回滚到 v1'))
+  // 不碰"生效方式"单选，保持默认的"立即推送"。
+  fireEvent.click(screen.getByRole('button', { name: '确认回滚' }))
+
+  await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
+  const body = calls.find((c) => c.method === 'POST')!.body as { type: string; seq: number; push: boolean }
+  expect(body).toEqual({ type: 'DEFAULT', seq: 1, push: true })
 })
 
 test('回滚成功后跳回配置中心页', async () => {
