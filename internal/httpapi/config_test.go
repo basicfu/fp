@@ -74,6 +74,48 @@ func TestConfigSaveCoercionAndRejection(t *testing.T) {
 	}
 }
 
+// PUT 是该分区配置的**全量替换**，不是合并：第二次 PUT 省略掉的 key，
+// 必须从当前配置里消失（这正是"删除配置项"的实现方式）。
+//
+// 【辨别力】必须省略一个**第一次存在过**的 key 再断言它没了。只覆盖同一个
+// key 的话，"合并"和"全量替换"产出完全一样的结果，测不出区别——审查时把
+// save 改成合并语义，四个既有测试无一变红。
+func TestConfigPutIsFullReplacement(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	appID := createTestApp(t, deps)
+	url := "/admin/api/applications/" + appID + "/config"
+
+	rec := do(t, h, token, http.MethodPut, url, `{"type":"DEFAULT","push":false,"fields":{
+		"a":{"type":"int","desc":"","value":1},
+		"b":{"type":"int","desc":"","value":2}
+	}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("首次保存 status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 第二次只带 a，b 被省略 —— 等价于"删掉 b"。
+	rec = do(t, h, token, http.MethodPut, url, `{"type":"DEFAULT","push":false,"fields":{
+		"a":{"type":"int","desc":"","value":1}
+	}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("二次保存 status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodGet, url+"?type=DEFAULT", "")
+	var cur struct {
+		Fields map[string]struct {
+			Value json.RawMessage `json:"value"`
+		} `json:"fields"`
+	}
+	decode(t, rec, &cur)
+	if _, ok := cur.Fields["b"]; ok {
+		t.Fatal("b 在第二次 PUT 里被省略了，应当从当前配置消失——PUT 是全量替换不是合并")
+	}
+	if _, ok := cur.Fields["a"]; !ok {
+		t.Fatal("a 应当还在")
+	}
+}
+
 // 未知分区 400；未知字段（decodeJSON 开了 DisallowUnknownFields）也 400。
 func TestConfigRejectsBadRequests(t *testing.T) {
 	h, token, deps := newAdminEnv(t)
