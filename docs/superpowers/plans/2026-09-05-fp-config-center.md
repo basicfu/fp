@@ -2289,10 +2289,13 @@ git commit -m "feat(config): ConfigChanged 接入 Watch 长流并完成装配"
 
 ```go
 package httpapi_test
-
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/basicfu/fp/internal/httpapi"
 )
 
 
@@ -2441,7 +2444,6 @@ func createTestApp(t *testing.T, deps httpapi.Deps) string {
 		t.Fatalf("建应用失败: %v", err)
 	}
 	return app.ID.String()
-}
 }
 ```
 
