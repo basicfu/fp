@@ -268,3 +268,86 @@ message ConfigChanged { string type = 1; int64 version = 2; }
 10. 端到端穿透测试
 
 1–7 完成时就能验证"改配置不用发版"（用 SQL 直接改 `config` 表即可），不必等控制台。
+
+---
+
+## 附：实施后的交接事项
+
+配置中心实施完毕：**82 个 commit**，手写约 13,256 行 / 91 个文件（不含 `sdk/gen/` 的 protobuf 生成产物与两份设计文档）。15 个任务各自通过独立审查，触发 15 轮任务级修复；全分支终审判定「可以合并，需先修 1 处」，修复波次 4 个 commit 后复审全部核销。
+
+交付时状态：`./scripts/test.sh` 退出码 0（26 个包），前端 15 files / 112 tests 全绿，`tsc -b` 干净，`gofmt -l` 无输出，`./scripts/gen.sh` 后 `git status` 无变化。
+
+### 一、合并前必须知道的三件事
+
+**1. 主设计文档 §6 / §10.3 / §11 已被本模块改写。** §10.3 原本承诺"fp 不可用时配置使用本地快照文件，业务不中断"——**这条承诺已被撤销**。现在的准确表述是：fp 不可达期间**无法启动新进程**，已在跑的进程不受影响（值在内存里）。别的模块若曾依赖那条降级契约来论证自己的可用性，需要重新评估。
+
+**2. 迁移编号被改过。** 本分支的迁移是 `00008_config.sql`，不是最初的 `00007`——`main` 的 authz 已经占了 00007。goose 按版本号记账，同号会让其中一条被**永久静默跳过**。这个坑在测试库里真实发生过：`config` 表一度只因为某次实现的 workaround 手工建出来而存在，迁移本身从未执行。**将来任何并行分支加迁移前，先看一眼 main 上的最大编号。**
+
+**3. `WatchResponse` 的 oneof 字段号已占到 6。** `revoke=1` / `ready=2` / `purge=3` / `policy_changed=4`（authz） / `user_role_changed=5`（authz） / `config_changed=6`。proto 字段号一经发布不可改动、不可重用。
+
+### 二、留给下一阶段的待办（按优先级）
+
+1. **控制台只能看到最近 20 版，服务端保留 100 版。** `internal/httpapi/config.go` 把 `limit` 硬编码成 20，导致 `ConfigService.ListVersions` 的 `limit` 参数成了死参数，且它的钳制语义反直觉（`limit<=0 || limit>100` 一律改成 20，传 500 被砍到 20 而不是 `min(limit,100)`；同一文件的 `checkConfigType` 对非法输入是显式报错，这里却静默改写）。v21..v100 保留着但控制台够不到、回滚不了。两头一起改。
+
+2. **`specsOf` 不检测 snake_case key 碰撞。** `type C struct { APIKey string; ApiKey string }` 会推导出两个 `api_key`，缺失清单里把它列两遍，人在控制台建一个、两个字段一起被填上，全程无任何迹象。`specsOf` 已经按 key 升序返回，排序后扫一遍相邻项即可，约五行。
+
+3. **`newConfigServer` 对 nil `Configs` 无守护。** `internal/grpcapi/config_service.go` 直接 `s.cfgs.Current(...)`，`Deps.Configs` 为 nil 时一次 `GetConfig` 会 nil 解引用**崩掉整个 gRPC 进程**。同包的 `authServer.requireAuthz()` 为完全同类的可选依赖建了 `Unimplemented` 守护，理由写得很清楚："一个可选功能没配，不该把认证也一起带走"。生产与三处测试 env 都装配到位，所以是埋雷不是活 bug——但两种依赖两种标准。
+
+4. **`MissingConfigError` 的文案没带分区。** 设计文档的样例是「请到控制台【商城 / 配置中心 / **DEFAULT**】创建并填值」，实现是「请到控制台创建并填值」。应用名 SDK 确实不知道，但分区（`b.typ`）知道。这份清单是人建配置项的唯一依据，少一个分区名就多一次猜。
+
+5. **`fetchConfig` 用 `context.Background()`**，既无超时也不受 Client 生命周期 ctx 约束。同一个 SDK 里 `refreshPolicy(ctx)` 用生命周期 ctx、`Options.ValidateTimeout` 给校验留了旋钮——配置这条什么都没有。grpc 层的 `minConnectTimeout` 兜住了最坏情况（数十秒而非无限），`Close()` 也能靠 `conn.Close()` 中断在途 RPC，所以不是挂死，但它是第三种超时策略。
+
+6. **`Binding[T]` 与 `TypeBinding` 有约 40 行近乎逐字重复**（`raise` / `reloadFromPush` / "DeepEqual 比较→换指针→取回调→调用"那段骨架）。回调签名不同让泛型抽不干净，但把 `mu`/`onError`/`raise` 抽成一个内嵌小 struct 是干净的。
+   **反例**：`ConfigHub` 与 `RevokeHub` 骨架也高度重复，但两者溢出策略真的不同（摘订阅者 vs 丢事件+purge 才摘），**不要**强行抽取。
+
+7. **`docs/console.md` 的路由表漏了配置中心的两条路由**（`/applications/:id/config`、`/applications/:id/config/versions`）。同一次合并里给 authz 补了 `/roles`、`/roles/:id`，只补了一半。
+
+8. **`BindType` 与 `Bind` 有一处行为不一致**：首次加载解析失败时前者返回 `(b, nil)`（表面成功、`Load()` 空、只有一条日志），后者返回 `(nil, err)`。**当前生产路径不可达**——`fetchConfig` 解出的 `json.RawMessage` 必然是合法 JSON，`Unmarshal` 进 `any` 不会失败。但哪天 `fetchConfig` 的解码方式变了（改成流式、或允许部分失败），这条就会从"不可达"变成真实差异。
+
+9. **`AddFieldDialog` 建不出空字符串值**：`if (!textValue.trim())` 拦下，但 `""` 在后端是**合法的已配置值**（`IsSet` 对 `""` 返回 true）。另外那里 `trim` 只用于判空、存的是未 trim 的原串，判据与存的东西不是一回事。
+
+### 三、这份计划自身被实现者挑出的缺陷（方法论记录）
+
+**二十处，全部源自计划本身，且都是被"真的把代码跑起来"的审查抓到的，不是读出来的。** 分四类：
+
+**A. 编造仓库里不存在的东西（六次，全部集中在测试脚手架）**
+
+| 计划里写的 | 仓库里实际是 |
+|---|---|
+| `newConfigFixture` 用两返回值的 `apps.Create` | 返回三个值 `(*Application, secret, error)` |
+| `newTestEnv` / `authedCtx` / `assertStatusCode`（grpcapi） | `newGRPCEnv` / `(e *grpcEnv).authed`；`assertStatusCode` 根本不存在 |
+| `env.do` / `env.getJSON` / `env.createApp`（httpapi） | 三个**包级函数** `newAdminEnv` / `do` / `decode` |
+| "每个测试文件必须自己写 `afterEach(cleanup)`" | `web/src/test-setup.ts` 已全局注册 |
+| `import userEvent from '@testing-library/user-event'` | 该包不在 `package.json` 里 |
+| `newFullEnv` / `stopGRPC` / `startGRPC`（integration） | `newPhase2Env` / `stopFp` / `restartFp` |
+
+这是最系统性的一类，**六次全部出现在同一个位置**。教训很具体：**凡是引用仓库既有辅助函数的地方，落笔前 grep 一次确认名字存在**——比事后让每个实现者各自绕一圈便宜得多。
+
+**B. 计划给的代码有真 bug（四处）**
+
+- `CoerceConfigValue` 对 array/object 走 `[]any`/`map[string]any` 往返，**超过 2^53 的整数被静默舍入**（`{"id":9007199254740993}` → `...992`，`err` 为 nil），且 object 的 key 被重排。讽刺的是同一份计划的 Task 8 早就点破了这个坑（"转成 any 再转回来会把整数变成 float64、把字段顺序打乱，原样透传"），Task 1 却没应用。
+- `applyValues` 的 `*out = *base` 浅拷贝让 slice/map 字段与旧快照共享底层存储，**`encoding/json` 解码 slice 时容量够就原地复用旧数组**——会连带改写那份"被约定为不可变、此刻可能正被别的 goroutine 通过 `Load()` 持有"的旧快照。修复还漏了 `[N][]T` 这个形状（数组套引用类型），复审又补了一次。
+- `getVersion` 用 `fmt.Sscanf(seq, "%d", &seq)` 解析路径参数：`%d` **不检查尾部残余字符**，`Sscanf("12abc", "%d", &seq)` 返回 `seq=12, err=nil`，`/versions/12abc` 会错误地返回 200。
+- `CreatedAt` 三处 SQL 缺 `* 1000`，产出的是秒而非毫秒，与仓库既有约定（`application.go` 注释明写"时间统一转成毫秒"）相反。
+
+**C. 计划给的验证步骤本身是假的（一处，但最隐蔽）**
+
+计划让每个 SDK 任务跑 `./scripts/test.sh ./sdk -run TestArch` 来"确认分层约束"。仓库里**没有任何以 `TestArch` 开头的测试**，`go test` 输出 `ok ... [no tests to run]` 并以 0 退出——**这条验证永远是绿的**。它比 A 类更危险：A 类会编译不过、立刻暴露；这一条会安静地绿。真实名字是 `TestSDKDoesNotImportInternal` / `TestSDKHasNoPanic` / `TestExamplesDoNotImportInternal` / `TestSDKDoesNotImportWebFrameworks`。
+
+**D. 计划给的测试没有辨别力（多处）**
+
+三种不同的失效形态，值得分开记：
+
+1. **因巧合而通过**：`configspec.go` 那行 `append(append([]int{}, index...), i)` 的双重防御拷贝，简化成朴素的 `append(index, i)` 后**全部测试照样绿**——因为 fixture 只嵌套 1 层、2 个字段，这个规模下 `cap` 恒等于 `len`，每次 append 都新分配，天然不共享底层数组。要 **4 层**嵌套才撞得上（3 层仍不够，实现者重放 `len`/`cap` 增长过程定位到的）。
+2. **被另一条路径顺带救活**：`TestConfigChangedPushTriggersReload` 只删掉 `GetConfigChanged` 分支的重载调用仍稳定通过 8/8，两处都删才失败——它的绿一直来自"首次建流 ready 触发的那次重载"，从未真正测过它名字所指的路径。
+3. **只断言通过的那一侧**：`disabled={!diffsReady}` 整段删掉、5 条测试全绿（helper 只"等到 disabled===false"，从不断言它**曾经**是 disabled）；`push: rollbackPush` 硬编码成 `false`、5 条全绿（唯一读 body 的测试在断言前先点了"仅落库"，`push:true` 从未被断言过）。
+
+还有一处更细的：`TestTypeChangeBothPaths` 原本用**单字段** struct 测"解析失败保持整份旧快照"——而 `encoding/json` 对标量类型不匹配是全有全无，单字段时"保持旧快照"与"半解析"产出完全相同的结果，抓获率 **0%**（同一变异跑 8/8 全 PASS）。加第二个字段后仍只有约 40%，因为 `raise(err)` 唤醒测试 goroutine 与 `snap.Store(next)` 之间没有同步点——补了沉降等待才到 10/10。
+
+### 四、执行过程中确立、后续应当延续的实践
+
+- **变异验证必须是"改坏跑一次确认真的变红"，而不是"跑一次绿了就算"。** 本轮 19 处标「辨别力」的测试全部做过，直接产出了上面 D 类的全部四个发现。更进一步的做法值得推广：**外科手术式变异**——比如让实现"照常换指针但抑制回调"，用来证明"指针恒等"那条断言不是与"回调次数"冗余；只有这样才能判断一条断言是否**独立承重**。
+- **审查要跑代码，不要读代码。** 本轮全部二十个发现无一例外都来自实跑：伪造一条 Redis 消息证明 `Gap` 可被伪造、8 个 goroutine 并发证明冲突错误没被分类、对着**数据库自己的时钟**比对证明时间戳单位错了、注入 5 种断连时长测出真实退避时刻表。
+- **共享测试基础设施要按 db 过滤。** `killPubSubConnection` 原本数的是整个 Redis 服务器的 pubsub 连接，既被别的 worktree 干扰，又在本模块引入第二条常驻订阅后**结构性地永远不可能成立**。改成按 `rdb.Options().DB` 过滤 + 杀本库全部，将来加第三条订阅也不用再改。
+- **`testsupport.NewTestDB` 每次调用都 TRUNCATE。** 拿 pool 和建数据的顺序反了，报错会是一句与真实原因毫无关系的外键失败。
+- **实现者应当把计划当作可证伪的。** 本轮有多个任务因为实现者拒绝照抄 brief 而避免了返工——它们核实了仓库现状、发现 brief 引用的东西不存在或本身有 bug，并在报告里写明依据。这比"忠实执行"更有价值。
