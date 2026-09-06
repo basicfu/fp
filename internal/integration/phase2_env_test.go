@@ -6,6 +6,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -44,10 +45,13 @@ type phase2Services struct {
 	authz     *service.AuthzService
 	// configPub 与 revokePub 同一装配方式：喂给 startServer 里的
 	// grpcapi.Deps.ConfigPub，让 grpcapi.Server 内部的 configHub 有一个
-	// 真实可用的 Redis 订阅源。这里没有任何测试用例读写配置，纯粹是
-	// 为了不让 ConfigHub.Run 在 *store.ConfigPublisher 为 nil 时炸掉
-	// ServeWhenReady——见 internal/grpcapi.Server.Run 的注释。
+	// 真实可用的 Redis 订阅源。
 	configPub *store.ConfigPublisher
+	// configs 是配置中心的 service 层入口（Task 15）。phase2Env 是纯 gRPC
+	// 环境、没有 HTTP 服务端——Task 8 的 httpapi 测试已经覆盖了
+	// HTTP→service 这一段，这里的测试直接调它的 Save，验证 service→
+	// Redis→gRPC→SDK 剩下这一段完整链路。
+	configs *service.ConfigService
 }
 
 func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Services {
@@ -84,10 +88,12 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 		Registry: registry, Notifier: sender, Codes: codes, Authz: authz,
 	})
 
+	configs := service.NewConfigService(pool, configPub)
+
 	return phase2Services{
 		apps: apps, users: users, sessions: sessions,
 		accounts: accounts, auth: auth, sms: sms, revokePub: revokePub, authz: authz,
-		configPub: configPub,
+		configPub: configPub, configs: configs,
 	}
 }
 
@@ -186,7 +192,7 @@ func (e *phase2Env) startServer(t *testing.T) {
 
 	srv := grpcapi.New(grpcapi.Deps{
 		Auth: e.auth, Apps: e.apps, Pub: e.revokePub, Authz: e.authz,
-		ConfigPub: e.configPub,
+		Configs: e.configs, ConfigPub: e.configPub,
 	})
 	e.server = srv
 
@@ -290,6 +296,27 @@ func (e *phase2Env) updateSessionPolicy(t *testing.T, mutate func(*domain.Sessio
 		t.Fatalf("更新会话策略: %v", err)
 	}
 	e.app = updated
+}
+
+// saveConfig 是 service.ConfigService.Save 的薄封装，供测试按 JSON 字面量
+// 直接写配置：fieldsJSON 是 map[string]domain.ConfigField 的 JSON 表示，
+// 形如 `{"fee_rate":{"type":"float","desc":"","value":0.02}}`。
+//
+// 直接调 service 层、不经 HTTP：Task 8 的 httpapi 测试已经覆盖了
+// HTTP→service 这一段，本包（phase2Env）本来就没有 HTTP 服务端，这里要
+// 验证的是 service→Redis→gRPC→SDK 这条链路，从 service 层入口开始即可，
+// 见 phase2Services.configs 字段的注释。
+func (e *phase2Env) saveConfig(t *testing.T, typ, fieldsJSON string, push bool) int64 {
+	t.Helper()
+	var fields map[string]domain.ConfigField
+	if err := json.Unmarshal([]byte(fieldsJSON), &fields); err != nil {
+		t.Fatalf("解析测试用配置字段 JSON %q: %v", fieldsJSON, err)
+	}
+	seq, err := e.configs.Save(context.Background(), e.app.ID, typ, fields, push)
+	if err != nil {
+		t.Fatalf("保存配置（分区 %s）: %v", typ, err)
+	}
+	return seq
 }
 
 // login 走一次完整的短信验证码登录（发码 → 取码 → 登录），全部经由 e.sdk
