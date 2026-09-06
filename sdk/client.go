@@ -61,12 +61,21 @@ type Client struct {
 	streamUp atomic.Bool
 
 	// bindingsMu 保护 bindings：Bind/BindType 可能在任意 goroutine 里被
-	// 业务方调用，注册与（Task 11 的）推送触发遍历必须互斥。
+	// 业务方调用，注册与推送触发遍历（runConfigReload）必须互斥。
 	bindingsMu sync.Mutex
-	// bindings 是全部已注册的配置绑定，供收到 ConfigChanged 推送时逐个
-	// 触发重新拉取（Task 11）。Binding[T] 是泛型，没法直接存进切片，
-	// 靠 reloadable 这个非泛型接口。
+	// bindings 是全部已注册的配置绑定，供收到 ConfigChanged 推送（或
+	// 推送流重连）时逐个触发重新拉取。Binding[T] 是泛型，没法直接存进
+	// 切片，靠 reloadable 这个非泛型接口。
 	bindings []reloadable
+
+	// cfgReload 是配置重载的唤醒信号，缓冲为 1。
+	//
+	// 缓冲满就丢弃信号是**安全的**：待处理的那次重载拉的是"当前版本"
+	// 而不是"第 N 版"，它一定会带上被丢掉那条信号对应的变更。
+	//
+	// 用 runConfigReload 单 goroutine 串行消费，而不是每条信号起一个：
+	// 两次重载并发跑的话，先发起的可能后返回，把旧快照盖到新快照上。
+	cfgReload chan struct{}
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -78,12 +87,48 @@ type reloadable interface {
 	reloadFromPush()
 }
 
-// registerBinding 记录一份绑定，供收到该分区的 ConfigChanged 推送时
-// （Task 11）触发它重新拉取。
+// registerBinding 记录一份绑定，供收到 ConfigChanged 推送（或推送流
+// 重连）时触发它重新拉取。
 func (c *Client) registerBinding(r reloadable) {
 	c.bindingsMu.Lock()
 	defer c.bindingsMu.Unlock()
 	c.bindings = append(c.bindings, r)
+}
+
+// runConfigReload 串行地重载全部绑定，直到 ctx 取消。
+//
+// 无差别重载全部绑定、不按分区分派：一个进程最多两份绑定（DEFAULT +
+// WEB），多拉一次 GetConfig 的代价可以忽略；而 Binding[T].applySnapshot
+// "快照没变就不触发 OnChange"这条规则保证了不相关的那份绑定不会产生
+// 任何回调。换来的是彻底不用处理 ConfigChanged.Type 为空串（fp 侧订阅
+// 重建时的兜底信号，见 ConfigChanged 的文档）这种分支。
+//
+// 不能在 watchOnce 的收流循环里同步做这件事：GetConfig 是一次网络往返，
+// 会把撤销事件的投递一起卡住。单独开一个 goroutine 串行消费信号，是
+// 保持收流循环不被拖慢、又不让并发的多次重载互相踩踏的最简单方式。
+func (c *Client) runConfigReload(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.cfgReload:
+			c.bindingsMu.Lock()
+			bs := append([]reloadable(nil), c.bindings...)
+			c.bindingsMu.Unlock()
+			for _, b := range bs {
+				b.reloadFromPush()
+			}
+		}
+	}
+}
+
+// requestConfigReload 请求一次重载。非阻塞——已经有待处理的信号就直接
+// 返回，见 cfgReload 字段的注释。
+func (c *Client) requestConfigReload() {
+	select {
+	case c.cfgReload <- struct{}{}:
+	default:
+	}
 }
 
 // fetchConfig 拉取 typ 分区当前的全部已配置值。
@@ -196,9 +241,10 @@ func New(opts Options) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		opts: opts, conn: conn,
-		rpc:    fpv1.NewAuthServiceClient(conn),
-		cfgRPC: fpv1.NewConfigServiceClient(conn),
-		cancel: cancel,
+		rpc:       fpv1.NewAuthServiceClient(conn),
+		cfgRPC:    fpv1.NewConfigServiceClient(conn),
+		cfgReload: make(chan struct{}, 1),
+		cancel:    cancel,
 	}
 	// 必须在启动 watch goroutine 之前构造好：goroutine 一跑起来就可能调
 	// c.auth（收到第一条 ready/revoke/purge 就会），构造顺序反了就是
@@ -210,6 +256,11 @@ func New(opts Options) (*Client, error) {
 	go func() {
 		defer c.wg.Done()
 		c.runWatch(ctx)
+	}()
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.runConfigReload(ctx)
 	}()
 	return c, nil
 }
@@ -335,6 +386,12 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 			// 流就绪后拉一次策略：新实例启动、以及每次重连之后，本地都要有
 			// 一份可用的快照，否则 Allow 会一直返回"没能判定"。
 			c.refreshPolicy(ctx)
+			// 重拉一次配置。断线期间发布的 ConfigChanged 一条都收不到，
+			// 光靠"下一次变更"来补会让配置无限期停在旧值——这是配置侧
+			// 对应 WatchPurge 的兜底，只是配置不需要"丢弃全部"，重拉即可。
+			// 首次连接也走这条：此时各绑定刚 Bind 时拉过一次，重拉会发现
+			// 内容没变、不触发任何回调（见 applySnapshot 的比较逻辑），无害。
+			c.requestConfigReload()
 		case msg.GetRevoke() != nil:
 			c.auth.onRevoke(msg.GetRevoke())
 		case msg.GetPurge() != nil:
@@ -349,9 +406,15 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 			// 只丢这个用户的缓存，不影响他的登录态——角色变更是**刷新**
 			// 而不是撤销。下次校验时 fp 会带回新角色。
 			c.auth.cache.dropUser(msg.GetUserRoleChanged().GetUserId())
+		case msg.GetConfigChanged() != nil:
+			// 无差别重载全部绑定，不按 Type 分派：一个进程最多两份绑定，
+			// 多拉一次 GetConfig 的代价可以忽略，而"快照没变就不触发
+			// OnChange"保证了不相关的那份不会产生回调。换来的是彻底不用
+			// 处理 Type 为空串（fp 侧订阅缺口，见 ConfigChanged 的文档）
+			// 这个分支——具体道理见 runConfigReload 的注释。
+			c.requestConfigReload()
 		default:
-			// 未知事件类型（将来的 ConfigChanged 等）。
-			// 忽略，不要报错——oneof 的向前兼容就靠这里。
+			// 未知事件类型。忽略，不要报错——oneof 的向前兼容就靠这里。
 		}
 	}
 }

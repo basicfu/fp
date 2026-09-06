@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -356,5 +359,364 @@ func TestFetchConfigJSONBoundaries(t *testing.T) {
 				c.check(t, got)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------
+// 以下是热更新编排（reload 的比较/换指针/回调，OnChange、OnError）的
+// 测试。
+//
+// newTestBinding/newTestBindingWithLogger/applyForTest/sameValues 是本节
+// 专用的测试辅助，绕开网络：直接构造一个 Binding[bindCfg]（specs 由
+// specsOf 反射得到、snap 用 fillStruct 预置好），applyForTest 直接调
+// applySnapshot——那是"拿到 values 之后做的全部事情"的内部方法，从
+// reload() 里独立出来就是为了让这组测试不需要起 gRPC 桩也能跑。
+// ---------------------------------------------------------------------
+
+// baseValues 返回一份内容固定的合法配置，供本节测试反复起步用。
+func baseValues() map[string]json.RawMessage {
+	return map[string]json.RawMessage{
+		"fee_rate":         json.RawMessage(`0.02`),
+		"enabled":          json.RawMessage(`true`),
+		"upstream.timeout": json.RawMessage(`3000`),
+		"upstream.api_key": json.RawMessage(`"k"`),
+		"limits":           json.RawMessage(`[]`),
+	}
+}
+
+// newTestBinding 构造一份已经用 values 填好的 Binding[bindCfg]。ERROR
+// 日志丢弃——本组测试大多数用例只关心 OnError 有没有被调用，不关心兜底
+// 日志的内容；要断言日志的用 newTestBindingWithLogger。
+func newTestBinding(t *testing.T, values map[string]json.RawMessage) *Binding[bindCfg] {
+	t.Helper()
+	c := &Client{opts: Options{Logger: slog.New(slog.DiscardHandler)}}
+	return newTestBindingOn(t, c, values)
+}
+
+// newTestBindingWithLogger 和 newTestBinding 一样，但把 >= ERROR 级别的
+// 日志记录转发给 logFn，供 TestReloadLogsWhenNoErrorHandler 断言"没挂
+// OnError 时确实打了日志"。
+func newTestBindingWithLogger(t *testing.T, values map[string]json.RawMessage, logFn func(msg string)) *Binding[bindCfg] {
+	t.Helper()
+	c := &Client{opts: Options{Logger: slog.New(&testErrorLogHandler{fn: logFn})}}
+	return newTestBindingOn(t, c, values)
+}
+
+// newTestBindingOn 是 newTestBinding/newTestBindingWithLogger 共用的构造
+// 逻辑：这一段与 Bind 首次加载做的事完全一样（specsOf 反射 + fillStruct
+// 填值），只是不经过网络，直接把 snap 预置好。
+func newTestBindingOn(t *testing.T, c *Client, values map[string]json.RawMessage) *Binding[bindCfg] {
+	t.Helper()
+	specs, err := specsOf(reflect.TypeOf(bindCfg{}))
+	if err != nil {
+		t.Fatalf("specsOf 失败: %v", err)
+	}
+	snap, missing, err := fillStruct[bindCfg](specs, values)
+	if err != nil {
+		t.Fatalf("fillStruct 失败: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("测试用的初始 values 不该缺项: %v", missing)
+	}
+	b := &Binding[bindCfg]{c: c, typ: ConfigTypeDefault, specs: specs}
+	b.snap.Store(snap)
+	return b
+}
+
+// testErrorLogHandler 是 newTestBindingWithLogger 用的最小 slog.Handler：
+// 每条 >= Error 级别的记录都回调一次 fn，只转发消息文本，测试用不到更多。
+type testErrorLogHandler struct{ fn func(msg string) }
+
+func (h *testErrorLogHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelError
+}
+
+func (h *testErrorLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.fn(r.Message)
+	return nil
+}
+
+func (h *testErrorLogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *testErrorLogHandler) WithGroup(_ string) slog.Handler      { return h }
+
+// applyForTest 直接调用 applySnapshot——"拿到 values 之后做的全部事情"
+// 那个内部方法，绕开网络。
+func (b *Binding[T]) applyForTest(t *testing.T, values map[string]json.RawMessage) {
+	t.Helper()
+	b.applySnapshot(values)
+}
+
+// sameValues 把一份已加载的快照重新序列化成 values map：内容与产生这份
+// 快照的原始 values 完全相同，只是重新走了一遍独立的 JSON 编码——用来
+// 模拟"同一分区里别人改了别的 key，fetchConfig 拉回来的仍是这份内容不变
+// 的快照"这种场景，而不是简单地把同一个 map 字面量传两遍。
+func sameValues(v *bindCfg) map[string]json.RawMessage {
+	feeRate, _ := json.Marshal(v.FeeRate)
+	enabled, _ := json.Marshal(v.Enabled)
+	timeoutMs, _ := json.Marshal(v.Upstream.Timeout.Milliseconds())
+	apiKey, _ := json.Marshal(v.Upstream.APIKey)
+	limits, _ := json.Marshal(v.Limits)
+	return map[string]json.RawMessage{
+		"fee_rate":         feeRate,
+		"enabled":          enabled,
+		"upstream.timeout": timeoutMs,
+		"upstream.api_key": apiKey,
+		"limits":           limits,
+	}
+}
+
+// 快照没变就不换指针、不触发 OnChange。
+// 同分区里别人改了你不关心的 key 也会推给你——不比较的话，别人配置一次
+// 你的连接池就重建一次。
+func TestReloadWithoutChangeDoesNotFire(t *testing.T) {
+	b := newTestBinding(t, map[string]json.RawMessage{
+		"fee_rate":         json.RawMessage(`0.02`),
+		"enabled":          json.RawMessage(`true`),
+		"upstream.timeout": json.RawMessage(`3000`),
+		"upstream.api_key": json.RawMessage(`"k"`),
+		"limits":           json.RawMessage(`[]`),
+	})
+	before := b.Load()
+
+	var calls int
+	b.OnChange(func(_, _ *bindCfg) { calls++ })
+
+	// 推一份内容完全相同的配置。
+	b.applyForTest(t, sameValues(before))
+
+	if calls != 0 {
+		t.Fatalf("OnChange 被调用了 %d 次，内容没变时应当是 0 次", calls)
+	}
+	if b.Load() != before {
+		t.Fatal("内容没变时不该换指针")
+	}
+}
+
+func TestReloadFiresOnChangeWithOldAndNew(t *testing.T) {
+	b := newTestBinding(t, baseValues())
+
+	var gotOld, gotNew *bindCfg
+	b.OnChange(func(o, n *bindCfg) { gotOld, gotNew = o, n })
+
+	v := baseValues()
+	v["fee_rate"] = json.RawMessage(`0.05`)
+	b.applyForTest(t, v)
+
+	if gotOld == nil || gotNew == nil {
+		t.Fatal("OnChange 没被调用")
+	}
+	if gotOld.FeeRate != 0.02 || gotNew.FeeRate != 0.05 {
+		t.Fatalf("old=%v new=%v，期望 0.02 → 0.05", gotOld.FeeRate, gotNew.FeeRate)
+	}
+	if b.Load().FeeRate != 0.05 {
+		t.Fatal("快照没被替换")
+	}
+}
+
+// key 消失（被删或回滚导致）→ 保持旧值 + OnError，**绝不清成零值**。
+// 清零值是危险的：fee_rate=0 就是免手续费。
+func TestReloadKeepsOldValueWhenKeyDisappears(t *testing.T) {
+	b := newTestBinding(t, baseValues())
+
+	var errs int
+	b.OnError(func(error) { errs++ })
+
+	v := baseValues()
+	delete(v, "fee_rate")
+	b.applyForTest(t, v)
+
+	if got := b.Load().FeeRate; got != 0.02 {
+		t.Fatalf("FeeRate = %v，key 消失时必须保持旧值 0.02", got)
+	}
+	if errs != 1 {
+		t.Fatalf("OnError 被调用 %d 次，期望 1 次", errs)
+	}
+}
+
+// 解析失败（有人把 int 改成了 object）→ 保持**整份**旧快照 + OnError，
+// 进程不崩、也不半解析。
+//
+// 【辨别力】必须断言"值还是旧的"而不只是"报了错"——一个先逐字段写入、
+// 遇到错误再返回的实现同样会报错，却已经把前面几个字段换掉了，
+// 快照的跨字段一致性已经破了。
+func TestReloadKeepsWholeSnapshotOnParseFailure(t *testing.T) {
+	b := newTestBinding(t, baseValues())
+	before := b.Load()
+
+	var errs int
+	b.OnError(func(error) { errs++ })
+
+	v := baseValues()
+	v["enabled"] = json.RawMessage(`true`)
+	v["fee_rate"] = json.RawMessage(`{"a":1}`) // 类型对不上
+	v["upstream.api_key"] = json.RawMessage(`"changed"`)
+	b.applyForTest(t, v)
+
+	if b.Load() != before {
+		t.Fatal("解析失败时必须保持整份旧快照，指针都不该换")
+	}
+	if b.Load().Upstream.APIKey != "k" {
+		t.Fatal("同一批里合法的字段也不该被写进去——那会破坏跨字段一致性")
+	}
+	if errs != 1 {
+		t.Fatalf("OnError 被调用 %d 次，期望 1 次", errs)
+	}
+}
+
+// 没挂 OnError 时不静默：打 ERROR 日志。
+func TestReloadLogsWhenNoErrorHandler(t *testing.T) {
+	var logged int
+	b := newTestBindingWithLogger(t, baseValues(), func(msg string) { logged++ })
+
+	v := baseValues()
+	v["fee_rate"] = json.RawMessage(`{"a":1}`)
+	b.applyForTest(t, v)
+
+	if logged == 0 {
+		t.Fatal("没挂 OnError 时必须打 ERROR 日志，不能静默")
+	}
+}
+
+// TestReloadDoesNotMutateOldSnapshotSlice 守住：reload 换指针时不能就地
+// 改写旧快照仍持有的切片底层数组。
+//
+// applyValues 用 `*out = *base` 做浅拷贝再往 out 上覆盖字段——slice 是
+// 引用类型，浅拷贝之后 out 与 base 在被覆盖之前指向同一份底层数组。
+// encoding/json 解码 slice 时若容量够用会原地复用旧数组，这样会连带
+// 改写 base（也就是 Load() 早先返回给别的 goroutine、且被约定为不可变的
+// 那份旧快照）。手工验证过：applyValues 里去掉"解码前置零"那段防护后，
+// 本测试会把 old.Limits 从 [1 2 3] 眼看着被就地改写成 [9 9 3]。
+//
+// 【辨别力】新值的元素个数必须**不超过**旧值、内容却不同——这样才会
+// 命中 slice 原地复用旧容量那个分支。只断言 new 快照正确的实现完全
+// 遮不住这个问题：错误实现里 new 快照本身是对的，只是捎带手弄脏了 old。
+func TestReloadDoesNotMutateOldSnapshotSlice(t *testing.T) {
+	b := newTestBinding(t, baseValues())
+	v1 := baseValues()
+	v1["limits"] = json.RawMessage(`[1,2,3]`)
+	b.applyForTest(t, v1) // 让旧快照的 Limits 有真实的底层数组可共享
+
+	old := b.Load()
+	oldLimitsCopy := append([]int(nil), old.Limits...)
+
+	v2 := baseValues()
+	v2["limits"] = json.RawMessage(`[9,9]`)
+	b.applyForTest(t, v2)
+
+	if !reflect.DeepEqual(old.Limits, oldLimitsCopy) {
+		t.Fatalf("旧快照的 Limits 被就地改写: %v，期望仍是 %v（不可变快照被击穿）",
+			old.Limits, oldLimitsCopy)
+	}
+}
+
+// ---------------------------------------------------------------------
+// 以下两条是热更新编排的端到端覆盖：从真实的 Watch 推流收到事件，到
+// Client 唯一的重载 goroutine 被唤醒、调用 fetchConfig 重新拉取、驱动
+// 已注册 binding 的 OnChange。
+//
+// 上面的 TestReload* 全部经 newTestBinding/applyForTest 绕开了网络，直接
+// 调 applySnapshot——这样测得快，但一条都没有验证 watchOnce 收到事件后
+// 真的会调用 requestConfigReload、runConfigReload 真的会被唤醒并驱动到
+// 已注册的 binding 上。这正是本任务开头"重载的编排"要保证的东西，用
+// 既有的 stubServer/newStubEnvFull 补上这段链路。
+// ---------------------------------------------------------------------
+
+// TestConfigChangedPushTriggersReload 守住：收到 ConfigChanged 推送之后，
+// 已注册的 binding 会被自动重新拉取并触发 OnChange。
+func TestConfigChangedPushTriggersReload(t *testing.T) {
+	var version atomic.Int64
+	version.Store(1)
+	stub := &stubServer{
+		getConfig: func(*fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error) {
+			v := version.Load()
+			return &fpv1.GetConfigResponse{Version: v, Values: fmt.Sprintf(`{
+				"fee_rate": %d,
+				"enabled": true,
+				"upstream.timeout": 3000,
+				"upstream.api_key": "k",
+				"limits": []
+			}`, v)}, nil
+		},
+	}
+	env := newStubEnvFull(t, stub)
+
+	b, err := Bind[bindCfg](env.client)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if got := b.Load().FeeRate; got != 1 {
+		t.Fatalf("初次加载 FeeRate = %v，期望 1", got)
+	}
+
+	var calls int
+	var gotOld, gotNew *bindCfg
+	b.OnChange(func(o, n *bindCfg) { calls++; gotOld, gotNew = o, n })
+
+	// 服务端配置变了（比如别人在控制台改的），再推一条 ConfigChanged。
+	version.Store(2)
+	env.stub.events <- &fpv1.WatchResponse{
+		Event: &fpv1.WatchResponse_ConfigChanged{ConfigChanged: &fpv1.ConfigChanged{
+			Type: ConfigTypeDefault, Version: 2,
+		}},
+	}
+
+	env.waitUntil(t, func() bool { return calls == 1 },
+		"收到 ConfigChanged 推送后 OnChange 应该被触发一次")
+	if gotOld == nil || gotNew == nil || gotOld.FeeRate != 1 || gotNew.FeeRate != 2 {
+		t.Fatalf("old=%+v new=%+v，期望 FeeRate 1 → 2", gotOld, gotNew)
+	}
+	if got := b.Load().FeeRate; got != 2 {
+		t.Fatalf("Load().FeeRate = %v，期望 2", got)
+	}
+}
+
+// TestReconnectTriggersConfigReload 守住硬约束"收到 Watch 流的 ready 就
+// 重拉一次配置"：断连期间发布的 ConfigChanged 一条都收不到（连接根本
+// 不在线），配置侧要靠重连后的 ready 兜底，而不是无限期停在旧值上。
+//
+// 这是本任务五条硬约束里唯一没有被 Step 1 单测覆盖到的一条——那五条
+// 测试全部用 newTestBinding 直接调 applySnapshot，根本碰不到 watchOnce
+// 的 ready 分支，只能靠这条端到端测试补上。
+func TestReconnectTriggersConfigReload(t *testing.T) {
+	var version atomic.Int64
+	version.Store(1)
+	stub := &stubServer{
+		getConfig: func(*fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error) {
+			v := version.Load()
+			return &fpv1.GetConfigResponse{Version: v, Values: fmt.Sprintf(`{
+				"fee_rate": %d,
+				"enabled": true,
+				"upstream.timeout": 3000,
+				"upstream.api_key": "k",
+				"limits": []
+			}`, v)}, nil
+		},
+	}
+	env := newStubEnvFull(t, stub)
+	env.waitUntil(t, env.client.StreamHealthy, "初次建流应变为健康")
+
+	b, err := Bind[bindCfg](env.client)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	var calls int
+	b.OnChange(func(_, _ *bindCfg) { calls++ })
+
+	// 断线期间配置发生变化——这条变更没有、也不可能有对应的 ConfigChanged
+	// 推送：客户端此刻已经不在线，fp 根本推不到它。
+	env.stop()
+	env.waitUntil(t, func() bool { return !env.client.StreamHealthy() }, "服务端停止后应变为不健康")
+	version.Store(2)
+
+	_, restartStop := startStub(t, env.addr, env.stub)
+	t.Cleanup(restartStop)
+
+	waitUntilTimeout(t, 20*time.Second, env.client.StreamHealthy,
+		"服务端在原地址重启后，StreamHealthy() 在 20 秒内仍未重新变为 true")
+	env.waitUntil(t, func() bool { return calls == 1 },
+		"重连收到 ready 后应当重拉配置并触发一次 OnChange")
+	if got := b.Load().FeeRate; got != 2 {
+		t.Fatalf("重连后 FeeRate = %v，期望 2——断线期间发生的变更必须靠 ready 兜底补上", got)
 	}
 }
