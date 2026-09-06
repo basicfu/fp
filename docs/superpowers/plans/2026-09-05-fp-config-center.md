@@ -4392,13 +4392,13 @@ import (
 
 // 改值 → 推送 → SDK 的 Load() 真的变了。
 func TestConfigChangePropagatesToSDK(t *testing.T) {
-	env := newFullEnv(t) // 真 fp + 真 SDK Client
+	env := newPhase2Env(t)
 	ctx := context.Background()
 
-	env.saveConfig(t, "DEFAULT", `{"fee_rate":{"type":"float","desc":"","value":0.02}}`, true)
+	e.saveConfig(t, "DEFAULT", `{"fee_rate":{"type":"float","desc":"","value":0.02}}`, true)
 
 	type shopCfg struct{ FeeRate float64 }
-	cfg, err := fpsdk.Bind[shopCfg](env.client)
+	cfg, err := fpsdk.Bind[shopCfg](e.sdk)
 	if err != nil {
 		t.Fatalf("Bind 失败: %v", err)
 	}
@@ -4411,7 +4411,7 @@ func TestConfigChangePropagatesToSDK(t *testing.T) {
 
 	// 走**控制台的 HTTP 接口**改值，不要直接调 service——这条测试的价值
 	// 就在于穿过 HTTP → PG → Redis → gRPC → SDK 这一整条链路。
-	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
+	e.saveConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
 		"fee_rate":{"type":"float","desc":"","value":0.05}}}`)
 
 	select {
@@ -4431,19 +4431,19 @@ func TestConfigChangePropagatesToSDK(t *testing.T) {
 // 【辨别力】必须同时断言这两件事。只断言"没推送"的话，一个根本没存的
 // 实现也会绿；只断言"新 Bind 拿到了"的话，一个照样推送的实现也会绿。
 func TestSaveWithoutPushIsInvisibleUntilRebind(t *testing.T) {
-	env := newFullEnv(t)
+	e := newPhase2Env(t)
 
-	env.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, true)
+	e.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, true)
 
 	type cfgT struct{ N int }
-	cfg, err := fpsdk.Bind[cfgT](env.client)
+	cfg, err := fpsdk.Bind[cfgT](e.sdk)
 	if err != nil {
 		t.Fatalf("Bind 失败: %v", err)
 	}
 	fired := make(chan struct{}, 1)
 	cfg.OnChange(func(_, _ *cfgT) { fired <- struct{}{} })
 
-	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":false,"fields":{
+	e.saveConfig(t, "DEFAULT", `{"type":"DEFAULT","push":false,"fields":{
 		"n":{"type":"int","desc":"","value":2}}}`)
 
 	select {
@@ -4456,7 +4456,7 @@ func TestSaveWithoutPushIsInvisibleUntilRebind(t *testing.T) {
 	}
 
 	// 另一条腿：新起一次 Bind（模拟 pod 重启）必须拿到新值。
-	fresh, err := fpsdk.Bind[cfgT](env.newClient(t))
+	fresh, err := fpsdk.Bind[cfgT](e.dial(t))
 	if err != nil {
 		t.Fatalf("重新 Bind 失败: %v", err)
 	}
@@ -4473,17 +4473,17 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	type v1Cfg struct{ Timeout int }
 
 	// —— 路径一：选「仅落库」，v1 完全不受影响
-	env := newFullEnv(t)
-	env.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000}}`, true)
+	e := newPhase2Env(t)
+	e.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000}}`, true)
 
-	cfg, err := fpsdk.Bind[v1Cfg](env.client)
+	cfg, err := fpsdk.Bind[v1Cfg](e.sdk)
 	if err != nil {
 		t.Fatalf("Bind 失败: %v", err)
 	}
 	var errs int32
 	cfg.OnError(func(error) { atomic.AddInt32(&errs, 1) })
 
-	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":false,"fields":{
+	e.saveConfig(t, "DEFAULT", `{"type":"DEFAULT","push":false,"fields":{
 		"timeout":{"type":"object","desc":"","value":{"ms":5000}}}}`)
 	time.Sleep(time.Second)
 
@@ -4495,10 +4495,10 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	}
 
 	// —— 路径二：误选「立即推送」，v1 保持旧值 + OnError，**不崩**
-	env2 := newFullEnv(t)
-	env2.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000}}`, true)
+	e2 := newPhase2Env(t)
+	e2.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000}}`, true)
 
-	cfg2, err := fpsdk.Bind[v1Cfg](env2.client)
+	cfg2, err := fpsdk.Bind[v1Cfg](e2.client)
 	if err != nil {
 		t.Fatalf("Bind 失败: %v", err)
 	}
@@ -4510,7 +4510,7 @@ func TestTypeChangeBothPaths(t *testing.T) {
 		}
 	})
 
-	env2.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
+	e2.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
 		"timeout":{"type":"object","desc":"","value":{"ms":5000}}}}`)
 
 	select {
@@ -4528,7 +4528,7 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	type v2Cfg struct {
 		Timeout struct{ Ms int }
 	}
-	fresh, err := fpsdk.Bind[v2Cfg](env2.newClient(t))
+	fresh, err := fpsdk.Bind[v2Cfg](e2.newClient(t))
 	if err != nil {
 		t.Fatalf("v2 Bind 失败: %v", err)
 	}
@@ -4541,22 +4541,22 @@ func TestTypeChangeBothPaths(t *testing.T) {
 // 【辨别力】变更必须发生在断线**期间**：断线前改（重连前就拉到了）
 // 或重连后改（有 ConfigChanged 推送）都测不到这个缺口。
 func TestReadyRepullsConfigMissedWhileDisconnected(t *testing.T) {
-	env := newFullEnv(t)
-	env.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, true)
+	e := newPhase2Env(t)
+	e.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, true)
 
 	type cfgT struct{ N int }
-	cfg, err := fpsdk.Bind[cfgT](env.client)
+	cfg, err := fpsdk.Bind[cfgT](e.sdk)
 	if err != nil {
 		t.Fatalf("Bind 失败: %v", err)
 	}
 
 	// 掐断 gRPC 服务端，让 SDK 的 Watch 流断开。
-	env.stopGRPC(t)
+	e.stopFp(t)
 	// 断线**期间**改值：这次的 ConfigChanged 谁也收不到。
-	env.putConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
+	e.saveConfig(t, "DEFAULT", `{"type":"DEFAULT","push":true,"fields":{
 		"n":{"type":"int","desc":"","value":42}}}`)
 	// 重新起服务端，SDK 会退避重连并收到 ready。
-	env.startGRPC(t)
+	e.restartFp(t)
 
 	deadline := time.Now().Add(15 * time.Second) // 退避最长 30s，这里给足重试窗口
 	for time.Now().Before(deadline) {
@@ -4571,14 +4571,14 @@ func TestReadyRepullsConfigMissedWhileDisconnected(t *testing.T) {
 // 分区隔离穿到 SDK 出口。
 // 【辨别力】两个分区的值必须不同，否则"分区对了"和"压根没分区"同结果。
 func TestPartitionIsolationAtSDKBoundary(t *testing.T) {
-	env := newFullEnv(t)
-	env.saveConfig(t, "DEFAULT", `{"site.title":{"type":"string","desc":"","value":"后端"}}`, false)
-	env.saveConfig(t, "WEB", `{"site.title":{"type":"string","desc":"","value":"前端"}}`, false)
+	e := newPhase2Env(t)
+	e.saveConfig(t, "DEFAULT", `{"site.title":{"type":"string","desc":"","value":"后端"}}`, false)
+	e.saveConfig(t, "WEB", `{"site.title":{"type":"string","desc":"","value":"前端"}}`, false)
 
 	type cfgT struct{ Site siteT }
 	type siteT struct{ Title string }
 
-	cfg, err := fpsdk.Bind[cfgT](env.client)
+	cfg, err := fpsdk.Bind[cfgT](e.sdk)
 	if err != nil {
 		t.Fatalf("Bind 失败: %v", err)
 	}
@@ -4586,7 +4586,7 @@ func TestPartitionIsolationAtSDKBoundary(t *testing.T) {
 		t.Fatalf("Bind 拿到 %q，期望 后端", got)
 	}
 
-	web, err := fpsdk.BindType(env.client, "WEB")
+	web, err := fpsdk.BindType(e.sdk, "WEB")
 	if err != nil {
 		t.Fatalf("BindType 失败: %v", err)
 	}
@@ -4596,7 +4596,7 @@ func TestPartitionIsolationAtSDKBoundary(t *testing.T) {
 }
 ```
 
-**实现者注意**：`newFullEnv` / `saveConfig` / `putConfig` / `newClient` / `stopGRPC` / `startGRPC` 要写。前四个照既有集成测试的脚手架扩展；后两个需要能停掉再起一个监听同一端口的 gRPC 服务端——照 `internal/grpcapi/server_test.go` 里起服务端的方式，把 listener 的地址记下来复用。
+**实现者注意——脚手架的真实名字在 `internal/integration/phase2_env_test.go`，扩展它，不要另写一套**：<br>• `newPhase2Env(t, opts...) *phase2Env` —— 真 Postgres/Redis + 真 gRPC 服务端 + 已连上的 SDK（字段 `e.sdk`、`e.app`、`e.pool`、`e.rdb`，内嵌 `phase2Services`）<br>• `(e *phase2Env) stopFp(t)` / `restartFp(t)` —— **停掉再起一个监听同一端口的服务端，正是断线重连那条测试要的**<br>• `(e *phase2Env) dial(t, opts...) *fpsdk.Client` —— 另起一个新 SDK 连接（模拟 pod 重启）<br>• `waitUntil(t, cond, msg)` / `waitUntilTimeout(t, d, cond, msg)`<br><br>`phase2Services` 目前有 `configPub` 但**没有** `configs *service.ConfigService`——你要加上并在 `wireServices` 里装配。`saveConfig` 自己写一个薄辅助，直接调 `e.configs.Save(...)`。<br><br>**关于要不要穿过 HTTP 层**：`phase2Env` 是纯 gRPC 的，没有 HTTP 服务端。Task 8 已经有完整的 httpapi 层测试覆盖 HTTP→service，所以本任务**直接调 `e.configs.Save(...)` 即可**——这里真正没有被别处覆盖、也最容易断的那一段是 service→Redis→gRPC→SDK。若你愿意额外把 `httpapi.NewRouter` 挂进 `phase2Env` 走完整链路更好，但不是必须的，别为此耗掉主要精力。
 
 - [ ] **Step 2: 跑测试确认失败**
 
