@@ -234,18 +234,29 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("「立即推送」路径：解析失败必须触发 OnError")
 	}
+	// <-raised 只保证 OnError 已经被调用过（fpsdk.Binding[T].applySnapshot
+	// 里 raise(err) 与本测试的 channel 发送之间有 happens-before 关系）,
+	// 不保证同一个重载 goroutine 后续几行（missing 检查、DeepEqual 比较、
+	// 要不要真的换指针）也跑完了。真实实现在错误分支里 raise 之后立刻
+	// return，这段真空期是空的；但如果拿一个"raise 之后不提前 return、
+	// 继续往下换指针"的坏实现来跑，紧接着立刻读 Load() 会有实测约六成
+	// 概率抢在它完成换指针之前读到——抓获率因此从确定性的 100% 掉到
+	// 约 40%（详见任务报告"审查回合"一节）。轮询到快照连续 150ms 不再
+	// 变化，才真正等完这段真空期，而不是在一个偶然的时间点抢答。
+	final := waitStable(t, 2*time.Second, 150*time.Millisecond,
+		func() v1Cfg { return *cfg2.Load() })
 	// 【辨别力】必须断言"值还是旧的"而不只是"报了错"——一个逐字段写入、
 	// 遇错才返回的实现同样会报错，却已经把快照改坏了。只看 Timeout 不够
 	// （标量解析失败时 encoding/json 本就不会碰这个字段，任何实现都测不
 	// 出差别，见 v1Cfg 定义处的注释）：Retries 才是真正有辨别力的一半——
 	// 它按字母序排在 Timeout 之前、这次保存里也真的变了，一个非原子的
 	// 实现会先把它提交成新值 2。
-	if got := cfg2.Load().Timeout; got != 3000 {
-		t.Fatalf("「立即推送」路径：Timeout = %d，解析失败时必须保持旧值 3000", got)
+	if final.Timeout != 3000 {
+		t.Fatalf("「立即推送」路径：Timeout = %d，解析失败时必须保持旧值 3000", final.Timeout)
 	}
-	if got := cfg2.Load().Retries; got != 1 {
+	if final.Retries != 1 {
 		t.Fatalf("「立即推送」路径：Retries = %d，解析失败时必须保持旧值 1"+
-			"（哪怕 Retries 自己解析没问题）——整份快照必须原子替换", got)
+			"（哪怕 Retries 自己解析没问题）——整份快照必须原子替换", final.Retries)
 	}
 
 	// 路径二同样要能让新版本代码拿到新值（路径一的这条断言已经在创建 e2

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -386,6 +387,42 @@ func waitUntilTimeout(t *testing.T, timeout time.Duration, cond func() bool, msg
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal(msg)
+}
+
+// waitStable 轮询 get()，直到它连续 settle 这么长时间都没有变化（用
+// reflect.DeepEqual 比较相邻两次取值），返回落定后的值；超过 timeout
+// 仍未落定则以 t.Fatal 失败。
+//
+// 用途：某些回调（尤其是 OnError）在"决定要不要把新快照换上去"之前就已经
+// 同步触发——回调 fire 到测试 goroutine 从 channel 上解除阻塞之间只保证
+// "回调已经被调用过"这一件事，并不保证同一个重载 goroutine 后续几行
+// （比如 fpsdk.Binding[T].applySnapshot 里 raise(err) 之后还有的
+// missing 检查与 DeepEqual 比较）已经跑完。直接在 <-ch 之后立刻读快照，
+// 断言与"重载 goroutine 到底有没有再多做一步把快照换掉"之间就有一段没有
+// 任何同步关系的真空期——对一个正确的实现（错误分支里 raise 之后立即
+// return）这段真空期是空的，但对一个假想的错误实现（raise 之后还会继续
+// 换指针）它就是真实存在的窗口，会让测试的抓获率从确定性的 100% 掉到
+// 一个不稳定的分数。轮询到值不再变化，就是把这段真空期真正等完，而不是
+// 猜一个固定时长。
+func waitStable[T any](t *testing.T, timeout, settle time.Duration, get func() T) T {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := get()
+	stableSince := time.Now()
+	for {
+		if time.Since(stableSince) >= settle {
+			return last
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等待快照落定超时（%v 内值持续变化）", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+		cur := get()
+		if !reflect.DeepEqual(cur, last) {
+			last = cur
+			stableSince = time.Now()
+		}
+	}
 }
 
 // pubsubClientLinePattern 从一行 CLIENT LIST 输出里取 id=<数字> 与
