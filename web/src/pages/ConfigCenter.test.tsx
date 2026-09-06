@@ -182,3 +182,33 @@ test('新建配置项时值必填，留空不能创建', async () => {
   // 没有新字段被加进列表——对话框还开着、b 没有出现在页面上的其他地方。
   expect(screen.queryByLabelText('b')).toBeNull()
 })
+
+// 【终审 Important】数字字段清空后，提交上去的是 JS 空字符串 ""，不是
+// JSON null——后端 CoerceConfigValue 判"未配置"发生在去引号之前，"" 带
+// 引号长度是 2，落不进那个分支，最终解析 int64 失败。Save 是"一项转不过去
+// 就整批拒绝"，清空一个数字字段会连累同一次保存里其余字段全部不生效。
+// 这两条测试锁住前端必须先一步拦住这种情况，不能指望后端 400 才发现。
+
+test('数字字段清空后保存按钮被禁用，并显示错误提示', async () => {
+  stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
+  renderPage()
+
+  const input = await screen.findByLabelText('a')
+  fireEvent.change(input, { target: { value: '' } })
+
+  // 提示要指出"数字不能为空"，并给出正确的路径（删除配置项，不是清空）——
+  // 清空在这个 UI 里没有对应到"未配置"的语义，那个状态只来自服务端。
+  expect(await screen.findByText(/数字字段不能为空/)).toBeTruthy()
+  expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
+})
+
+test('数字字段填非法值（int 填 3.7）同样被拦，保存按钮禁用', async () => {
+  stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
+  renderPage()
+
+  const input = await screen.findByLabelText('a')
+  fireEvent.change(input, { target: { value: '3.7' } })
+
+  expect(await screen.findByText(/不是合法的整数/)).toBeTruthy()
+  expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
+})
