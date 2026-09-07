@@ -96,7 +96,7 @@ export function buildBreadcrumb(pathname: string): BreadcrumbSegment[]
 
 卡片网格下方新增 `<ApplicationSettings app={currentApp} onSaved={reload} />`（`currentApp` 非空时才渲染；应用列表为空时不渲染，只显示"还没有应用"）。
 
-新增 `src/components/ApplicationSettings.tsx`，内容是原 `ApplicationDetail.tsx` 去掉"权限点" tab 和面包屑上报 `useEffect` 之后的东西：应用名+状态徽标+停用二次确认+「基本信息／会话策略／登录方式」三个 tab（`BasicForm`/`SessionForm`/`ConnectorsPanel`，逐字保留原实现），标题行右侧的"配置中心"链接和新增的"权限管理"链接都改成不带 id 的 `/config`、`/permissions`（因为现在是全局当前应用驱动，不用再拼 id）。
+新增 `src/components/ApplicationSettings.tsx`，内容是原 `ApplicationDetail.tsx` 去掉"权限点" tab 和面包屑上报 `useEffect` 之后的东西：应用名+状态徽标+停用二次确认+「基本信息／会话策略／登录方式」三个 tab（`BasicForm`/`SessionForm`/`ConnectorsPanel`，逐字保留原实现）。原标题行右侧指向"配置中心"的那个链接直接去掉，不再保留——侧边栏已经有「权限管理」「配置中心」两个常驻一级入口，且都是读全局当前应用，在这里再放一份指向同一个目的地的链接是纯冗余，不加。
 
 ## 五、权限管理独立页
 
