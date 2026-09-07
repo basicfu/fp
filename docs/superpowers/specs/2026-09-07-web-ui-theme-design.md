@@ -66,16 +66,19 @@
 对照 `shadcn-admin` 的骨架，重写 [Layout.tsx](../../../web/src/components/Layout.tsx)：
 
 **侧边栏**
-- 顶部：产品标记（"fp"）+ 折叠按钮
-- 导航：应用 / 用户 / 角色 三项，各配一个 lucide 图标（`AppWindow` / `Users` / `ShieldCheck`），当前路由高亮
-- 折叠态：只显示图标，hover/focus 用 `tooltip`（新装 shadcn `tooltip` 组件）显示文字；折叠状态存 `localStorage`
-- 因为目前只有 3 个一级导航项，不做 shadcn-admin 那种多分组（General/Pages/Other），保持单组列表，避免过度设计
+
+用 shadcn 官方 `sidebar` 区块（`npx shadcn add sidebar`，内含 `SidebarProvider`/`Sidebar`/`SidebarHeader`/`SidebarContent`/`SidebarGroup`/`SidebarMenu`/`SidebarTrigger` 等一整套原语），不再手写 div。理由：虽然当前只有 3 个一级导航项，用户明确后续会继续加导航项，官方区块自带折叠（icon-collapsed 模式）、快捷键（Cmd/Ctrl+B）、状态持久化（cookie）、移动端 Sheet 化、`SidebarGroup` 分组能力，现在切进来能省掉后续再迁移一次的成本。
+
+- `SidebarHeader`：产品标记（"fp"）
+- `SidebarContent` 里一个 `SidebarGroup`，`SidebarMenu` 三项：应用 / 用户 / 角色，各配一个 lucide 图标（`AppWindow` / `Users` / `ShieldCheck`），当前路由高亮（`SidebarMenuButton` 的 `isActive`）；后续新增导航项直接往这个 `SidebarMenu`（或新开一个 `SidebarGroup` 分组）里加
+- 折叠由区块自带的 `collapsible="icon"` 模式处理，折叠态图标 hover 自动显示 tooltip（区块内置，不必再单独装 `tooltip` 组件）；折叠状态区块自己持久化，不用再手写 `localStorage` 逻辑
+- 顶栏或侧边栏头部放 `SidebarTrigger` 作为展开/收起按钮
 
 **顶栏**
 - 左侧：面包屑（`breadcrumb` 新组件），根据当前路由拼出层级，比如 应用 / Acme / 配置中心 / 版本历史（应用名需要从已加载的详情数据里取，取不到时退化成纯路径文案，不额外发请求）
 - 右侧：主题色切换下拉、明暗模式切换按钮、头像下拉菜单（`dropdown-menu` + `avatar` 新组件，菜单项：当前用户名（只读）、退出）
 
-**响应式**：后台以桌面使用为主，不做窄屏抽屉式侧边栏这类额外交互，保持现状的固定布局，只是内容更丰富。
+**响应式**：后台以桌面使用为主，窄屏下的抽屉式侧边栏（Sheet）是 `sidebar` 区块自带行为，直接用默认表现即可，不需要额外开发。
 
 ## 三、列表页视觉
 
@@ -85,7 +88,7 @@
 
 ## 四、需要新增的 shadcn 组件
 
-用现有 `shadcn` CLI（已是依赖）添加，风格保持 `base-nova` / neutral 一致：`dropdown-menu`、`avatar`、`breadcrumb`、`tooltip`。不引入 `sidebar` 官方区块（它自带一套更重的 Provider/Context 机制），侧边栏直接手写 div + 上述规则，量级更匹配当前只有 3 个导航项的实际需求。
+用现有 `shadcn` CLI（已是依赖）添加，风格保持 `base-nova` / neutral 一致：`sidebar`（含其依赖的 `separator`——已装、`tooltip`、`sheet`，CLI 会自动带出）、`dropdown-menu`、`avatar`、`breadcrumb`。
 
 ## 五、验证方式
 
