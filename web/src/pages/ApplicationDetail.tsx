@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { useEffect, useState } from 'react'
+import { Link, useOutletContext, useParams } from 'react-router'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -17,10 +17,19 @@ import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { applicationStatusLabels } from '@/lib/labels'
 import type { Application, SessionPolicy } from '@/lib/types'
+import type { LayoutOutletContext } from '@/components/Layout'
 
 export default function ApplicationDetail() {
   const { id = '' } = useParams()
   const app = useResource(() => api.get<Application>(`/applications/${id}`), [id])
+  // 不是所有渲染场景都套着 Layout 的 <Outlet>（比如这个文件自己的单元
+  // 测试就没有），拿不到 context 时 setCrumbLabel 是 undefined，下面全部
+  // 用 ?. 兜底，不能假设它一定存在。
+  const outlet = useOutletContext<LayoutOutletContext | undefined>()
+  useEffect(() => {
+    outlet?.setCrumbLabel(app.data?.name ?? null)
+    return () => outlet?.setCrumbLabel(null)
+  }, [outlet, app.data?.name])
   // 只有"停用"这个方向需要二次确认：它会拒绝该应用的全部新登录与 SDK 回源
   // 校验，是四个破坏性操作之一。"启用"是恢复服务，不是破坏性操作，直接执行。
   const [confirmingDisable, setConfirmingDisable] = useState(false)
