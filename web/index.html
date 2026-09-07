@@ -5,6 +5,23 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>fp 管理控制台</title>
+    <script>
+      // 在任何 CSS/JS bundle 加载前，把持久化过的配色预设写回 <html
+      // data-theme>——同步执行，避免出现"先看到默认配色、bundle 加载完
+      // 才跳到用户上次选的配色"这一下闪烁。next-themes 自己的 .dark 类
+      // 切换不需要这段脚本处理，它在 ThemeProvider 挂载时用 useLayoutEffect
+      // 同步写 class，在 CSR 应用里本来就没有 SSR 场景下那种水合闪烁问题。
+      ;(function () {
+        var KEY = 'fp-ui-theme'
+        var THEMES = ['blue', 'violet', 'emerald', 'mono']
+        var saved = null
+        try {
+          saved = localStorage.getItem(KEY)
+        } catch (e) {}
+        var theme = THEMES.indexOf(saved) !== -1 ? saved : 'blue'
+        document.documentElement.setAttribute('data-theme', theme)
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
