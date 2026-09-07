@@ -55,8 +55,6 @@
     --card-foreground: oklch(0.145 0 0);
     --popover: oklch(1 0 0);
     --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
     --secondary: oklch(0.97 0 0);
     --secondary-foreground: oklch(0.205 0 0);
     --muted: oklch(0.97 0 0);
@@ -66,8 +64,6 @@
     --destructive: oklch(0.577 0.245 27.325);
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
@@ -75,12 +71,9 @@
     --radius: 0.625rem;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
     --sidebar-accent: oklch(0.97 0 0);
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
 }
 
 .dark {
@@ -90,8 +83,6 @@
     --card-foreground: oklch(0.985 0 0);
     --popover: oklch(0.205 0 0);
     --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
     --secondary: oklch(0.269 0 0);
     --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.269 0 0);
@@ -101,20 +92,95 @@
     --destructive: oklch(0.704 0.191 22.216);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
     --sidebar-accent: oklch(0.269 0 0);
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+}
+
+[data-theme="blue"] {
+  --primary: oklch(0.546 0.215 262.9);
+  --primary-foreground: oklch(0.98 0.01 259);
+  --ring: oklch(0.546 0.215 262.9);
+  --sidebar-primary: oklch(0.546 0.215 262.9);
+  --sidebar-primary-foreground: oklch(0.98 0.01 259);
+  --sidebar-ring: oklch(0.546 0.215 262.9);
+  --chart-1: oklch(0.546 0.215 262.9);
+}
+[data-theme="blue"].dark {
+  --primary: oklch(0.72 0.16 259);
+  --primary-foreground: oklch(0.18 0.04 259);
+  --ring: oklch(0.72 0.16 259);
+  --sidebar-primary: oklch(0.72 0.16 259);
+  --sidebar-primary-foreground: oklch(0.18 0.04 259);
+  --sidebar-ring: oklch(0.72 0.16 259);
+  --chart-1: oklch(0.72 0.16 259);
+}
+
+[data-theme="violet"] {
+  --primary: oklch(0.556 0.233 293.5);
+  --primary-foreground: oklch(0.98 0.01 293);
+  --ring: oklch(0.556 0.233 293.5);
+  --sidebar-primary: oklch(0.556 0.233 293.5);
+  --sidebar-primary-foreground: oklch(0.98 0.01 293);
+  --sidebar-ring: oklch(0.556 0.233 293.5);
+  --chart-1: oklch(0.556 0.233 293.5);
+}
+[data-theme="violet"].dark {
+  --primary: oklch(0.75 0.16 293);
+  --primary-foreground: oklch(0.18 0.05 293);
+  --ring: oklch(0.75 0.16 293);
+  --sidebar-primary: oklch(0.75 0.16 293);
+  --sidebar-primary-foreground: oklch(0.18 0.05 293);
+  --sidebar-ring: oklch(0.75 0.16 293);
+  --chart-1: oklch(0.75 0.16 293);
+}
+
+[data-theme="emerald"] {
+  --primary: oklch(0.6 0.14 162.5);
+  --primary-foreground: oklch(0.98 0.01 162);
+  --ring: oklch(0.6 0.14 162.5);
+  --sidebar-primary: oklch(0.6 0.14 162.5);
+  --sidebar-primary-foreground: oklch(0.98 0.01 162);
+  --sidebar-ring: oklch(0.6 0.14 162.5);
+  --chart-1: oklch(0.6 0.14 162.5);
+}
+[data-theme="emerald"].dark {
+  --primary: oklch(0.75 0.14 162);
+  --primary-foreground: oklch(0.17 0.04 162);
+  --ring: oklch(0.75 0.14 162);
+  --sidebar-primary: oklch(0.75 0.14 162);
+  --sidebar-primary-foreground: oklch(0.17 0.04 162);
+  --sidebar-ring: oklch(0.75 0.14 162);
+  --chart-1: oklch(0.75 0.14 162);
+}
+
+/* 现有的纯灰度配色，原样保留成一个可选预设，不再是唯一的默认值。 */
+[data-theme="mono"] {
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --ring: oklch(0.708 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+}
+[data-theme="mono"].dark {
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --ring: oklch(0.556 0 0);
+  /* 原来这里的深色 --sidebar-primary 一直是 oklch(0.488 0.243 264.376)
+     ——一个和其余纯灰度变量对不上的蓝色残留值（大概率是脚手架默认主题
+     没清干净）。mono 预设要求深浅色都是纯灰度，这里一并修正。 */
+  --sidebar-primary: oklch(0.922 0 0);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
+  --sidebar-ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
 }
 
 @layer base {

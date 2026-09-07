@@ -18,3 +18,22 @@ import { cleanup } from '@testing-library/react'
 afterEach(() => {
   cleanup()
 })
+
+// jsdom 没有实现 window.matchMedia：shadcn 的 useIsMobile（sidebar 区块
+// 内部用它判断是否切到移动端 Sheet 布局）和 next-themes 在 enableSystem
+// 时都会调用它。不 mock 的话，任何渲染到 <Sidebar> 或被 <ThemeProvider>
+// 包裹的组件一测试就抛 "window.matchMedia is not a function"，报错和真正
+// 的业务逻辑毫无关系。固定返回 matches: false，等价于"不是移动端、不是
+// 深色系统偏好"，测试环境统一按桌面浅色场景走。
+if (!window.matchMedia) {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia
+}

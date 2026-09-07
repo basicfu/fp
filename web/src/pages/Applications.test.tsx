@@ -176,3 +176,16 @@ test('复制 appSecret 成功时提示已复制', async () => {
   await waitFor(() => expect(writeText).toHaveBeenCalledWith('plaintext-secret-abc'))
   expect(successSpy).toHaveBeenCalledWith('已复制')
 })
+
+test('启用状态的徽标使用绿色语义样式', async () => {
+  stubFetchSequence(new Response(JSON.stringify([sampleApp]), { status: 200 }))
+
+  render(
+    <MemoryRouter>
+      <Applications />
+    </MemoryRouter>,
+  )
+
+  const badge = await waitFor(() => screen.getByText('启用'))
+  expect(badge.className).toContain('bg-green-100')
+})
