@@ -40,15 +40,23 @@ func New(cfg Config) (*Authenticator, error) {
 	if cfg.Apps == nil {
 		return nil, errors.New("bizauth: Apps 必填")
 	}
+	c := &http.Client{}
+	if cfg.Client != nil {
+		cp := *cfg.Client // 复制而不是就地改：Client 是调用方的，不该有副作用
+		c = &cp
+	}
+	// 不跟随重定向：Go 默认会跟，且不阻止 https->http 降级；307/308 还会把
+	// 带令牌的请求体原样重放过去，配置层"verify_url 必须是 https"这条强制
+	// 就形同虚设。重定向的接口按"业务方接口配错了"处理，落到非 200 分支
+	// 回 4004 让 client 退避重连，语义正确。
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 	a := &Authenticator{
 		apps:   cfg.Apps,
-		client: cfg.Client,
+		client: c,
 		log:    cfg.Logger,
 		now:    cfg.Now,
 		cache:  newCacheSet(),
-	}
-	if a.client == nil {
-		a.client = &http.Client{}
 	}
 	if a.log == nil {
 		a.log = slog.Default()
@@ -74,7 +82,7 @@ func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (mod
 		// 你这个令牌在这里验不了。不区分是为了不泄露"哪些 app 开了什么"。
 		return model.Subject{}, auth.ErrUnauthorized
 	}
-	if sub, hit := a.cache.get(req.App, req.Token, a.now()); hit {
+	if sub, hit := a.cache.get(req.App, req.Token, cfg.BizAuth.VerifyURL, a.now()); hit {
 		return sub, nil
 	}
 
@@ -95,10 +103,15 @@ func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (mod
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		// 业务方明确说这个令牌不对，client 该去重新登录而不是重连。
+		// 排空（带上限，防止异常大的响应体）而不是直接 Close：这样底层连接
+		// 能回连接池复用，令牌过期重连是稳态高频事件，省下的是每次一次
+		// TCP+TLS 握手。
+		drainBody(resp.Body)
 		return model.Subject{}, auth.ErrUnauthorized
 	}
 	if resp.StatusCode != http.StatusOK {
 		a.log.Warn("bizauth: 业务方验证接口返回异常状态", "app", req.App, "status", resp.StatusCode)
+		drainBody(resp.Body)
 		return model.Subject{}, fmt.Errorf("%w: 业务方返回 %d", auth.ErrUnavailable, resp.StatusCode)
 	}
 
@@ -122,6 +135,13 @@ func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (mod
 	sub := model.Biz(vr.UserID)
 	// 只缓存成功的结果。失败不缓存：业务方接口恢复之后 client 应当立刻能连上，
 	// 而不是等一个负缓存过期。
-	a.cache.put(req.App, req.Token, sub, time.Duration(vr.CacheSeconds)*time.Second, cfg.BizAuth.CacheSize, a.now())
+	a.cache.put(req.App, req.Token, cfg.BizAuth.VerifyURL, sub, time.Duration(vr.CacheSeconds)*time.Second, cfg.BizAuth.CacheSize, a.now())
 	return sub, nil
+}
+
+// drainBody 排空响应体（带上限），让底层连接能回连接池复用，而不是靠
+// Close 直接丢弃连接逼一次新的 TCP+TLS 握手。上限复用 maxRespBody：
+// 业务方接口异常时可能吐出一个巨大的 body，排空不能没有边界。
+func drainBody(r io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(r, maxRespBody))
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -252,5 +254,84 @@ func TestVerifyRespectsTimeout(t *testing.T) {
 	// 否则 client 会先被握手超时踢掉，拿到的关闭码是错的。
 	if el > 2*time.Second {
 		t.Fatalf("超时没生效，耗时 %v", el)
+	}
+}
+
+// TestVerifyDoesNotFollowRedirectToPlaintext 钉住终审发现 1：业务方验证
+// 接口配置校验要求 https（令牌明文走在请求体里），但 Go 默认的 http.Client
+// 会跟随最多 10 跳重定向，且不阻止 https->http 降级；307/308 还会把带令牌
+// 的请求体原样重放到新地址。一次配错（或恶意）的 307 就能让配置层那条
+// "verify_url 必须是 https" 的强制形同虚设，静默把令牌明文发到任意主机。
+//
+// 断言两件事：明文服务端必须收到零个请求（重定向没有被跟随），且 Verify
+// 返回 ErrUnavailable（重定向的接口按"业务方接口配错了"处理，回 4004
+// 让 client 退避重连，而不是把明文主机的返回结果当成验证通过）。
+func TestVerifyDoesNotFollowRedirectToPlaintext(t *testing.T) {
+	var plaintextCalls atomic.Int64
+	plaintext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		plaintextCalls.Add(1)
+		w.Write([]byte(`{"user_id":"attacker"}`))
+	}))
+	t.Cleanup(plaintext.Close)
+
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plaintext.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+
+	a, err := New(Config{
+		Apps: apps{"a1": {
+			AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace,
+			BizAuth: &model.BizAuth{VerifyURL: redirecting.URL, Timeout: model.Duration(2 * time.Second), CacheSize: 10},
+		}},
+		// 不传 Client：用 New 自己构造的默认客户端，这正是生产环境的真实路径。
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, verr := a.Verify(context.Background(), req("a1", "tok", `{"t":"auth","app":"a1","token":"tok","kind":"biz"}`))
+	if !errors.Is(verr, auth.ErrUnavailable) {
+		t.Fatalf("不跟随重定向的接口应归入服务不可用（4004，配错了让 client 退避重连），实际 %v", verr)
+	}
+	if n := plaintextCalls.Load(); n != 0 {
+		t.Fatalf("令牌不该被明文重放到重定向目标，明文服务端却收到了 %d 次请求", n)
+	}
+}
+
+// TestVerify401DrainsBodyForConnectionReuse 钉住终审发现 2：401 分支只
+// Close 响应体没有先排空。Go 的 http.Transport 只有在响应体被读到 EOF
+// 之后才会把底层连接放回连接池；提前 Close 未读完的响应体会让连接被直接
+// 丢弃，令牌过期重连（稳态高频事件）时每次验证都多一次 TCP 握手。
+//
+// 用 httptrace 的 GotConn 钩子记录每次请求是否复用了连接：业务方对同一个
+// 令牌连续返回两次 401（各带一段非空响应体，不排空就无法判断是否读到
+// EOF），第二次请求必须复用第一次的连接。
+func TestVerify401DrainsBodyForConnectionReuse(t *testing.T) {
+	a, _, _ := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		// 非空响应体：如果只 Close 不排空，这段数据留在缓冲区里，Go 的
+		// transport 会认为这条连接状态不明而直接丢弃，不放回连接池。
+		w.Write([]byte(strings.Repeat("x", 4096)))
+	})
+
+	var reused []bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			reused = append(reused, info.Reused)
+		},
+	}
+	ctx := httptrace.WithClientTrace(context.Background(), trace)
+
+	for i := 0; i < 2; i++ {
+		if _, err := a.Verify(ctx, req("a1", "tok", `{}`)); !errors.Is(err, auth.ErrUnauthorized) {
+			t.Fatalf("第 %d 次应返回 ErrUnauthorized，实际 %v", i+1, err)
+		}
+	}
+	if len(reused) != 2 {
+		t.Fatalf("应当各建立/复用一次连接共两次记录，实际记录了 %d 次", len(reused))
+	}
+	if !reused[1] {
+		t.Fatal("第二次请求应当复用第一次的连接（响应体已排空）；未复用说明 401 分支只 Close 没排空，白白多了一次 TCP 握手")
 	}
 }

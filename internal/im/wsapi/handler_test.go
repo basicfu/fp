@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,17 +21,30 @@ import (
 
 // fakeAuth 除了按 token 查表，还要记下最后一次收到的请求，这样测试才能
 // 断言原始字节与令牌类型确实被传下来了——纯 map 做不到这一点。
+// Verify 由 handler 协程写 last，waitUntil 与随后的断言由测试协程读，
+// 中间必须有锁：本仓无 cgo 跑不了 -race，这类跨协程无同步的读写不会被
+// 工具抓到，表现为一条偶发的、看起来毫无道理的失败。
 type fakeAuth struct {
 	byToken map[string]model.Subject
+	mu      sync.Mutex
 	last    auth.VerifyRequest
 }
 
 func (a *fakeAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subject, error) {
+	a.mu.Lock()
 	a.last = req
+	a.mu.Unlock()
 	if s, ok := a.byToken[req.Token]; ok {
 		return s, nil
 	}
 	return model.Subject{}, auth.ErrUnauthorized
+}
+
+// lastSnapshot 加锁返回 last 的快照，供测试协程安全读取。
+func (a *fakeAuth) lastSnapshot() auth.VerifyRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.last
 }
 
 type fakeHandshaker struct {
@@ -192,16 +206,17 @@ func TestHandshakePassesRawFrameAndKind(t *testing.T) {
 	if err := c.Write(context.Background(), websocket.MessageText, []byte(raw)); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, func() bool { return e.auth.last.Token != "" }, "认证器应当被调用")
+	waitUntil(t, func() bool { return e.auth.lastSnapshot().Token != "" }, "认证器应当被调用")
 
-	if e.auth.last.Kind != "biz" {
-		t.Fatalf("令牌类型没传下去，实际 %q", e.auth.last.Kind)
+	last := e.auth.lastSnapshot()
+	if last.Kind != "biz" {
+		t.Fatalf("令牌类型没传下去，实际 %q", last.Kind)
 	}
-	if string(e.auth.last.Raw) != raw {
-		t.Fatalf("原始帧字节不是逐字节转发的：\n收到 %s\n期望 %s", e.auth.last.Raw, raw)
+	if string(last.Raw) != raw {
+		t.Fatalf("原始帧字节不是逐字节转发的：\n收到 %s\n期望 %s", last.Raw, raw)
 	}
-	if e.auth.last.App != "a1" {
-		t.Fatalf("app 没传下去，实际 %q", e.auth.last.App)
+	if last.App != "a1" {
+		t.Fatalf("app 没传下去，实际 %q", last.App)
 	}
 }
 
@@ -217,8 +232,8 @@ func TestHandshakeDefaultsKindToEmpty(t *testing.T) {
 	if f, err := read(t, c); err != nil || f.T != "hello" {
 		t.Fatalf("不带 kind 的握手应当成功，实际 %+v %v", f, err)
 	}
-	if e.auth.last.Kind != "" {
-		t.Fatalf("缺省的令牌类型应当是空串，实际 %q——老客户端一行不用改是这次改动的前提", e.auth.last.Kind)
+	if kind := e.auth.lastSnapshot().Kind; kind != "" {
+		t.Fatalf("缺省的令牌类型应当是空串，实际 %q——老客户端一行不用改是这次改动的前提", kind)
 	}
 }
 
