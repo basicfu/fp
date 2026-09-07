@@ -2,15 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/basicfu/fp/internal/im/config"
@@ -194,6 +200,106 @@ func TestServeDeliversFirstConnectEventAfterStartup(t *testing.T) {
 		return false
 	}, "节点刚启动就连上来的第一条连接，它的建立事件必须送达业务 server："+
 		"装配时没有对配置里的 app 预先追踪的话，这条事件会因为转发候选列表为空被静默丢弃，且永不重发")
+}
+
+// dialWS 拨一个到 wsURL 的原始 ws 连接（不经 fpim SDK），用来发送 SDK
+// 没有暴露的自定义字段（这里是 kind）。
+func dialWS(t *testing.T, wsURL string) *websocket.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// sendFrame 把 v 序列化成 JSON 文本帧发出去。
+func sendFrame(t *testing.T, c *websocket.Conn, v any) {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Write(context.Background(), websocket.MessageText, b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readFrame 读一帧并解析成 model.Frame；连接被关闭时 err 非空，
+// 调用方用 websocket.CloseStatus(err) 取关闭码。
+func readFrame(t *testing.T, c *websocket.Conn) (model.Frame, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, b, err := c.Read(ctx)
+	if err != nil {
+		return model.Frame{}, err
+	}
+	var f model.Frame
+	if uerr := json.Unmarshal(b, &f); uerr != nil {
+		t.Fatal(uerr)
+	}
+	return f, nil
+}
+
+// writeAppsFileWithBizAuth 写一份声明了 biz_auth 的 apps.json，verifyURL
+// 通常是一个自签证书的 httptest.NewTLSServer 地址。
+func writeAppsFileWithBizAuth(t *testing.T, verifyURL string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "apps.json")
+	body := `{"apps":[{"app_id":"a1","app_secret":"s1","allow_guest":true,` +
+		`"biz_auth":{"verify_url":"` + verifyURL + `"}}]}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("写 apps.json: %v", err)
+	}
+	return p
+}
+
+// TestServeWithBizAuthStartsAndDispatches 是 Task 6 装配的验收测试：配置带
+// biz_auth 时进程要能正常启动，且带 kind=biz 的握手要被路由到业务方的验证
+// 地址，而不是 fp 认证器。
+//
+// 断言刻意留在"回调确实被调用了一次"这一层，不去追究回调成功与否：假的
+// 验证服务用自签证书，配置校验又强制 HTTPS，进程侧 HTTP 客户端默认不信任
+// 自签证书，所以这次回调注定失败、握手以 4004 收尾。真正的回调成功路径由
+// bizauth 包内测试覆盖（那里可以自由注入 Client）。这里只验证装配：
+// kind=biz 有没有被送到 bizauth 而不是 fpauth。
+func TestServeWithBizAuthStartsAndDispatches(t *testing.T) {
+	var calls atomic.Int64
+	verify := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"user_id":"biz-42"}`))
+	}))
+	// 计数挂在 ConnState 而不是 handler 里：进程侧的 HTTP 客户端不信任这张
+	// 自签证书，TLS 握手会在证书校验阶段就被客户端中止（client 发一个
+	// fatal alert 后连接关闭），请求内容根本没有机会送到 handler——实测
+	// 确实如此：handler 里的计数器永远是 0，就算装配是对的。ConnState 在
+	// Accept 之后、TLS 握手之前就会触发 StateNew，能在不依赖握手成功的
+	// 前提下证明"这次握手真的把 TCP 连接打到了这个地址"。
+	verify.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			calls.Add(1)
+		}
+	}
+	verify.StartTLS()
+	defer verify.Close()
+
+	appsFile := writeAppsFileWithBizAuth(t, verify.URL)
+	_, wsURL, _, _ := startTestNode(t, testConfig(t, appsFile))
+
+	c := dialWS(t, wsURL)
+	defer c.CloseNow()
+	sendFrame(t, c, map[string]any{"t": "auth", "app": "a1", "token": "whatever", "kind": "biz"})
+
+	// 证书不被信任，所以握手最终会失败并拿到 4004。但请求确实发出去了，
+	// 这证明 cmd 里的装配把 kind=biz 路由到了 bizauth 而不是 fpauth。
+	_, err := readFrame(t, c)
+	if websocket.CloseStatus(err) != model.CloseUnavailable {
+		t.Fatalf("回调失败应当以 4004 关闭，实际 %v", err)
+	}
+	waitUntil(t, func() bool { return calls.Load() > 0 },
+		"带 kind=biz 的握手必须打到业务方的验证地址；打不到说明装配把它错误地路由给了 fp 认证器")
 }
 
 // fakeHandshaker 是 reregistrar 需要的 registry.Conns 子集的假实现。

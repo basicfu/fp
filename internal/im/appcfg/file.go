@@ -73,6 +73,20 @@ func (s *Source) Reload() error {
 		if a.GuestIPRate == 0 {
 			a.GuestIPRate = 20
 		}
+		// biz_auth 是可选的；配了才填默认值。
+		// 填充必须在 Validate 之前：Validate 要求 timeout 与 cache_size 大于零，
+		// 顺序反了的话不写这两项的配置会被自己的校验拒掉。
+		// 注意 a 是循环变量的副本，但 BizAuth 是指针：改 a.BizAuth.Timeout
+		// 改的是副本和原始 f.Apps[i] 共同指向的那个 BizAuth 结构体，这正是
+		// 这里想要的效果（下面 apps[a.AppID] = a 存的副本也能看到这次填充）。
+		if a.BizAuth != nil {
+			if a.BizAuth.Timeout <= 0 {
+				a.BizAuth.Timeout = model.Duration(2 * time.Second)
+			}
+			if a.BizAuth.CacheSize == 0 {
+				a.BizAuth.CacheSize = 10000
+			}
+		}
 		if err := a.Validate(); err != nil {
 			return err
 		}

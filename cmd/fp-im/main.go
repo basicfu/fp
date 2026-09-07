@@ -15,12 +15,14 @@ import (
 	"time"
 
 	"github.com/basicfu/fp/internal/im/appcfg"
+	"github.com/basicfu/fp/internal/im/bizauth"
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/config"
 	"github.com/basicfu/fp/internal/im/fpauth"
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/imgrpc"
 	"github.com/basicfu/fp/internal/im/model"
+	"github.com/basicfu/fp/internal/im/multiauth"
 	"github.com/basicfu/fp/internal/im/redisx"
 	"github.com/basicfu/fp/internal/im/registry"
 	"github.com/basicfu/fp/internal/im/wsapi"
@@ -133,14 +135,23 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	// 完、serve() 早已往后走了很远（起了 HTTP/gRPC 监听）之后，不存在
 	// "回调被调用时 h 还是 nil" 的窗口。
 	var h *hub.Hub
-	authn, err := fpauth.New(fpauth.Config{
+	fpAuthn, err := fpauth.New(fpauth.Config{
 		FPAddr: cfg.FPAddr, Insecure: cfg.FPInsecure, Apps: apps, Logger: log,
 		OnRevoke: func(app string, tokens []string) { h.OnRevoked(context.Background(), app, tokens) },
 	})
 	if err != nil {
 		return err
 	}
-	defer authn.Close()
+	defer fpAuthn.Close()
+
+	// 业务方认证器与 fp 认证器并列，由 multiauth 按握手帧里的令牌类型分派。
+	// 即使没有任何 app 配了 biz_auth 也照常构造：判断"这个 app 支不支持"
+	// 在 bizauth 内部按 app 配置做，比在这里按全局有无来决定更精确。
+	bizAuthn, err := bizauth.New(bizauth.Config{Apps: apps, Logger: log})
+	if err != nil {
+		return err
+	}
+	authn := multiauth.New(fpAuthn, bizAuthn)
 	h = hub.New(nodeID, conns, live, b, apps)
 
 	// 节点频道：先订阅、再登记心跳，保证别的节点看到我的心跳、开始往我的

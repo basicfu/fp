@@ -159,3 +159,45 @@ func TestOnReloadFiresOncePerSuccessfulReload(t *testing.T) {
 		t.Fatalf("重载失败不应触发回调，实际触发了 %d 次", len(seen))
 	}
 }
+
+func TestLoadFileFillsBizAuthDefaults(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "apps.json")
+	write(t, p, `{"apps":[{"app_id":"a1","app_secret":"s1","biz_auth":{"verify_url":"https://x/verify"}}]}`)
+	src, err := LoadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := src.Get("a1")
+	if a.BizAuth == nil {
+		t.Fatal("biz_auth 应当被保留")
+	}
+	if a.BizAuth.Timeout.Std() != 2*time.Second {
+		t.Fatalf("timeout 默认值应为 2s，实际 %v", a.BizAuth.Timeout.Std())
+	}
+	if a.BizAuth.CacheSize != 10000 {
+		t.Fatalf("cache_size 默认值应为 10000，实际 %d", a.BizAuth.CacheSize)
+	}
+}
+
+func TestLoadFileRejectsPlaintextVerifyURL(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "apps.json")
+	write(t, p, `{"apps":[{"app_id":"a1","app_secret":"s1","biz_auth":{"verify_url":"http://x/verify"}}]}`)
+	// 明文 http 会让所有业务方令牌暴露给中间人，必须在加载时就拒绝，
+	// 而不是等到第一次握手才发现。
+	if _, err := LoadFile(p); err == nil {
+		t.Fatal("明文 http 的 verify_url 必须在加载时被拒")
+	}
+}
+
+func TestLoadFileKeepsExplicitBizAuthValues(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "apps.json")
+	write(t, p, `{"apps":[{"app_id":"a1","app_secret":"s1","biz_auth":{"verify_url":"https://x/v","timeout":"5s","cache_size":7}}]}`)
+	src, err := LoadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := src.Get("a1")
+	if a.BizAuth.Timeout.Std() != 5*time.Second || a.BizAuth.CacheSize != 7 {
+		t.Fatalf("显式值不能被默认值覆盖，实际 timeout=%v cache_size=%d", a.BizAuth.Timeout.Std(), a.BizAuth.CacheSize)
+	}
+}
