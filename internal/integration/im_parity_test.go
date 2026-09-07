@@ -37,8 +37,15 @@ func TestImKeepalivePairing(t *testing.T) {
 // 的存在）。
 //
 // 输入覆盖：合法用户主体、合法访客主体、大写 uuid、无连字符 uuid、
-// 版本位非 4 的 uuid、未知前缀、空串——这些正是两份实现里判断逻辑分叉的
-// 关键点（Cut 是否成功、前缀是否认识、uuid 格式/大小写/版本位校验）。
+// 版本位非 4 的 uuid、未知前缀、空串、业务方主体——这些正是两份实现里
+// 判断逻辑分叉的关键点（Cut 是否成功、前缀是否认识、uuid 格式/大小写/
+// 版本位校验、业务方 id 的校验规则）。
+//
+// 业务方主体的输入集刻意不包含超长（>128 字节）或含空字节的 id：网关侧
+// model.ValidateUserID 会额外查这两项（那是给业务方回调返回值用的入口
+// 校验），sdk/im.Parse 只查非空——两边对这类输入的结论本来就不同，是
+// sdk/im/subject.go 里 KindBiz 分支注释记录过的有意差异，不是需要配对
+// 断言去抓的漂移，加进来只会让这条测试永远红。
 func TestSubjectFormatParity(t *testing.T) {
 	cases := []string{
 		"u:1001",                                 // 合法用户主体
@@ -48,6 +55,9 @@ func TestSubjectFormatParity(t *testing.T) {
 		"g:6f1c3c2e-4b1a-1d2e-9f0e-7a8b9c0d1e2f", // 版本位是 1 不是 4
 		"x:1",                                    // 未知前缀
 		"",                                       // 空串
+		"b:1001",                                 // 合法的业务方主体
+		"b:",                                     // 空 id，两边都要拒
+		"b:a-b_c",                                // 业务方的 id 不约束字符集，两边都要接受
 	}
 	for _, s := range cases {
 		a, errA := model.ParseSubject(s)
