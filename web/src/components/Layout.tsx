@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
 import type { LucideIcon } from 'lucide-react'
-import { AppWindow, LogOut, ShieldCheck, Users as UsersIcon } from 'lucide-react'
+import { AppWindow, KeyRound, LogOut, Settings, ShieldCheck, Users as UsersIcon } from 'lucide-react'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -35,13 +35,16 @@ import {
 } from '@/components/ui/sidebar'
 import ThemeColorSwitcher from '@/components/ThemeColorSwitcher'
 import ThemeModeToggle from '@/components/ThemeModeToggle'
+import AppSwitcher from '@/components/AppSwitcher'
 import { useAuth } from '@/lib/auth'
 import { buildBreadcrumb } from '@/lib/breadcrumb'
 
 const nav: { to: string; label: string; icon: LucideIcon }[] = [
-  { to: '/applications', label: '应用', icon: AppWindow },
-  { to: '/users', label: '用户', icon: UsersIcon },
-  { to: '/roles', label: '角色', icon: ShieldCheck },
+  { to: '/applications', label: '应用列表', icon: AppWindow },
+  { to: '/users', label: '用户管理', icon: UsersIcon },
+  { to: '/roles', label: '角色管理', icon: ShieldCheck },
+  { to: '/permissions', label: '权限管理', icon: KeyRound },
+  { to: '/config', label: '配置中心', icon: Settings },
 ]
 
 /** 详情类子页面（目前只有 ApplicationDetail）用它把已加载到的实体名报给面包屑。 */
@@ -70,6 +73,9 @@ export default function Layout() {
       <Sidebar collapsible="icon">
         <SidebarHeader>
           <div className="flex h-8 items-center px-2 text-lg font-semibold">fp</div>
+          <div className="group-data-[collapsible=icon]:hidden">
+            <AppSwitcher />
+          </div>
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>

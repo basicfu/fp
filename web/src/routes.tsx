@@ -10,6 +10,7 @@ import UserDetail from '@/pages/UserDetail'
 import Roles from '@/pages/Roles'
 import RoleDetail from '@/pages/RoleDetail'
 import { useAuth } from '@/lib/auth'
+import { CurrentAppProvider } from '@/lib/current-app'
 
 /**
  * RequireAuth 把未登录的访问送回登录页。
@@ -36,7 +37,9 @@ export default function AppRoutes() {
       <Route
         element={
           <RequireAuth>
-            <Layout />
+            <CurrentAppProvider>
+              <Layout />
+            </CurrentAppProvider>
           </RequireAuth>
         }
       >
