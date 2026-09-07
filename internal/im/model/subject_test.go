@@ -60,6 +60,13 @@ func TestParseSubjectBiz(t *testing.T) {
 	if _, err := ParseSubject("b:"); err == nil {
 		t.Fatal("空的业务方 id 必须被拒")
 	}
+	// ValidateUserID 还拦两种会造成问题的情况，必须通过 ParseSubject 路径测试其调用
+	if _, err := ParseSubject("b:" + strings.Repeat("x", 129)); err == nil {
+		t.Fatal("超长业务方 id 必须被拒绝：会生成超长 Redis key")
+	}
+	if _, err := ParseSubject("b:10\x0001"); err == nil {
+		t.Fatal("含空字节的业务方 id 必须被拒绝：会撞上路由表内存键的分隔符")
+	}
 }
 
 func TestValidateUserID(t *testing.T) {
