@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link } from 'react-router'
+import { useCurrentApp } from '@/lib/current-app'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -111,10 +112,14 @@ function groupFields(keys: string[]): [string, string[]][] {
 }
 
 export default function ConfigCenter() {
-  const { id = '' } = useParams()
+  const { currentApp } = useCurrentApp()
+  const id = currentApp?.id ?? ''
   const [partition, setPartition] = useState<ConfigPartition>('DEFAULT')
   const snapshot = useResource(
-    () => api.get<ConfigSnapshot>(`/applications/${id}/config?type=${partition}`),
+    () =>
+      id
+        ? api.get<ConfigSnapshot>(`/applications/${id}/config?type=${partition}`)
+        : Promise.resolve<ConfigSnapshot>({ seq: 0, fields: {} }),
     [id, partition],
   )
 
@@ -301,17 +306,16 @@ export default function ConfigCenter() {
   const groups = groupFields(Object.keys(draft))
   const hasFieldErrors = Object.keys(fieldErrors).length > 0
 
+  if (!currentApp) {
+    return <p className="text-sm text-muted-foreground">还没有应用，请先在「应用列表」创建一个。</p>
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
-        <div>
-          <Link to={`/applications/${id}`} className="text-sm text-muted-foreground underline-offset-4 hover:underline">
-            ← 返回应用详情
-          </Link>
-          <h1 className="text-xl font-semibold">配置中心</h1>
-        </div>
+        <h1 className="text-xl font-semibold">配置中心 · {currentApp.name}</h1>
         <div className="flex-1" />
-        <Button variant="outline" render={<Link to={`/applications/${id}/config/versions`} />}>
+        <Button variant="outline" render={<Link to="/config/versions" />}>
           版本历史
         </Button>
         <Button variant="outline" onClick={() => setAdding(true)}>

@@ -47,13 +47,13 @@ export default function AppRoutes() {
         <Route path="/" element={<Navigate to="/applications" replace />} />
         <Route path="/applications" element={<Applications />} />
         <Route path="/applications/:id" element={<ApplicationDetail />} />
-        <Route path="/applications/:id/config" element={<ConfigCenter />} />
-        <Route path="/applications/:id/config/versions" element={<ConfigVersions />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/roles" element={<Roles />} />
         <Route path="/roles/:id" element={<RoleDetail />} />
         <Route path="/permissions" element={<Permissions />} />
+        <Route path="/config" element={<ConfigCenter />} />
+        <Route path="/config/versions" element={<ConfigVersions />} />
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>
