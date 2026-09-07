@@ -2,7 +2,7 @@
 // `@testing-library/user-event`，但这个包**不在** package.json 的
 // devDependencies 里（`grep -rn user-event package.json package-lock.json`
 // 零匹配），加进去会违反任务里"不引入新依赖"的硬约束。改用仓库里
-// ApplicationDetail.test.tsx 已经在用的 `fireEvent`（同样来自
+// ApplicationSettings.test.tsx 已经在用的 `fireEvent`（同样来自
 // @testing-library/react，本来就是依赖）。userEvent.clear+type 在这里
 // 等价于对着同一个受控 input 触发一次 fireEvent.change 把值整个换掉。
 import { test, expect, vi, afterEach } from 'vitest'

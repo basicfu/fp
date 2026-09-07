@@ -13,7 +13,7 @@ export const statusLabels: Record<UserStatus, string> = {
 /**
  * 应用状态的中文文案。
  *
- * 【终审】之前 Applications.tsx 与 ApplicationDetail.tsx 各自内联写着
+ * 【终审】之前 Applications.tsx 与 ApplicationSettings.tsx 各自内联写着
  * `status === 'ACTIVE' ? '启用' : '停用'`，跟用户状态走的
  * `statusLabels[u.status] ?? u.status`（有兜底）是两种不同做法。内联三元
  * 的问题不是重复本身，是它没有兜底：后端将来加第三种应用状态（比如

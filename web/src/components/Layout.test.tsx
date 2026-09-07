@@ -2,7 +2,8 @@ import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import Layout from './Layout'
-import { CurrentAppProvider } from '@/lib/current-app'
+import { CurrentAppProvider, useCurrentApp } from '@/lib/current-app'
+import type { Application } from '@/lib/types'
 
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ username: 'alice', logout: vi.fn() }),
@@ -59,4 +60,57 @@ test('点击折叠按钮后侧边栏进入 collapsed 状态', () => {
   const trigger = screen.getByRole('button', { name: 'Toggle Sidebar' })
   fireEvent.click(trigger)
   expect(document.querySelector('[data-slot="sidebar"][data-state="collapsed"]')).toBeTruthy()
+})
+
+const appA: Application = {
+  id: 'app-a',
+  name: 'A应用',
+  slug: 'a',
+  appId: 'appid-a',
+  status: 'ACTIVE',
+  cookieDomain: '',
+  defaultRoleKey: '',
+  session: {
+    idleTimeoutSeconds: 1,
+    idleTimeoutMobileSeconds: 0,
+    maxLifetimeSeconds: 1,
+    rotateIntervalSeconds: 1,
+    extendIntervalSeconds: 1,
+    tokenCacheTtlSeconds: 1,
+  },
+  createdAt: 1,
+  updatedAt: 1,
+}
+const appB: Application = { ...appA, id: 'app-b', name: 'B应用', slug: 'b' }
+
+test('在切换器里选另一个应用后，路由子页面跟着显示新的当前应用', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([appA, appB]), { status: 200 })))
+
+  function Probe() {
+    const { currentApp } = useCurrentApp()
+    return <div>当前：{currentApp?.name ?? '无'}</div>
+  }
+
+  render(
+    <MemoryRouter initialEntries={['/applications']}>
+      <CurrentAppProvider>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path="/applications" element={<Probe />} />
+          </Route>
+        </Routes>
+      </CurrentAppProvider>
+    </MemoryRouter>,
+  )
+
+  await waitFor(() => expect(screen.getByText('当前：A应用')).toBeTruthy())
+
+  const trigger = screen.getByRole('combobox', { name: '切换当前应用' })
+  fireEvent.pointerDown(trigger)
+  fireEvent.click(trigger)
+  const option = await screen.findByRole('option', { name: 'B应用' })
+  fireEvent.pointerDown(option)
+  fireEvent.click(option)
+
+  await waitFor(() => expect(screen.getByText('当前：B应用')).toBeTruthy())
 })

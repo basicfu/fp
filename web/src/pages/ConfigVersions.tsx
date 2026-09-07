@@ -83,7 +83,7 @@ type RowDiff =
 type UnsetKeysResult = { known: true; keys: string[] } | { known: false }
 
 export default function ConfigVersions() {
-  const { currentApp } = useCurrentApp()
+  const { currentApp, apps, loading, error } = useCurrentApp()
   const id = currentApp?.id ?? ''
   const navigate = useNavigate()
   const [partition, setPartition] = useState<ConfigPartition>('DEFAULT')
@@ -257,9 +257,12 @@ export default function ConfigVersions() {
 
   const unsetResult: UnsetKeysResult = rollbackTarget !== null ? willUnsetKeys(rollbackTarget) : { known: true, keys: [] }
 
-  if (!currentApp) {
+  if (error) return <p className="text-sm text-destructive">{error}</p>
+  if (loading) return <p className="text-sm text-muted-foreground">加载中…</p>
+  if (apps.length === 0) {
     return <p className="text-sm text-muted-foreground">还没有应用，请先在「应用列表」创建一个。</p>
   }
+  if (!currentApp) return null
 
   return (
     <div className="space-y-6">

@@ -68,6 +68,8 @@ test('渲染应用列表', async () => {
   // 设置区里的一份（设置区也展示 slug 和状态徽标）。
   expect(screen.getAllByText('demo').length).toBeGreaterThanOrEqual(2)
   expect(screen.getAllByText('启用').length).toBeGreaterThanOrEqual(2)
+  // ACTIVE 状态的徽标要带绿色语义色，不能只是文案对了但样式跟 DISABLED 撞色。
+  expect(screen.getAllByText('启用')[0].className).toContain('bg-green-100')
 })
 
 test('空列表显示"还没有应用"提示', async () => {
