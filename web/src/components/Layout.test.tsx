@@ -1,7 +1,9 @@
+import { useEffect } from 'react'
 import { test, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useOutletContext } from 'react-router'
 import Layout from './Layout'
+import type { LayoutOutletContext } from './Layout'
 
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ username: 'alice', logout: vi.fn() }),
@@ -47,4 +49,32 @@ test('点击折叠按钮后侧边栏进入 collapsed 状态', () => {
   const trigger = screen.getByRole('button', { name: 'Toggle Sidebar' })
   fireEvent.click(trigger)
   expect(document.querySelector('[data-slot="sidebar"][data-state="collapsed"]')).toBeTruthy()
+})
+
+function Reporter({ name }: { name: string }) {
+  const outlet = useOutletContext<LayoutOutletContext | undefined>()
+  useEffect(() => {
+    // 用 setTimeout 错开一个 commit：真实的 ApplicationDetail 也是等异步请求
+    // 回来后才在单独一次 re-render 里上报名字，不会和 Layout 那个「路由变化
+    // 时重置 crumbLabel」的 effect 挤在同一次 commit 里（子先父后的 effect
+    // 顺序下，如果两者同一个 commit 触发，Layout 的重置会在 Reporter 上报
+    // 之后执行，把值又清成 null）。这里同步 setCrumbLabel 会复现那种竞态，
+    // 所以延后一拍，贴近真实场景。
+    const t = setTimeout(() => outlet?.setCrumbLabel(name))
+    return () => clearTimeout(t)
+  }, [outlet, name])
+  return <div>详情内容</div>
+}
+
+test('子页面通过 outlet context 上报的实体名会出现在面包屑里', async () => {
+  render(
+    <MemoryRouter initialEntries={['/applications/app-1']}>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path="/applications/:id" element={<Reporter name="Acme" />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  )
+  expect(await screen.findByText('Acme')).toBeTruthy()
 })

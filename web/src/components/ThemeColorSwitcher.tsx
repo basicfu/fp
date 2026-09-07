@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 export const THEME_COLORS = [
@@ -24,20 +24,22 @@ function currentTheme(): ThemeColor {
 }
 
 export default function ThemeColorSwitcher() {
-  const [theme, setThemeState] = useState<ThemeColor>(DEFAULT_THEME)
-
-  useEffect(() => {
-    setThemeState(currentTheme())
-  }, [])
+  const [theme, setThemeState] = useState<ThemeColor>(currentTheme)
 
   return (
     <Select
+      // items 让 base-ui 的 Select.Value 能把受控 value 映射回对应的中文标签；
+      // 缺了它，首次渲染（下拉还没打开过）时会直接显示 value 的原始英文值。
       items={THEME_COLORS}
       value={theme}
       onValueChange={(v) => {
         if (!isThemeColor(v)) return
         document.documentElement.setAttribute('data-theme', v)
-        localStorage.setItem(STORAGE_KEY, v)
+        try {
+          localStorage.setItem(STORAGE_KEY, v)
+        } catch {
+          // 隐私模式/配额满：不持久化，本次会话内仍然生效
+        }
         setThemeState(v)
       }}
     >

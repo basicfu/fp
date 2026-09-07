@@ -14,6 +14,7 @@ import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { formatTime } from '@/lib/format'
 import { statusLabels } from '@/lib/labels'
+import { userStatusBadgeClassName, GRAY } from '@/lib/status-badge'
 import type { LoginLog, User, UserSession } from '@/lib/types'
 
 export default function UserDetail() {
@@ -78,7 +79,7 @@ export default function UserDetail() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{u.nickname || '（未设置昵称）'}</h1>
-        <Badge variant={u.status === 'ACTIVE' ? 'default' : 'secondary'}>
+        <Badge className={userStatusBadgeClassName[u.status] ?? GRAY}>
           {statusLabels[u.status] ?? u.status}
         </Badge>
         <div className="flex-1" />

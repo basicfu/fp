@@ -14,7 +14,7 @@ import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { formatTime } from '@/lib/format'
 import { applicationStatusLabels } from '@/lib/labels'
-import { applicationStatusBadgeClassName } from '@/lib/status-badge'
+import { applicationStatusBadgeClassName, GRAY } from '@/lib/status-badge'
 import type { Application, CreateApplicationResponse } from '@/lib/types'
 
 const createSchema = z.object({
@@ -57,7 +57,7 @@ export default function Applications() {
                 <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                   <AppWindow className="size-5" />
                 </div>
-                <Badge className={applicationStatusBadgeClassName[a.status]}>
+                <Badge className={applicationStatusBadgeClassName[a.status] ?? GRAY}>
                   {applicationStatusLabels[a.status] ?? a.status}
                 </Badge>
               </div>

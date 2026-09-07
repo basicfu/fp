@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
 import type { LucideIcon } from 'lucide-react'
 import { AppWindow, LogOut, ShieldCheck, Users as UsersIcon } from 'lucide-react'
@@ -61,6 +61,9 @@ export default function Layout() {
   }, [location.pathname])
 
   const segments = buildBreadcrumb(location.pathname, crumbLabel)
+  // 避免每次 Layout 重渲染都创建新对象：否则依赖它的子页面 effect
+  // （比如 ApplicationDetail 那个）会跟着不必要地重新触发 cleanup+执行。
+  const outletContext = useMemo<LayoutOutletContext>(() => ({ setCrumbLabel }), [])
 
   return (
     <SidebarProvider>
@@ -131,9 +134,9 @@ export default function Layout() {
             </DropdownMenu>
           </div>
         </header>
-        <main className="min-w-0 flex-1 p-6">
-          <Outlet context={{ setCrumbLabel } satisfies LayoutOutletContext} />
-        </main>
+        <div className="min-w-0 flex-1 p-6">
+          <Outlet context={outletContext} />
+        </div>
       </SidebarInset>
     </SidebarProvider>
   )

@@ -16,6 +16,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { applicationStatusLabels } from '@/lib/labels'
+import { applicationStatusBadgeClassName, GRAY } from '@/lib/status-badge'
 import type { Application, SessionPolicy } from '@/lib/types'
 import type { LayoutOutletContext } from '@/components/Layout'
 
@@ -63,7 +64,7 @@ export default function ApplicationDetail() {
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <h1 className="text-xl font-semibold">{a.name}</h1>
-        <Badge variant={a.status === 'ACTIVE' ? 'default' : 'secondary'}>
+        <Badge className={applicationStatusBadgeClassName[a.status] ?? GRAY}>
           {applicationStatusLabels[a.status] ?? a.status}
         </Badge>
         <div className="flex-1" />

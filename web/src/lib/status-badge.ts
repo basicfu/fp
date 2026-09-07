@@ -5,7 +5,7 @@ import type { ApplicationStatus, UserStatus } from './types'
 const GREEN = 'border-transparent bg-green-100 text-green-800 dark:bg-green-500/15 dark:text-green-400'
 const RED = 'border-transparent bg-red-100 text-red-800 dark:bg-red-500/15 dark:text-red-400'
 const AMBER = 'border-transparent bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400'
-const GRAY = 'border-transparent bg-muted text-muted-foreground'
+export const GRAY = 'border-transparent bg-muted text-muted-foreground'
 
 export const applicationStatusBadgeClassName: Record<ApplicationStatus, string> = {
   ACTIVE: GREEN,

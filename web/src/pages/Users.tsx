@@ -12,7 +12,7 @@ import { useResource } from '@/lib/useResource'
 import { buildUserQuery, normalizePage, PAGE_SIZE } from '@/lib/query'
 import { formatTime } from '@/lib/format'
 import { statusLabels } from '@/lib/labels'
-import { userStatusBadgeClassName } from '@/lib/status-badge'
+import { userStatusBadgeClassName, GRAY } from '@/lib/status-badge'
 import type { UserListResponse, UserStatus } from '@/lib/types'
 
 const ALL = '__all__'
@@ -139,7 +139,7 @@ export default function Users() {
                       {u.identities.map((i) => `${i.type}:${i.subject}`).join('  ') || '-'}
                     </TableCell>
                     <TableCell>
-                      <Badge className={userStatusBadgeClassName[u.status]}>
+                      <Badge className={userStatusBadgeClassName[u.status] ?? GRAY}>
                         {statusLabels[u.status] ?? u.status}
                       </Badge>
                     </TableCell>
