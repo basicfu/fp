@@ -18,10 +18,16 @@ import (
 	"github.com/coder/websocket"
 )
 
-type fakeAuth map[string]model.Subject
+// fakeAuth 除了按 token 查表，还要记下最后一次收到的请求，这样测试才能
+// 断言原始字节与令牌类型确实被传下来了——纯 map 做不到这一点。
+type fakeAuth struct {
+	byToken map[string]model.Subject
+	last    auth.VerifyRequest
+}
 
-func (a fakeAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subject, error) {
-	if s, ok := a[req.Token]; ok {
+func (a *fakeAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subject, error) {
+	a.last = req
+	if s, ok := a.byToken[req.Token]; ok {
 		return s, nil
 	}
 	return model.Subject{}, auth.ErrUnauthorized
@@ -51,6 +57,7 @@ type env struct {
 	stream *hubtest.Stream
 	hs     *fakeHandshaker
 	apps   hubtest.Apps
+	auth   *fakeAuth // 让测试能断言认证器收到了什么（原始字节、令牌类型）
 }
 
 // TestNewFillsConfigDefaults 钉住 New 对零值 Config 的兜底：AuthTimeout/
@@ -93,10 +100,11 @@ func newEnv(t *testing.T, cfg Config) *env {
 	if cfg.SendQueue == 0 {
 		cfg.SendQueue = 8
 	}
-	handler := New(Deps{Hub: h, Conns: hs, Live: fakeLiveness{}, Auth: fakeAuth{"tok-1": model.User("1")}, Apps: apps, Guests: NewGuestLimiter(), Cfg: cfg})
+	fa := &fakeAuth{byToken: map[string]model.Subject{"tok-1": model.User("1")}}
+	handler := New(Deps{Hub: h, Conns: hs, Live: fakeLiveness{}, Auth: fa, Apps: apps, Guests: NewGuestLimiter(), Cfg: cfg})
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return &env{srv: srv, h: h, stream: stream, hs: hs, apps: apps}
+	return &env{srv: srv, h: h, stream: stream, hs: hs, apps: apps, auth: fa}
 }
 
 func (e *env) dial(t *testing.T) *websocket.Conn {
@@ -167,6 +175,50 @@ func TestHandshakeWithTokenThenMessageAndPing(t *testing.T) {
 	send(t, c, map[string]any{"t": "ping"})
 	if f, _ := read(t, c); f.T != "pong" {
 		t.Fatalf("ping 应回 pong，实际 %+v", f)
+	}
+}
+
+// TestHandshakePassesRawFrameAndKind 钉住 Task 5 的核心行为：握手帧的原始
+// 字节要逐字节转发给认证器，令牌类型也要一并传下去。business 验证器需要
+// 把原始字节原样 POST 给业务方，解析后再序列化会丢掉 client 塞的未知字段
+// （这里的 custom.deviceId），所以断言必须比对整条原始 JSON 字符串，而不是
+// 只比对几个已知字段。
+func TestHandshakePassesRawFrameAndKind(t *testing.T) {
+	e := newEnv(t, Config{})
+	c := e.dial(t)
+	defer c.CloseNow()
+	// 帧里故意带一个网关不认识的字段，它必须原样出现在 Raw 里
+	raw := `{"t":"auth","app":"a1","token":"tok-1","kind":"biz","custom":{"deviceId":"d-1"}}`
+	if err := c.Write(context.Background(), websocket.MessageText, []byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { return e.auth.last.Token != "" }, "认证器应当被调用")
+
+	if e.auth.last.Kind != "biz" {
+		t.Fatalf("令牌类型没传下去，实际 %q", e.auth.last.Kind)
+	}
+	if string(e.auth.last.Raw) != raw {
+		t.Fatalf("原始帧字节不是逐字节转发的：\n收到 %s\n期望 %s", e.auth.last.Raw, raw)
+	}
+	if e.auth.last.App != "a1" {
+		t.Fatalf("app 没传下去，实际 %q", e.auth.last.App)
+	}
+}
+
+// TestHandshakeDefaultsKindToEmpty 钉住向后兼容：老客户端的握手帧不带
+// kind 字段，Kind 必须是空串（由 multiauth 当成 fp 处理），不能因为这次
+// 改动而要求老客户端多传一个字段。
+func TestHandshakeDefaultsKindToEmpty(t *testing.T) {
+	e := newEnv(t, Config{})
+	c := e.dial(t)
+	defer c.CloseNow()
+	// 不带 kind 的老客户端，Kind 应当是空串，由 multiauth 当成 fp 处理
+	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "tok-1"})
+	if f, err := read(t, c); err != nil || f.T != "hello" {
+		t.Fatalf("不带 kind 的握手应当成功，实际 %+v %v", f, err)
+	}
+	if e.auth.last.Kind != "" {
+		t.Fatalf("缺省的令牌类型应当是空串，实际 %q——老客户端一行不用改是这次改动的前提", e.auth.last.Kind)
 	}
 }
 

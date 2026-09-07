@@ -85,7 +85,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(s.Cfg.MaxFrame)
 	ctx := r.Context()
 
-	af, ok := s.readAuthFrame(ctx, ws)
+	af, rawFrame, ok := s.readAuthFrame(ctx, ws)
 	if !ok {
 		_ = ws.Close(websocket.StatusCode(model.CloseAuthFailed), "auth frame")
 		return
@@ -95,7 +95,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close(websocket.StatusCode(model.CloseAuthFailed), "unknown app")
 		return
 	}
-	sub, code := s.resolveSubject(ctx, af, appCfg, clientIP(r, s.Cfg.TrustProxy))
+	sub, code := s.resolveSubject(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
 	if code != 0 {
 		_ = ws.Close(websocket.StatusCode(code), "auth")
 		return
@@ -156,7 +156,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // `if !ok { ws.Close(...) }` 分支去做——那次 Close 本身会让还卡着的
 // 后台读 goroutine 解除阻塞退出，不会泄漏，也不会有第二个协程抢着关闭
 // 同一条 ws（读 goroutine 只读不写/不关）。
-func (s *server) readAuthFrame(ctx context.Context, ws *websocket.Conn) (model.AuthFrame, bool) {
+// readAuthFrame 读第一帧并解析。第二个返回值是原始字节：业务方的验证
+// 回调要把它逐字节转发过去，client 塞的自定义字段（设备指纹之类）才能到
+// 业务方手里；解析后再重新序列化会丢掉网关不认识的字段，所以这里必须
+// 把 ws.Read 读到的那份字节原样带出去，不能在别处重新 Marshal 一份。
+func (s *server) readAuthFrame(ctx context.Context, ws *websocket.Conn) (model.AuthFrame, []byte, bool) {
 	type result struct {
 		data []byte
 		err  error
@@ -170,25 +174,26 @@ func (s *server) readAuthFrame(ctx context.Context, ws *websocket.Conn) (model.A
 	select {
 	case r := <-done:
 		if r.err != nil {
-			return model.AuthFrame{}, false
+			return model.AuthFrame{}, nil, false
 		}
 		var af model.AuthFrame
 		// 握手帧必须带 app：fp 签发的 token 不透明，没有 claim，网关要先知道
 		// 用哪个 app 的凭据去验它，缺 app 直接拒。
 		if json.Unmarshal(r.data, &af) != nil || af.T != model.FrameAuth || af.App == "" {
-			return model.AuthFrame{}, false
+			return model.AuthFrame{}, nil, false
 		}
-		return af, true
+		return af, r.data, true
 	case <-time.After(s.Cfg.AuthTimeout):
-		return model.AuthFrame{}, false
+		return model.AuthFrame{}, nil, false
 	}
 }
 
-// resolveSubject 返回 subject，或非零的关闭码。
-func (s *server) resolveSubject(ctx context.Context, af model.AuthFrame, cfg model.AppConfig, ip string) (model.Subject, int) {
+// resolveSubject 返回 subject，或非零的关闭码。raw 是 readAuthFrame 读到的
+// 原始帧字节，只有走 token 分支时才会用到；访客分支不经过认证器，用不上它。
+func (s *server) resolveSubject(ctx context.Context, af model.AuthFrame, raw []byte, cfg model.AppConfig, ip string) (model.Subject, int) {
 	switch {
 	case af.Token != "":
-		sub, err := s.Auth.Verify(ctx, auth.VerifyRequest{App: af.App, Kind: af.Kind, Token: af.Token})
+		sub, err := s.Auth.Verify(ctx, auth.VerifyRequest{App: af.App, Kind: af.Kind, Token: af.Token, Raw: raw})
 		if errors.Is(err, auth.ErrUnavailable) {
 			return model.Subject{}, model.CloseUnavailable
 		}
