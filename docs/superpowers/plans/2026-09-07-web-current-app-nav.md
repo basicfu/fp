@@ -1016,7 +1016,7 @@ function SessionForm({ app, onSaved }: { app: Application; onSaved: () => void }
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd web && npx vitest run src/components/ApplicationSettings.test.tsx`
-Expected: PASS（6 个用例全绿）。
+Expected: PASS（5 个用例全绿）。
 
 - [ ] **Step 5: 类型检查 + 全量测试**
 
