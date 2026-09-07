@@ -21,6 +21,12 @@ type SubjectKind string
 const (
 	KindUser  SubjectKind = "u"
 	KindGuest SubjectKind = "g"
+	// KindBiz 是业务方自己的认证体系里的用户。与 KindUser 分开，是为了让
+	// fp 的用户 1001 和业务方的用户 1001 在网关的 Redis key 上天然隔离。
+	// 这份定义与 internal/im/model 的那份必须逐字一致，由
+	// internal/integration 的配对测试守着——sdk 不能 import internal，
+	// 所以这个重复是架构约束下的必然。
+	KindBiz SubjectKind = "b"
 )
 
 // Subject 是一条连接归属的主体。同一 Subject 可以有多条连接（多终端）。
@@ -31,6 +37,7 @@ type Subject struct {
 
 func User(id string) Subject  { return Subject{Kind: KindUser, ID: id} }
 func Guest(id string) Subject { return Subject{Kind: KindGuest, ID: id} }
+func Biz(id string) Subject   { return Subject{Kind: KindBiz, ID: id} }
 
 func (s Subject) String() string { return string(s.Kind) + ":" + s.ID }
 
@@ -51,6 +58,15 @@ func Parse(s string) (Subject, error) {
 			return Subject{}, fmt.Errorf("%w: 访客 id 不是 uuid v4: %q", ErrBadSubject, id)
 		}
 		return Guest(id), nil
+	case KindBiz:
+		// 只校验非空，不像网关侧 ValidateUserID 那样再查长度与空字节：
+		// 那是给"业务方回调返回的值"用的入口校验，这里解析的是网关已经
+		// 发下来的主体串，网关不会发出非法值。128 字节以内且不含空字节
+		// 的输入在两边行为相同，配对测试的输入集也只覆盖这一范围。
+		if id == "" {
+			return Subject{}, fmt.Errorf("%w: 业务方 id 不能为空", ErrBadSubject)
+		}
+		return Biz(id), nil
 	}
 	return Subject{}, fmt.Errorf("%w: 未知前缀 %q", ErrBadSubject, kind)
 }

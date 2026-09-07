@@ -32,6 +32,19 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseBizSubject(t *testing.T) {
+	got, err := Parse("b:1001")
+	if err != nil {
+		t.Fatalf("合法的业务方主体被拒：%v", err)
+	}
+	if got != Biz("1001") || got.String() != "b:1001" {
+		t.Fatalf("Parse(\"b:1001\")=%+v String()=%q", got, got.String())
+	}
+	if _, err := Parse("b:"); err == nil {
+		t.Fatal("空的业务方 id 必须被拒")
+	}
+}
+
 func TestIsUUIDv4(t *testing.T) {
 	if !IsUUIDv4("6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f") {
 		t.Fatal("合法 v4 被拒")

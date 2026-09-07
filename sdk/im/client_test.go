@@ -369,6 +369,38 @@ func TestClientGaveUpFalseWhileHealthyAndAfterClose(t *testing.T) {
 	}
 }
 
+// TestDialSendsTokenKind 覆盖 Kind: TokenKindBiz 时握手帧真的带上了
+// kind: "biz"——网关侧靠这个字段决定走 fp 认证还是业务方回调，字段名/值
+// 拼错网关会直接按缺省当成 fp 处理，业务方令牌就会被错误地送去 fp 认证。
+func TestDialSendsTokenKind(t *testing.T) {
+	f, url := newFake(t)
+	c, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok", Kind: TokenKindBiz})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	auths := f.authsSnapshot()
+	if len(auths) != 1 || auths[0]["kind"] != "biz" {
+		t.Fatalf("握手帧里的令牌类型不对：%v", auths)
+	}
+}
+
+// TestDialOmitsKindWhenEmpty 覆盖不设 Kind 时握手帧里根本不带 kind 这个
+// 键（而不是带一个空串）：多发一个无意义的键会在抓包/日志里造成噪音，
+// 且让"缺省当成 fp"这条契约变得不那么直观。
+func TestDialOmitsKindWhenEmpty(t *testing.T) {
+	f, url := newFake(t)
+	c, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	auths := f.authsSnapshot()
+	if _, present := auths[0]["kind"]; present {
+		t.Fatalf("没设类型时不该发 kind 字段，实际 %v", auths[0])
+	}
+}
+
 // waitUntilTrue 轮询等待条件成立，超时即失败。
 func waitUntilTrue(t *testing.T, cond func() bool, msg string) {
 	t.Helper()

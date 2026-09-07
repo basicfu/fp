@@ -46,6 +46,12 @@ const (
 	CloseBackpressure = 1013
 )
 
+// 握手帧里的令牌类型。空表示 fp，与服务端的缺省一致。
+const (
+	TokenKindFP  = "fp"
+	TokenKindBiz = "biz"
+)
+
 // PingInterval 是 client 在一条已建立的连接上发心跳帧的间隔。
 //
 // 它与网关的空闲超时（FP_IM_CONN_IDLE_TIMEOUT，默认 60 秒）是一对配对
@@ -79,6 +85,9 @@ type ClientConfig struct {
 	// 生成并持久化。
 	Token string
 	Guest string
+	// Kind 声明 Token 是哪一种。留空表示 fp 签发的令牌。
+	// 业务方自己签发的令牌填 TokenKindBiz，网关会回调该应用配置里的验证地址。
+	Kind string
 	// UA / OS / Mobile 是设备标识，进网关的 hub 事件供业务方观测。OS 留空
 	// 时网关会从 UA 反推，两者都可以只给一个。
 	UA     string
@@ -238,6 +247,9 @@ func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
 		auth["token"] = c.cfg.Token
 	} else {
 		auth["guest"] = c.cfg.Guest
+	}
+	if c.cfg.Kind != "" {
+		auth["kind"] = c.cfg.Kind
 	}
 	if c.cfg.UA != "" {
 		auth["ua"] = c.cfg.UA
