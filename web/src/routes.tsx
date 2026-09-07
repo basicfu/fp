@@ -2,7 +2,6 @@ import { Navigate, Route, Routes } from 'react-router'
 import Layout from '@/components/Layout'
 import Login from '@/pages/Login'
 import Applications from '@/pages/Applications'
-import ApplicationDetail from '@/pages/ApplicationDetail'
 import ConfigCenter from '@/pages/ConfigCenter'
 import ConfigVersions from '@/pages/ConfigVersions'
 import Users from '@/pages/Users'
@@ -46,7 +45,6 @@ export default function AppRoutes() {
       >
         <Route path="/" element={<Navigate to="/applications" replace />} />
         <Route path="/applications" element={<Applications />} />
-        <Route path="/applications/:id" element={<ApplicationDetail />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/roles" element={<Roles />} />
