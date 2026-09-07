@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
+import { Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -11,6 +12,7 @@ import { useResource } from '@/lib/useResource'
 import { buildUserQuery, normalizePage, PAGE_SIZE } from '@/lib/query'
 import { formatTime } from '@/lib/format'
 import { statusLabels } from '@/lib/labels'
+import { userStatusBadgeClassName } from '@/lib/status-badge'
 import type { UserListResponse, UserStatus } from '@/lib/types'
 
 const ALL = '__all__'
@@ -74,13 +76,16 @@ export default function Users() {
           变回旧值时，effect 把 keywordInput 更新回去，输入框跟着回填，
           节点同样没有被卸载重挂过。
         */}
-        <Input
-          name="keyword"
-          value={keywordInput}
-          onChange={(e) => setKeywordInput(e.target.value)}
-          placeholder="手机号 / 用户名 / 昵称"
-          className="w-64"
-        />
+        <div className="relative w-64">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            name="keyword"
+            value={keywordInput}
+            onChange={(e) => setKeywordInput(e.target.value)}
+            placeholder="手机号 / 用户名 / 昵称"
+            className="w-64 pl-8"
+          />
+        </div>
         <Button type="submit" variant="secondary">搜索</Button>
 
         <Select
@@ -134,7 +139,7 @@ export default function Users() {
                       {u.identities.map((i) => `${i.type}:${i.subject}`).join('  ') || '-'}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={u.status === 'ACTIVE' ? 'default' : 'secondary'}>
+                      <Badge className={userStatusBadgeClassName[u.status]}>
                         {statusLabels[u.status] ?? u.status}
                       </Badge>
                     </TableCell>
