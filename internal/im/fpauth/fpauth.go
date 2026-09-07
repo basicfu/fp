@@ -75,12 +75,12 @@ func (a *Authenticator) client(app string) (*fpsdk.Client, error) {
 	return c, nil
 }
 
-func (a *Authenticator) Verify(ctx context.Context, app, token string) (model.Subject, error) {
-	c, err := a.client(app)
+func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (model.Subject, error) {
+	c, err := a.client(req.App)
 	if err != nil {
 		return model.Subject{}, err
 	}
-	id, err := c.Auth().Validate(ctx, token)
+	id, err := c.Auth().Validate(ctx, req.Token)
 	if err != nil {
 		return model.Subject{}, translate(err)
 	}

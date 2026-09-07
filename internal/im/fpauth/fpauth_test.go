@@ -20,7 +20,7 @@ func TestUnknownAppIsUnauthorized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Verify(context.Background(), "nope", "tok"); !errors.Is(err, auth.ErrUnauthorized) {
+	if _, err := a.Verify(context.Background(), auth.VerifyRequest{App: "nope", Token: "tok"}); !errors.Is(err, auth.ErrUnauthorized) {
 		t.Fatalf("未配置的 app 应 ErrUnauthorized，实际 %v", err)
 	}
 }
@@ -54,7 +54,7 @@ func TestVerifyAfterCloseDoesNotRebuildClient(t *testing.T) {
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Verify(context.Background(), "a1", "tok"); !errors.Is(err, auth.ErrUnavailable) {
+	if _, err := a.Verify(context.Background(), auth.VerifyRequest{App: "a1", Token: "tok"}); !errors.Is(err, auth.ErrUnavailable) {
 		t.Fatalf("Close 之后 Verify 应返回 ErrUnavailable，实际 %v", err)
 	}
 	a.mu.Lock()

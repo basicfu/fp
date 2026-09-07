@@ -20,8 +20,8 @@ import (
 
 type fakeAuth map[string]model.Subject
 
-func (a fakeAuth) Verify(_ context.Context, _, token string) (model.Subject, error) {
-	if s, ok := a[token]; ok {
+func (a fakeAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subject, error) {
+	if s, ok := a[req.Token]; ok {
 		return s, nil
 	}
 	return model.Subject{}, auth.ErrUnauthorized

@@ -188,7 +188,7 @@ func (s *server) readAuthFrame(ctx context.Context, ws *websocket.Conn) (model.A
 func (s *server) resolveSubject(ctx context.Context, af model.AuthFrame, cfg model.AppConfig, ip string) (model.Subject, int) {
 	switch {
 	case af.Token != "":
-		sub, err := s.Auth.Verify(ctx, af.App, af.Token)
+		sub, err := s.Auth.Verify(ctx, auth.VerifyRequest{App: af.App, Kind: af.Kind, Token: af.Token})
 		if errors.Is(err, auth.ErrUnavailable) {
 			return model.Subject{}, model.CloseUnavailable
 		}

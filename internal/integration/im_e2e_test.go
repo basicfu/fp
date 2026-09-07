@@ -31,8 +31,8 @@ import (
 // fpauth 包自己的单元测试的职责。
 type staticAuth map[string]model.Subject
 
-func (a staticAuth) Verify(_ context.Context, _, token string) (model.Subject, error) {
-	if s, ok := a[token]; ok {
+func (a staticAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subject, error) {
+	if s, ok := a[req.Token]; ok {
 		return s, nil
 	}
 	return model.Subject{}, auth.ErrUnauthorized
