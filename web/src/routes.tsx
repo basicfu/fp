@@ -9,6 +9,7 @@ import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import Roles from '@/pages/Roles'
 import RoleDetail from '@/pages/RoleDetail'
+import Permissions from '@/pages/Permissions'
 import { useAuth } from '@/lib/auth'
 import { CurrentAppProvider } from '@/lib/current-app'
 
@@ -52,6 +53,7 @@ export default function AppRoutes() {
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/roles" element={<Roles />} />
         <Route path="/roles/:id" element={<RoleDetail />} />
+        <Route path="/permissions" element={<Permissions />} />
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>
