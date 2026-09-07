@@ -64,13 +64,22 @@ const (
 	FramePong  = "pong"
 )
 
+// 握手帧里的令牌类型。缺省（空串）视为 fp，所以老客户端一行不用改。
+const (
+	TokenKindFP  = "fp"
+	TokenKindBiz = "biz"
+)
+
 // AuthFrame 是 client 连接后的第一帧。App 必须给：fp 的 token 是不透明的，
 // im 要先知道用哪个 app 的凭据去 fp 验它。
 type AuthFrame struct {
-	T      string `json:"t"`
-	App    string `json:"app"`
-	Token  string `json:"token,omitempty"`
-	Guest  string `json:"guest,omitempty"`
+	T     string `json:"t"`
+	App   string `json:"app"`
+	Token string `json:"token,omitempty"`
+	Guest string `json:"guest,omitempty"`
+	// Kind 决定这个 token 送去哪个验证器。空或 "fp" 走 fp，"biz" 走业务方回调。
+	// 客户端可以乱填，但那不构成安全边界：类型只决定送到哪儿验，不决定是否放行。
+	Kind   string `json:"kind,omitempty"`
 	UA     string `json:"ua,omitempty"`
 	OS     string `json:"os,omitempty"`
 	Mobile *bool  `json:"mobile,omitempty"`
