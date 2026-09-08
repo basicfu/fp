@@ -1,0 +1,52 @@
+# fp-im 启动配置。复制成 config-im.yaml 后填入真实值——config-im.yaml 含
+# 密钥，已在 .gitignore 里，不会被提交。
+#
+# 二进制默认读 ./config-im.yaml，用 -c 指定别的路径：
+#   ./fp-im -c /etc/fp/config-im.yaml
+#
+# fp-im 强制依赖 fp（它必须连 fp 的 gRPC 验 token），但这份配置完全独立于
+# config.yaml：不引用、不继承它的任何默认值。想跟 fp 共用一个 Redis，就把
+# 同一条 URL 抄到下面 redis.url。
+
+env: dev                       # dev / prod，大小写不敏感
+
+log:
+  level: info                  # debug / info / warn / error
+
+http:
+  addr: ":8081"                # client 的 WebSocket 接入
+  # 前面确实有可信反代时才开：开启后访客限流的 IP 取 X-Forwarded-For 的
+  # 最右一跳。开在裸奔的服务上等于让客户端自己声明 IP。
+  trust_proxy: false
+grpc:
+  addr: ":9091"                # 业务 server 接入
+
+redis:
+  url: redis://:password@127.0.0.1:6379/0
+
+# fp SDK 的连接参数。addr 是 fp 的 gRPC 地址，不是 HTTP。
+#
+# 没有 insecure 开关：传输安全由上面的 env 推导——dev 明文，prod 走 TLS。
+# 【部署硬要求】fp 的 gRPC 服务端目前只服务明文，所以 env: prod 下这条 TLS
+# 必须由 fp 前面的反代 / 网关终结。
+fpsdk:
+  addr: localhost:9090
+
+# 接入应用清单。除 app_id/app_secret 外都有默认值，10 秒检测 mtime 热更新，
+# 坏文件保留旧配置。格式见 docs/im.md。
+apps_file: ./tmp/im-apps.json
+
+node:
+  heartbeat: 3s
+  dead_after: 10s              # 必须大于 heartbeat
+
+conn:
+  field_ttl: 30m               # 必须 >= 1s（会被换算成整秒传给 Redis HEXPIRE）
+  field_renew: 10m             # 必须小于 field_ttl 的一半
+  idle_timeout: 60s            # 必须 >= 50s（client SDK 每 25 秒发一次心跳）
+  auth_timeout: 5s             # 握手帧的等待上限
+  send_queue: 256
+
+pipeline:
+  flush_interval: 0s           # 0s = 不合批
+  flush_size: 1                # > 1 时必须同时设 flush_interval

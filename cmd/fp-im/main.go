@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -47,11 +48,14 @@ func main() {
 // 分配到的端口、能用一个自己可以取消的 ctx 触发优雅关闭——这三件事正是
 // run 与 serve 的分界线。
 func run() error {
-	cfg, err := config.Load()
+	cfgPath := flag.String("c", config.DefaultPath, "配置文件路径")
+	flag.Parse()
+
+	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
 	}
-	log := logging.Setup(cfg.LogLevel)
+	log := logging.Setup(cfg.Log.Level)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serve(ctx, cfg, log, serveOptions{})
@@ -91,12 +95,12 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 		nodeID = model.NewNodeID(host, os.Getpid(), time.Now())
 	}
 
-	rdb, mode, err := redisx.Open(ctx, cfg.RedisURL)
+	rdb, mode, err := redisx.Open(ctx, cfg.Redis.URL)
 	if err != nil {
 		return err
 	}
 	defer rdb.Close()
-	runner, err := redisx.NewRunner(rdb, cfg.Pipeline.FlushInterval, cfg.Pipeline.FlushSize)
+	runner, err := redisx.NewRunner(rdb, cfg.Pipeline.FlushInterval.Std(), cfg.Pipeline.FlushSize)
 	if err != nil {
 		return err
 	}
@@ -107,8 +111,8 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 		return err
 	}
 
-	live := registry.NewLiveness(rdb, nodeID, cfg.Node.Heartbeat, cfg.Node.DeadAfter)
-	conns := registry.NewConns(rdb, runner, cfg.Conn.FieldTTL)
+	live := registry.NewLiveness(rdb, nodeID, cfg.Node.Heartbeat.Std(), cfg.Node.DeadAfter.Std())
+	conns := registry.NewConns(rdb, runner, cfg.Conn.FieldTTL.Std())
 	b := bus.New(rdb, runner)
 
 	// 甲一：装配时就把配置里的每个 app 加进 srv 表的追踪集合，位置必须在
@@ -136,7 +140,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	// "回调被调用时 h 还是 nil" 的窗口。
 	var h *hub.Hub
 	fpAuthn, err := fpauth.New(fpauth.Config{
-		FPAddr: cfg.FPAddr, Insecure: cfg.FPInsecure, Apps: apps, Logger: log,
+		FPAddr: cfg.FPSDK.Addr, Insecure: cfg.Insecure(), Apps: apps, Logger: log,
 		OnRevoke: func(app string, tokens []string) { h.OnRevoked(context.Background(), app, tokens) },
 	})
 	if err != nil {
@@ -182,28 +186,28 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 		return fmt.Errorf("首次存活视图刷新失败: %w", err)
 	}
 	go live.Run(ctx)
-	go renewLoop(ctx, h, conns, cfg.Conn.FieldRenew)
+	go renewLoop(ctx, h, conns, cfg.Conn.FieldRenew.Std())
 	guests := wsapi.NewGuestLimiter()
 	go sweepLoop(ctx, guests)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsapi.New(wsapi.Deps{
 		Hub: h, Conns: conns, Live: live, Auth: authn, Apps: apps, Guests: guests,
-		Cfg: wsapi.Config{AuthTimeout: cfg.Conn.AuthTimeout, IdleTimeout: cfg.Conn.IdleTimeout, SendQueue: cfg.Conn.SendQueue, TrustProxy: cfg.TrustProxy},
+		Cfg: wsapi.Config{AuthTimeout: cfg.Conn.AuthTimeout.Std(), IdleTimeout: cfg.Conn.IdleTimeout.Std(), SendQueue: cfg.Conn.SendQueue, TrustProxy: cfg.HTTP.TrustProxy},
 	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}
+	httpSrv := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	grpcSrv := imgrpc.New(imgrpc.Deps{Hub: h, Apps: apps})
 	// HTTP 与 gRPC 都先显式 net.Listen 再 Serve，而不是用
 	// httpSrv.ListenAndServe：端口配成 :0 时只有监听建立之后才知道操作
 	// 系统分配了哪个端口，测试要连上来就必须能读到真实地址（opt.ready）。
 	// 顺带把"端口被占用"这类错误变成 serve 的同步返回值，而不是从一个
 	// 后台 goroutine 里异步冒出来。
-	httpLis, err := net.Listen("tcp", cfg.HTTPAddr)
+	httpLis, err := net.Listen("tcp", cfg.HTTP.Addr)
 	if err != nil {
 		return err
 	}
-	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
+	grpcLis, err := net.Listen("tcp", cfg.GRPC.Addr)
 	if err != nil {
 		httpLis.Close()
 		return err

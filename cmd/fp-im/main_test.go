@@ -62,38 +62,42 @@ func writeAppsFile(t *testing.T) string {
 }
 
 // testConfig 构造一份指向测试 Redis、端口全交给操作系统分配的配置。
-// 不走 config.Load：那条路径读环境变量，测试要在同一个进程里起两个配置
-// 不同的节点，改环境变量既不并发安全也说不清楚。
+// 不走 config.Load：那条路径读一个 YAML 文件，测试要在同一个进程里起两个
+// 配置不同的节点，为此各写一个临时文件只是把结构体字面量绕了一圈。
 func testConfig(t *testing.T, appsFile string) *config.Config {
 	t.Helper()
 	url := os.Getenv("FP_TEST_REDIS_URL")
 	if url == "" {
 		t.Fatal("缺少 FP_TEST_REDIS_URL，请用 ./scripts/test.sh 跑测试")
 	}
-	c := &config.Config{
-		Env:      "TEST",
-		HTTPAddr: "127.0.0.1:0",
-		GRPCAddr: "127.0.0.1:0",
-		RedisURL: url,
+	return &config.Config{
+		// dev 而不是 prod：Insecure() 由它推导，下面那个必然不通的地址
+		// 也就不会去要求 TLS。
+		Env:      "dev",
+		Log:      config.Log{Level: "warn"},
+		HTTP:     config.HTTP{Addr: "127.0.0.1:0"},
+		GRPC:     config.Listen{Addr: "127.0.0.1:0"},
+		Redis:    config.Endpoint{URL: url},
+		AppsFile: appsFile,
 		// 访客握手不会走到 Authenticator，这个地址永远不会被真的拨号；
 		// 但 fpauth.New 要求非空，所以给一个必然不通的地址，万一哪天真的
 		// 被拨了，失败会立刻暴露而不是悄悄连上别的东西。
-		FPAddr:     "127.0.0.1:1",
-		FPInsecure: true,
-		AppsFile:   appsFile,
-		LogLevel:   "warn",
+		FPSDK: config.FPSDK{Addr: "127.0.0.1:1"},
+		// 心跳 200ms（而不是生产的 3 秒）：测试里要等的传播延迟就是心跳周期
+		// 本身，取生产值只会把每条测试拖慢十几倍。
+		Node: config.Node{
+			Heartbeat: config.Duration(200 * time.Millisecond),
+			DeadAfter: config.Duration(2 * time.Second),
+		},
+		Conn: config.Conn{
+			FieldTTL:    config.Duration(30 * time.Minute),
+			FieldRenew:  config.Duration(10 * time.Minute),
+			IdleTimeout: config.Duration(60 * time.Second),
+			AuthTimeout: config.Duration(2 * time.Second),
+			SendQueue:   64,
+		},
+		Pipeline: config.Pipeline{FlushSize: 1},
 	}
-	// 心跳 200ms（而不是生产的 3 秒）：测试里要等的传播延迟就是心跳周期
-	// 本身，取生产值只会把每条测试拖慢十几倍。
-	c.Node.Heartbeat = 200 * time.Millisecond
-	c.Node.DeadAfter = 2 * time.Second
-	c.Conn.FieldTTL = 30 * time.Minute
-	c.Conn.FieldRenew = 10 * time.Minute
-	c.Conn.IdleTimeout = 60 * time.Second
-	c.Conn.AuthTimeout = 2 * time.Second
-	c.Conn.SendQueue = 64
-	c.Pipeline.FlushSize = 1
-	return c
 }
 
 // nodeIDCounter 保证同一个测试进程里起的节点标识互不相同。
