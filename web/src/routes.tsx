@@ -2,14 +2,15 @@ import { Navigate, Route, Routes } from 'react-router'
 import Layout from '@/components/Layout'
 import Login from '@/pages/Login'
 import Applications from '@/pages/Applications'
-import ApplicationDetail from '@/pages/ApplicationDetail'
 import ConfigCenter from '@/pages/ConfigCenter'
 import ConfigVersions from '@/pages/ConfigVersions'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import Roles from '@/pages/Roles'
 import RoleDetail from '@/pages/RoleDetail'
+import Permissions from '@/pages/Permissions'
 import { useAuth } from '@/lib/auth'
+import { CurrentAppProvider } from '@/lib/current-app'
 
 /**
  * RequireAuth 把未登录的访问送回登录页。
@@ -36,19 +37,21 @@ export default function AppRoutes() {
       <Route
         element={
           <RequireAuth>
-            <Layout />
+            <CurrentAppProvider>
+              <Layout />
+            </CurrentAppProvider>
           </RequireAuth>
         }
       >
         <Route path="/" element={<Navigate to="/applications" replace />} />
         <Route path="/applications" element={<Applications />} />
-        <Route path="/applications/:id" element={<ApplicationDetail />} />
-        <Route path="/applications/:id/config" element={<ConfigCenter />} />
-        <Route path="/applications/:id/config/versions" element={<ConfigVersions />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/roles" element={<Roles />} />
         <Route path="/roles/:id" element={<RoleDetail />} />
+        <Route path="/permissions" element={<Permissions />} />
+        <Route path="/config" element={<ConfigCenter />} />
+        <Route path="/config/versions" element={<ConfigVersions />} />
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>

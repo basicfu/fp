@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -97,9 +96,7 @@ export default function UserRolesCard({ userId }: { userId: string }) {
             {defaults.map((a, i) => (
               <span key={a.id}>
                 {i > 0 && '、'}
-                <Link to={`/applications/${a.id}`} className="underline-offset-4 hover:underline">
-                  {a.name}
-                </Link>
+                <span>{a.name}</span>
                 <span className="font-mono"> {a.defaultRoleKey}</span>
               </span>
             ))}

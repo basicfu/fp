@@ -2,14 +2,16 @@
 // `@testing-library/user-event`，但这个包**不在** package.json 的
 // devDependencies 里（`grep -rn user-event package.json package-lock.json`
 // 零匹配），加进去会违反任务里"不引入新依赖"的硬约束。改用仓库里
-// ApplicationDetail.test.tsx 已经在用的 `fireEvent`（同样来自
+// ApplicationSettings.test.tsx 已经在用的 `fireEvent`（同样来自
 // @testing-library/react，本来就是依赖）。userEvent.clear+type 在这里
 // 等价于对着同一个受控 input 触发一次 fireEvent.change 把值整个换掉。
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter } from 'react-router'
 import ConfigCenter from './ConfigCenter'
-import type { ConfigSnapshot } from '@/lib/types'
+import { CurrentAppContext } from '@/lib/current-app'
+import type { CurrentAppValue } from '@/lib/current-app'
+import type { Application, ConfigSnapshot } from '@/lib/types'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -44,12 +46,50 @@ function stubConfigCapturingUrls(urls: string[]) {
   return fn
 }
 
+const fixedApp: Application = {
+  id: 'app-1',
+  name: '固定应用',
+  slug: 'fixed',
+  appId: 'appid-1',
+  status: 'ACTIVE',
+  cookieDomain: '',
+  defaultRoleKey: '',
+  session: {
+    idleTimeoutSeconds: 1,
+    idleTimeoutMobileSeconds: 0,
+    maxLifetimeSeconds: 1,
+    rotateIntervalSeconds: 1,
+    extendIntervalSeconds: 1,
+    tokenCacheTtlSeconds: 1,
+  },
+  createdAt: 1,
+  updatedAt: 1,
+}
+
+/**
+ * ConfigCenter 现在从全局"当前应用"读 appId，不再走路由参数。直接塞一个
+ * 固定的 context 值，绕开真实的 CurrentAppProvider——不需要真的发一次
+ * /applications 请求去凑出一个"当前应用"。id 用 'app-1'，和原来路由参数
+ * 的值保持一致，下面每条测试断言的 URL 字符串不用跟着改。
+ */
+function currentAppValue(): CurrentAppValue {
+  return {
+    apps: [fixedApp],
+    currentAppId: fixedApp.id,
+    currentApp: fixedApp,
+    setCurrentAppId: () => {},
+    loading: false,
+    error: '',
+    reload: () => {},
+  }
+}
+
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={['/applications/app-1/config']}>
-      <Routes>
-        <Route path="/applications/:id/config" element={<ConfigCenter />} />
-      </Routes>
+    <MemoryRouter>
+      <CurrentAppContext.Provider value={currentAppValue()}>
+        <ConfigCenter />
+      </CurrentAppContext.Provider>
     </MemoryRouter>,
   )
 }
@@ -60,13 +100,17 @@ function renderPage() {
 // 路由能访问不等于功能可用，控制台里如果没有入口，管理员根本不知道这个
 // 页面存在，等于白做。这里补一个最小的跳转链接，并用这条测试钉住它的
 // 目标路径，防止以后重构 ConfigCenter 时被无意删掉。
+// 【与 brief 的出入】brief 说这条用例"不用改"，但它断言的 href 字符串
+// 本身就是路由拍平前的形状（带 :id）——Step 2 把 Link 目标换成不带 appId
+// 的 `/config/versions` 之后，这里如果不跟着改，就会跟其余用例一样"看起来
+// 不依赖 URL 形状"的说法自相矛盾。改成断言拍平后的目标路径。
 test('提供入口跳到版本历史页', async () => {
   stubConfig({ seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } })
   renderPage()
 
   await screen.findByLabelText('a')
   const link = screen.getByRole('link', { name: '版本历史' })
-  expect(link.getAttribute('href')).toBe('/applications/app-1/config/versions')
+  expect(link.getAttribute('href')).toBe('/config/versions')
 })
 
 test('未配置的项标出来并计数', async () => {

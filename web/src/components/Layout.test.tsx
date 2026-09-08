@@ -1,47 +1,58 @@
-import { useEffect } from 'react'
-import { test, expect, vi } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes, useOutletContext } from 'react-router'
+import { test, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import Layout from './Layout'
-import type { LayoutOutletContext } from './Layout'
+import { CurrentAppProvider, useCurrentApp } from '@/lib/current-app'
+import type { Application } from '@/lib/types'
 
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ username: 'alice', logout: vi.fn() }),
 }))
 
+afterEach(() => vi.unstubAllGlobals())
+
+function stubEmptyApplications() {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([]), { status: 200 })))
+}
+
 function renderLayout(initialEntries: string[]) {
+  stubEmptyApplications()
   return render(
     <MemoryRouter initialEntries={initialEntries}>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path="/applications" element={<div>应用页内容</div>} />
-          <Route path="/users" element={<div>用户页内容</div>} />
-        </Route>
-      </Routes>
+      <CurrentAppProvider>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path="/applications" element={<div>应用页内容</div>} />
+            <Route path="/users" element={<div>用户页内容</div>} />
+          </Route>
+        </Routes>
+      </CurrentAppProvider>
     </MemoryRouter>,
   )
 }
 
-test('渲染三个导航项，当前用户名和页面内容都显示', () => {
+test('渲染五个导航项，当前用户名、面包屑和页面内容都显示', async () => {
   renderLayout(['/applications'])
   // shadcn 的 BreadcrumbPage 本身也带 role="link"（aria-disabled，标记当前页），
-  // 在 /applications 这种单段路径下文案会和侧边栏导航项重名（都是"应用"），
-  // 所以这里把查询范围限定在侧边栏导航列表（data-sidebar="menu"）内，
-  // 避免和面包屑里的"应用"当前页文案产生歧义匹配。
+  // /applications 这种单段路径下面包屑文案和侧边栏导航项现在都是"应用列表"，
+  // 会重名，所以把导航项的查询范围限定在侧边栏导航列表（data-sidebar="menu"）内。
   const navMenu = document.querySelector('[data-sidebar="menu"]') as HTMLElement
-  expect(within(navMenu).getByRole('link', { name: /应用/ })).toBeTruthy()
-  expect(within(navMenu).getByRole('link', { name: /用户/ })).toBeTruthy()
-  expect(within(navMenu).getByRole('link', { name: /角色/ })).toBeTruthy()
+  expect(within(navMenu).getByRole('link', { name: /应用列表/ })).toBeTruthy()
+  expect(within(navMenu).getByRole('link', { name: /用户管理/ })).toBeTruthy()
+  expect(within(navMenu).getByRole('link', { name: /角色管理/ })).toBeTruthy()
+  expect(within(navMenu).getByRole('link', { name: /权限管理/ })).toBeTruthy()
+  expect(within(navMenu).getByRole('link', { name: /配置中心/ })).toBeTruthy()
   expect(screen.getByText('alice')).toBeTruthy()
   expect(screen.getByText('应用页内容')).toBeTruthy()
+  await waitFor(() => expect(screen.getByText('还没有应用')).toBeTruthy())
 })
 
-test('面包屑随路由变化，用户列表页展示"用户"', () => {
+test('面包屑随路由变化，用户列表页展示"用户管理"', () => {
   renderLayout(['/users'])
   expect(screen.getByText('用户页内容')).toBeTruthy()
-  // 导航栏里也有一个"用户"链接，这里只确认面包屑区域至少多渲染出一个
-  // "用户"文案，不去精确匹配具体 DOM 节点。
-  expect(screen.getAllByText('用户').length).toBeGreaterThanOrEqual(2)
+  // 导航栏里也有一个"用户管理"链接，现在面包屑和导航标签统一了，这里
+  // 只确认至少多渲染出一个"用户管理"文案，不精确匹配具体 DOM 节点。
+  expect(screen.getAllByText('用户管理').length).toBeGreaterThanOrEqual(2)
 })
 
 test('点击折叠按钮后侧边栏进入 collapsed 状态', () => {
@@ -51,30 +62,55 @@ test('点击折叠按钮后侧边栏进入 collapsed 状态', () => {
   expect(document.querySelector('[data-slot="sidebar"][data-state="collapsed"]')).toBeTruthy()
 })
 
-function Reporter({ name }: { name: string }) {
-  const outlet = useOutletContext<LayoutOutletContext | undefined>()
-  useEffect(() => {
-    // 用 setTimeout 错开一个 commit：真实的 ApplicationDetail 也是等异步请求
-    // 回来后才在单独一次 re-render 里上报名字，不会和 Layout 那个「路由变化
-    // 时重置 crumbLabel」的 effect 挤在同一次 commit 里（子先父后的 effect
-    // 顺序下，如果两者同一个 commit 触发，Layout 的重置会在 Reporter 上报
-    // 之后执行，把值又清成 null）。这里同步 setCrumbLabel 会复现那种竞态，
-    // 所以延后一拍，贴近真实场景。
-    const t = setTimeout(() => outlet?.setCrumbLabel(name))
-    return () => clearTimeout(t)
-  }, [outlet, name])
-  return <div>详情内容</div>
+const appA: Application = {
+  id: 'app-a',
+  name: 'A应用',
+  slug: 'a',
+  appId: 'appid-a',
+  status: 'ACTIVE',
+  cookieDomain: '',
+  defaultRoleKey: '',
+  session: {
+    idleTimeoutSeconds: 1,
+    idleTimeoutMobileSeconds: 0,
+    maxLifetimeSeconds: 1,
+    rotateIntervalSeconds: 1,
+    extendIntervalSeconds: 1,
+    tokenCacheTtlSeconds: 1,
+  },
+  createdAt: 1,
+  updatedAt: 1,
 }
+const appB: Application = { ...appA, id: 'app-b', name: 'B应用', slug: 'b' }
 
-test('子页面通过 outlet context 上报的实体名会出现在面包屑里', async () => {
+test('在切换器里选另一个应用后，路由子页面跟着显示新的当前应用', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([appA, appB]), { status: 200 })))
+
+  function Probe() {
+    const { currentApp } = useCurrentApp()
+    return <div>当前：{currentApp?.name ?? '无'}</div>
+  }
+
   render(
-    <MemoryRouter initialEntries={['/applications/app-1']}>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path="/applications/:id" element={<Reporter name="Acme" />} />
-        </Route>
-      </Routes>
+    <MemoryRouter initialEntries={['/applications']}>
+      <CurrentAppProvider>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path="/applications" element={<Probe />} />
+          </Route>
+        </Routes>
+      </CurrentAppProvider>
     </MemoryRouter>,
   )
-  expect(await screen.findByText('Acme')).toBeTruthy()
+
+  await waitFor(() => expect(screen.getByText('当前：A应用')).toBeTruthy())
+
+  const trigger = screen.getByRole('combobox', { name: '切换当前应用' })
+  fireEvent.pointerDown(trigger)
+  fireEvent.click(trigger)
+  const option = await screen.findByRole('option', { name: 'B应用' })
+  fireEvent.pointerDown(option)
+  fireEvent.click(option)
+
+  await waitFor(() => expect(screen.getByText('当前：B应用')).toBeTruthy())
 })

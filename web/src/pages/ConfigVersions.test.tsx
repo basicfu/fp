@@ -15,12 +15,14 @@
 // 限定在弹窗里。
 //
 // 仓库**没有**装 @testing-library/user-event（不在 package.json 里），
-// 用既有的 fireEvent，写法照 ApplicationDetail.test.tsx。
+// 用既有的 fireEvent，写法照 ApplicationSettings.test.tsx。
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import ConfigVersions from './ConfigVersions'
-import type { ConfigSnapshot, ConfigVersion } from '@/lib/types'
+import { CurrentAppContext } from '@/lib/current-app'
+import type { CurrentAppValue } from '@/lib/current-app'
+import type { Application, ConfigSnapshot, ConfigVersion } from '@/lib/types'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -115,16 +117,50 @@ function stubVersionsWithGatedSnapshot(
   return fn
 }
 
-/** /applications/:id/config 只放一个占位页——验证"回滚成功后跳回配置中心页"
- * 只需要知道路由确实换了，不需要真的渲染 ConfigCenter 那一整套逻辑（那是
- * Task 13 自己的测试范围）。 */
+const fixedApp: Application = {
+  id: 'app-1',
+  name: '固定应用',
+  slug: 'fixed',
+  appId: 'appid-1',
+  status: 'ACTIVE',
+  cookieDomain: '',
+  defaultRoleKey: '',
+  session: {
+    idleTimeoutSeconds: 1,
+    idleTimeoutMobileSeconds: 0,
+    maxLifetimeSeconds: 1,
+    rotateIntervalSeconds: 1,
+    extendIntervalSeconds: 1,
+    tokenCacheTtlSeconds: 1,
+  },
+  createdAt: 1,
+  updatedAt: 1,
+}
+
+/** 同 ConfigCenter.test.tsx：绕开真实 CurrentAppProvider，直接塞固定当前应用。 */
+function currentAppValue(): CurrentAppValue {
+  return {
+    apps: [fixedApp],
+    currentAppId: fixedApp.id,
+    currentApp: fixedApp,
+    setCurrentAppId: () => {},
+    loading: false,
+    error: '',
+    reload: () => {},
+  }
+}
+
+/** /config 只放一个占位页——验证"回滚成功后跳回配置中心页"只需要知道
+ * 路由确实换了，不需要真的渲染 ConfigCenter 那一整套逻辑。 */
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={['/applications/app-1/config/versions']}>
-      <Routes>
-        <Route path="/applications/:id/config/versions" element={<ConfigVersions />} />
-        <Route path="/applications/:id/config" element={<div>CONFIG_CENTER_PLACEHOLDER</div>} />
-      </Routes>
+    <MemoryRouter initialEntries={['/config/versions']}>
+      <CurrentAppContext.Provider value={currentAppValue()}>
+        <Routes>
+          <Route path="/config/versions" element={<ConfigVersions />} />
+          <Route path="/config" element={<div>CONFIG_CENTER_PLACEHOLDER</div>} />
+        </Routes>
+      </CurrentAppContext.Provider>
     </MemoryRouter>,
   )
 }

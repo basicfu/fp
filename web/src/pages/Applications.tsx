@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { Link } from 'react-router'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -10,12 +9,15 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import ApplicationSettings from '@/components/ApplicationSettings'
 import { api } from '@/lib/api'
-import { useResource, errorMessage } from '@/lib/useResource'
+import { errorMessage } from '@/lib/useResource'
+import { useCurrentApp } from '@/lib/current-app'
+import { cn } from '@/lib/utils'
 import { formatTime } from '@/lib/format'
 import { applicationStatusLabels } from '@/lib/labels'
 import { applicationStatusBadgeClassName, GRAY } from '@/lib/status-badge'
-import type { Application, CreateApplicationResponse } from '@/lib/types'
+import type { CreateApplicationResponse } from '@/lib/types'
 
 const createSchema = z.object({
   name: z.string().min(1, '请输入应用名称'),
@@ -27,49 +29,61 @@ const createSchema = z.object({
 type CreateValues = z.infer<typeof createSchema>
 
 export default function Applications() {
-  const apps = useResource(() => api.get<Application[]>('/applications'), [])
+  const { apps, currentAppId, currentApp, setCurrentAppId, loading, error, reload } = useCurrentApp()
   const [creating, setCreating] = useState(false)
   const [newSecret, setNewSecret] = useState<CreateApplicationResponse | null>(null)
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">应用</h1>
+        <h1 className="text-xl font-semibold">应用列表</h1>
         <Button onClick={() => setCreating(true)}>新建应用</Button>
       </div>
 
-      {apps.loading && <p className="text-sm text-muted-foreground">加载中…</p>}
-      {apps.error && <p className="text-sm text-destructive">{apps.error}</p>}
+      {loading && <p className="text-sm text-muted-foreground">加载中…</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {apps.data && apps.data.length === 0 && (
+      {!loading && apps.length === 0 && (
         <p className="text-center text-sm text-muted-foreground">还没有应用</p>
       )}
 
-      {apps.data && apps.data.length > 0 && (
+      {apps.length > 0 && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {apps.data.map((a) => (
-            <Link
-              key={a.id}
-              to={`/applications/${a.id}`}
-              className="group rounded-xl border bg-card p-4 transition-colors hover:border-primary/50 hover:bg-accent/30"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <AppWindow className="size-5" />
+          {apps.map((a) => {
+            const isCurrent = a.id === currentAppId
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => setCurrentAppId(a.id)}
+                className={cn(
+                  'group rounded-xl border bg-card p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/30',
+                  isCurrent && 'border-primary ring-1 ring-primary',
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                    <AppWindow className="size-5" />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {isCurrent && <Badge variant="outline">当前</Badge>}
+                    <Badge className={applicationStatusBadgeClassName[a.status] ?? GRAY}>
+                      {applicationStatusLabels[a.status] ?? a.status}
+                    </Badge>
+                  </div>
                 </div>
-                <Badge className={applicationStatusBadgeClassName[a.status] ?? GRAY}>
-                  {applicationStatusLabels[a.status] ?? a.status}
-                </Badge>
-              </div>
-              <div className="mt-3 space-y-1">
-                <div className="font-medium group-hover:underline group-hover:underline-offset-4">{a.name}</div>
-                <div className="text-xs text-muted-foreground">{a.slug}</div>
-              </div>
-              <div className="mt-4 text-xs text-muted-foreground">创建于 {formatTime(a.createdAt)}</div>
-            </Link>
-          ))}
+                <div className="mt-3 space-y-1">
+                  <div className="font-medium group-hover:underline group-hover:underline-offset-4">{a.name}</div>
+                  <div className="text-xs text-muted-foreground">{a.slug}</div>
+                </div>
+                <div className="mt-4 text-xs text-muted-foreground">创建于 {formatTime(a.createdAt)}</div>
+              </button>
+            )
+          })}
         </div>
       )}
+
+      {currentApp && <ApplicationSettings app={currentApp} onSaved={reload} />}
 
       <CreateDialog
         open={creating}
@@ -77,7 +91,8 @@ export default function Applications() {
         onCreated={(res) => {
           setCreating(false)
           setNewSecret(res)
-          apps.reload()
+          reload()
+          setCurrentAppId(res.application.id)
         }}
       />
 
@@ -142,10 +157,7 @@ function CreateDialog({
  *
  * 两种失败都要接住：(1) navigator.clipboard 在非安全上下文（http 且非
  * localhost）下整个是 undefined，直接调用会抛错；(2) 即使存在，
- * writeText() 也可能因为权限被拒绝等原因 reject。之前的写法只有
- * `.then(() => toast.success(...))`，没有 `.catch`——用户点了没反应，
- * 控制台还会留一条未处理的 rejection（与 auth.tsx 的 logout() 是同一类
- * 问题）。
+ * writeText() 也可能因为权限被拒绝等原因 reject。
  */
 async function copyAppSecret(secret: string) {
   try {

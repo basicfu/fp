@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react'
-import { Link, useOutletContext, useParams } from 'react-router'
+import { useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -11,49 +10,31 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import ConnectorsPanel from '@/components/ConnectorsPanel'
-import PermissionsPanel from '@/components/PermissionsPanel'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
-import { useResource, errorMessage } from '@/lib/useResource'
+import { errorMessage } from '@/lib/useResource'
 import { applicationStatusLabels } from '@/lib/labels'
 import { applicationStatusBadgeClassName, GRAY } from '@/lib/status-badge'
 import type { Application, SessionPolicy } from '@/lib/types'
-import type { LayoutOutletContext } from '@/components/Layout'
 
-export default function ApplicationDetail() {
-  const { id = '' } = useParams()
-  const app = useResource(() => api.get<Application>(`/applications/${id}`), [id])
-  // 不是所有渲染场景都套着 Layout 的 <Outlet>（比如这个文件自己的单元
-  // 测试就没有），拿不到 context 时 setCrumbLabel 是 undefined，下面全部
-  // 用 ?. 兜底，不能假设它一定存在。
-  const outlet = useOutletContext<LayoutOutletContext | undefined>()
-  useEffect(() => {
-    outlet?.setCrumbLabel(app.data?.name ?? null)
-    return () => outlet?.setCrumbLabel(null)
-  }, [outlet, app.data?.name])
+export default function ApplicationSettings({ app, onSaved }: { app: Application; onSaved: () => void }) {
   // 只有"停用"这个方向需要二次确认：它会拒绝该应用的全部新登录与 SDK 回源
   // 校验，是四个破坏性操作之一。"启用"是恢复服务，不是破坏性操作，直接执行。
   const [confirmingDisable, setConfirmingDisable] = useState(false)
 
-  if (app.loading) return <p className="text-sm text-muted-foreground">加载中…</p>
-  if (app.error) return <p className="text-sm text-destructive">{app.error}</p>
-  if (!app.data) return null
-
-  const a = app.data
-
   async function toggleStatus() {
-    const next = a.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
+    const next = app.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
     try {
-      await api.patch(`/applications/${id}/status`, { status: next })
+      await api.patch(`/applications/${app.id}/status`, { status: next })
       toast.success(next === 'ACTIVE' ? '已启用' : '已停用')
-      app.reload()
+      onSaved()
     } catch (e) {
       toast.error(errorMessage(e))
     }
   }
 
   function onToggleStatusClick() {
-    if (a.status === 'ACTIVE') {
+    if (app.status === 'ACTIVE') {
       setConfirmingDisable(true)
     } else {
       void toggleStatus()
@@ -61,21 +42,15 @@ export default function ApplicationDetail() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold">{a.name}</h1>
-        <Badge className={applicationStatusBadgeClassName[a.status] ?? GRAY}>
-          {applicationStatusLabels[a.status] ?? a.status}
+    <div className="space-y-6 rounded-xl border p-6">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-lg font-semibold">{app.name}</h2>
+        <Badge className={applicationStatusBadgeClassName[app.status] ?? GRAY}>
+          {applicationStatusLabels[app.status] ?? app.status}
         </Badge>
         <div className="flex-1" />
-        <Link
-          to={`/applications/${id}/config`}
-          className="text-sm text-muted-foreground underline-offset-4 hover:underline"
-        >
-          配置中心
-        </Link>
-        <Button variant={a.status === 'ACTIVE' ? 'destructive' : 'default'} onClick={onToggleStatusClick}>
-          {a.status === 'ACTIVE' ? '停用应用' : '启用应用'}
+        <Button variant={app.status === 'ACTIVE' ? 'destructive' : 'default'} onClick={onToggleStatusClick}>
+          {app.status === 'ACTIVE' ? '停用应用' : '启用应用'}
         </Button>
       </div>
 
@@ -83,7 +58,7 @@ export default function ApplicationDetail() {
         open={confirmingDisable}
         onOpenChange={setConfirmingDisable}
         title="停用应用"
-        description={`停用后，「${a.name}」的全部新登录与 SDK 的下一次回源校验都会被拒绝。已签发的 token 最多还能在各接入方本地缓存里存活 ${a.session.tokenCacheTtlSeconds} 秒。此操作可以随时再次启用撤销，但停用期间会中断所有依赖该应用登录的下游服务。`}
+        description={`停用后，「${app.name}」的全部新登录与 SDK 的下一次回源校验都会被拒绝。已签发的 token 最多还能在各接入方本地缓存里存活 ${app.session.tokenCacheTtlSeconds} 秒。此操作可以随时再次启用撤销，但停用期间会中断所有依赖该应用登录的下游服务。`}
         confirmLabel="确认停用"
         onConfirm={() => {
           setConfirmingDisable(false)
@@ -91,10 +66,10 @@ export default function ApplicationDetail() {
         }}
       />
 
-      {a.status === 'DISABLED' && (
+      {app.status === 'DISABLED' && (
         <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
           该应用已停用：新的登录会被拒绝，SDK 的下一次回源校验也会被拒绝。
-          已签发的 token 最多还能在各接入方本地缓存里存活 {a.session.tokenCacheTtlSeconds} 秒。
+          已签发的 token 最多还能在各接入方本地缓存里存活 {app.session.tokenCacheTtlSeconds} 秒。
         </p>
       )}
 
@@ -103,23 +78,18 @@ export default function ApplicationDetail() {
           <TabsTrigger value="basic">基本信息</TabsTrigger>
           <TabsTrigger value="session">会话策略</TabsTrigger>
           <TabsTrigger value="connectors">登录方式</TabsTrigger>
-          <TabsTrigger value="permissions">权限点</TabsTrigger>
         </TabsList>
 
         <TabsContent value="basic" className="pt-4">
-          <BasicForm app={a} onSaved={app.reload} />
+          <BasicForm app={app} onSaved={onSaved} />
         </TabsContent>
 
         <TabsContent value="session" className="pt-4">
-          <SessionForm app={a} onSaved={app.reload} />
+          <SessionForm app={app} onSaved={onSaved} />
         </TabsContent>
 
         <TabsContent value="connectors" className="pt-4">
-          <ConnectorsPanel appId={id} />
-        </TabsContent>
-
-        <TabsContent value="permissions" className="pt-4">
-          <PermissionsPanel app={a} onAppChanged={app.reload} />
+          <ConnectorsPanel appId={app.id} />
         </TabsContent>
       </Tabs>
     </div>
@@ -212,15 +182,6 @@ const sessionFields: { key: keyof SessionPolicy; label: string; help?: string }[
 ]
 
 function SessionForm({ app, onSaved }: { app: Application; onSaved: () => void }) {
-  // 显式给 useForm 一个类型实参：sessionSchema 六个字段全用 z.coerce.number()，
-  // 但 zod 3 对 coerce 的类型声明和不 coerce 完全一样（input=output=number），
-  // 不反映"运行时其实接受字符串再转"这件事。实测发现光这一条本身不会让
-  // handleSubmit(onSubmit) 报类型错——之所以显式标注，是为了不依赖"resolver
-  // 与 defaultValues 两处推断刚好碰巧一致"这种脆弱的隐式行为：defaultValues
-  // 来自 app.session（SessionPolicy），resolver 来自 zodResolver(sessionSchema)，
-  // 两者都应该、也确实推出同一个数字形状，但把它写成显式类型实参能让这件事
-  // 不必依赖推断，未来升级 zod/@hookform/resolvers 时更不容易因为推断结果
-  // 变化而在这里悄悄崩掉。
   const { register, handleSubmit, formState } = useForm<SessionPolicy>({
     resolver: zodResolver(sessionSchema),
     defaultValues: app.session,
@@ -228,8 +189,6 @@ function SessionForm({ app, onSaved }: { app: Application; onSaved: () => void }
 
   async function onSubmit(v: SessionPolicy) {
     try {
-      // 全量替换：后端 decodeJSON 开了 DisallowUnknownFields 且六项都必填，
-      // 所以这里必须把六个字段一次性全发出去（路由用的是 PUT 不是 PATCH）。
       await api.put(`/applications/${app.id}/session`, v)
       toast.success('已保存')
       onSaved()
