@@ -64,3 +64,18 @@ func TestVerifyAfterCloseDoesNotRebuildClient(t *testing.T) {
 		t.Fatalf("Close 之后不应该悄悄建立新的 fp 客户端，实际 clients=%d", n)
 	}
 }
+
+// TestNewRequiresFPAddr 钉住"fpsdk.addr 为空必须在装配阶段就失败"。
+//
+// internal/im/config 按"谁用谁校验"把这一项从必填清单里拿掉了，这句检查
+// 因此成了唯一的挡板。不能指望 fpsdk.New 自己报——client 是懒建的（每个
+// app 一个，首次握手才建），那样"地址配错了"会被推迟到第一个真实用户握手
+// 的那一刻才暴露。
+func TestNewRequiresFPAddr(t *testing.T) {
+	if _, err := New(Config{Apps: apps{}}); err == nil {
+		t.Fatal("FPAddr 为空必须报错：config 已不再校验这一项，这里是唯一的挡板")
+	}
+	if _, err := New(Config{FPAddr: "127.0.0.1:1"}); err == nil {
+		t.Fatal("Apps 为 nil 必须报错")
+	}
+}
