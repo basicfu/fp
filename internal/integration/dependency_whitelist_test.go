@@ -36,6 +36,10 @@ var allowedDirectDependencies = []string{
 	"golang.org/x/sync",          // 第二阶段新增：Auth.Validate 用 singleflight 合并并发回源
 	"google.golang.org/grpc",     // 第二阶段新增：gRPC 服务端（internal/grpcapi）与 Go SDK 的传输层
 	"google.golang.org/protobuf", // 第二阶段新增：Watch/ValidateToken 等 RPC 的消息类型（sdk/gen）
+	"gopkg.in/yaml.v3",           // 两个使用方：(1) 配置中心改成整份 YAML 存储，domain.ParseConfigYAML
+	// 用它把管理端提交的 YAML 原文解析成 map[string]any，交给 GetConfig 序列化成 JSON 吐给 SDK；
+	// (2) 启动配置本身也是 YAML，internal/config 与 internal/im/config 用它读 config.yaml /
+	// config-im.yaml，并开 KnownFields(true) 让拼错的键当场报错。
 }
 
 // TestGoModDirectDependenciesAreWhitelisted 守住依赖白名单。
