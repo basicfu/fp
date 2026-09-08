@@ -55,9 +55,9 @@ grpc:
   addr: ":9090"                # SDK 接入
 
 postgres:
-  url: postgres://postgres:xxx@10.9.1.2:15432/fp?sslmode=disable
+  url: postgres://postgres:xxx@127.0.0.1:5432/fp?sslmode=disable
 redis:
-  url: redis://:xxx@10.9.1.2:4379/0
+  url: redis://:xxx@127.0.0.1:6379/0
 
 # 首次启动创建的平台管理员。两项都填才生效，已存在同名账号不覆盖
 # （AdminService.EnsureBootstrap 在任一为空时直接跳过）。
@@ -112,7 +112,7 @@ grpc:
   addr: ":9091"                # 业务 server 接入
 
 redis:
-  url: redis://:xxx@10.9.1.2:4379/0
+  url: redis://:xxx@127.0.0.1:6379/0
 
 # fp SDK 的连接参数。addr 是 fp 的 gRPC 地址，不是 HTTP。
 # 传输安全由 env 推导：dev 明文，prod 走 TLS（见第六节）。
