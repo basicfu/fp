@@ -60,7 +60,8 @@ git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
 
 > 从第三阶段起，下面这些准备步骤都可以在管理控制台里点完，不必用 curl：
 > 先 `./scripts/build-web.sh` 构建前端，再照下面一样 `./scripts/run.sh` 起服务，
-> 浏览器打开 http://localhost:8080/ 即是控制台（默认账号 `admin` / `admin123456`）。
+> 浏览器打开 http://localhost:8080/ 即是控制台（账号取自 `config.yaml` 的
+> `bootstrap_admin`，`config.example.yaml` 给的是 `admin` / `admin`）。
 > 详见 [docs/console.md](../../docs/console.md)。
 > curl 的写法保留在这里，供脚本化和排障使用。
 
@@ -69,8 +70,8 @@ git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
 ```
 
 看到日志里的 `"fp 启动"`（带 `http`/`grpc` 两个监听地址）即成功。
-`run.sh` 默认建的平台管理员是 `admin` / `admin123456`（`FP_BOOTSTRAP_ADMIN_USER`
-/ `FP_BOOTSTRAP_ADMIN_PASSWORD` 未覆盖时的默认值，见 `scripts/run.sh`）。
+首次启动建的平台管理员来自 `config.yaml` 的 `bootstrap_admin.user` /
+`bootstrap_admin.password`；`config.example.yaml` 给的是 `admin` / `admin`。
 
 另开一个终端，用管理员账号登录管理 API、建一个应用、启用 `sms_code`：
 
@@ -78,7 +79,7 @@ git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
 # 1a. 管理员登录，拿到管理端 token。
 curl -s -X POST http://localhost:8080/admin/api/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123456"}'
+  -d '{"username":"admin","password":"admin"}'
 ```
 
 **该看到**：`200`，响应体形如

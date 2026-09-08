@@ -25,7 +25,7 @@
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/admin/api/login \
-  -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123456"}' \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin"}' \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
 
 curl -s -X POST http://localhost:8080/admin/api/applications \
