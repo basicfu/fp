@@ -1,139 +1,197 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// setRequiredEnv 把 Load 在生产环境下会校验的全部必填环境变量设成占位值，
-// 供不关心这些字段本身的测试复用。各测试按需用 t.Setenv 覆盖它真正要测
-// 的那一个，其余保持有效——不然每加一项必填校验，所有走成功路径的测试
-// 都要跟着补一行，重复且容易漏改。
-//
-// 阿里云那四项只在 FP_ENV=PROD 时才是必填的（见 config.go 的 Load），
-// 这里统一设上不影响非生产测试——非生产环境下这四项设或不设都应该
-// Load 成功，专门验证"不设也行"的测试见 TestLoadAllowsMissingAliyunOutsideProd。
-func setRequiredEnv(t *testing.T) {
+// writeConfig 把 body 写成一个临时的 config.yaml 并返回它的路径。
+// 每条测试一个独立的 t.TempDir()，互不干扰；也不再有旧版 t.Setenv 那种
+// "本机 .env.local 恰好设了同名变量"的污染问题——文件的内容完全由测试决定。
+func writeConfig(t *testing.T, body string) string {
 	t.Helper()
-	t.Setenv("FP_POSTGRES_URL", "postgres://x/y")
-	t.Setenv("FP_REDIS_URL", "redis://localhost:6379/0")
-	t.Setenv("FP_ALIYUN_ACCESS_KEY_ID", "test-key-id")
-	t.Setenv("FP_ALIYUN_ACCESS_KEY_SECRET", "test-key-secret")
-	t.Setenv("FP_ALIYUN_SMS_SIGN_NAME", "测试签名")
-	t.Setenv("FP_ALIYUN_SMS_TEMPLATE_LOGIN_CODE", "SMS_TEST0001")
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("写临时配置文件：%v", err)
+	}
+	return p
+}
+
+// minimal 是只写了必填项的最小配置，供只关心默认值或某一项的测试复用。
+const minimal = `
+postgres:
+  url: postgres://x/y
+redis:
+  url: redis://localhost:6379/0
+`
+
+// TestLoadReadsEveryField 逐字段断言，是 yaml tag 的护栏。
+//
+// 漏写 tag 的多词字段（比如 BootstrapAdmin 上漏了 `yaml:"bootstrap_admin"`）
+// 会被 yaml.v3 按"字段名整个小写"的默认规则映射到 bootstrapadmin，于是配置
+// 文件里的 bootstrap_admin 变成未知键——KnownFields(true) 会把它报成"配置
+// 文件写错了"，指错方向。只有逐字段断言读到的值才能把这类错误钉在加载器上。
+func TestLoadReadsEveryField(t *testing.T) {
+	p := writeConfig(t, `
+env: prod
+log:
+  level: debug
+http:
+  addr: ":18080"
+grpc:
+  addr: ":19090"
+postgres:
+  url: postgres://u:p@h:5432/fp?sslmode=disable
+redis:
+  url: redis://:pw@h:6379/0
+bootstrap_admin:
+  user: root
+  password: s3cret
+sms:
+  aliyun:
+    access_key_id: ak
+    access_key_secret: sk
+    sign_name: 测试签名
+    template_login_code: SMS_0001
+    endpoint: dysmsapi.example.com
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	for _, tc := range []struct{ name, got, want string }{
+		{"env", cfg.Env, "prod"},
+		{"log.level", cfg.Log.Level, "debug"},
+		{"http.addr", cfg.HTTP.Addr, ":18080"},
+		{"grpc.addr", cfg.GRPC.Addr, ":19090"},
+		{"postgres.url", cfg.Postgres.URL, "postgres://u:p@h:5432/fp?sslmode=disable"},
+		{"redis.url", cfg.Redis.URL, "redis://:pw@h:6379/0"},
+		{"bootstrap_admin.user", cfg.BootstrapAdmin.User, "root"},
+		{"bootstrap_admin.password", cfg.BootstrapAdmin.Password, "s3cret"},
+		{"sms.aliyun.access_key_id", cfg.SMS.Aliyun.AccessKeyID, "ak"},
+		{"sms.aliyun.access_key_secret", cfg.SMS.Aliyun.AccessKeySecret, "sk"},
+		{"sms.aliyun.sign_name", cfg.SMS.Aliyun.SignName, "测试签名"},
+		{"sms.aliyun.template_login_code", cfg.SMS.Aliyun.TemplateLoginCode, "SMS_0001"},
+		{"sms.aliyun.endpoint", cfg.SMS.Aliyun.Endpoint, "dysmsapi.example.com"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
 }
 
 func TestLoadDefaults(t *testing.T) {
-	setRequiredEnv(t)
-
-	cfg, err := Load()
+	cfg, err := Load(writeConfig(t, minimal))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.Env != "DEV" {
-		t.Errorf("Env = %q, want DEV", cfg.Env)
+	if cfg.Env != "dev" {
+		t.Errorf("Env = %q, want dev", cfg.Env)
 	}
-	if cfg.HTTPAddr != ":8080" {
-		t.Errorf("HTTPAddr = %q, want :8080", cfg.HTTPAddr)
+	if cfg.Log.Level != "info" {
+		t.Errorf("Log.Level = %q, want info", cfg.Log.Level)
 	}
-	if cfg.GRPCAddr != ":9090" {
-		t.Errorf("GRPCAddr = %q, want :9090", cfg.GRPCAddr)
+	if cfg.HTTP.Addr != ":8080" {
+		t.Errorf("HTTP.Addr = %q, want :8080", cfg.HTTP.Addr)
 	}
-	if cfg.LogLevel != "info" {
-		t.Errorf("LogLevel = %q, want info", cfg.LogLevel)
-	}
-}
-
-func TestLoadOverrides(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("FP_ENV", "PROD")
-	t.Setenv("FP_HTTP_ADDR", ":18080")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Env != "PROD" {
-		t.Errorf("Env = %q, want PROD", cfg.Env)
-	}
-	if cfg.HTTPAddr != ":18080" {
-		t.Errorf("HTTPAddr = %q, want :18080", cfg.HTTPAddr)
+	if cfg.GRPC.Addr != ":9090" {
+		t.Errorf("GRPC.Addr = %q, want :9090", cfg.GRPC.Addr)
 	}
 }
 
-// IsProd 决定管理端 cookie 带不带 Secure，是个真正有安全后果的判定，
-// 必须钉住它的大小写不敏感与默认值。
+// TestLoadRejectsUnknownField 是这次从环境变量迁到文件净新增的能力：
+// 环境变量那个介质压根没有"这个键我不认识"的概念，拼错只会静默回落到
+// 默认值；文件有，所以必须报错。
+func TestLoadRejectsUnknownField(t *testing.T) {
+	_, err := Load(writeConfig(t, minimal+`
+log:
+  lvel: debug
+`))
+	if err == nil {
+		t.Fatal("拼错的键必须报错，不能静默用默认值")
+	}
+	if !strings.Contains(err.Error(), "lvel") {
+		t.Errorf("错误信息 %q 里应当出现拼错的那个键名 lvel", err)
+	}
+}
+
+func TestLoadRejectsMissingFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "不存在.yaml")
+	if _, err := Load(p); err == nil {
+		t.Fatal("文件不存在必须报错，不能回落到一整套默认值")
+	}
+}
+
+// TestLoadMissingRequired 同时钉住"报错"和"错误信息用 YAML 路径而不是
+// 环境变量名"——后者才是这次迁移对排障的实际改善。
+func TestLoadMissingRequired(t *testing.T) {
+	_, err := Load(writeConfig(t, "redis:\n  url: redis://localhost:6379/0\n"))
+	if err == nil {
+		t.Fatal("缺 postgres.url 必须报错")
+	}
+	if !strings.Contains(err.Error(), "postgres.url") {
+		t.Errorf("错误信息 %q 里应当出现 YAML 路径 postgres.url", err)
+	}
+	if strings.Contains(err.Error(), "FP_POSTGRES_URL") {
+		t.Errorf("错误信息 %q 里不该再出现环境变量名", err)
+	}
+}
+
+// TestIsProd 钉住大小写不敏感与默认值。IsProd 决定管理端 cookie 带不带
+// Secure，是个真正有安全后果的判定。
 func TestIsProd(t *testing.T) {
-	tests := []struct {
+	for _, tt := range []struct {
 		env  string
 		want bool
 	}{
-		{"PROD", true},
 		{"prod", true},
+		{"PROD", true},
 		{"Prod", true},
-		{"DEV", false},
+		{"dev", false},
 		{"", false},
-		{"PRODUCTION", false}, // 只认 PROD，不做前缀匹配
-	}
-	for _, tt := range tests {
-		c := &Config{Env: tt.env}
-		if got := c.IsProd(); got != tt.want {
+		{"production", false}, // 只认 prod，不做前缀匹配
+	} {
+		if got := (&Config{Env: tt.env}).IsProd(); got != tt.want {
 			t.Errorf("Env=%q IsProd() = %v, want %v", tt.env, got, tt.want)
 		}
 	}
 }
 
-func TestLoadMissingRequired(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("FP_POSTGRES_URL", "")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("Load() error = nil, want error for missing FP_POSTGRES_URL")
-	}
-}
-
 // TestLoadMissingAliyunRequiredInProd 钉住阿里云短信凭据在生产环境是必填项。
 //
-// 没有它的话，config.Load() 会允许生产环境下阿里云凭据全部留空——
-// cmd/fp/main.go 会因此在生产环境悄悄退化成 notify.NewFakeProvider，
-// 验证码只进内存、没有任何真实用户能收到，且不会有任何启动期报错，
-// 只会在运营发现"用户投诉收不到验证码"时才暴露。
+// 没有它的话，Load 会允许生产环境下阿里云凭据全部留空——cmd/fp/main.go 会
+// 因此在生产环境悄悄退化成假供应商，验证码只进内存、没有任何真实用户能收到，
+// 且不会有任何启动期报错，只会在运营发现"用户投诉收不到验证码"时才暴露。
 func TestLoadMissingAliyunRequiredInProd(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("FP_ENV", "PROD")
-	t.Setenv("FP_ALIYUN_ACCESS_KEY_ID", "")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("Load() error = nil, want error for missing FP_ALIYUN_ACCESS_KEY_ID in PROD")
+	_, err := Load(writeConfig(t, minimal+`
+env: prod
+sms:
+  aliyun:
+    access_key_secret: sk
+    sign_name: 签名
+    template_login_code: SMS_0001
+`))
+	if err == nil {
+		t.Fatal("生产环境缺 sms.aliyun.access_key_id 必须报错")
+	}
+	if !strings.Contains(err.Error(), "sms.aliyun.access_key_id") {
+		t.Errorf("错误信息 %q 里应当出现 sms.aliyun.access_key_id", err)
 	}
 }
 
 // TestLoadAllowsMissingAliyunOutsideProd 钉住阿里云短信凭据在非生产环境
-// 允许留空——config.Load 本身不应该因为缺它们而失败。
-//
-// notify.FakeProvider 的文档注释写着"用于测试与本地开发"：本机开发、CI
-// 跑 cmd/fp 二进制，都不应该被要求先备齐一份连假的都算不上的阿里云凭据
-// 才能启动。真正装配 FakeProvider 并打 WARN 日志的逻辑在 cmd/fp/main.go
-// 里（package main 无测试基础设施，未覆盖到这条测试），这里只钉住
-// "config.Load 不会在非生产环境替它做这个决定"。
+// 允许留空——Load 本身不该因为缺它们而失败。本机开发、CI 跑 cmd/fp 二进制，
+// 都不该被要求先备齐一份连假的都算不上的阿里云凭据才能启动。真正装配假
+// 供应商并打 WARN 的逻辑在 cmd/fp/main.go 里，这里只钉住"Load 不替它做
+// 这个决定"。
 func TestLoadAllowsMissingAliyunOutsideProd(t *testing.T) {
-	t.Setenv("FP_POSTGRES_URL", "postgres://x/y")
-	t.Setenv("FP_REDIS_URL", "redis://localhost:6379/0")
-	// 显式清空，而不是干脆不调用 t.Setenv：本机 .env.local 为了 Step 5
-	// 的手工验证配了阿里云占位值，scripts/test.sh 经 scripts/env.sh 把它们
-	// 带进了整个测试进程的环境变量——不显式清空的话，这条测试在本机测的
-	// 其实是"环境变量恰好没设"，而不是"config.Load 允许它们不设"，换一台
-	// 干净的机器或者 CI 反而测不出这条测试原本想测的东西。
-	t.Setenv("FP_ENV", "") // 显式清空，确保落在 envOr 的默认值 DEV 上
-	t.Setenv("FP_ALIYUN_ACCESS_KEY_ID", "")
-	t.Setenv("FP_ALIYUN_ACCESS_KEY_SECRET", "")
-	t.Setenv("FP_ALIYUN_SMS_SIGN_NAME", "")
-	t.Setenv("FP_ALIYUN_SMS_TEMPLATE_LOGIN_CODE", "")
-
-	cfg, err := Load()
+	cfg, err := Load(writeConfig(t, minimal))
 	if err != nil {
-		t.Fatalf("Load() error = %v, want nil（非生产环境阿里云凭据允许留空）", err)
+		t.Fatalf("Load() error = %v，非生产环境阿里云凭据允许留空", err)
 	}
-	if cfg.AliyunAccessKeyID != "" {
-		t.Errorf("AliyunAccessKeyID = %q, want empty", cfg.AliyunAccessKeyID)
+	if cfg.SMS.Aliyun.AccessKeyID != "" {
+		t.Errorf("SMS.Aliyun.AccessKeyID = %q, want empty", cfg.SMS.Aliyun.AccessKeyID)
 	}
 }
