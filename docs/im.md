@@ -8,14 +8,26 @@ fp-im 是无队列的 WebSocket 连接网关：只管"谁在线、递一条消�
 ## 启动
 
 ```bash
-FP_IM_HTTP_ADDR=:8081 FP_IM_GRPC_ADDR=:9091 ./scripts/run-im.sh
+cp config-im.example.yaml config-im.yaml   # 首次：填入 Redis 连接串与 fp 地址
+./scripts/run-im.sh
 ```
 
-依赖 `FP_IM_REDIS_URL`、`FP_IM_FP_ADDR`、`FP_IM_APPS_FILE`：三者对二进制本身都是
-必填项，缺一个直接启动失败（`internal/im/config.Load`）。"`FP_IM_REDIS_URL` 默认
-复用 `FP_REDIS_URL`"这条回退**只在 `scripts/run-im.sh`（经 `scripts/env.sh`）里
-成立**，是本机联调的便利写法；直接跑 `./fp-im` 二进制的人没有这层回退，必须自己
-显式传全这三个变量。
+`fp-im` 读 `./config-im.yaml`（`-c` 可指定别的路径），与 fp 的 `config.yaml`
+**完全独立**：不引用、不继承它的任何默认值。想跟 fp 共用一个 Redis，就把同一条
+URL 抄进 `config-im.yaml` 的 `redis.url`——旧版那条"`FP_IM_REDIS_URL` 未设时复用
+`FP_REDIS_URL`"的 shell 回退没有了，隐式继承比多抄一行难懂得多。
+
+`redis.url` 与 `apps_file` 是必填项，缺一个直接启动失败。`fpsdk.addr`（fp 的
+**gRPC** 地址，不是 HTTP）不由 `internal/im/config` 校验——"谁用谁校验"，它由
+`fpauth.New` 在装配阶段挡住，报错时机一样是启动时。
+
+**传输安全没有开关，由 `env` 推导**：`env: dev` 明文，`env: prod` 走 TLS。一个
+默认为 true 的 `insecure` 旋钮最可能的失效方式就是被连同整份 dev 配置抄到生产上，
+而 `appSecret` 是随每个 RPC 的 metadata 明文发的。
+
+> **【部署硬要求】** fp 的 gRPC 服务端目前没有传 `grpc.Creds`，只服务明文。所以
+> `env: prod` 下 fp-im 连 fp 的那条 TLS **必须**由 fp 前面的反代 / 网关终结。
+> 在给 fp 的 gRPC 补上 TLS 之前，这不是可选项。
 
 ```json
 {"apps":[{"app_id":"…","app_secret":"…","allow_guest":true,
@@ -156,7 +168,7 @@ Redis 最低 8.0（`HEXPIRE`/`HTTL`/分片订阅）；心跳 3s、判死 10s；�
 删掉自己的条目；conn 元数据 field TTL 默认 30 分钟、每 10 分钟续期；写管道默认立即发，可配
 攒批；单机/Cluster 由 `INFO cluster` 自动探测。
 
-`FP_IM_CONN_IDLE_TIMEOUT` 有 50 秒下界（client SDK 每 25 秒发一次心跳，`fpim.PingInterval`
+`conn.idle_timeout` 有 50 秒下界（client SDK 每 25 秒发一次心跳，`fpim.PingInterval`
 的两倍），低于它启动直接失败：配成 20s 会让全网 client 每 20 秒被以 4005 踢一次并立即重连
 （4005 的契约就是不退避），形成稳定的重连风暴。
 
@@ -167,7 +179,7 @@ Redis 最低 8.0（`HEXPIRE`/`HTTL`/分片订阅）；心跳 3s、判死 10s；�
 关 ws 必须排在停 gRPC 之前，否则断开事件没有出口——改动这段顺序前先看
 `cmd/fp-im/main.go` 里 `shutdown` 的注释和 `TestServeGracefulShutdownClosesWebSockets`。
 
-**`FP_IM_TRUST_PROXY`**：开启后访客限流的 IP 取 `X-Forwarded-For` 的**最右一跳**，也就是直连
+**`http.trust_proxy`**：开启后访客限流的 IP 取 `X-Forwarded-For` 的**最右一跳**，也就是直连
 本网关的那个代理亲手追加的值（client 改不了）。因此**只在网关前确实有代理时开**：直接对公网
 暴露时开启它，等于把限流键交给所有人伪造。多层代理下最右跳是内层代理的地址，那一层后面的所有
 client 会共用一个限流桶（偏严、可能误伤，但不会被绕过）。nginx 用默认写法即可：
@@ -187,7 +199,7 @@ proxy_read_timeout 3600s;   # 大于 conn.idle_timeout，别让代理抢在网�
 **消息信封线路格式变过两次**（插入转发候选列表、游标 1→2 字节），新旧节点互相
 解不出对方的信封。**升级必须整批替换，不能滚动。**
 
-**`FP_IM_CONN_IDLE_TIMEOUT` 现在有 50 秒下界，低于它进程直接启动失败**（不是警告、不是取
+**`conn.idle_timeout` 现在有 50 秒下界，低于它进程直接启动失败**（不是警告、不是取
 默认值）。这是破坏性变更：升级前先检查现网这一项的取值，配得比 50s 小的部署会起不来。原因
 见运维要点那一节。
 

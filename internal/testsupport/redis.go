@@ -18,7 +18,8 @@ const missingRedisHint = `
 
   ./scripts/test.sh
 
-注意：测试会对该 Redis DB 执行 FLUSHDB，务必使用独立的 DB index（脚本已指定 /1）。
+注意：测试会对该 Redis DB 执行 FLUSHDB，务必在 FP_TEST_REDIS_URL 里使用
+独立的 DB index（约定用 /1，开发库是 /0）。
 `
 
 var (

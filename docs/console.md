@@ -5,27 +5,32 @@
 
 ## 构建与运行
 
-    ./scripts/build-web.sh      # 构建前端，产物落在 web/dist/
-    ./scripts/run.sh            # 起 fp，浏览器打开 http://localhost:8080/
+    ./scripts/build-web.sh                # 构建前端，产物落在 web/dist/
+    cp config.example.yaml config.yaml    # 首次：填入 PG / Redis 连接串
+    ./scripts/run.sh                      # 起 fp，浏览器打开 http://localhost:8080/
 
-**必须走 `scripts/run.sh`，不能直接跑 `./fp` 或 `go run ./cmd/fp`。**
-`fp` 二进制只读环境变量、不加载任何 dotenv 文件，而 `.env.local` 里存的是
-零件（`FP_PG_HOST`、`FP_PG_PORT`、`FP_PG_PASSWORD`…），`config.Load()` 要的
-却是拼好的 `FP_POSTGRES_URL` / `FP_REDIS_URL`。拼装这一步在 `scripts/env.sh`
-里，`run.sh` 会 source 它。直接跑二进制会得到：
+`fp` 读 `./config.yaml`（`-c` 可以指定别的路径），文件不存在直接启动失败：
 
-    ERROR fp 启动失败 err="config: 缺少必填环境变量 FP_POSTGRES_URL, FP_REDIS_URL"
+    ERROR fp 启动失败 err="config: 打开配置文件 config.yaml: ..."
 
-确实想跑构建出来的二进制（例如验证 `go:embed` 的产物），先把连接串导进当前
-shell 再跑：
+拼错的键也会当场报错，不会静默回落到默认值——`log: {lvel: debug}` 起不来：
 
-    set -a; . ./scripts/env.sh; set +a
+    ERROR fp 启动失败 err="config: 解析 config.yaml: yaml: unmarshal errors:
+      line 6: field lvel not found in type config.Log"
+
+这是从环境变量迁到配置文件换来的：环境变量那个介质压根没有"这个键我不认识"
+的概念，`FP_LOG_LVEL` 拼错只会静默用默认值。
+
+`scripts/run.sh` 现在只是个"检查 `config.yaml` 在不在，然后 `go run ./cmd/fp`"
+的包装，所以**直接跑构建出来的二进制也完全可以**（例如验证 `go:embed` 的产物）：
+
     go build -o fp ./cmd/fp && ./fp
 
-**控制台的登录账号**：`run.sh` 在 `FP_BOOTSTRAP_ADMIN_USER` /
-`FP_BOOTSTRAP_ADMIN_PASSWORD` 未设置时默认用 `admin` / `admin123456`。
-想换成别的，在 `.env.local` 里设这两项。注意 `EnsureBootstrap` 是
-`ON CONFLICT DO NOTHING`——账号一旦建过，改这两个环境变量不会改密码。
+**控制台的登录账号**：`config.yaml` 里的 `bootstrap_admin.user` /
+`bootstrap_admin.password`，`config.example.yaml` 给的是 `admin` / `admin`。
+两项都填才生效——`EnsureBootstrap` 在任一为空时直接跳过，不报错也不提示，
+结果是库里没有任何管理员、控制台登不进去。注意它是 `ON CONFLICT DO NOTHING`
+——账号一旦建过，改这两项不会改密码，得直接改库。
 
 **没跑过 `build-web.sh` 也能 `go build`**（`web/dist/` 里提交了一个
 `.gitkeep`，embed 指令用的是 `all:` 前缀），只是打开控制台会看到一句

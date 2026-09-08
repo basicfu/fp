@@ -25,8 +25,8 @@
 
 ## 前置条件
 
-- fp 能跑起来：局域网 PostgreSQL / Redis 可达，仓库根目录有 `.env.local`
-  （从 `.env.example` 复制、按注释填好 PG/Redis 那几项）。
+- fp 能跑起来：局域网 PostgreSQL / Redis 可达，仓库根目录有 `config.yaml`
+  （从 `config.example.yaml` 复制、按注释填好 PG/Redis 那两条连接串）。
 - 本机没有 Docker、没有 make：全部用 bash 脚本 + `go run`，`./scripts/*.sh`
   在 Git Bash 里执行。
 
@@ -41,9 +41,9 @@
 | `FP_INSECURE` | 设为 `1` 时用明文连接。**只能用于本地开发** |
 
 `FP_APP_ID` / `FP_APP_SECRET` 是凭据，和 PG/Redis 密码一样只能进
-git-ignored 的 `.env.local`——**不要**写进 `.env.example`，也不要提交到
-git。`scripts/demo.sh` 与 `scripts/run.sh` 同构：都是先 `. scripts/env.sh`
-从 `.env.local` 载入凭据，再起对应的进程；`FP_ADDR` / `FP_INSECURE` 在
+git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
+`. scripts/env.sh` 从 `.env.local` 载入这两个变量再起 demo（`scripts/run.sh`
+不再走这条路——fp 自己的配置已经全在 `config.yaml` 里）；`FP_ADDR` / `FP_INSECURE` 在
 `scripts/demo.sh` 里给了本地开发的默认值（`127.0.0.1:9090` /`1`），不用
 额外配置。
 
@@ -119,8 +119,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 **该看到**：`204`。
 
-最后，把 `appId` / `appSecret` 写进仓库根目录的 `.env.local`（追加两行，
-照抄 `.env.example` 里的字段名）：
+最后，把 `appId` / `appSecret` 追加到仓库根目录的 `.env.local`：
 
 ```bash
 FP_APP_ID=<application.appId>
