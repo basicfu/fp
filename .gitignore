@@ -5,6 +5,11 @@
 /tmp/
 .env
 .env.local
+
+# 启动配置：含 PG/Redis 密码与阿里云凭据。仓库里只留 *.example.yaml。
+/config.yaml
+/config-im.yaml
+
 .idea/
 .superpowers/
 

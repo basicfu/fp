@@ -1,0 +1,41 @@
+# fp 启动配置。复制成 config.yaml 后填入真实值——config.yaml 含密钥，
+# 已在 .gitignore 里，不会被提交。
+#
+# 二进制默认读 ./config.yaml，用 -c 指定别的路径：
+#   ./fp -c /etc/fp/config.yaml
+#
+# 拼错的键会当场报错，不会静默回落到默认值。
+
+env: dev                       # dev / prod，大小写不敏感
+
+log:
+  level: info                  # debug / info / warn / error
+
+http:
+  addr: ":8080"                # 管理控制台
+grpc:
+  addr: ":9090"                # SDK 接入
+
+postgres:
+  url: postgres://postgres:password@127.0.0.1:5432/fp?sslmode=disable
+redis:
+  url: redis://:password@127.0.0.1:6379/0
+
+# 首次启动创建的平台管理员。两项都填才生效——EnsureBootstrap 在任一为空时
+# 直接跳过，不报错也不提示，结果是库里没有任何管理员、控制台登不进去。
+# 已存在同名账号时不会覆盖（ON CONFLICT DO NOTHING），改密码要直接改库。
+bootstrap_admin:
+  user: admin
+  password: admin
+
+# 阿里云短信。只在 env: prod 时前四项强制必填；非 prod 缺任一项会退化成
+# 内存假供应商（验证码不会真的发送，而是以 WARN 级别打进 fp 自己的日志），
+# 启动日志会打一条 WARN 提示这一点，不会静默降级。四项在非生产环境下也
+# 填齐的话，仍然会使用真实的阿里云供应商。
+sms:
+  aliyun:
+    access_key_id: ""
+    access_key_secret: ""
+    sign_name: ""
+    template_login_code: ""    # fp 模板 key "login_code" 对应的阿里云模板 ID
+    endpoint: ""               # 留空则用阿里云短信默认接入点，任何环境都不必填

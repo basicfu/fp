@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -32,16 +33,19 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Load()
+	cfgPath := flag.String("c", config.DefaultPath, "配置文件路径")
+	flag.Parse()
+
+	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
 	}
-	log := logging.Setup(cfg.LogLevel)
+	log := logging.Setup(cfg.Log.Level)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := store.OpenPostgres(ctx, cfg.PostgresURL)
+	pool, err := store.OpenPostgres(ctx, cfg.Postgres.URL)
 	if err != nil {
 		return err
 	}
@@ -52,7 +56,7 @@ func run() error {
 	}
 	log.Info("数据库迁移完成")
 
-	rdb, err := store.OpenRedis(ctx, cfg.RedisURL)
+	rdb, err := store.OpenRedis(ctx, cfg.Redis.URL)
 	if err != nil {
 		return err
 	}
@@ -78,7 +82,7 @@ func run() error {
 	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore)
 
 	adminSvc := service.NewAdminService(pool, rdb)
-	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdminUser, cfg.BootstrapAdminPassword); err != nil {
+	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdmin.User, cfg.BootstrapAdmin.Password); err != nil {
 		return err
 	}
 
@@ -103,17 +107,17 @@ func run() error {
 	//     走的是上面 aliyunConfigured 分支，代码路径上根本不会碰到
 	//     LoggingFakeProvider，日志里也就不会出现真实验证码。
 	smsSender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
-	aliyunConfigured := cfg.AliyunAccessKeyID != "" && cfg.AliyunAccessKeySecret != "" &&
-		cfg.AliyunSMSSignName != "" && cfg.AliyunSMSTemplateLoginCode != ""
+	aliyunConfigured := cfg.SMS.Aliyun.AccessKeyID != "" && cfg.SMS.Aliyun.AccessKeySecret != "" &&
+		cfg.SMS.Aliyun.SignName != "" && cfg.SMS.Aliyun.TemplateLoginCode != ""
 	switch {
 	case aliyunConfigured:
 		aliyunSMS, err := notify.NewAliyunSMS(notify.AliyunConfig{
-			AccessKeyID:     cfg.AliyunAccessKeyID,
-			AccessKeySecret: cfg.AliyunAccessKeySecret,
-			Endpoint:        cfg.AliyunEndpoint,
-			SignName:        cfg.AliyunSMSSignName,
+			AccessKeyID:     cfg.SMS.Aliyun.AccessKeyID,
+			AccessKeySecret: cfg.SMS.Aliyun.AccessKeySecret,
+			Endpoint:        cfg.SMS.Aliyun.Endpoint,
+			SignName:        cfg.SMS.Aliyun.SignName,
 			Templates: map[string]string{
-				service.LoginCodeTemplate: cfg.AliyunSMSTemplateLoginCode,
+				service.LoginCodeTemplate: cfg.SMS.Aliyun.TemplateLoginCode,
 			},
 		})
 		if err != nil {
@@ -142,7 +146,7 @@ func run() error {
 	})
 
 	httpSrv := &http.Server{
-		Addr: cfg.HTTPAddr,
+		Addr: cfg.HTTP.Addr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Admin:    adminSvc,
 			Apps:     appSvc,
@@ -187,9 +191,9 @@ func run() error {
 		ConfigPub: configPub,
 	})
 
-	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
+	grpcLis, err := net.Listen("tcp", cfg.GRPC.Addr)
 	if err != nil {
-		return fmt.Errorf("监听 gRPC 地址 %s: %w", cfg.GRPCAddr, err)
+		return fmt.Errorf("监听 gRPC 地址 %s: %w", cfg.GRPC.Addr, err)
 	}
 
 	// ServeWhenReady 内部会先等撤销中继订阅上 Redis 才开始接受连接——这条
@@ -201,7 +205,7 @@ func run() error {
 			stop()
 		}
 	}()
-	log.Info("fp 启动", "env", cfg.Env, "http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr)
+	log.Info("fp 启动", "env", cfg.Env, "http", cfg.HTTP.Addr, "grpc", cfg.GRPC.Addr)
 
 	<-ctx.Done()
 	log.Info("fp 收到退出信号，正在关闭")
