@@ -60,7 +60,10 @@ type HubEvent struct {
 
 type revokeSub struct {
 	appID uuid.UUID
-	ch    chan HubEvent
+	// all 为 true 时不按 app 过滤：fp-im 网关只有一条 Watch 流，服务的却是
+	// 所有应用。业务方 SDK 永远是 false——它绝不能收到别的应用的 token。
+	all bool
+	ch  chan HubEvent
 }
 
 // newRevokeHub 构造一个还没接上任何信号源的 RevokeHub。
@@ -204,7 +207,7 @@ func (h *RevokeHub) fanout(ev domain.RevokeEvent) {
 		// 会被这里的等值比较静默过滤成推给零个订阅者，正是这个阶段一直
 		// 在消灭的那类失效模式。TestGlobalRevokeReachesEveryApp 专门钉住
 		// 这一点，同样不能因为"看起来没有生产者覆盖它"而删除。
-		if ev.AppID != uuid.Nil && ev.AppID != sub.appID {
+		if !sub.all && ev.AppID != uuid.Nil && ev.AppID != sub.appID {
 			continue
 		}
 		select {
@@ -251,8 +254,21 @@ func (h *RevokeHub) broadcastPurge(reason string) {
 	}
 }
 
-// Subscribe 登记一个订阅者。返回的函数必须被调用，否则订阅者永久驻留。
+// Subscribe 登记一个只收指定应用（以及跨应用）撤销的订阅者。
+// 返回的函数必须被调用，否则订阅者永久驻留。
 func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan HubEvent, func()) {
+	return h.subscribeWith(revokeSub{appID: appID})
+}
+
+// SubscribeAll 登记一个**不按 app 过滤**的订阅者，只给 fp-im 网关用。
+//
+// 与 Subscribe 共用同一份注册表与同一条 Redis 订阅——多一个订阅者不会多
+// 一次 Redis 订阅，见 subscribeCalls 的注释。
+func (h *RevokeHub) SubscribeAll() (<-chan HubEvent, func()) {
+	return h.subscribeWith(revokeSub{all: true})
+}
+
+func (h *RevokeHub) subscribeWith(proto revokeSub) (<-chan HubEvent, func()) {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -261,7 +277,8 @@ func (h *RevokeHub) Subscribe(appID uuid.UUID) (<-chan HubEvent, func()) {
 		return ch, func() {}
 	}
 
-	sub := &revokeSub{appID: appID, ch: make(chan HubEvent, revokeBufferSize)}
+	sub := &proto
+	sub.ch = make(chan HubEvent, revokeBufferSize)
 	h.next++
 	id := h.next
 	h.subs[id] = sub

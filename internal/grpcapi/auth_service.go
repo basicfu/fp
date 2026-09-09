@@ -239,7 +239,17 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	// TestServerReadyWaitsForBothHubs）在更上游堵死；这里剩下的只是"进程内
 	// map 登记"与"发一条消息"这两个动作谁先谁后，写代码的人只要不把顺序
 	// 倒过来就没有问题。
-	events, unsubscribe := s.hub.Subscribe(app.ID)
+	// fp-im 网关只有一条流，服务的却是所有应用，所以不按 app 过滤。
+	// 它多收到几条自己没有连接的应用的撤销是无害的：fp-im 侧按 token 查
+	// 本地连接表，查不到就什么都不做。为此在 fp 侧按 im_enabled 过滤要给
+	// 每条事件多查一次应用，不划算。
+	var events <-chan HubEvent
+	var unsubscribe func()
+	if callerTypeFrom(ctx) == CallerTypeIM {
+		events, unsubscribe = s.hub.SubscribeAll()
+	} else {
+		events, unsubscribe = s.hub.Subscribe(app.ID)
+	}
 	defer unsubscribe()
 	configEvents, unsubscribeConfig := s.configHub.Subscribe(app.ID)
 	defer unsubscribeConfig()

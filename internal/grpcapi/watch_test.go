@@ -293,3 +293,52 @@ func newTestHubWithFakeSignals(t *testing.T) (*RevokeHub, chan<- store.RevokeSig
 
 	return hub, signals
 }
+
+// TestSubscribeAllReceivesEveryApp：type=im 的订阅者要收到所有应用的撤销。
+//
+// fp-im 只有一条到 fp 的连接、一条 Watch 流，服务的却是所有应用。按 app
+// 过滤的话它只能收到一个应用的撤销，其余应用被踢下线的用户 ws 会一直挂到
+// 空闲超时。
+func TestSubscribeAllReceivesEveryApp(t *testing.T) {
+	h := newRevokeHub()
+	events, unsub := h.SubscribeAll()
+	defer unsub()
+
+	appA, appB := uuid.New(), uuid.New()
+	h.fanout(domain.RevokeEvent{AppID: appA, Tokens: []string{"ta"}})
+	h.fanout(domain.RevokeEvent{AppID: appB, Tokens: []string{"tb"}})
+
+	got := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-events:
+			got[ev.Revoke.Tokens[0]] = true
+		case <-time.After(time.Second):
+			t.Fatalf("只收到 %d 条事件，期望 2 条", i)
+		}
+	}
+	if !got["ta"] || !got["tb"] {
+		t.Fatalf("收到的事件 = %v，两个应用的都要收到", got)
+	}
+}
+
+// TestSubscribeByAppStillFilters：通配订阅不能把既有的按 app 过滤弄坏。
+// 业务方 SDK 绝不能收到别的应用的 token 列表。
+func TestSubscribeByAppStillFilters(t *testing.T) {
+	h := newRevokeHub()
+	appA, appB := uuid.New(), uuid.New()
+	events, unsub := h.Subscribe(appA)
+	defer unsub()
+
+	h.fanout(domain.RevokeEvent{AppID: appB, Tokens: []string{"tb"}})
+	h.fanout(domain.RevokeEvent{AppID: appA, Tokens: []string{"ta"}})
+
+	select {
+	case ev := <-events:
+		if ev.Revoke.Tokens[0] != "ta" {
+			t.Fatalf("收到了别的应用的事件：%v", ev.Revoke.Tokens)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("本应用的事件没收到")
+	}
+}
