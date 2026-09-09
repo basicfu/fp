@@ -1,6 +1,13 @@
-// Package fpauth 用 fpsdk 实现 auth.Authenticator。每个 app 一个 fpsdk.Client：
-// fp 的 SDK 按 app 凭据建连，fp-im 服务多个 app 就得有多个。
-// 这是 internal/im 里唯一允许 import github.com/basicfu/fp/sdk 的包（arch_test 断言）。
+// Package fpauth 用 fpsdk 实现 auth.Authenticator，并把 fp 的 IM 网关接口
+// 包给 fp-im 的其余部分用。
+//
+// **全进程只有一个 fpsdk.Client。** 早期是每个 app 一个——因为那时凭据是
+// 各 app 自己的 appSecret，而 fpsdk 的凭据钉在连接上。现在凭据是 IM
+// secret，连接级不带 app_id，app 作用域由每次调用附上（fpsdk.WithAppID），
+// 所以一条连接服务所有 app。
+//
+// 这是 internal/im 里唯一允许 import github.com/basicfu/fp/sdk 的包
+// （internal/im/arch_test.go 断言）。
 package fpauth
 
 import (
@@ -8,7 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
+	"time"
 
 	"github.com/basicfu/fp/internal/im/auth"
 	"github.com/basicfu/fp/internal/im/model"
@@ -16,98 +23,145 @@ import (
 )
 
 type Config struct {
-	FPAddr   string
+	// FPAddr 是 fp 的 gRPC 地址。
+	FPAddr string
+	// Secret 是 IM 凭据，来自 config-im.yaml 的 fpsdk.secret，在 fp 控制台
+	// 生成。全部 fp-im 实例共用同一份。
+	Secret   string
 	Insecure bool
-	Apps     auth.AppConfigSource
-	// OnRevoke 在某 app 的 token 被撤销时调用，fp-im 用它关 ws。
+	// OnRevoke 在 token 被撤销时调用，fp-im 用它关 ws。
 	OnRevoke func(app string, tokens []string)
-	Logger   *slog.Logger
+	// AllApps 返回本节点当前持有配置（也就是有过连接）的全部 app。
+	//
+	// 只为一件事存在：RevokeEvent.AppID 为空串表示**跨全部应用**的撤销
+	// （改密、冻结），而 hub 的连接表按 app 分桶，必须逐个投递。
+	// 见 dispatchRevoke。
+	AllApps func() []string
+	// OnAppIMConfigChanged 在 fp 推来某个 app 的 IM 配置变更时调用。
+	// app 为空串表示"不知道变了哪个，全部重来"（推送流出现 Gap）。
+	OnAppIMConfigChanged func(app string)
+	Logger               *slog.Logger
 }
 
 type Authenticator struct {
-	cfg     Config
-	mu      sync.Mutex
-	clients map[string]*fpsdk.Client
-	// closed 为 true 后，client 必须硬失败而不是悄悄建一个新连接。
-	// 没有这个标志位，Close() 只是把 clients 表清空，一个在途的握手协程
-	// 只要还调 Verify，就会在"已关闭"的 Authenticator 上重新拉起一条到
-	// fp 的连接——这在进程正在退出时尤其糟糕：一个语义上已经死掉的对象
-	// 又悄悄活了过来。
-	closed bool
+	cfg    Config
+	client *fpsdk.Client
 }
 
 func New(cfg Config) (*Authenticator, error) {
-	if cfg.FPAddr == "" || cfg.Apps == nil {
-		return nil, errors.New("fpauth: FPAddr 与 Apps 必填")
+	// FPAddr 与 Secret 的非空检查留在这里而不是 internal/im/config：
+	// "谁用谁校验"——config 包不知道谁会用这两项。而 client 是启动时建的，
+	// 所以配错了会在装配阶段就失败，不会推迟到第一个用户握手。
+	if cfg.FPAddr == "" {
+		return nil, errors.New("fpauth: FPAddr 必填")
 	}
-	return &Authenticator{cfg: cfg, clients: map[string]*fpsdk.Client{}}, nil
-}
-
-// client 按需为 app 建 fpsdk.Client。懒建而不是启动时全建：apps 文件会热重载。
-func (a *Authenticator) client(app string) (*fpsdk.Client, error) {
-	cfg, ok := a.cfg.Apps.Get(app)
-	if !ok {
-		return nil, auth.ErrUnauthorized
+	if cfg.Secret == "" {
+		return nil, errors.New("fpauth: Secret（IM 凭据）必填")
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.closed {
-		// 用 auth.ErrUnavailable 包一层：对调用方（握手代码）来说，
-		// "Authenticator 已关闭"和"身份服务此刻联系不上"是同一种后果——
-		// 都应该拒绝这次握手而不是崩溃，没必要为此新增第三个哨兵错误。
-		return nil, fmt.Errorf("%w: fpauth 已关闭，不再建立新的 fp 连接", auth.ErrUnavailable)
-	}
-	if c, ok := a.clients[app]; ok {
-		return c, nil
-	}
+	a := &Authenticator{cfg: cfg}
 	c, err := fpsdk.New(fpsdk.Options{
-		Addr: a.cfg.FPAddr, AppID: cfg.AppID, AppSecret: cfg.AppSecret, Insecure: a.cfg.Insecure, Logger: a.cfg.Logger,
-		OnRevoke: func(ev fpsdk.RevokeEvent) {
-			if a.cfg.OnRevoke != nil && len(ev.Tokens) > 0 {
-				a.cfg.OnRevoke(app, ev.Tokens)
-			}
-		},
+		Addr:       cfg.FPAddr,
+		AppSecret:  cfg.Secret,
+		CallerType: fpsdk.CallerTypeIM,
+		Insecure:   cfg.Insecure,
+		Logger:     cfg.Logger,
+		OnRevoke:   a.dispatchRevoke,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fpauth: 为 app %s 建 fp 客户端: %w", app, err)
+		return nil, fmt.Errorf("fpauth: 连接 fp: %w", err)
 	}
-	a.clients[app] = c
-	return c, nil
+	a.client = c
+	return a, nil
+}
+
+// dispatchRevoke 把一条撤销事件投给 hub。
+//
+// **AppID 为空串表示跨全部应用的撤销**（改密、冻结）——proto 的 RevokeEvent
+// 注释里写着这个语义。早期 fp-im 每个 app 一个 client，这条事件被 N 个
+// 客户端各收一份，扇出是靠连接数量天然做到的；收敛成一条流之后只收到一份，
+// 必须在这里显式扇开。
+//
+// 漏了这一步的后果是**静默的**：拿空串去查 hub 的连接表（键是
+// app + "\x00" + token）一条也查不到，改密码 / 冻结用户之后 ws 全都不会被
+// 关，没有任何报错或日志。TestCrossAppRevokeFansOutToAllApps 钉住它。
+func (a *Authenticator) dispatchRevoke(ev fpsdk.RevokeEvent) {
+	if a.cfg.OnRevoke == nil || len(ev.Tokens) == 0 {
+		return
+	}
+	if ev.AppID != "" {
+		a.cfg.OnRevoke(ev.AppID, ev.Tokens)
+		return
+	}
+	if a.cfg.AllApps == nil {
+		return
+	}
+	for _, app := range a.cfg.AllApps() {
+		a.cfg.OnRevoke(app, ev.Tokens)
+	}
 }
 
 func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (model.Subject, error) {
-	c, err := a.client(req.App)
-	if err != nil {
-		return model.Subject{}, err
-	}
-	id, err := c.Auth().Validate(ctx, req.Token)
+	// app 作用域逐调用附上：连接级凭据里没有 app_id。
+	id, err := a.client.Auth().Validate(fpsdk.WithAppID(ctx, req.App), req.Token)
 	if err != nil {
 		return model.Subject{}, translate(err)
 	}
 	return model.User(id.UserID), nil
 }
 
-// translate 把 fpsdk 的哨兵错误映射到 auth 的两个：握手代码只需要分"拒绝"和"稍后再试"。
+// Fetch 满足 fpappcfg.Fetcher：拉一个 app 的 IM 配置并转成 fp-im 的模型。
+func (a *Authenticator) Fetch(ctx context.Context, app string) (model.AppConfig, error) {
+	c, err := a.client.IMGateway().GetAppIMConfig(ctx, app)
+	if err != nil {
+		return model.AppConfig{}, translate(err)
+	}
+	cfg := model.AppConfig{
+		AppID:       app,
+		ConnPolicy:  model.Policy(c.ConnPolicy),
+		ConnLimit:   int(c.ConnLimit),
+		AllowGuest:  c.AllowGuest,
+		GuestIPRate: int(c.GuestIPRate),
+	}
+	if b := c.BizAuth; b != nil {
+		cfg.BizAuth = &model.BizAuth{
+			VerifyURL: b.VerifyURL,
+			Timeout:   model.Duration(time.Duration(b.TimeoutMs) * time.Millisecond),
+			CacheSize: int(b.CacheSize),
+		}
+	}
+	// fp 侧保存时已经校验过一遍，这里再校验一次不是不信任它，而是让"线上
+	// 传下来一份 fp-im 认为非法的配置"在加载时就暴露，而不是等到某条握手
+	// 走到那个字段才诡异地失败。
+	if err := cfg.Validate(); err != nil {
+		return model.AppConfig{}, err
+	}
+	return cfg, nil
+}
+
+// VerifyAppCredential 核实业务 server 连入 fp-im 时递上来的凭据。
+//
+// fp-im 没有数据库、也拿不到任何应用的 secret（fp 只存 bcrypt 哈希），
+// 只能转给 fp 核实。
+func (a *Authenticator) VerifyAppCredential(ctx context.Context, app, secret string) error {
+	return translate(a.client.IMGateway().VerifyAppCredential(ctx, app, secret))
+}
+
+func (a *Authenticator) Close() error { return a.client.Close() }
+
+// translate 把 fpsdk 的哨兵错误映射到 auth 的两个：调用方只需要分"拒绝"和
+// "稍后再试"。
+//
+// ErrIMNotAvailable（应用不存在 / 已停用 / 没开 IM）归到 ErrUnauthorized：
+// 它是一个**确定**的拒绝，不是"够不着"——退避重连不会让它变好。
 func translate(err error) error {
 	switch {
-	case errors.Is(err, fpsdk.ErrNoToken), errors.Is(err, fpsdk.ErrUnauthorized):
+	case err == nil:
+		return nil
+	case errors.Is(err, fpsdk.ErrNoToken), errors.Is(err, fpsdk.ErrUnauthorized),
+		errors.Is(err, fpsdk.ErrIMNotAvailable):
 		return auth.ErrUnauthorized
 	case errors.Is(err, fpsdk.ErrUnavailable):
 		return auth.ErrUnavailable
 	}
 	return fmt.Errorf("%w: %v", auth.ErrUnavailable, err)
-}
-
-func (a *Authenticator) Close() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.closed = true
-	var errs []error
-	for app, c := range a.clients {
-		if err := c.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("app %s: %w", app, err))
-		}
-	}
-	a.clients = map[string]*fpsdk.Client{}
-	return errors.Join(errs...)
 }
