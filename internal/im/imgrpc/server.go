@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/basicfu/fp/internal/im/auth"
 	"github.com/basicfu/fp/internal/im/hub"
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
 	"google.golang.org/grpc"
@@ -24,8 +23,12 @@ const KeepaliveMinTime = 10 * time.Second
 const defaultWorkers = 64
 
 type Deps struct {
-	Hub  *hub.Hub
-	Apps auth.AppConfigSource
+	Hub *hub.Hub
+	// Creds 核实业务 server 连入时的凭据。fp-im 不再持有任何应用的
+	// secret（fp 只存 bcrypt 哈希），只能转给 fp 核实。
+	Creds CredentialVerifier
+	// CredCacheTTL 为 0 时取 DefaultCredCacheTTL（5 分钟）。
+	CredCacheTTL time.Duration
 	// Workers 是每条流并发处理请求的上限，0 表示用默认值。Push 会等 Redis，
 	// 串行处理会让一条慢请求拖住整条流上后面所有请求。
 	Workers int
@@ -45,7 +48,7 @@ func New(d Deps) *Server {
 	s.grpc = grpc.NewServer(
 		// 只装流拦截器：这个服务只有一个双向流方法 Connect，没有一元方法，
 		// 一元拦截器装了也永远不会被触发。
-		grpc.StreamInterceptor(streamAuth(d.Apps)),
+		grpc.StreamInterceptor(streamAuth(newCredCache(d.Creds, d.CredCacheTTL))),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: KeepaliveMinTime, PermitWithoutStream: true}),
 	)
 	fpimv1.RegisterImServiceServer(s.grpc, s)

@@ -25,8 +25,9 @@ import (
 // 以及假注册表 Reg。
 func newClient(t *testing.T) (fpimv1.ImServiceClient, *hub.Hub, *hubtest.Reg) {
 	t.Helper()
-	h, reg, _, _, apps := hubtest.NewHub()
-	srv := New(Deps{Hub: h, Apps: apps})
+	h, reg, _, _, _ := hubtest.NewHub()
+	// 凭据校验现在转给 fp，测试里用一个只认 a1/s 的假实现。
+	srv := New(Deps{Hub: h, Creds: &fakeVerifier{ok: map[string]string{"a1": "s"}}})
 	lis := bufconn.Listen(1 << 20)
 	go srv.Serve(lis)
 	t.Cleanup(func() { srv.Stop(context.Background()) })
