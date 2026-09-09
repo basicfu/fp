@@ -163,7 +163,19 @@ message WatchResponse {
     UserRoleChanged user_role_changed = 5;
     // config_changed 表示某个分区的配置变了，SDK 应当重拉。
     ConfigChanged config_changed = 6;
+    // app_im_config_changed 表示某个应用的 IM 接入配置变了，fp-im 应当重拉
+    // 一次 GetAppIMConfig。只有 fp-caller-type: im 的流会收到。
+    AppIMConfigChanged app_im_config_changed = 7;
   }
+}
+
+// AppIMConfigChanged 是一次 IM 接入配置变更的通知。
+//
+// 只推信号不推内容，与 ConfigChanged / PolicyChanged 同一范式：fp-im 收到
+// 后重拉全量。它替掉了 fp-im 早期那套"每 10 秒看一次 apps 文件 mtime"的
+// 轮询。
+message AppIMConfigChanged {
+  string app_id = 1;
 }
 
 message PolicyChanged {

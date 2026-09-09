@@ -621,6 +621,7 @@ type WatchResponse struct {
 	//	*WatchResponse_PolicyChanged
 	//	*WatchResponse_UserRoleChanged
 	//	*WatchResponse_ConfigChanged
+	//	*WatchResponse_AppImConfigChanged
 	Event         isWatchResponse_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -717,6 +718,15 @@ func (x *WatchResponse) GetConfigChanged() *ConfigChanged {
 	return nil
 }
 
+func (x *WatchResponse) GetAppImConfigChanged() *AppIMConfigChanged {
+	if x != nil {
+		if x, ok := x.Event.(*WatchResponse_AppImConfigChanged); ok {
+			return x.AppImConfigChanged
+		}
+	}
+	return nil
+}
+
 type isWatchResponse_Event interface {
 	isWatchResponse_Event()
 }
@@ -755,6 +765,12 @@ type WatchResponse_ConfigChanged struct {
 	ConfigChanged *ConfigChanged `protobuf:"bytes,6,opt,name=config_changed,json=configChanged,proto3,oneof"`
 }
 
+type WatchResponse_AppImConfigChanged struct {
+	// app_im_config_changed 表示某个应用的 IM 接入配置变了，fp-im 应当重拉
+	// 一次 GetAppIMConfig。只有 fp-caller-type: im 的流会收到。
+	AppImConfigChanged *AppIMConfigChanged `protobuf:"bytes,7,opt,name=app_im_config_changed,json=appImConfigChanged,proto3,oneof"`
+}
+
 func (*WatchResponse_Revoke) isWatchResponse_Event() {}
 
 func (*WatchResponse_Ready) isWatchResponse_Event() {}
@@ -767,6 +783,57 @@ func (*WatchResponse_UserRoleChanged) isWatchResponse_Event() {}
 
 func (*WatchResponse_ConfigChanged) isWatchResponse_Event() {}
 
+func (*WatchResponse_AppImConfigChanged) isWatchResponse_Event() {}
+
+// AppIMConfigChanged 是一次 IM 接入配置变更的通知。
+//
+// 只推信号不推内容，与 ConfigChanged / PolicyChanged 同一范式：fp-im 收到
+// 后重拉全量。它替掉了 fp-im 早期那套"每 10 秒看一次 apps 文件 mtime"的
+// 轮询。
+type AppIMConfigChanged struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppIMConfigChanged) Reset() {
+	*x = AppIMConfigChanged{}
+	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppIMConfigChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppIMConfigChanged) ProtoMessage() {}
+
+func (x *AppIMConfigChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppIMConfigChanged.ProtoReflect.Descriptor instead.
+func (*AppIMConfigChanged) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *AppIMConfigChanged) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
 type PolicyChanged struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// version 是新的策略版本号，SDK 可用它跳过已经拿到的版本。
@@ -777,7 +844,7 @@ type PolicyChanged struct {
 
 func (x *PolicyChanged) Reset() {
 	*x = PolicyChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	mi := &file_fp_v1_auth_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -789,7 +856,7 @@ func (x *PolicyChanged) String() string {
 func (*PolicyChanged) ProtoMessage() {}
 
 func (x *PolicyChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[11]
+	mi := &file_fp_v1_auth_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -802,7 +869,7 @@ func (x *PolicyChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyChanged.ProtoReflect.Descriptor instead.
 func (*PolicyChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{11}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PolicyChanged) GetVersion() int64 {
@@ -821,7 +888,7 @@ type UserRoleChanged struct {
 
 func (x *UserRoleChanged) Reset() {
 	*x = UserRoleChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[12]
+	mi := &file_fp_v1_auth_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -833,7 +900,7 @@ func (x *UserRoleChanged) String() string {
 func (*UserRoleChanged) ProtoMessage() {}
 
 func (x *UserRoleChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[12]
+	mi := &file_fp_v1_auth_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -846,7 +913,7 @@ func (x *UserRoleChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserRoleChanged.ProtoReflect.Descriptor instead.
 func (*UserRoleChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{12}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UserRoleChanged) GetUserId() string {
@@ -869,7 +936,7 @@ type WatchReady struct {
 
 func (x *WatchReady) Reset() {
 	*x = WatchReady{}
-	mi := &file_fp_v1_auth_proto_msgTypes[13]
+	mi := &file_fp_v1_auth_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -881,7 +948,7 @@ func (x *WatchReady) String() string {
 func (*WatchReady) ProtoMessage() {}
 
 func (x *WatchReady) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[13]
+	mi := &file_fp_v1_auth_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -894,7 +961,7 @@ func (x *WatchReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchReady.ProtoReflect.Descriptor instead.
 func (*WatchReady) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{13}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{14}
 }
 
 // WatchPurge 要求 SDK 丢弃**全部**缓存条目。
@@ -916,7 +983,7 @@ type WatchPurge struct {
 
 func (x *WatchPurge) Reset() {
 	*x = WatchPurge{}
-	mi := &file_fp_v1_auth_proto_msgTypes[14]
+	mi := &file_fp_v1_auth_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -928,7 +995,7 @@ func (x *WatchPurge) String() string {
 func (*WatchPurge) ProtoMessage() {}
 
 func (x *WatchPurge) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[14]
+	mi := &file_fp_v1_auth_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -941,7 +1008,7 @@ func (x *WatchPurge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchPurge.ProtoReflect.Descriptor instead.
 func (*WatchPurge) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{14}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *WatchPurge) GetReason() string {
@@ -966,7 +1033,7 @@ type ReportPermissionsRequest struct {
 
 func (x *ReportPermissionsRequest) Reset() {
 	*x = ReportPermissionsRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[15]
+	mi := &file_fp_v1_auth_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -978,7 +1045,7 @@ func (x *ReportPermissionsRequest) String() string {
 func (*ReportPermissionsRequest) ProtoMessage() {}
 
 func (x *ReportPermissionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[15]
+	mi := &file_fp_v1_auth_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -991,7 +1058,7 @@ func (x *ReportPermissionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportPermissionsRequest.ProtoReflect.Descriptor instead.
 func (*ReportPermissionsRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{15}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ReportPermissionsRequest) GetPoints() []*PermissionPoint {
@@ -1018,7 +1085,7 @@ type PermissionPoint struct {
 
 func (x *PermissionPoint) Reset() {
 	*x = PermissionPoint{}
-	mi := &file_fp_v1_auth_proto_msgTypes[16]
+	mi := &file_fp_v1_auth_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1030,7 +1097,7 @@ func (x *PermissionPoint) String() string {
 func (*PermissionPoint) ProtoMessage() {}
 
 func (x *PermissionPoint) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[16]
+	mi := &file_fp_v1_auth_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1043,7 +1110,7 @@ func (x *PermissionPoint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PermissionPoint.ProtoReflect.Descriptor instead.
 func (*PermissionPoint) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{16}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PermissionPoint) GetKey() string {
@@ -1082,7 +1149,7 @@ type ReportPermissionsResponse struct {
 
 func (x *ReportPermissionsResponse) Reset() {
 	*x = ReportPermissionsResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[17]
+	mi := &file_fp_v1_auth_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1094,7 +1161,7 @@ func (x *ReportPermissionsResponse) String() string {
 func (*ReportPermissionsResponse) ProtoMessage() {}
 
 func (x *ReportPermissionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[17]
+	mi := &file_fp_v1_auth_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1107,7 +1174,7 @@ func (x *ReportPermissionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportPermissionsResponse.ProtoReflect.Descriptor instead.
 func (*ReportPermissionsResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{17}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{18}
 }
 
 type GetPolicyRequest struct {
@@ -1118,7 +1185,7 @@ type GetPolicyRequest struct {
 
 func (x *GetPolicyRequest) Reset() {
 	*x = GetPolicyRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	mi := &file_fp_v1_auth_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1130,7 +1197,7 @@ func (x *GetPolicyRequest) String() string {
 func (*GetPolicyRequest) ProtoMessage() {}
 
 func (x *GetPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	mi := &file_fp_v1_auth_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1143,7 +1210,7 @@ func (x *GetPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPolicyRequest.ProtoReflect.Descriptor instead.
 func (*GetPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{18}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{19}
 }
 
 type GetPolicyResponse struct {
@@ -1155,7 +1222,7 @@ type GetPolicyResponse struct {
 
 func (x *GetPolicyResponse) Reset() {
 	*x = GetPolicyResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	mi := &file_fp_v1_auth_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1167,7 +1234,7 @@ func (x *GetPolicyResponse) String() string {
 func (*GetPolicyResponse) ProtoMessage() {}
 
 func (x *GetPolicyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	mi := &file_fp_v1_auth_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1180,7 +1247,7 @@ func (x *GetPolicyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPolicyResponse.ProtoReflect.Descriptor instead.
 func (*GetPolicyResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{19}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *GetPolicyResponse) GetPolicy() *AppPolicy {
@@ -1212,7 +1279,7 @@ type ConfigChanged struct {
 
 func (x *ConfigChanged) Reset() {
 	*x = ConfigChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[20]
+	mi := &file_fp_v1_auth_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1224,7 +1291,7 @@ func (x *ConfigChanged) String() string {
 func (*ConfigChanged) ProtoMessage() {}
 
 func (x *ConfigChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[20]
+	mi := &file_fp_v1_auth_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1237,7 +1304,7 @@ func (x *ConfigChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigChanged.ProtoReflect.Descriptor instead.
 func (*ConfigChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{20}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ConfigChanged) GetType() string {
@@ -1298,15 +1365,18 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\arotated\x18\x04 \x01(\bR\arotated\x12\x1b\n" +
 	"\tnew_token\x18\x05 \x01(\tR\bnewToken\x12\x14\n" +
 	"\x05roles\x18\x06 \x03(\tR\x05roles\"\x0e\n" +
-	"\fWatchRequest\"\xe0\x02\n" +
+	"\fWatchRequest\"\xb0\x03\n" +
 	"\rWatchResponse\x12,\n" +
 	"\x06revoke\x18\x01 \x01(\v2\x12.fp.v1.RevokeEventH\x00R\x06revoke\x12)\n" +
 	"\x05ready\x18\x02 \x01(\v2\x11.fp.v1.WatchReadyH\x00R\x05ready\x12)\n" +
 	"\x05purge\x18\x03 \x01(\v2\x11.fp.v1.WatchPurgeH\x00R\x05purge\x12=\n" +
 	"\x0epolicy_changed\x18\x04 \x01(\v2\x14.fp.v1.PolicyChangedH\x00R\rpolicyChanged\x12D\n" +
 	"\x11user_role_changed\x18\x05 \x01(\v2\x16.fp.v1.UserRoleChangedH\x00R\x0fuserRoleChanged\x12=\n" +
-	"\x0econfig_changed\x18\x06 \x01(\v2\x14.fp.v1.ConfigChangedH\x00R\rconfigChangedB\a\n" +
-	"\x05event\")\n" +
+	"\x0econfig_changed\x18\x06 \x01(\v2\x14.fp.v1.ConfigChangedH\x00R\rconfigChanged\x12N\n" +
+	"\x15app_im_config_changed\x18\a \x01(\v2\x19.fp.v1.AppIMConfigChangedH\x00R\x12appImConfigChangedB\a\n" +
+	"\x05event\"+\n" +
+	"\x12AppIMConfigChanged\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\")\n" +
 	"\rPolicyChanged\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\"*\n" +
 	"\x0fUserRoleChanged\x12\x17\n" +
@@ -1351,7 +1421,7 @@ func file_fp_v1_auth_proto_rawDescGZIP() []byte {
 	return file_fp_v1_auth_proto_rawDescData
 }
 
-var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_fp_v1_auth_proto_goTypes = []any{
 	(*SendLoginCodeRequest)(nil),      // 0: fp.v1.SendLoginCodeRequest
 	(*SendLoginCodeResponse)(nil),     // 1: fp.v1.SendLoginCodeResponse
@@ -1364,50 +1434,52 @@ var file_fp_v1_auth_proto_goTypes = []any{
 	(*ValidateTokenResponse)(nil),     // 8: fp.v1.ValidateTokenResponse
 	(*WatchRequest)(nil),              // 9: fp.v1.WatchRequest
 	(*WatchResponse)(nil),             // 10: fp.v1.WatchResponse
-	(*PolicyChanged)(nil),             // 11: fp.v1.PolicyChanged
-	(*UserRoleChanged)(nil),           // 12: fp.v1.UserRoleChanged
-	(*WatchReady)(nil),                // 13: fp.v1.WatchReady
-	(*WatchPurge)(nil),                // 14: fp.v1.WatchPurge
-	(*ReportPermissionsRequest)(nil),  // 15: fp.v1.ReportPermissionsRequest
-	(*PermissionPoint)(nil),           // 16: fp.v1.PermissionPoint
-	(*ReportPermissionsResponse)(nil), // 17: fp.v1.ReportPermissionsResponse
-	(*GetPolicyRequest)(nil),          // 18: fp.v1.GetPolicyRequest
-	(*GetPolicyResponse)(nil),         // 19: fp.v1.GetPolicyResponse
-	(*ConfigChanged)(nil),             // 20: fp.v1.ConfigChanged
-	nil,                               // 21: fp.v1.LoginRequest.CredentialsEntry
-	(*RevokeEvent)(nil),               // 22: fp.v1.RevokeEvent
-	(*AppPolicy)(nil),                 // 23: fp.v1.AppPolicy
+	(*AppIMConfigChanged)(nil),        // 11: fp.v1.AppIMConfigChanged
+	(*PolicyChanged)(nil),             // 12: fp.v1.PolicyChanged
+	(*UserRoleChanged)(nil),           // 13: fp.v1.UserRoleChanged
+	(*WatchReady)(nil),                // 14: fp.v1.WatchReady
+	(*WatchPurge)(nil),                // 15: fp.v1.WatchPurge
+	(*ReportPermissionsRequest)(nil),  // 16: fp.v1.ReportPermissionsRequest
+	(*PermissionPoint)(nil),           // 17: fp.v1.PermissionPoint
+	(*ReportPermissionsResponse)(nil), // 18: fp.v1.ReportPermissionsResponse
+	(*GetPolicyRequest)(nil),          // 19: fp.v1.GetPolicyRequest
+	(*GetPolicyResponse)(nil),         // 20: fp.v1.GetPolicyResponse
+	(*ConfigChanged)(nil),             // 21: fp.v1.ConfigChanged
+	nil,                               // 22: fp.v1.LoginRequest.CredentialsEntry
+	(*RevokeEvent)(nil),               // 23: fp.v1.RevokeEvent
+	(*AppPolicy)(nil),                 // 24: fp.v1.AppPolicy
 }
 var file_fp_v1_auth_proto_depIdxs = []int32{
-	21, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
+	22, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
 	4,  // 1: fp.v1.LoginResponse.user:type_name -> fp.v1.UserInfo
-	22, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
-	13, // 3: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
-	14, // 4: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
-	11, // 5: fp.v1.WatchResponse.policy_changed:type_name -> fp.v1.PolicyChanged
-	12, // 6: fp.v1.WatchResponse.user_role_changed:type_name -> fp.v1.UserRoleChanged
-	20, // 7: fp.v1.WatchResponse.config_changed:type_name -> fp.v1.ConfigChanged
-	16, // 8: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
-	23, // 9: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
-	0,  // 10: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
-	2,  // 11: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
-	5,  // 12: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
-	7,  // 13: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
-	9,  // 14: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
-	15, // 15: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
-	18, // 16: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
-	1,  // 17: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
-	3,  // 18: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
-	6,  // 19: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
-	8,  // 20: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
-	10, // 21: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
-	17, // 22: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
-	19, // 23: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
-	17, // [17:24] is the sub-list for method output_type
-	10, // [10:17] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	23, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
+	14, // 3: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
+	15, // 4: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
+	12, // 5: fp.v1.WatchResponse.policy_changed:type_name -> fp.v1.PolicyChanged
+	13, // 6: fp.v1.WatchResponse.user_role_changed:type_name -> fp.v1.UserRoleChanged
+	21, // 7: fp.v1.WatchResponse.config_changed:type_name -> fp.v1.ConfigChanged
+	11, // 8: fp.v1.WatchResponse.app_im_config_changed:type_name -> fp.v1.AppIMConfigChanged
+	17, // 9: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
+	24, // 10: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
+	0,  // 11: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
+	2,  // 12: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
+	5,  // 13: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
+	7,  // 14: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
+	9,  // 15: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
+	16, // 16: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
+	19, // 17: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
+	1,  // 18: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
+	3,  // 19: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
+	6,  // 20: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
+	8,  // 21: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
+	10, // 22: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
+	18, // 23: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
+	20, // 24: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
+	18, // [18:25] is the sub-list for method output_type
+	11, // [11:18] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_fp_v1_auth_proto_init() }
@@ -1423,6 +1495,7 @@ func file_fp_v1_auth_proto_init() {
 		(*WatchResponse_PolicyChanged)(nil),
 		(*WatchResponse_UserRoleChanged)(nil),
 		(*WatchResponse_ConfigChanged)(nil),
+		(*WatchResponse_AppImConfigChanged)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1430,7 +1503,7 @@ func file_fp_v1_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_auth_proto_rawDesc), len(file_fp_v1_auth_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

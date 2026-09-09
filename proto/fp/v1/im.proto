@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package fp.v1;
+
+option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
+
+// IMGatewayService 是 fp 与 fp-im 网关之间的全部契约。
+//
+// **只有携带 fp-caller-type: im 的调用方能用**（凭据是 IM secret，不是某个
+// 应用的 appSecret）；普通应用调用一律 PERMISSION_DENIED。反过来，im 调用方
+// 也不能碰 AuthService 的 Login 系列与 ConfigService——隔离是双向的，不是
+// 提权：一份泄露的 IM 凭据不能签发任何会话。
+//
+// 作用域一律来自 metadata 的 fp-app-id，请求体里不再重复：两处都有就要回答
+// "不一致算谁的"，而这个问题不该存在。fp-im 那个 app-id 来自 client 的 ws
+// 握手帧，逐调用附上——它的连接级凭据里没有 app-id。
+service IMGatewayService {
+  // GetAppIMConfig 返回 metadata 中那个应用的 IM 接入配置。
+  //
+  // 应用不存在、被停用、或没打开 im_enabled 时返回 FAILED_PRECONDITION，
+  // fp-im 据此给 client 关闭码 4002（策略拒绝，别重连）而不是 4001
+  // （认证失败，去重新登录）——token 可能完全有效，把 client 指去重新登录
+  // 是错的方向，它登录完还是连不上，变成死循环。
+  rpc GetAppIMConfig(GetAppIMConfigRequest) returns (GetAppIMConfigResponse);
+
+  // VerifyAppCredential 核实 secret 是否为 metadata 中那个应用的 appSecret。
+  //
+  // fp-im 没有数据库、也拿不到任何应用的 secret（fp 只存 bcrypt 哈希，明文
+  // 只在创建应用时返回一次），业务 server 连上来时只能把凭据转给 fp 核实。
+  rpc VerifyAppCredential(VerifyAppCredentialRequest) returns (VerifyAppCredentialResponse);
+}
+
+message GetAppIMConfigRequest {}
+
+message GetAppIMConfigResponse {
+  bool allow_guest = 1;
+  // conn_policy 取值 replace / reject / limit，与服务端 domain.IMConnPolicy*
+  // 及 fp-im 的 model.Policy 逐字相同。
+  string conn_policy = 2;
+  int32 conn_limit = 3;
+  int32 guest_ip_rate = 4;
+  // biz_auth 不设表示这个应用不支持业务方令牌。
+  // 用 message 而不是铺平三个字段：这是"整组有或整组没有"的东西，铺平之后
+  // 就得靠"verify_url 是不是空串"这种间接判断。
+  IMBizAuth biz_auth = 5;
+}
+
+message IMBizAuth {
+  // verify_url 必须是 https：client 的令牌明文走在请求体里。
+  string verify_url = 1;
+  // timeout_ms 是整个回调请求的超时，必须明显小于握手的 5 秒上限——配大了
+  // 会让 client 先被握手超时踢掉，拿到的关闭码方向完全反了。
+  int32 timeout_ms = 2;
+  int32 cache_size = 3;
+}
+
+message VerifyAppCredentialRequest {
+  string secret = 1;
+}
+
+message VerifyAppCredentialResponse {}
