@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"github.com/basicfu/fp/internal/im/auth"
 )
 
 // 与 fp 的 grpcapi 使用相同的 metadata 键，业务方的 SDK 配置同一对
@@ -116,8 +119,14 @@ func streamAuth(c *credCache) grpc.StreamServerInterceptor {
 		md, _ := metadata.FromIncomingContext(ss.Context())
 		id, secret := first(md, MDAppID), first(md, MDAppSecret)
 		if err := c.verify(ss.Context(), id, secret); err != nil {
-			// 不区分"凭据不对"与"fp 不可达"：前者的细节会泄露 appId 是否
-			// 存在，而后者对业务 server SDK 而言同样是"这次连不上，重试"。
+			// "凭据有效但这个应用没开 IM 接入"要单独告诉调用方：它已经证明
+			// 自己持有那份 appSecret，所以说真话不泄露任何东西；压成"凭据无效"
+			// 会让运维去查 secret，而实际要做的是去控制台翻一个开关。
+			if errors.Is(err, auth.ErrIMNotEnabled) {
+				return status.Error(codes.FailedPrecondition, "该应用未在 fp 控制台启用 IM 接入")
+			}
+			// 其余一律不区分："凭据不对"的细节会泄露 appId 是否存在，而
+			// "fp 不可达"对业务 server SDK 而言同样是"这次连不上，重试"。
 			return status.Error(codes.Unauthenticated, "应用凭据无效")
 		}
 		return handler(srv, &wrapped{ServerStream: ss, ctx: context.WithValue(ss.Context(), appCtxKey{}, id)})

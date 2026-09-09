@@ -135,3 +135,37 @@ func TestTranslate(t *testing.T) {
 		})
 	}
 }
+
+// TestTranslateVerify 钉住 VerifyAppCredential 那条路径**不复用 translate**。
+//
+// 差别只有一行：ErrIMNotAvailable 在这里映射成 ErrIMNotEnabled 而不是
+// ErrUnauthorized。合并回 translate 的诱惑很大（两个函数看着几乎一样），
+// 但那会让业务 server 在"控制台没打开 IM 接入"时收到"应用凭据无效"，
+// 于是运维去查一个根本没错的 secret，实际要做的是翻一个开关。
+//
+// 之所以敢对这条路径说真话：调用方已经证明自己持有那份 appSecret。
+func TestTranslateVerify(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   error
+		want error
+	}{
+		{"nil", nil, nil},
+		{"没开 IM 接入", fpsdk.ErrIMNotAvailable, auth.ErrIMNotEnabled},
+		{"凭据无效", fpsdk.ErrUnauthorized, auth.ErrUnauthorized},
+		{"fp 不可达", fpsdk.ErrUnavailable, auth.ErrUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := translateVerify(tc.in)
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("translateVerify(nil) = %v，期望 nil", got)
+				}
+				return
+			}
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("translateVerify(%v) = %v，期望 %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

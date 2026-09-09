@@ -12,6 +12,15 @@ import (
 var (
 	ErrUnauthorized = errors.New("auth: 凭证无效")
 	ErrUnavailable  = errors.New("auth: 身份服务不可用")
+	// ErrIMNotEnabled 表示凭据本身有效，但这个应用没在 fp 控制台打开 IM
+	// 接入。
+	//
+	// 与 ErrUnauthorized 分开不是分类癖：能拿到这个错误的调用方**已经证明
+	// 自己持有那份 appSecret**，所以告诉它真实原因不泄露任何东西；而把它
+	// 压成"凭据无效"会让运维去查 secret，实际要做的是去控制台翻一个开关。
+	// fp 侧的 VerifyAppCredential 特意先验凭据再看开关就是为了保住这个区分，
+	// 在这里压掉等于把那份用心扔了。
+	ErrIMNotEnabled = errors.New("auth: 该应用未启用 IM 接入")
 )
 
 // VerifyRequest 是一次身份验证的全部输入。

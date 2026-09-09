@@ -6,6 +6,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+
+	"github.com/basicfu/fp/internal/im/auth"
 )
 
 // fakeVerifier 计数并按一张表判定。
@@ -112,5 +119,99 @@ func TestCredCacheSurvivesFPOutage(t *testing.T) {
 	}
 	if err := c.verify(context.Background(), "a2", "s2"); err == nil {
 		t.Fatal("没缓存过的凭据在 fp 不可达时必须被拒")
+	}
+}
+
+// TestCredCachePropagatesIMNotEnabled：凭据有效但应用没开 IM 时，错误必须
+// 能被上层区分出来。
+//
+// 压成"凭据无效"会让运维去查 secret，而实际要做的是去控制台翻一个开关——
+// fp 侧的 VerifyAppCredential 特意先验凭据再看开关就是为了保住这个区分，
+// 在这里压掉等于把那份用心扔了。
+func TestCredCachePropagatesIMNotEnabled(t *testing.T) {
+	v := &fakeVerifier{ok: map[string]string{}, err: auth.ErrIMNotEnabled}
+	c := newCredCache(v, time.Minute)
+	err := c.verify(context.Background(), "a1", "s1")
+	if !errors.Is(err, auth.ErrIMNotEnabled) {
+		t.Fatalf("err = %v，必须能被 errors.Is 认出是 ErrIMNotEnabled", err)
+	}
+	// 而且这类失败同样不入缓存：开关一打开，下一次连接就该通。
+	v.mu.Lock()
+	v.err = nil
+	v.ok["a1"] = "s1"
+	v.mu.Unlock()
+	if err := c.verify(context.Background(), "a1", "s1"); err != nil {
+		t.Fatalf("开关打开之后应当立刻放行：%v", err)
+	}
+}
+
+// fakeStream 是 streamAuth 需要的最小 grpc.ServerStream。
+type fakeStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (f *fakeStream) Context() context.Context { return f.ctx }
+
+// TestStreamAuthStatusCodes 钉住业务 server 从 fp-im 收到的**状态码**。
+//
+// sdk/README.md 明确教业务方按这两个码分诊：FailedPrecondition 去控制台翻
+// 开关，Unauthenticated 才去查凭据 / 查 fp 健康。合并成一个码等于把那段
+// 文档变成谎言，而且是最难查的那种——运维会拿着一份完全正确的 secret 找
+// 一整天。
+//
+// 反向也要钉：其余失败**必须**都塌成 Unauthenticated。区分"应用不存在"和
+// "secret 不对"会泄露某个 appId 是否存在。
+func TestStreamAuthStatusCodes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verr    error
+		want    codes.Code
+		wantMsg string
+	}{
+		{"没开 IM 接入", auth.ErrIMNotEnabled, codes.FailedPrecondition, "该应用未在 fp 控制台启用 IM 接入"},
+		{"凭据无效", auth.ErrUnauthorized, codes.Unauthenticated, "应用凭据无效"},
+		{"fp 不可达", auth.ErrUnavailable, codes.Unauthenticated, "应用凭据无效"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCredCache(&fakeVerifier{ok: map[string]string{}, err: tc.verr}, time.Minute)
+			ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+				MDAppID, "a1", MDAppSecret, "s1"))
+
+			called := false
+			err := streamAuth(c)(nil, &fakeStream{ctx: ctx}, nil,
+				func(any, grpc.ServerStream) error { called = true; return nil })
+
+			if called {
+				t.Fatal("校验失败时绝不能进 handler")
+			}
+			st, _ := status.FromError(err)
+			if st.Code() != tc.want {
+				t.Fatalf("code = %v，期望 %v", st.Code(), tc.want)
+			}
+			if st.Message() != tc.wantMsg {
+				t.Fatalf("msg = %q，期望 %q", st.Message(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+// TestStreamAuthPassesAppIDToHandler：校验通过之后，handler 必须能从 ctx
+// 里拿到 app——下游全部按它做租户隔离，丢了就是跨应用串数据。
+func TestStreamAuthPassesAppIDToHandler(t *testing.T) {
+	c := newCredCache(&fakeVerifier{ok: map[string]string{"a1": "s1"}}, time.Minute)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		MDAppID, "a1", MDAppSecret, "s1"))
+
+	var got string
+	err := streamAuth(c)(nil, &fakeStream{ctx: ctx}, nil, func(_ any, ss grpc.ServerStream) error {
+		got = appFrom(ss.Context())
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("正确凭据必须放行：%v", err)
+	}
+	if got != "a1" {
+		t.Fatalf("handler 拿到的 app = %q，期望 %q", got, "a1")
 	}
 }

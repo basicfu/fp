@@ -143,7 +143,23 @@ func (a *Authenticator) Fetch(ctx context.Context, app string) (model.AppConfig,
 // fp-im 没有数据库、也拿不到任何应用的 secret（fp 只存 bcrypt 哈希），
 // 只能转给 fp 核实。
 func (a *Authenticator) VerifyAppCredential(ctx context.Context, app, secret string) error {
-	return translate(a.client.IMGateway().VerifyAppCredential(ctx, app, secret))
+	return translateVerify(a.client.IMGateway().VerifyAppCredential(ctx, app, secret))
+}
+
+// translateVerify 是 VerifyAppCredential 专用的映射，**刻意不复用 translate**。
+//
+// translate 把 ErrIMNotAvailable 压成 ErrUnauthorized，对 token 校验是对的
+// （client 拿着 token，凭什么告诉它这个 app 的内部状态）；但对这条路径是错
+// 的：调用到这里的业务 server 已经证明自己持有那份 appSecret，告诉它"开关
+// 没打开"不泄露任何东西，压成"凭据无效"却会让运维去查一个根本没错的 secret。
+//
+// fp 侧的 VerifyAppCredential 特意先验 bcrypt 再看 im_enabled 就是为了保住
+// 这个区分，在这里压掉等于把那份用心扔了。
+func translateVerify(err error) error {
+	if errors.Is(err, fpsdk.ErrIMNotAvailable) {
+		return auth.ErrIMNotEnabled
+	}
+	return translate(err)
 }
 
 func (a *Authenticator) Close() error { return a.client.Close() }
