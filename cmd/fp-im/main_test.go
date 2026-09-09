@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,23 +47,38 @@ func waitUntil(t *testing.T, cond func() bool, msg string) {
 	}
 }
 
-// writeAppsFile 写一份只声明 a1 的 apps.json，允许访客。
-// 这些测试全部用访客身份握手：访客路径不经过 fp（见设计第四节 4.1），
-// 所以不必为了测装配顺序再起一个真实的身份平台。
-func writeAppsFile(t *testing.T) string {
-	t.Helper()
-	p := t.TempDir() + "/apps.json"
-	body := `{"apps":[{"app_id":"a1","app_secret":"s1","conn_policy":"replace","conn_limit":3,"allow_guest":true,"guest_ip_rate":100}]}`
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatalf("写 apps.json: %v", err)
+// staticApps 是 fpappcfg.Fetcher 的静态实现，供这些测试注入。
+//
+// app 配置现在来自 fp，而这些测试验的是装配顺序、连接注册、优雅关闭、
+// 重登记这类**与 fp 无关**的行为——为它们连带起一整套 fp 不值得。
+//
+// 注入的是 Fetcher 而不是整个 AppConfigSource：真实的 fpappcfg.Source
+// 连同它的 onLoad 回调（TrackApp + 同步 Refresh）仍然在链路上，「甲一」
+// 那条测试因此测的还是真东西。
+//
+// 这些测试全部用访客身份握手：访客路径不经过 fp（见设计第四节 4.1）。
+type staticApps map[string]model.AppConfig
+
+func (a staticApps) Fetch(_ context.Context, app string) (model.AppConfig, error) {
+	c, ok := a[app]
+	if !ok {
+		return model.AppConfig{}, errors.New("no such app")
 	}
-	return p
+	return c, nil
+}
+
+// guestApps 是只声明 a1、允许访客的配置。
+func guestApps() staticApps {
+	return staticApps{"a1": {
+		AppID: "a1", ConnPolicy: model.PolicyReplace, ConnLimit: 3,
+		AllowGuest: true, GuestIPRate: 100,
+	}}
 }
 
 // testConfig 构造一份指向测试 Redis、端口全交给操作系统分配的配置。
 // 不走 config.Load：那条路径读一个 YAML 文件，测试要在同一个进程里起两个
 // 配置不同的节点，为此各写一个临时文件只是把结构体字面量绕了一圈。
-func testConfig(t *testing.T, appsFile string) *config.Config {
+func testConfig(t *testing.T) *config.Config {
 	t.Helper()
 	url := os.Getenv("FP_TEST_REDIS_URL")
 	if url == "" {
@@ -73,16 +87,15 @@ func testConfig(t *testing.T, appsFile string) *config.Config {
 	return &config.Config{
 		// dev 而不是 prod：Insecure() 由它推导，下面那个必然不通的地址
 		// 也就不会去要求 TLS。
-		Env:      "dev",
-		Log:      config.Log{Level: "warn"},
-		HTTP:     config.HTTP{Addr: "127.0.0.1:0"},
-		GRPC:     config.Listen{Addr: "127.0.0.1:0"},
-		Redis:    config.Endpoint{URL: url},
-		AppsFile: appsFile,
+		Env:   "dev",
+		Log:   config.Log{Level: "warn"},
+		HTTP:  config.HTTP{Addr: "127.0.0.1:0"},
+		GRPC:  config.Listen{Addr: "127.0.0.1:0"},
+		Redis: config.Endpoint{URL: url},
 		// 访客握手不会走到 Authenticator，这个地址永远不会被真的拨号；
-		// 但 fpauth.New 要求非空，所以给一个必然不通的地址，万一哪天真的
-		// 被拨了，失败会立刻暴露而不是悄悄连上别的东西。
-		FPSDK: config.FPSDK{Addr: "127.0.0.1:1"},
+		// 但 fpauth.New 要求两项都非空，所以给一个必然不通的地址，万一哪天
+		// 真的被拨了，失败会立刻暴露而不是悄悄连上别的东西。
+		FPSDK: config.FPSDK{Addr: "127.0.0.1:1", Secret: "im-secret"},
 		// 心跳 200ms（而不是生产的 3 秒）：测试里要等的传播延迟就是心跳周期
 		// 本身，取生产值只会把每条测试拖慢十几倍。
 		Node: config.Node{
@@ -107,7 +120,17 @@ var nodeIDCounter atomic.Int64
 
 // startTestNode 用 serve() 起一个真实节点，返回它的 ws 与 gRPC 地址，
 // 以及一个"触发优雅关闭并等 serve 真正返回"的函数。
-func startTestNode(t *testing.T, cfg *config.Config) (nodeID, wsURL, grpcAddr string, stop func()) {
+// staticCreds 让业务 server 的凭据校验在测试里不必回源到 fp。
+type staticCreds map[string]string
+
+func (c staticCreds) VerifyAppCredential(_ context.Context, app, secret string) error {
+	if c[app] != secret {
+		return errors.New("凭据无效")
+	}
+	return nil
+}
+
+func startTestNode(t *testing.T, cfg *config.Config, apps staticApps) (nodeID, wsURL, grpcAddr string, stop func()) {
 	t.Helper()
 	nodeID = fmt.Sprintf("im-test-%d-%d", time.Now().UnixNano(), nodeIDCounter.Add(1))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -116,8 +139,10 @@ func startTestNode(t *testing.T, cfg *config.Config) (nodeID, wsURL, grpcAddr st
 	done := make(chan error, 1)
 	go func() {
 		done <- serve(ctx, cfg, slog.Default(), serveOptions{
-			nodeID: nodeID,
-			ready:  func(h, g string) { ready <- addrs{h, g} },
+			nodeID:  nodeID,
+			ready:   func(h, g string) { ready <- addrs{h, g} },
+			fetcher: apps,
+			creds:   staticCreds{"a1": "s1"},
 		})
 	}()
 	var a addrs
@@ -160,10 +185,9 @@ func startTestNode(t *testing.T, cfg *config.Config) (nodeID, wsURL, grpcAddr st
 func TestServeDeliversFirstConnectEventAfterStartup(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
-	appsFile := writeAppsFile(t)
 
 	// 节点 B：业务 server 接在这里。它自己不会有任何 ws 连接。
-	_, _, grpcB, _ := startTestNode(t, testConfig(t, appsFile))
+	_, _, grpcB, _ := startTestNode(t, testConfig(t), guestApps())
 	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: grpcB, AppID: "a1", AppSecret: "s1", Insecure: true})
 	if err != nil {
 		t.Fatalf("fpim.NewServer: %v", err)
@@ -186,7 +210,7 @@ func TestServeDeliversFirstConnectEventAfterStartup(t *testing.T) {
 
 	// 节点 A：client 接在这里。A 上没有任何 server 流，连接事件必须跨节点
 	// 转发到 B 才能到达业务 server。
-	_, wsA, _, _ := startTestNode(t, testConfig(t, appsFile))
+	_, wsA, _, _ := startTestNode(t, testConfig(t), guestApps())
 	cli, err := fpim.Dial(ctx, fpim.ClientConfig{URL: wsA, App: "a1", Guest: uuid.NewString(), OS: "linux"})
 	if err != nil {
 		t.Fatalf("fpim.Dial: %v", err)
@@ -248,17 +272,18 @@ func readFrame(t *testing.T, c *websocket.Conn) (model.Frame, error) {
 	return f, nil
 }
 
-// writeAppsFileWithBizAuth 写一份声明了 biz_auth 的 apps.json，verifyURL
-// 通常是一个自签证书的 httptest.NewTLSServer 地址。
-func writeAppsFileWithBizAuth(t *testing.T, verifyURL string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "apps.json")
-	body := `{"apps":[{"app_id":"a1","app_secret":"s1","allow_guest":true,` +
-		`"biz_auth":{"verify_url":"` + verifyURL + `"}}]}`
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatalf("写 apps.json: %v", err)
-	}
-	return p
+// appsWithBizAuth 是一份声明了 biz_auth 的配置，verifyURL 通常是一个自签
+// 证书的 httptest.NewTLSServer 地址。
+func appsWithBizAuth(verifyURL string) staticApps {
+	return staticApps{"a1": {
+		AppID: "a1", ConnPolicy: model.PolicyReplace, ConnLimit: 5,
+		AllowGuest: true, GuestIPRate: 100,
+		BizAuth: &model.BizAuth{
+			VerifyURL: verifyURL,
+			Timeout:   model.Duration(2 * time.Second),
+			CacheSize: 100,
+		},
+	}}
 }
 
 // TestServeWithBizAuthStartsAndDispatches 是 Task 6 装配的验收测试：配置带
@@ -289,8 +314,8 @@ func TestServeWithBizAuthStartsAndDispatches(t *testing.T) {
 	verify.StartTLS()
 	defer verify.Close()
 
-	appsFile := writeAppsFileWithBizAuth(t, verify.URL)
-	_, wsURL, _, _ := startTestNode(t, testConfig(t, appsFile))
+	apps := appsWithBizAuth(verify.URL)
+	_, wsURL, _, _ := startTestNode(t, testConfig(t), apps)
 
 	c := dialWS(t, wsURL)
 	defer c.CloseNow()
@@ -460,12 +485,11 @@ func TestGapReregisterDoesNotBlockCaller(t *testing.T) {
 func TestServeGracefulShutdownClosesWebSockets(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
-	appsFile := writeAppsFile(t)
 
 	// 业务 server 接在同一个节点上：断开事件要能被观察到，就必须有一条
 	// 还活着的 server 流——这条流也顺带验证了关闭顺序（先断 ws、再停
 	// gRPC），顺序反了断开事件就没有出口。
-	_, wsURL, grpcAddr, stop := startTestNode(t, testConfig(t, appsFile))
+	_, wsURL, grpcAddr, stop := startTestNode(t, testConfig(t), guestApps())
 	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: grpcAddr, AppID: "a1", AppSecret: "s1", Insecure: true})
 	if err != nil {
 		t.Fatalf("fpim.NewServer: %v", err)

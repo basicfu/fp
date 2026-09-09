@@ -30,7 +30,7 @@ func TestPushUnderLimitPolicyStillFansOutToOtherNodes(t *testing.T) {
 	// 这条测试需要 limit 策略而不是 hubtest.NewHub() 默认的 replace，用
 	// NewHubWithApps 在构造时就把 apps 配好，而不是构造后去改
 	// hub.Hub 的未导出 apps 字段（那样做在 hub 包外部根本编译不过）。
-	apps := hubtest.Apps{"a1": {AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyLimit, ConnLimit: 3}}
+	apps := hubtest.Apps{"a1": {AppID: "a1", ConnPolicy: model.PolicyLimit, ConnLimit: 3}}
 	h, reg, _, pub := hubtest.NewHubWithApps(apps)
 	c := &hubtest.Conn{ConnID: "c1"}
 	h.AddConn(context.Background(), "a1", model.User("1"), c, model.ConnMeta{Node: "im-a"}, "")

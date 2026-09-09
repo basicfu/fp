@@ -2,9 +2,9 @@ package integration_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,7 +12,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/basicfu/fp/internal/im/appcfg"
 	"github.com/basicfu/fp/internal/im/auth"
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/hub"
@@ -56,6 +55,16 @@ type imNode struct {
 // 心跳周期给 200ms（而不是生产的秒级）：验收项⑥（顶号）依赖节点 A 的
 // live 视图先看到节点 B 持有 server 流，这段传播延迟就是心跳周期本身，
 // 测试用轮询等待这件事发生，但心跳周期太长会把测试拖得没必要地慢。
+// imCreds 让业务 server 的凭据校验在 e2e 里不必回源到 fp。
+type imCreds map[string]string
+
+func (c imCreds) VerifyAppCredential(_ context.Context, app, secret string) error {
+	if c[app] != secret {
+		return errors.New("凭据无效")
+	}
+	return nil
+}
+
 func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSource, authn auth.Authenticator) *imNode {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -124,7 +133,7 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 	t.Cleanup(func() { httpSrv.Close() })
 
 	grpcLis := listenAddr(t, "127.0.0.1:0")
-	g := imgrpc.New(imgrpc.Deps{Hub: h, Apps: apps})
+	g := imgrpc.New(imgrpc.Deps{Hub: h, Creds: imCreds{"a1": "s1"}})
 	go g.Serve(grpcLis)
 	t.Cleanup(func() { g.Stop(context.Background()) })
 
@@ -136,20 +145,30 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 	}
 }
 
-// writeApps 在临时目录写一份 apps.json，只声明一个应用 a1，策略可配置
+// imApps 是 auth.AppConfigSource 的静态实现，只声明一个应用 a1，策略可配置
 // （"replace" 用于顶号场景⑥）。
-func writeApps(t *testing.T, policy string) *appcfg.Source {
+//
+// app 配置现在来自 fp。这些 e2e 场景验的是 ws 协议、连接注册、跨节点转发
+// 这些**与 fp 无关**的行为，全部走访客身份握手（访客路径不经过 fp），所以
+// 用静态实现而不是连带起一整套 fp。
+type imApps map[string]model.AppConfig
+
+func (a imApps) Load(context.Context, string) error     { return nil }
+func (a imApps) Get(app string) (model.AppConfig, bool) { c, ok := a[app]; return c, ok }
+func (a imApps) Apps() []string {
+	out := make([]string, 0, len(a))
+	for k := range a {
+		out = append(out, k)
+	}
+	return out
+}
+
+func writeApps(t *testing.T, policy string) imApps {
 	t.Helper()
-	p := t.TempDir() + "/apps.json"
-	body := `{"apps":[{"app_id":"a1","app_secret":"s1","conn_policy":"` + policy + `","conn_limit":3,"allow_guest":true,"guest_ip_rate":20}]}`
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatalf("写 apps.json: %v", err)
-	}
-	src, err := appcfg.LoadFile(p)
-	if err != nil {
-		t.Fatalf("appcfg.LoadFile: %v", err)
-	}
-	return src
+	return imApps{"a1": {
+		AppID: "a1", ConnPolicy: model.Policy(policy), ConnLimit: 3,
+		AllowGuest: true, GuestIPRate: 20,
+	}}
 }
 
 // uniqueNodeID 保证同一次测试进程内多次调用生成的 nodeId 互不冲突——同一个

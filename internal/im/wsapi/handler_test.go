@@ -264,7 +264,7 @@ func TestBadTokenCloses4001AndGuestRules(t *testing.T) {
 	}
 	c.CloseNow()
 
-	e.apps["a1"] = model.AppConfig{AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace, AllowGuest: true, GuestIPRate: 20}
+	e.apps["a1"] = model.AppConfig{AppID: "a1", ConnPolicy: model.PolicyReplace, AllowGuest: true, GuestIPRate: 20}
 	c = e.dial(t)
 	defer c.CloseNow()
 	send(t, c, map[string]any{"t": "auth", "app": "a1", "guest": "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"})
@@ -282,7 +282,7 @@ func TestBadTokenCloses4001AndGuestRules(t *testing.T) {
 // 就能冒充别人（这条约束本身在 model.ParseSubject 的注释里也提到过）。
 func TestGuestNonUUIDCloses4001(t *testing.T) {
 	e := newEnv(t, Config{})
-	e.apps["a1"] = model.AppConfig{AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace, AllowGuest: true, GuestIPRate: 20}
+	e.apps["a1"] = model.AppConfig{AppID: "a1", ConnPolicy: model.PolicyReplace, AllowGuest: true, GuestIPRate: 20}
 	c := e.dial(t)
 	defer c.CloseNow()
 	send(t, c, map[string]any{"t": "auth", "app": "a1", "guest": "not-a-uuid"})

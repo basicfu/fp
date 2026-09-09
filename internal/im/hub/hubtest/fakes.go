@@ -227,7 +227,7 @@ func (a Apps) Apps() []string {
 // DefaultApps 返回默认的单 app（a1，replace 策略）配置，多数测试不需要
 // 自定义 apps 时用它。
 func DefaultApps() Apps {
-	return Apps{"a1": {AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace}}
+	return Apps{"a1": {AppID: "a1", ConnPolicy: model.PolicyReplace}}
 }
 
 // NewHub 用假实现装一个 nodeID 为 im-a、a1 策略为 replace 的 Hub。

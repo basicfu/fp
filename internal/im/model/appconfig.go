@@ -54,11 +54,13 @@ type BizAuth struct {
 	CacheSize int      `json:"cache_size"`
 }
 
-// AppConfig 是一个接入应用在 fp-im 里的全部配置。
-// AppID/AppSecret 同时用于 fp-im 调 fp 验 token，和校验业务 server 连 fp-im 的凭据。
+// AppConfig 是一个接入应用在 fp-im 里的配置，全部来自 fp。
+//
+// **没有 AppSecret**：fp 只存 bcrypt 哈希，明文只在创建应用时返回一次，
+// fp-im 拿不到也不需要——验 client 的 token 用的是 IM 凭据（fpauth），
+// 核实业务 server 的凭据是转给 fp 做的（imgrpc）。
 type AppConfig struct {
 	AppID       string   `json:"app_id"`
-	AppSecret   string   `json:"app_secret"`
 	ConnPolicy  Policy   `json:"conn_policy"`
 	ConnLimit   int      `json:"conn_limit"`
 	AllowGuest  bool     `json:"allow_guest"`
@@ -67,8 +69,8 @@ type AppConfig struct {
 }
 
 func (c AppConfig) Validate() error {
-	if c.AppID == "" || c.AppSecret == "" {
-		return fmt.Errorf("model: app %q 缺少 app_id 或 app_secret", c.AppID)
+	if c.AppID == "" {
+		return fmt.Errorf("model: app 配置缺少 app_id")
 	}
 	switch c.ConnPolicy {
 	case PolicyReplace, PolicyReject:

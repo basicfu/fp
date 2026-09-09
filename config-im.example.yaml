@@ -29,12 +29,16 @@ redis:
 # 没有 insecure 开关：传输安全由上面的 env 推导——dev 明文，prod 走 TLS。
 # 【部署硬要求】fp 的 gRPC 服务端目前只服务明文，所以 env: prod 下这条 TLS
 # 必须由 fp 前面的反代 / 网关终结。
+#
+# secret 是 IM 凭据，在 fp 控制台生成（应用管理页 →「IM 接入」页签），
+# 明文只显示一次。全部 fp-im 实例共用同一份。轮换后旧凭据最多再活 10 秒。
 fpsdk:
   addr: localhost:9090
+  secret: ""
 
-# 接入应用清单。除 app_id/app_secret 外都有默认值，10 秒检测 mtime 热更新，
-# 坏文件保留旧配置。格式见 docs/im.md。
-apps_file: ./tmp/im-apps.json
+# 没有 apps_file 了：接入应用的准入与策略全部来自 fp，在控制台的应用管理页
+# 配置（先打开 im_enabled）。fp-im 不再持有任何应用的 app_secret——fp 只存
+# bcrypt 哈希，明文只在创建应用时返回一次。
 
 node:
   heartbeat: 3s

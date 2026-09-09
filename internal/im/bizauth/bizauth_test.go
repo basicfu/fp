@@ -37,7 +37,7 @@ func newEnv(t *testing.T, h http.HandlerFunc) (*Authenticator, *httptest.Server,
 	// 不是配置校验（那条由 model 包的测试守着）。
 	a, err := New(Config{
 		Apps: apps{"a1": {
-			AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace,
+			AppID: "a1", ConnPolicy: model.PolicyReplace,
 			BizAuth: &model.BizAuth{VerifyURL: srv.URL, Timeout: model.Duration(2 * time.Second), CacheSize: 100},
 		}},
 		Client: srv.Client(),
@@ -115,7 +115,7 @@ func TestVerifyUnreachableIsUnavailable(t *testing.T) {
 }
 
 func TestVerifyAppWithoutBizAuthIsUnauthorized(t *testing.T) {
-	a, err := New(Config{Apps: apps{"a1": {AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace}}})
+	a, err := New(Config{Apps: apps{"a1": {AppID: "a1", ConnPolicy: model.PolicyReplace}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestVerifyReCallsAfterCacheExpires(t *testing.T) {
 	t.Cleanup(srv.Close)
 	a, err := New(Config{
 		Apps: apps{"a1": {
-			AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace,
+			AppID: "a1", ConnPolicy: model.PolicyReplace,
 			BizAuth: &model.BizAuth{VerifyURL: srv.URL, Timeout: model.Duration(2 * time.Second), CacheSize: 10},
 		}},
 		Client: srv.Client(),
@@ -237,7 +237,7 @@ func TestVerifyRespectsTimeout(t *testing.T) {
 	t.Cleanup(srv.Close)
 	a, err := New(Config{
 		Apps: apps{"a1": {
-			AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace,
+			AppID: "a1", ConnPolicy: model.PolicyReplace,
 			BizAuth: &model.BizAuth{VerifyURL: srv.URL, Timeout: model.Duration(200 * time.Millisecond), CacheSize: 10},
 		}},
 		Client: srv.Client(),
@@ -282,7 +282,7 @@ func TestVerifyDoesNotFollowRedirectToPlaintext(t *testing.T) {
 
 	a, err := New(Config{
 		Apps: apps{"a1": {
-			AppID: "a1", AppSecret: "s", ConnPolicy: model.PolicyReplace,
+			AppID: "a1", ConnPolicy: model.PolicyReplace,
 			BizAuth: &model.BizAuth{VerifyURL: redirecting.URL, Timeout: model.Duration(2 * time.Second), CacheSize: 10},
 		}},
 		// 不传 Client：用 New 自己构造的默认客户端，这正是生产环境的真实路径。

@@ -21,7 +21,6 @@ func writeConfig(t *testing.T, body string) string {
 const minimal = `
 redis:
   url: redis://localhost:6379/0
-apps_file: apps.json
 `
 
 // TestLoadReadsEveryField 逐字段断言，是 yaml tag 的护栏——多词字段
@@ -42,7 +41,7 @@ redis:
   url: redis://:pw@h:6379/2
 fpsdk:
   addr: fp.internal:9090
-apps_file: ./tmp/im-apps.json
+  secret: im-secret
 node:
   heartbeat: 1s
   dead_after: 4s
@@ -74,8 +73,8 @@ pipeline:
 	if cfg.FPSDK.Addr != "fp.internal:9090" {
 		t.Errorf("fpsdk.addr = %q, want fp.internal:9090", cfg.FPSDK.Addr)
 	}
-	if cfg.AppsFile != "./tmp/im-apps.json" {
-		t.Errorf("apps_file = %q", cfg.AppsFile)
+	if cfg.FPSDK.Secret != "im-secret" {
+		t.Errorf("fpsdk.secret = %q, want im-secret", cfg.FPSDK.Secret)
 	}
 	if cfg.Node.Heartbeat.Std() != time.Second || cfg.Node.DeadAfter.Std() != 4*time.Second {
 		t.Errorf("node = %+v, want heartbeat 1s / dead_after 4s", cfg.Node)
@@ -112,16 +111,17 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-// TestLoadDoesNotRequireFPSDKAddr 钉住"谁用谁校验"：config 包不知道谁会用
-// 这个地址，不该替使用方决定它是不是必需。空值仍会在启动时炸，但那是
-// fpauth.New 的职责（见 internal/im/fpauth 的 TestNewRequiresFPAddr）。
-func TestLoadDoesNotRequireFPSDKAddr(t *testing.T) {
+// TestLoadDoesNotRequireFPSDK 钉住"谁用谁校验"：config 包不知道谁会用
+// fpsdk 的地址与凭据，不该替使用方决定它们是不是必需。空值仍会在启动时
+// 炸，但那是 fpauth.New 的职责（见 internal/im/fpauth 的
+// TestNewRequiresAddrAndSecret）。
+func TestLoadDoesNotRequireFPSDK(t *testing.T) {
 	cfg, err := Load(writeConfig(t, minimal))
 	if err != nil {
-		t.Fatalf("Load() error = %v，fpsdk.addr 不该是 config 的必填项", err)
+		t.Fatalf("Load() error = %v，fpsdk 两项都不该是 config 的必填项", err)
 	}
-	if cfg.FPSDK.Addr != "" {
-		t.Errorf("fpsdk.addr = %q, want empty", cfg.FPSDK.Addr)
+	if cfg.FPSDK.Addr != "" || cfg.FPSDK.Secret != "" {
+		t.Errorf("fpsdk = %+v, want empty", cfg.FPSDK)
 	}
 }
 
@@ -141,22 +141,6 @@ conn:
 func TestLoadRejectsMissingFile(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "不存在.yaml")); err == nil {
 		t.Fatal("文件不存在必须报错")
-	}
-}
-
-// TestLoadRequiresRedisAndAppsFile 两个必填项各自单独缺失都要报错，
-// 且错误信息用 YAML 路径而不是环境变量名。
-func TestLoadRequiresRedisAndAppsFile(t *testing.T) {
-	_, err := Load(writeConfig(t, "apps_file: apps.json\n"))
-	if err == nil || !strings.Contains(err.Error(), "redis.url") {
-		t.Fatalf("缺 redis.url 必须报错且信息里含 redis.url，实际 %v", err)
-	}
-	if strings.Contains(err.Error(), "FP_IM_") {
-		t.Errorf("错误信息 %q 里不该再出现环境变量名", err)
-	}
-	_, err = Load(writeConfig(t, "redis:\n  url: redis://localhost:6379/0\n"))
-	if err == nil || !strings.Contains(err.Error(), "apps_file") {
-		t.Fatalf("缺 apps_file 必须报错且信息里含 apps_file，实际 %v", err)
 	}
 }
 
@@ -266,5 +250,17 @@ func TestLoadRejectsIdleTimeoutBelowClientHeartbeat(t *testing.T) {
 	body := minimal + "conn:\n  idle_timeout: " + MinIdleTimeout.String() + "\n"
 	if _, err := Load(writeConfig(t, body)); err != nil {
 		t.Fatalf("空闲超时恰好等于下界应放行，实际报错：%v", err)
+	}
+}
+
+// TestLoadRequiresRedis：删掉 apps_file 之后 redis.url 是唯一的必填项，
+// 且错误信息用 YAML 路径而不是环境变量名。
+func TestLoadRequiresRedis(t *testing.T) {
+	_, err := Load(writeConfig(t, "log:\n  level: info\n"))
+	if err == nil || !strings.Contains(err.Error(), "redis.url") {
+		t.Fatalf("缺 redis.url 必须报错且信息里含 redis.url，实际 %v", err)
+	}
+	if strings.Contains(err.Error(), "FP_IM_") {
+		t.Errorf("错误信息 %q 里不该再出现环境变量名", err)
 	}
 }

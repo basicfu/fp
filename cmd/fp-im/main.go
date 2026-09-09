@@ -15,10 +15,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/basicfu/fp/internal/im/appcfg"
+	"github.com/basicfu/fp/internal/im/auth"
 	"github.com/basicfu/fp/internal/im/bizauth"
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/config"
+	"github.com/basicfu/fp/internal/im/fpappcfg"
 	"github.com/basicfu/fp/internal/im/fpauth"
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/imgrpc"
@@ -74,6 +75,19 @@ type serveOptions struct {
 	// model.NewNodeID 的注释：两张表交替写同一字段、消息被静默丢弃）。
 	// 生产路径为空串，仍走 model.NewNodeID。
 	nodeID string
+	// fetcher 与 creds 覆盖"向 fp 拉 app 配置 / 核实业务 server 凭据"这两条
+	// 依赖。生产路径都为 nil，走真实的 fpauth。
+	//
+	// 测试需要它们，是因为这两条路都要一个真的 fp 在线：起一个真实 fp-im
+	// 节点来验证连接注册、优雅关闭、重登记这类**与 fp 无关**的行为，不该被
+	// 迫连带起一整套 fp。
+	//
+	// 注入的是 **Fetcher 而不是整个 AppConfigSource**：后者会把
+	// fpappcfg.Source 连同它的 onLoad 回调（TrackApp + 同步 Refresh）整条
+	// 绕过去，而那恰恰是「甲一」那条测试要验的东西——注入点一旦盖住被测
+	// 逻辑，测试就变成了自说自话。
+	fetcher fpappcfg.Fetcher
+	creds   imgrpc.CredentialVerifier
 }
 
 // shutdownBudget 是关闭阶段每个独立步骤各自的时间预算。
@@ -106,32 +120,9 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	}
 	defer runner.Close()
 
-	apps, err := appcfg.LoadFile(cfg.AppsFile)
-	if err != nil {
-		return err
-	}
-
 	live := registry.NewLiveness(rdb, nodeID, cfg.Node.Heartbeat.Std(), cfg.Node.DeadAfter.Std())
 	conns := registry.NewConns(rdb, runner, cfg.Conn.FieldTTL.Std())
 	b := bus.New(rdb, runner)
-
-	// 甲一：装配时就把配置里的每个 app 加进 srv 表的追踪集合，位置必须在
-	// 下面那次同步 live.Refresh 之前。
-	//
-	// 不这样做的后果不是"慢一点"，是每个 app 在本节点上的**第一条**上行
-	// 消息或连接事件必定被静默丢弃、零日志：hub.Deliver 在需要跨节点转发
-	// 时先调 live.TrackApp 再读 live.ServerNodes(app)，而 TrackApp 只是把
-	// app 加进待刷新集合，真正的内容要等下一次 Refresh（默认 3 秒）才有。
-	// 于是节点起来后第一个连上的 client，它的连接建立事件因为候选列表为空
-	// 被丢掉，业务方永远收不到这条上线通知——它不会被重发，也没有任何
-	// 日志说明发生过这件事。
-	//
-	// 热重载引入的新 app 同样需要补追踪，理由一模一样，所以这里用
-	// appcfg 的重载回调再跑一遍，而不是只在启动时跑一次。回调必须在
-	// 启动 Watch 之前注册，否则第一次热重载可能赶在注册之前发生。
-	trackApps(live, apps)
-	apps.OnReload(func() { trackApps(live, apps) })
-	go apps.Watch(ctx, 10*time.Second)
 
 	// h 先声明后赋值，打破"撤销回调需要 h"与"h 的构造需要撤销回调"之间的
 	// 循环：fpauth.New 只是把这个闭包存起来，回调只会在 fpsdk 的撤销流上
@@ -139,24 +130,66 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	// 完、serve() 早已往后走了很远（起了 HTTP/gRPC 监听）之后，不存在
 	// "回调被调用时 h 还是 nil" 的窗口。
 	var h *hub.Hub
+	// apps 同样先声明后赋值：它的 Fetcher 是 fpAuthn，而 fpAuthn 的
+	// AllApps 又要读 apps。两者的赋值紧挨着，中间没有任何 I/O 或调度点，
+	// 而回调只会在 fpsdk 的推送流上真的收到事件时才被调用——那必然远在
+	// 两行都执行完之后。
+	var apps *fpappcfg.Source
 	fpAuthn, err := fpauth.New(fpauth.Config{
-		FPAddr: cfg.FPSDK.Addr, Insecure: cfg.Insecure(), Apps: apps, Logger: log,
+		FPAddr: cfg.FPSDK.Addr, Secret: cfg.FPSDK.Secret, Insecure: cfg.Insecure(), Logger: log,
 		OnRevoke: func(app string, tokens []string) { h.OnRevoked(context.Background(), app, tokens) },
+		// AllApps 只服务一件事：RevokeEvent.AppID 为空串的跨应用撤销
+		// （改密、冻结）要逐个 app 投递，见 fpauth.dispatchRevoke。
+		AllApps: func() []string { return apps.Apps() },
+		OnAppIMConfigChanged: func(app string) {
+			if app == "" {
+				apps.InvalidateAll()
+				return
+			}
+			apps.Invalidate(app)
+		},
 	})
 	if err != nil {
 		return err
 	}
 	defer fpAuthn.Close()
 
+	// 首次加载某个 app 时，必须立刻把它加进 srv 表的追踪集合并**同步**刷新
+	// 一次。
+	//
+	// 早期这件事在装配时对本地 apps 文件里的每个 app 做一遍（「甲一」）。
+	// 现在没有本地文件，fp-im 启动时不知道任何 app，只能在按需加载的那一刻
+	// 补上——而那一刻在握手完成之前，仍然早于该 app 的任何消息投递。
+	//
+	// 同步 Refresh 不能省：TrackApp 只是把 app 加进待刷新集合，真正的内容
+	// 要等下一次周期刷新（默认 3 秒）。握手完成后 client 可能立刻发消息，
+	// 那条消息在需要跨节点转发时会因为候选列表为空而被**静默丢弃、零日志**。
+	var fetcher fpappcfg.Fetcher = fpAuthn
+	if opt.fetcher != nil {
+		fetcher = opt.fetcher
+	}
+	apps = fpappcfg.New(fetcher, func(app string) {
+		live.TrackApp(app)
+		if err := live.Refresh(ctx); err != nil {
+			log.Error("刷新 srv 表失败，该 app 的首条消息可能被丢弃", "app", app, "err", err)
+		}
+	})
+
+	var appSrc auth.AppConfigSource = apps
+	var credSrc imgrpc.CredentialVerifier = fpAuthn
+	if opt.creds != nil {
+		credSrc = opt.creds
+	}
+
 	// 业务方认证器与 fp 认证器并列，由 multiauth 按握手帧里的令牌类型分派。
 	// 即使没有任何 app 配了 biz_auth 也照常构造：判断"这个 app 支不支持"
 	// 在 bizauth 内部按 app 配置做，比在这里按全局有无来决定更精确。
-	bizAuthn, err := bizauth.New(bizauth.Config{Apps: apps, Logger: log})
+	bizAuthn, err := bizauth.New(bizauth.Config{Apps: appSrc, Logger: log})
 	if err != nil {
 		return err
 	}
 	authn := multiauth.New(fpAuthn, bizAuthn)
-	h = hub.New(nodeID, conns, live, b, apps)
+	h = hub.New(nodeID, conns, live, b, appSrc)
 
 	// 节点频道：先订阅、再登记心跳，保证别的节点看到我的心跳、开始往我的
 	// 频道投递时，我已经在监听，不会丢消息。
@@ -192,12 +225,12 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsapi.New(wsapi.Deps{
-		Hub: h, Conns: conns, Live: live, Auth: authn, Apps: apps, Guests: guests,
+		Hub: h, Conns: conns, Live: live, Auth: authn, Apps: appSrc, Guests: guests,
 		Cfg: wsapi.Config{AuthTimeout: cfg.Conn.AuthTimeout.Std(), IdleTimeout: cfg.Conn.IdleTimeout.Std(), SendQueue: cfg.Conn.SendQueue, TrustProxy: cfg.HTTP.TrustProxy},
 	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	httpSrv := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
-	grpcSrv := imgrpc.New(imgrpc.Deps{Hub: h, Apps: apps})
+	grpcSrv := imgrpc.New(imgrpc.Deps{Hub: h, Creds: credSrc})
 	// HTTP 与 gRPC 都先显式 net.Listen 再 Serve，而不是用
 	// httpSrv.ListenAndServe：端口配成 :0 时只有监听建立之后才知道操作
 	// 系统分配了哪个端口，测试要连上来就必须能读到真实地址（opt.ready）。
@@ -347,12 +380,6 @@ func waitConnsDrained(ctx context.Context, h *hub.Hub) int {
 
 // trackApps 把配置里当前的每个 app 都加进存活视图的 srv 表追踪集合。
 // 幂等（TrackApp 只是往一个 set 里写），可以在启动时和每次热重载后重复调用。
-func trackApps(live *registry.Liveness, apps *appcfg.Source) {
-	for _, app := range apps.Apps() {
-		live.TrackApp(app)
-	}
-}
-
 // runBusLoop 订阅节点频道并起协程分发。收到 Gap（Redis 重连过）时交给
 // reregistrar 处理，本协程立刻回到消费循环。
 //

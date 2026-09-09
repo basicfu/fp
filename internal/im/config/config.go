@@ -51,7 +51,6 @@ type Config struct {
 	GRPC     Listen   `yaml:"grpc"` // 业务 server 接入
 	Redis    Endpoint `yaml:"redis"`
 	FPSDK    FPSDK    `yaml:"fpsdk"`
-	AppsFile string   `yaml:"apps_file"`
 	Node     Node     `yaml:"node"`
 	Conn     Conn     `yaml:"conn"`
 	Pipeline Pipeline `yaml:"pipeline"`
@@ -88,6 +87,11 @@ type Endpoint struct {
 // TestNewRequiresFPAddr）。
 type FPSDK struct {
 	Addr string `yaml:"addr"`
+	// Secret 是 IM 凭据，在 fp 控制台生成，全部 fp-im 实例共用同一份。
+	//
+	// 与 Addr 一样**不由本包校验**——config 不知道谁会用它，"谁用谁校验"。
+	// 两项为空都会在装配阶段被 fpauth.New 挡住，报错时机仍是启动时。
+	Secret string `yaml:"secret"`
 }
 
 type Node struct {
@@ -173,7 +177,6 @@ func Load(path string) (*Config, error) {
 	// fpsdk.addr 刻意不在这个清单里，理由见 FPSDK 的注释。
 	for _, kv := range []struct{ path, v string }{
 		{"redis.url", c.Redis.URL},
-		{"apps_file", c.AppsFile},
 	} {
 		if kv.v == "" {
 			missing = append(missing, kv.path)

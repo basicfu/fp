@@ -7,7 +7,7 @@ import (
 )
 
 func TestAppConfigValidate(t *testing.T) {
-	base := AppConfig{AppID: "a1", AppSecret: "s", ConnPolicy: PolicyReplace, ConnLimit: 5, GuestIPRate: 20}
+	base := AppConfig{AppID: "a1", ConnPolicy: PolicyReplace, ConnLimit: 5, GuestIPRate: 20}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("合法配置被拒：%v", err)
 	}
@@ -31,11 +31,6 @@ func TestAppConfigValidate(t *testing.T) {
 	bad.AppID = ""
 	if bad.Validate() == nil {
 		t.Fatal("缺少 app_id 必须报错")
-	}
-	bad = base
-	bad.AppSecret = ""
-	if bad.Validate() == nil {
-		t.Fatal("缺少 app_secret 必须报错")
 	}
 	ok := base
 	ok.AllowGuest = true
@@ -72,7 +67,7 @@ func TestDurationJSONRoundTrip(t *testing.T) {
 }
 
 func TestAppConfigValidateBizAuth(t *testing.T) {
-	base := AppConfig{AppID: "a1", AppSecret: "s", ConnPolicy: PolicyReplace, ConnLimit: 5, GuestIPRate: 20}
+	base := AppConfig{AppID: "a1", ConnPolicy: PolicyReplace, ConnLimit: 5, GuestIPRate: 20}
 
 	ok := base
 	ok.BizAuth = &BizAuth{VerifyURL: "https://x/verify", Timeout: Duration(2 * time.Second), CacheSize: 10}

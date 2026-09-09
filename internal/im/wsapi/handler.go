@@ -90,9 +90,19 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close(websocket.StatusCode(model.CloseAuthFailed), "auth frame")
 		return
 	}
+	// 先确保这个 app 的配置在本地缓存里。冷路径，可能回源到 fp；
+	// 之后的 Get 是纯内存读。
+	//
+	// 应用不存在 / 已停用 / 没打开 IM 接入都在这里失败，给的是
+	// **4002 策略拒绝**而不是 4001 认证失败——token 可能完全有效，把
+	// client 指去重新登录是错的方向：它登录完还是连不上，变成死循环。
+	if err := s.Apps.Load(ctx, af.App); err != nil {
+		_ = ws.Close(websocket.StatusCode(model.ClosePolicyRejected), "app unavailable")
+		return
+	}
 	appCfg, ok := s.Apps.Get(af.App)
 	if !ok {
-		_ = ws.Close(websocket.StatusCode(model.CloseAuthFailed), "unknown app")
+		_ = ws.Close(websocket.StatusCode(model.ClosePolicyRejected), "unknown app")
 		return
 	}
 	sub, code := s.resolveSubject(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
