@@ -31,6 +31,7 @@ const applicationColumns = `
 	idle_timeout_seconds, idle_timeout_mobile_seconds, max_lifetime_seconds,
 	rotate_interval_seconds, extend_interval_seconds, token_cache_ttl_seconds,
 	cookie_domain, redirect_uris, grant_types, default_role_key,
+	im_enabled, im_conn_policy, im_conn_limit, im_allow_guest, im_guest_ip_rate, im_biz_auth,
 	(extract(epoch from created_at) * 1000)::bigint,
 	(extract(epoch from updated_at) * 1000)::bigint`
 
@@ -442,15 +443,25 @@ func (s *ApplicationService) ListConnectors(ctx context.Context, appID uuid.UUID
 
 func scanApplication(r rowScanner) (*domain.Application, error) {
 	var app domain.Application
+	var bizAuth []byte
 	err := r.Scan(
 		&app.ID, &app.Name, &app.Slug, &app.AppID, &app.Status,
 		&app.Session.IdleTimeoutSeconds, &app.Session.IdleTimeoutMobileSeconds, &app.Session.MaxLifetimeSeconds,
 		&app.Session.RotateIntervalSeconds, &app.Session.ExtendIntervalSeconds, &app.Session.TokenCacheTTLSeconds,
 		&app.CookieDomain, &app.RedirectURIs, &app.GrantTypes, &app.DefaultRoleKey,
+		&app.IM.Enabled, &app.IM.ConnPolicy, &app.IM.ConnLimit, &app.IM.AllowGuest, &app.IM.GuestIPRate, &bizAuth,
 		&app.CreatedAt, &app.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	// NULL 表示这个应用不支持业务方令牌，保持 BizAuth 为 nil。
+	if len(bizAuth) > 0 {
+		var b domain.IMBizAuth
+		if err := json.Unmarshal(bizAuth, &b); err != nil {
+			return nil, fmt.Errorf("service: 解析 im_biz_auth: %w", err)
+		}
+		app.IM.BizAuth = &b
 	}
 	return &app, nil
 }
@@ -478,6 +489,44 @@ func (s *ApplicationService) SetDefaultRole(ctx context.Context, id uuid.UUID, r
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 设置默认角色: %w", err)
+	}
+	return app, nil
+}
+
+// SetIMConfig 更新应用的 IM 接入配置。配置非法时不写库。
+func (s *ApplicationService) SetIMConfig(ctx context.Context, id uuid.UUID, cfg domain.IMConfig) (*domain.Application, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	// BizAuth 为 nil 时写 SQL NULL，而不是 "null" 字面量或空对象：
+	// scanApplication 靠 NULL 判定"这个应用不支持业务方令牌"。
+	var bizAuth any
+	if cfg.BizAuth != nil {
+		raw, err := json.Marshal(cfg.BizAuth)
+		if err != nil {
+			return nil, fmt.Errorf("service: 序列化 im_biz_auth: %w", err)
+		}
+		bizAuth = raw
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE application SET
+			im_enabled       = $2,
+			im_conn_policy   = $3,
+			im_conn_limit    = $4,
+			im_allow_guest   = $5,
+			im_guest_ip_rate = $6,
+			im_biz_auth      = $7,
+			updated_at       = now()
+		WHERE id = $1
+		RETURNING `+applicationColumns,
+		id, cfg.Enabled, cfg.ConnPolicy, cfg.ConnLimit, cfg.AllowGuest, cfg.GuestIPRate, bizAuth)
+
+	app, err := scanApplication(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: 更新 IM 配置: %w", err)
 	}
 	return app, nil
 }

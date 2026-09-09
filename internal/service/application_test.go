@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -577,4 +578,89 @@ func newAppServiceWith(t *testing.T, pool *pgxpool.Pool) *service.ApplicationSer
 		t.Fatalf("注册 sms_code: %v", err)
 	}
 	return service.NewApplicationService(pool, reg)
+}
+
+func TestSetIMConfigRoundTrip(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	app, _, err := svc.Create(ctx, "im 应用", "im-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 新建的应用 IM 必须是关的——这是"发布后对现网零影响"的依据。
+	if app.IM.Enabled {
+		t.Fatal("新建应用的 im_enabled 必须默认为 false")
+	}
+
+	want := domain.IMConfig{
+		Enabled:     true,
+		ConnPolicy:  domain.IMConnPolicyLimit,
+		ConnLimit:   3,
+		AllowGuest:  true,
+		GuestIPRate: 30,
+		BizAuth:     &domain.IMBizAuth{VerifyURL: "https://biz/v", TimeoutMs: 1500, CacheSize: 100},
+	}
+	got, err := svc.SetIMConfig(ctx, app.ID, want)
+	if err != nil {
+		t.Fatalf("SetIMConfig: %v", err)
+	}
+	if !reflect.DeepEqual(got.IM, want) {
+		t.Fatalf("写回的配置 = %+v，want %+v", got.IM, want)
+	}
+	// 重新读一次：确认真的落库了，而不是只在返回值里对。
+	reread, err := svc.GetByAppID(ctx, app.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reread.IM, want) {
+		t.Fatalf("重新读出的配置 = %+v，want %+v", reread.IM, want)
+	}
+}
+
+// TestSetIMConfigClearsBizAuth 钉住"整组置空"这条路径：biz_auth 是可空
+// jsonb，从"配过"改成"没配"必须真的写 NULL，而不是留一份旧值或写成
+// "null" 字面量——scanApplication 靠 NULL 判定"不支持业务方令牌"。
+func TestSetIMConfigClearsBizAuth(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	app, _, err := svc.Create(ctx, "im 应用", "im-app2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := domain.DefaultIMConfig()
+	cfg.Enabled = true
+	cfg.BizAuth = &domain.IMBizAuth{VerifyURL: "https://biz/v", TimeoutMs: 1500, CacheSize: 100}
+	if _, err := svc.SetIMConfig(ctx, app.ID, cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BizAuth = nil
+	got, err := svc.SetIMConfig(ctx, app.ID, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IM.BizAuth != nil {
+		t.Fatalf("BizAuth = %+v，want nil", got.IM.BizAuth)
+	}
+}
+
+func TestSetIMConfigRejectsInvalid(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	app, _, err := svc.Create(ctx, "im 应用", "im-app3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := domain.DefaultIMConfig()
+	bad.Enabled = true
+	bad.BizAuth = &domain.IMBizAuth{VerifyURL: "http://biz/v", TimeoutMs: 1500, CacheSize: 100}
+	if _, err := svc.SetIMConfig(ctx, app.ID, bad); err == nil {
+		t.Fatal("非法配置必须在写库之前被拒")
+	}
+	reread, err := svc.GetByAppID(ctx, app.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reread.IM.Enabled {
+		t.Fatal("被拒的配置不能有任何一部分落库")
+	}
 }
