@@ -282,14 +282,23 @@ func TestNoCallerTypeBehavesExactlyAsBefore(t *testing.T) {
 	}
 }
 
-// TestIMCallerRequiresAppID：im 调用同样要带 app-id。它能调的四个 RPC 全都
-// 需要 app 作用域——只是这个 appId 来自 client 的 ws 握手帧、逐调用附上，
-// 而不是钉在连接的凭据里。
-func TestIMCallerRequiresAppID(t *testing.T) {
+// TestIMCallerAllowsEmptyAppID：im 调用方**不要求** app-id。
+//
+// 它的连接级凭据里没有作用域——每次调用从 client 的 ws 握手帧取、用
+// WithAppID 附上。而 Watch 那条流是 SDK 在 New 里自己起的，压根没有作用域
+// 可言：它对 im 调用方就是通配的。
+//
+// 拦截器一刀切要求 appId 会把 Watch 直接掐死，而那是 fp-im 收撤销事件的
+// 唯一通道——掐掉之后被踢下线的用户 ws 会一直挂到空闲超时，零报错。
+func TestIMCallerAllowsEmptyAppID(t *testing.T) {
 	v, _, _ := newTestVerifierWithIM()
 	md := metadata.Pairs(mdAppSecret, "im-secret", MDCallerType, CallerTypeIM)
-	if _, err := v.authenticate(metadata.NewIncomingContext(context.Background(), md)); err == nil {
-		t.Fatal("im 调用缺 fp-app-id 必须报错")
+	ctx, err := v.authenticate(metadata.NewIncomingContext(context.Background(), md))
+	if err != nil {
+		t.Fatalf("im 调用不带 fp-app-id 应当通过认证：%v", err)
+	}
+	if got := callerTypeFrom(ctx); got != CallerTypeIM {
+		t.Fatalf("callerType = %q, want im", got)
 	}
 }
 

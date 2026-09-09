@@ -201,11 +201,15 @@ func (v *appVerifier) authenticate(ctx context.Context) (context.Context, error)
 		}
 		return context.WithValue(ctx, appIDCtxKey{}, appID), nil
 	case CallerTypeIM:
-		// im 调用同样要带 appId：它能调的接口全都需要 app 作用域，只是这个
-		// appId 来自 client 的 ws 握手帧、逐调用附上，而不是钉在连接的凭据里。
-		if appID == "" {
-			return nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "缺少 appId")
-		}
+		// **不要求 appId。** im 调用方的连接级凭据里没有它——作用域由每次
+		// 调用从 client 的 ws 握手帧取、用 WithAppID 附上。而 Watch 这条流是
+		// SDK 在 New 里自己起的，压根没有作用域可言：它对 im 调用方就是
+		// 通配的（一条流服务所有应用）。
+		//
+		// "这个 RPC 需不需要 app 作用域"是每个 RPC 自己的事，由它们各自
+		// 用 appIDFrom 判断；拦截器一刀切会把 Watch 直接掐死，而那正是
+		// fp-im 收撤销事件的唯一通道——掐掉之后被踢下线的用户 ws 会一直
+		// 挂到空闲超时，零报错。
 		if err := v.verifyIM(ctx, secret); err != nil {
 			return nil, err
 		}

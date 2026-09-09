@@ -165,6 +165,13 @@ func (c *Client) Authz() *Authz { return c.authz }
 // 从"按上一份策略判定"退化成"全部拒绝"。策略是慢变数据，用旧一点的
 // 远好过没有。
 func (c *Client) refreshPolicy(ctx context.Context) {
+	// IM 网关没有 app 作用域，也用不到任何应用的授权策略；fp 那边对它
+	// 关着 GetPolicy（双向隔离）。不提前返回的话，每次推送流重连都会刷一条
+	// PermissionDenied 的 WARN——真正的问题会被这种噪声淹掉，而这正是
+	// 下面 Unimplemented 那个分支已经在防的同一件事。
+	if c.opts.CallerType == CallerTypeIM {
+		return
+	}
 	res, err := c.rpc.GetPolicy(ctx, &fpv1.GetPolicyRequest{})
 	if status.Code(err) == codes.Unimplemented {
 		// 这个 fp 部署没启用授权模块。安静跳过，不要当成故障反复告警——

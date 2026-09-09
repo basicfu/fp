@@ -40,8 +40,11 @@ func (a staticAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Sub
 // imNode 是测试里起的一个完整 im 节点的句柄：client 连 wsURL，业务 server
 // 连 grpcAddr，live 暴露给测试轮询"这个节点的存活视图有没有看到另一个节点"。
 type imNode struct {
-	id       string
-	live     *registry.Liveness
+	id   string
+	live *registry.Liveness
+	// hub 暴露出来供 im_provisioning_test 把 fpauth 的撤销回调接上——
+	// 生产装配里那个回调也是这么接的（cmd/fp-im 的 h.OnRevoked）。
+	hub      *hub.Hub
 	wsURL    string
 	grpcAddr string
 }
@@ -140,6 +143,7 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 	return &imNode{
 		id:       id,
 		live:     live,
+		hub:      h,
 		wsURL:    "ws://" + wsLis.Addr().String() + "/",
 		grpcAddr: grpcLis.Addr().String(),
 	}

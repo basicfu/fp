@@ -17,9 +17,13 @@ cp config-im.example.yaml config-im.yaml   # 首次：填入 Redis 连接串与 
 URL 抄进 `config-im.yaml` 的 `redis.url`——旧版那条"`FP_IM_REDIS_URL` 未设时复用
 `FP_REDIS_URL`"的 shell 回退没有了，隐式继承比多抄一行难懂得多。
 
-`redis.url` 与 `apps_file` 是必填项，缺一个直接启动失败。`fpsdk.addr`（fp 的
-**gRPC** 地址，不是 HTTP）不由 `internal/im/config` 校验——"谁用谁校验"，它由
+`redis.url` 是唯一的必填项。`fpsdk.addr`（fp 的 **gRPC** 地址，不是 HTTP）与
+`fpsdk.secret` 不由 `internal/im/config` 校验——"谁用谁校验"，它们由
 `fpauth.New` 在装配阶段挡住，报错时机一样是启动时。
+
+`fpsdk.secret` 是 **IM 网关凭据**，在 fp 控制台生成（应用管理页 →「IM 接入」
+页签），明文只显示一次。全部 fp-im 实例共用同一份。轮换后旧凭据最多再活
+10 秒——那是 fp 侧凭据缓存的 TTL，因泄露而轮换时要知道。
 
 **传输安全没有开关，由 `env` 推导**：`env: dev` 明文，`env: prod` 走 TLS。一个
 默认为 true 的 `insecure` 旋钮最可能的失效方式就是被连同整份 dev 配置抄到生产上，
@@ -29,12 +33,23 @@ URL 抄进 `config-im.yaml` 的 `redis.url`——旧版那条"`FP_IM_REDIS_URL` 
 > `env: prod` 下 fp-im 连 fp 的那条 TLS **必须**由 fp 前面的反代 / 网关终结。
 > 在给 fp 的 gRPC 补上 TLS 之前，这不是可选项。
 
-```json
-{"apps":[{"app_id":"…","app_secret":"…","allow_guest":true,
-  "biz_auth":{"verify_url":"https://biz.example.com/verify","timeout":"2s","cache_size":10000}}]}
-```
+## 接入应用的配置
 
-除 `app_id`/`app_secret` 外都有默认值，10 秒检测 mtime 热更新，坏文件保留旧配置。
+**没有 apps 文件了。** 接入应用的准入与策略全部来自 fp，在控制台的应用管理页
+配置（先打开 `im_enabled`，参数说明见 `docs/console.md`）。
+
+fp-im **不再持有任何应用的 `app_secret`**——fp 只存 bcrypt 哈希，明文只在创建
+应用时返回一次，fp-im 拿不到也不需要：验 client 的 token 用的是 IM 凭据，核实
+业务 server 连入的凭据是转给 fp 做的。
+
+配置按需拉取并缓存在进程内，控制台改完由 fp 经 Watch 流推一条通知触发重拉，
+不再有 mtime 轮询。**没打开 `im_enabled` 的应用**：业务 server 接不进来，client
+握手拿到关闭码 4002（策略拒绝、别重连）而不是 4001——token 可能完全有效，
+把 client 指去重新登录是错的方向，它登录完还是连不上。
+
+**关掉 `im_enabled` 不会断开已在线的连接**，只挡新握手。这与「停用应用」
+（`status=disabled`）逐字相同：两者都只影响新的认证，不主动撤销已签发的东西。
+要立刻踢人用 server SDK 的 `Kick`。
 
 `biz_auth` 整组为空表示这个应用不支持业务方令牌。`verify_url` 必填且必须是
 https（令牌明文走在请求体里）；`timeout` 缺省 2 秒，是整个请求的超时；
@@ -212,10 +227,12 @@ proxy_read_timeout 3600s;   # 大于 conn.idle_timeout，别让代理抢在网�
 - 业务 server 一直挂着 `Connect` 长流时，关闭第三步的 `GracefulStop` 会用满 10 秒预算才硬停
   ——ws 与注册表在第二步就已经处理干净，只是进程多活 10 秒。
 - `cmd/fp-im` 只有第一批测试（甲一的启动事件、乙一的优雅关闭、Gap 重登记四条），装配里其它
-  顺序（先订阅后心跳、同步 Refresh 在监听之前）仍然只有注释守着。热重载补追踪那一半也是：
-  回调机制本身有 `appcfg` 的单测守着，但 `serve()` 里
-  `apps.OnReload(func() { trackApps(live, apps) })` 这一行删掉不会让任何测试变红——要覆盖它
-  得让 `apps.Watch` 的 10 秒周期在测试里可配，成本大于收益。
+  顺序（先订阅后心跳、同步 Refresh 在监听之前）仍然只有注释守着。
+- **fp 不可达时业务 server 接不进来**——凭据校验现在要转给 fp。这是配置改由 fp 下发之后
+  新增的依赖。`imgrpc` 那层只缓存成功的凭据校验结果（默认 5 分钟）把 fp 的短暂抖动挡在
+  外面，但冷启动或缓存过期时撞上 fp 停机就是接不进来。访客与业务方令牌两条路仍然不碰 fp。
+- **不存在的 app 每次握手都会回源一次**：`fpappcfg` 只缓存成功，失败不入缓存（缓存键来自
+  未认证的握手帧，缓存失败等于把 map 大小交给攻击者）。靠 fp 侧限流兜底。
 - 优雅关闭有一个残留窗口：收到终止信号到某条连接真正被拆掉之间，本节点的节点频道订阅可能
   已经断了（`serve` 的 ctx 一取消，`bus.Subscribe` 那条订阅就开始收摊），而它的注册表条目
   还在。这段时间里别的节点给这个 subject 发推送，会算出目标是本节点、`SPUBLISH` 返回 0 个

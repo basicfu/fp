@@ -203,13 +203,20 @@ func userInfo(u *domain.User) *fpv1.UserInfo {
 // 流的生命周期就是订阅的生命周期。返回即注销——中继不需要知道流为什么结束。
 func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fpv1.WatchResponse]) error {
 	ctx := stream.Context()
-	appIDStr, err := callerAppID(ctx)
-	if err != nil {
-		return err
-	}
-	app, err := s.apps.GetActiveByAppID(ctx, appIDStr)
-	if err != nil {
-		return StatusFrom(err)
+	// IM 网关那条流是**通配**的：一条流服务所有应用，没有作用域可言，
+	// 所以不解析 appId，也不去查应用——查什么应用呢？
+	isIM := callerTypeFrom(ctx) == CallerTypeIM
+	var app *domain.Application
+	if !isIM {
+		appIDStr, err := callerAppID(ctx)
+		if err != nil {
+			return err
+		}
+		var aerr error
+		app, aerr = s.apps.GetActiveByAppID(ctx, appIDStr)
+		if aerr != nil {
+			return StatusFrom(aerr)
+		}
 	}
 
 	// 先订阅再发 ready：反过来的话，客户端收到 ready 就认为推送通道健康、
@@ -245,7 +252,7 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	// 每条事件多查一次应用，不划算。
 	var events <-chan HubEvent
 	var unsubscribe func()
-	if callerTypeFrom(ctx) == CallerTypeIM {
+	if isIM {
 		events, unsubscribe = s.hub.SubscribeAll()
 	} else {
 		events, unsubscribe = s.hub.Subscribe(app.ID)
@@ -253,7 +260,7 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	defer unsubscribe()
 	var configEvents <-chan ConfigEvent
 	var unsubscribeConfig func()
-	if callerTypeFrom(ctx) == CallerTypeIM {
+	if isIM {
 		configEvents, unsubscribeConfig = s.configHub.SubscribeAll()
 	} else {
 		configEvents, unsubscribeConfig = s.configHub.Subscribe(app.ID)
