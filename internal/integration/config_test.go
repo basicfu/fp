@@ -30,7 +30,7 @@ func TestConfigChangePropagatesToSDK(t *testing.T) {
 	// 没人处理的 ConfigChanged 信号，白白让后面的时序更复杂
 	// （TestTypeChangeBothPaths 就因为同样的种子写法偶发触发过一次
 	// 不相关的 OnError，见该测试里的详细分析）。
-	e.saveConfig(t, "DEFAULT", `{"fee_rate":{"type":"float","desc":"","value":0.02}}`, false)
+	e.saveConfig(t, "DEFAULT", "fee_rate: 0.02\n", false)
 
 	type shopCfg struct{ FeeRate float64 }
 	cfg, err := fpsdk.Bind[shopCfg](e.sdk)
@@ -44,7 +44,7 @@ func TestConfigChangePropagatesToSDK(t *testing.T) {
 	changed := make(chan float64, 1)
 	cfg.OnChange(func(_, n *shopCfg) { changed <- n.FeeRate })
 
-	e.saveConfig(t, "DEFAULT", `{"fee_rate":{"type":"float","desc":"","value":0.05}}`, true)
+	e.saveConfig(t, "DEFAULT", "fee_rate: 0.05\n", true)
 
 	select {
 	case v := <-changed:
@@ -85,7 +85,7 @@ func TestSaveWithoutPushIsInvisibleUntilRebind(t *testing.T) {
 	e := newPhase2Env(t)
 	waitUntil(t, e.sdk.StreamHealthy, "建流后应变为健康")
 
-	e.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, false)
+	e.saveConfig(t, "DEFAULT", "n: 1\n", false)
 
 	type cfgT struct{ N int }
 	cfg, err := fpsdk.Bind[cfgT](e.sdk)
@@ -95,7 +95,7 @@ func TestSaveWithoutPushIsInvisibleUntilRebind(t *testing.T) {
 	fired := make(chan struct{}, 1)
 	cfg.OnChange(func(_, _ *cfgT) { fired <- struct{}{} })
 
-	e.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":2}}`, false)
+	e.saveConfig(t, "DEFAULT", "n: 2\n", false)
 
 	select {
 	case <-fired:
@@ -154,8 +154,7 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	// 种子保存用 push=false：见 TestSaveWithoutPushIsInvisibleUntilRebind
 	// 顶部注释里对种子信号时序问题的完整分析——这条测试早前压测下就是
 	// 因为这个问题偶发把 errs 从期望的 0 计成过 1。
-	e.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000},
-		"retries":{"type":"int","desc":"","value":1}}`, false)
+	e.saveConfig(t, "DEFAULT", "timeout: 3000\nretries: 1\n", false)
 
 	cfg, err := fpsdk.Bind[v1Cfg](e.sdk)
 	if err != nil {
@@ -165,10 +164,9 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	cfg.OnError(func(error) { atomic.AddInt32(&errs, 1) })
 
 	// retries 原样带过去（不变）：这次保存只关心 timeout 的类型迁移，
-	// fields 是全量替换（见 service.ConfigService.Save 的文档），漏写
+	// value 是全量替换（见 service.ConfigService.Save 的文档），漏写
 	// retries 会让它在新版本里直接消失，变成一个不相关的"缺失"信号。
-	e.saveConfig(t, "DEFAULT", `{"timeout":{"type":"object","desc":"","value":{"ms":5000}},
-		"retries":{"type":"int","desc":"","value":1}}`, false)
+	e.saveConfig(t, "DEFAULT", "timeout:\n  ms: 5000\nretries: 1\n", false)
 	time.Sleep(time.Second)
 
 	if got := cfg.Load().Timeout; got != 3000 {
@@ -207,8 +205,7 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	// 同上，种子保存不推送——这里即便种子信号迟到也不会造成误判（迟到的
 	// 重载和下面第二次 push=true 的重载读到的都是同一份 object 值，两者
 	// 都会正确地报错并保持旧值），但保持两条路径的种子写法一致更清楚。
-	e2.saveConfig(t, "DEFAULT", `{"timeout":{"type":"int","desc":"","value":3000},
-		"retries":{"type":"int","desc":"","value":1}}`, false)
+	e2.saveConfig(t, "DEFAULT", "timeout: 3000\nretries: 1\n", false)
 
 	cfg2, err := fpsdk.Bind[v1Cfg](e2.sdk)
 	if err != nil {
@@ -226,8 +223,7 @@ func TestTypeChangeBothPaths(t *testing.T) {
 	// "timeout" 之前，一个逐字段写入、遇到 timeout 解析失败才返回的错误
 	// 实现，会先把 retries 的新值 2 提交下去——这正是下面第二条断言要
 	// 抓的东西。
-	e2.saveConfig(t, "DEFAULT", `{"timeout":{"type":"object","desc":"","value":{"ms":5000}},
-		"retries":{"type":"int","desc":"","value":2}}`, true)
+	e2.saveConfig(t, "DEFAULT", "timeout:\n  ms: 5000\nretries: 2\n", true)
 
 	select {
 	case <-raised:
@@ -280,7 +276,7 @@ func TestReadyRepullsConfigMissedWhileDisconnected(t *testing.T) {
 	waitUntil(t, e.sdk.StreamHealthy, "建流后应变为健康")
 	// 种子保存不推送，理由同 TestSaveWithoutPushIsInvisibleUntilRebind：
 	// Bind 首次加载不依赖推送，用 true 只会留下一条无谓的 ConfigChanged。
-	e.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":1}}`, false)
+	e.saveConfig(t, "DEFAULT", "n: 1\n", false)
 
 	type cfgT struct{ N int }
 	cfg, err := fpsdk.Bind[cfgT](e.sdk)
@@ -292,7 +288,7 @@ func TestReadyRepullsConfigMissedWhileDisconnected(t *testing.T) {
 	e.stopFp(t)
 	// 断线**期间**改值：这次的 ConfigChanged 谁也收不到——发布时压根没有
 	// 任何 fp 实例订阅着这个频道。
-	e.saveConfig(t, "DEFAULT", `{"n":{"type":"int","desc":"","value":42}}`, true)
+	e.saveConfig(t, "DEFAULT", "n: 42\n", true)
 	// 重新起服务端（监听同一端口），SDK 会退避重连并收到 ready。
 	e.restartFp(t)
 
@@ -306,8 +302,8 @@ func TestReadyRepullsConfigMissedWhileDisconnected(t *testing.T) {
 // 【辨别力】两个分区的值必须不同，否则"分区对了"和"压根没分区"同结果。
 func TestPartitionIsolationAtSDKBoundary(t *testing.T) {
 	e := newPhase2Env(t)
-	e.saveConfig(t, "DEFAULT", `{"site.title":{"type":"string","desc":"","value":"后端"}}`, false)
-	e.saveConfig(t, "WEB", `{"site.title":{"type":"string","desc":"","value":"前端"}}`, false)
+	e.saveConfig(t, "DEFAULT", "site.title: 后端\n", false)
+	e.saveConfig(t, "WEB", "site.title: 前端\n", false)
 
 	// siteT 必须先于 cfgT 声明：函数体内的局部类型标识符从声明处才进入
 	// 作用域，cfgT 若先声明会在类型检查阶段就因为引用了尚未声明的 siteT

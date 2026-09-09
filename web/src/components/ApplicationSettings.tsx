@@ -13,6 +13,7 @@ import ConnectorsPanel from '@/components/ConnectorsPanel'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { errorMessage } from '@/lib/useResource'
+import { toastFormErrors } from '@/lib/formErrors'
 import { applicationStatusLabels } from '@/lib/labels'
 import { applicationStatusBadgeClassName, GRAY } from '@/lib/status-badge'
 import type { Application, SessionPolicy } from '@/lib/types'
@@ -121,11 +122,10 @@ function BasicForm({ app, onSaved }: { app: Application; onSaved: () => void }) 
   return (
     <Card>
       <CardContent className="pt-6">
-        <form onSubmit={handleSubmit(onSubmit)} className="max-w-md space-y-4" noValidate>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="max-w-md space-y-4" noValidate>
           <div className="space-y-2">
             <Label htmlFor="name">名称</Label>
             <Input id="name" {...register('name')} />
-            {formState.errors.name && <p className="text-sm text-destructive">{formState.errors.name.message}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="cookieDomain">Cookie 作用域</Label>
@@ -203,15 +203,12 @@ function SessionForm({ app, onSaved }: { app: Application; onSaved: () => void }
         <CardTitle className="text-base">会话策略</CardTitle>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit(onSubmit)} className="max-w-md space-y-4" noValidate>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="max-w-md space-y-4" noValidate>
           {sessionFields.map((f) => (
             <div key={f.key} className="space-y-2">
               <Label htmlFor={f.key}>{f.label}</Label>
               <Input id={f.key} type="number" {...register(f.key)} />
               {f.help && <p className="text-xs text-muted-foreground">{f.help}</p>}
-              {formState.errors[f.key] && (
-                <p className="text-sm text-destructive">{String(formState.errors[f.key]?.message)}</p>
-              )}
             </div>
           ))}
           <Button type="submit" disabled={formState.isSubmitting}>保存</Button>

@@ -31,7 +31,10 @@ function DialogOverlay({
     <DialogPrimitive.Backdrop
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        // bg-black/50、不加 blur：照抄 shadcn-admin 实测的 overlay——纯半透明
+        // 遮罩，底层内容保持清晰（只是变暗），不像 blur 那样把文字糊成一团、
+        // 让人感觉"看不见下面的内容"。
+        "fixed inset-0 isolate z-50 bg-black/50 duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}

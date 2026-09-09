@@ -1,300 +1,117 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router'
+import { Plus } from 'lucide-react'
+import { load as loadYAML } from 'js-yaml'
 import { useCurrentApp } from '@/lib/current-app'
 import { toast } from 'sonner'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
+import { useConfigTypes } from '@/lib/useConfigTypes'
 import { cn } from '@/lib/utils'
-import type { ConfigField, ConfigPartition, ConfigSnapshot, ConfigValueType, SaveConfigResponse } from '@/lib/types'
+import { DEFAULT_PARTITION, type ConfigPartition, type ConfigSnapshot, type SaveConfigResponse } from '@/lib/types'
 
-const partitions: ConfigPartition[] = ['DEFAULT', 'WEB']
+/** 分区名的字符集：字母开头，字母/数字/下划线，不超过 64 个字符——与后端 domain.IsConfigType 逐字一致。 */
+const partitionNamePattern = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 
-const valueTypeOptions: ConfigValueType[] = ['bool', 'int', 'float', 'string', 'array', 'object']
-
-/** 值类型的中文名，仅用于展示；提交给后端的仍然是英文 token（与 domain.ConfigValue* 逐字一致）。 */
-const configValueTypeLabels: Record<ConfigValueType, string> = {
-  bool: '布尔',
-  int: '整数',
-  float: '浮点数',
-  string: '字符串',
-  array: '数组（JSON）',
-  object: '对象（JSON）',
-}
-
-/** 改类型或新建配置项时，给新类型一个合理的初始值。 */
-function defaultValueForType(t: ConfigValueType): unknown {
-  switch (t) {
-    case 'bool':
-      return false
-    case 'int':
-    case 'float':
-      return 0
-    case 'string':
-      return ''
-    case 'array':
-      return []
-    case 'object':
-      return {}
-  }
-}
-
-/** array/object 的文本框内容：未配置显示空串，否则是格式化过的 JSON。 */
-function rawTextForValue(value: unknown): string {
-  if (value === null || value === undefined) return ''
-  return JSON.stringify(value, null, 2)
+/**
+ * normalizeYAML 给"key:value"这种冒号后漏了空格的行补上那个空格（列表
+ * 项前缀、缩进都保留，注释行不动）——跟后端 domain.NormalizeConfigYAML
+ * 是同一条启发式规则的前端版本，只用来在打字时就让校验通过，真正落库的
+ * 补全动作由后端做一遍权威的。
+ */
+function normalizeYAML(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trimStart()
+      if (trimmed === '' || trimmed.startsWith('#')) return line
+      return line.replace(/^(\s*(?:-\s+)?[^:\s][^:]*):(\S)/, '$1: $2')
+    })
+    .join('\n')
 }
 
 /**
- * 校验 int/float 字段编辑中的原始输入串，返回错误文案（''表示合法）。
- *
- * 【终审必须修】空字符串专门拦下来报错，不能当成"未配置"放行：后端
- * domain.CoerceConfigValue 判"未配置"靠 `len(s)==0 || s=="null"`，这个
- * 判断发生在去引号之前——JS 空字符串序列化上 wire 是带引号的 `""`（长度
- * 2），落不进那个分支，最终会被当成非法数字解析失败。而 Save 是"一项转
- * 不过去就整批拒绝"，所以清空一个数字字段会连累同一次保存里的其余字段
- * 全部不生效，报错还是后端的通用文案，看不出是哪个字段的问题。
- *
- * 这里的"清空"在这个 UI 里没有对应到"未配置"的语义：未配置（value 为
- * null）是这一项从服务端读回来时就是这个状态（新建时没有代码强制填值），
- * 不是通过清空输入框产生的。要让一个数字字段变回未配置，应该走删除配置
- * 项这条路——错误文案里直接写清楚，不指望管理员自己想到。
+ * validateYAML 只做一件事：这段文本（补完冒号空格之后）能不能被解析、且
+ * 顶层是不是一个映射。不做任何值级别的校验——YAML 自己的字面量语法就是
+ * 类型信息。跟后端 domain.ParseConfigYAML 是同一条校验规则的前端版本，
+ * 只是提前到打字时就告诉人，不用等点保存才知道。
  */
-function numericFieldError(type: 'int' | 'float', raw: string): string {
-  if (raw === '') {
-    return '数字字段不能为空；要让它变回未配置状态，请删除这个配置项。'
+function validateYAML(text: string): string {
+  const normalized = normalizeYAML(text)
+  if (normalized.trim() === '') return ''
+  let parsed: unknown
+  try {
+    parsed = loadYAML(normalized)
+  } catch (e) {
+    return e instanceof Error ? e.message : '不是合法的 YAML'
   }
-  if (type === 'int') {
-    // 含小数点的也要拦：后端用 int64 解析，3.7 这类值会在那边报错，
-    // 不能等后端 400 才发现。
-    if (!/^-?\d+$/.test(raw)) return '不是合法的整数。'
-  } else if (Number.isNaN(Number(raw))) {
-    return '不是合法的数字。'
+  if (parsed === null || parsed === undefined) return ''
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return '顶层必须是一个映射（key: value 的形式），不能是列表或裸标量'
   }
   return ''
-}
-
-/**
- * 按 key 的第一段点前缀分组，组内再按 key 排序。
- *
- * 用 draft 当前的 key 集合而不是服务端原始快照——新建/删除都要立刻反映到
- * 分组里，不能等保存之后才更新。
- */
-function groupFields(keys: string[]): [string, string[]][] {
-  const groups = new Map<string, string[]>()
-  for (const key of keys) {
-    const dot = key.indexOf('.')
-    // dot <= 0 而不是 === -1：以点开头的 key（比如 ".foo"）切出来的前缀是
-    // 空字符串，会渲染成一个看不见文字的分组标题，比"未分组"更让人费解。
-    const group = dot <= 0 ? '未分组' : key.slice(0, dot)
-    const arr = groups.get(group)
-    if (arr) arr.push(key)
-    else groups.set(group, [key])
-  }
-  const entries = [...groups.entries()]
-  for (const [, arr] of entries) arr.sort()
-  return entries.sort(([a], [b]) => {
-    if (a === b) return 0
-    // "未分组"固定排最后：其余组名是管理员自己起的、有意义的前缀，
-    // 未分组只是"没有前缀"，不该抢在有意义的分组前面。
-    if (a === '未分组') return 1
-    if (b === '未分组') return -1
-    return a.localeCompare(b)
-  })
 }
 
 export default function ConfigCenter() {
   const { currentApp, apps, loading, error } = useCurrentApp()
   const id = currentApp?.id ?? ''
-  const [partition, setPartition] = useState<ConfigPartition>('DEFAULT')
+  const [partition, setPartition] = useState<ConfigPartition>(DEFAULT_PARTITION)
+  const types = useConfigTypes(id)
   const snapshot = useResource(
     () =>
       id
         ? api.get<ConfigSnapshot>(`/applications/${id}/config?type=${partition}`)
-        : Promise.resolve<ConfigSnapshot>({ seq: 0, fields: {} }),
+        : Promise.resolve<ConfigSnapshot>({ seq: 0, value: '' }),
     [id, partition],
   )
 
-  // draft 是本地编辑中的 fields，保存时永远整份提交——接口是全量替换，
-  // 只提交被改过的字段会让其余字段在新版本里凭空消失。
-  const [draft, setDraft] = useState<Record<string, ConfigField>>({})
-  // array/object 字段编辑中的原始 JSON 文本，与 draft 分开存：不合法的
-  // 半成品 JSON（比如刚打完一个 "{"）不该直接进 draft，那会让"全量提交"
-  // 把一个解析不出来的东西发给后端。失焦时才校验、才真正写回 draft。
-  const [rawText, setRawText] = useState<Record<string, string>>({})
-  // fieldErrors 是字段级校验错误：key -> 错误文案，没有错误的字段不在
-  // 这个对象里。【终审必须修】原来只有 array/object 的 JSON 校验会写进
-  // 这里（叫 jsonErrors），但数字字段清空、或填非法值同样会导致后端整批
-  // 拒绝保存——两类错误本质上是同一件事（"draft 里这一项转不成声明的类型，
-  // 保存前必须挡住"），合并成一个通用的字段级错误表，避免以后再加一种
-  // 类型又要建第三套校验状态。
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
-  const [push, setPush] = useState(true)
+  // draft 是编辑框里的原文；服务端数据一到（首次加载、切分区、保存成功后
+  // 的 reload）就用它整体覆盖——不做任何"合并本地改动"的尝试，YAML
+  // 编辑框本来就是"整份替换"的心智模型，不是逐字段增量编辑。
+  const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-  const [adding, setAdding] = useState(false)
-  const [deleteKey, setDeleteKey] = useState<string | null>(null)
-  const [typeChange, setTypeChange] = useState<{ key: string; next: ConfigValueType } | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
-  // 分区切换、或保存成功后的 reload，都要用服务端的权威数据重置本地草稿：
-  // 不重置的话，切分区会把上一个分区的编辑内容错误地留在界面上；保存成功
-  // 后不重置的话，界面会一直显示提交前的草稿，看不出这次保存真正生效的
-  // 是什么（尤其是 push=false 时后端可能做过强类型转换）。
+  const [addingType, setAddingType] = useState(false)
+  const [newType, setNewType] = useState('')
+  const [creatingType, setCreatingType] = useState(false)
+
   useEffect(() => {
     if (!snapshot.data) return
-    setDraft(snapshot.data.fields)
-    const rt: Record<string, string> = {}
-    for (const [k, f] of Object.entries(snapshot.data.fields)) {
-      if (f.type === 'array' || f.type === 'object') rt[k] = rawTextForValue(f.value)
-    }
-    setRawText(rt)
-    setFieldErrors({})
-    setPush(true)
+    setDraft(snapshot.data.value)
   }, [snapshot.data])
 
-  /** 设置或清空某个字段的错误文案；message 为空串表示清掉这一项的错误。 */
-  function setFieldError(key: string, message: string) {
-    setFieldErrors((e) => {
-      if (message === '') {
-        if (!(key in e)) return e
-        const next = { ...e }
-        delete next[key]
-        return next
-      }
-      if (e[key] === message) return e
-      return { ...e, [key]: message }
-    })
-  }
+  // 边框颜色的实时反馈不占布局（只是描边变色，不产生/挪走任何一段
+  // 文本），所以保留；但校验失败的具体原因不再常驻显示成一段 <p>——
+  // 那段文本会随着每次按键增删，把下面的按钮一跳一跳地顶上顶下。原因
+  // 改成点保存时才用 toast 报，是"操作触发的错误用 toast"这条既有原则
+  // 的自然延伸，而不是新开一条例外。
+  const validationError = validateYAML(draft)
+  const dirty = snapshot.data !== null && draft !== snapshot.data.value
 
-  function updateValue(key: string, value: unknown) {
-    setDraft((d) => ({ ...d, [key]: { ...d[key], value } }))
-    // int/float 走 <input type="number">，值在编辑中始终是原始字符串
-    // （见 ValueControl）——每次变化都校验一遍，不等失焦，因为空字符串
-    // 这种"看起来什么都没做错"的中间态本身就是需要立刻拦住的那个问题。
-    const type = draft[key]?.type
-    if (type === 'int' || type === 'float') {
-      setFieldError(key, numericFieldError(type, String(value)))
-    }
-  }
-
-  /** 设计文档 §8：desc 每行可编辑，不再是只在新建时能填一次的只读展示。 */
-  function updateDesc(key: string, desc: string) {
-    setDraft((d) => ({ ...d, [key]: { ...d[key], desc } }))
-  }
-
-  function updateRawText(key: string, text: string) {
-    setRawText((r) => ({ ...r, [key]: text }))
-  }
-
-  /** 失焦时校验 array/object 的 JSON 文本，合法才写回 draft.value。 */
-  function commitRawText(key: string) {
-    const field = draft[key]
-    if (!field) return
-    const text = (rawText[key] ?? '').trim()
-    if (text === '') {
-      // 清空文本框视为把这一项重新变回"未配置"，而不是一个错误——这一点
-      // array/object 与 int/float 不同：array/object 的"空"在 JSON 里没有
-      // 歧义（就是没填），数字的"空"在 wire 上是带引号的空字符串，两者不
-      // 能同一套处理，这也是 numericFieldError 单独存在的原因。
-      updateValue(key, null)
-      setFieldError(key, '')
+  async function handleSave(push: boolean) {
+    const err = validateYAML(draft)
+    if (err) {
+      toast.error(err)
       return
     }
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(text)
-    } catch {
-      setFieldError(key, '不是合法的 JSON，请修正后再保存。')
-      return
-    }
-    // 形状必须与声明的类型匹配：array 不能是 object，反之亦然，
-    // 与后端 domain.CoerceConfigValue 的校验对齐。
-    if (field.type === 'array' && !Array.isArray(parsed)) {
-      setFieldError(key, '内容必须是 JSON 数组。')
-      return
-    }
-    if (field.type === 'object' && (Array.isArray(parsed) || typeof parsed !== 'object' || parsed === null)) {
-      setFieldError(key, '内容必须是 JSON 对象。')
-      return
-    }
-    updateValue(key, parsed)
-    setFieldError(key, '')
-  }
-
-  function requestTypeChange(key: string, next: ConfigValueType) {
-    if (draft[key]?.type === next) return
-    setTypeChange({ key, next })
-  }
-
-  function confirmTypeChange() {
-    if (!typeChange) return
-    const { key, next } = typeChange
-    setDraft((d) => ({ ...d, [key]: { ...d[key], type: next, value: defaultValueForType(next) } }))
-    if (next === 'array' || next === 'object') {
-      setRawText((r) => ({ ...r, [key]: next === 'array' ? '[]' : '{}' }))
-    }
-    // defaultValueForType 给的初始值对新类型总是合法的（0/false/''/[]/{}），
-    // 旧类型可能留下的错误必须清掉，否则改完类型保存按钮还会莫名其妙地
-    // 保持禁用。
-    setFieldError(key, '')
-    setTypeChange(null)
-  }
-
-  function confirmDelete() {
-    const key = deleteKey
-    if (!key) return
-    setDraft((d) => {
-      const next = { ...d }
-      delete next[key]
-      return next
-    })
-    setRawText((r) => {
-      const next = { ...r }
-      delete next[key]
-      return next
-    })
-    setFieldError(key, '')
-    setDeleteKey(null)
-  }
-
-  function addField(key: string, field: ConfigField) {
-    setDraft((d) => ({ ...d, [key]: field }))
-    if (field.type === 'array' || field.type === 'object') {
-      setRawText((r) => ({ ...r, [key]: rawTextForValue(field.value) }))
-    }
-    setAdding(false)
-  }
-
-  function toggleGroup(name: string) {
-    setCollapsed((s) => {
-      const next = new Set(s)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
-    })
-  }
-
-  async function handleSave() {
-    if (Object.keys(fieldErrors).length > 0) return
     setSaving(true)
     try {
       const res = await api.put<SaveConfigResponse>(`/applications/${id}/config`, {
         type: partition,
         push,
-        // 永远提交完整的 draft——接口是全量替换，只提交被改过的字段的话，
-        // 其余字段会在新版本里凭空消失（等于被删）。
-        fields: draft,
+        value: draft,
       })
       toast.success(push ? `已推送，当前版本 seq=${res.seq}` : `已落库，seq=${res.seq}，实例重启后生效`)
       snapshot.reload()
+      types.reload()
     } catch (e) {
       toast.error(errorMessage(e))
     } finally {
@@ -302,9 +119,69 @@ export default function ConfigCenter() {
     }
   }
 
-  const unsetCount = Object.values(draft).filter((f) => f.value === null).length
-  const groups = groupFields(Object.keys(draft))
-  const hasFieldErrors = Object.keys(fieldErrors).length > 0
+  async function handleDeleteType() {
+    setDeleting(true)
+    try {
+      await api.del(`/applications/${id}/config?type=${partition}`)
+      toast.success(`已删除「${partition}」分区的全部历史版本`)
+      setConfirmDelete(false)
+      if (partition !== DEFAULT_PARTITION) setPartition(DEFAULT_PARTITION)
+      else snapshot.reload()
+      types.reload()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  function openAddType() {
+    setNewType('')
+    setAddingType(true)
+  }
+
+  async function confirmAddType() {
+    const t = newType.trim()
+    if (!t) {
+      toast.error('请输入分区名')
+      return
+    }
+    if (!partitionNamePattern.test(t)) {
+      toast.error('分区名必须以字母开头，只能包含字母、数字、下划线，且不超过 64 个字符')
+      return
+    }
+    if (types.types.includes(t)) {
+      toast.error('这个分区已经存在')
+      return
+    }
+    setCreatingType(true)
+    try {
+      // 新分区落一个空值的版本——这样它立刻在数据库里真实存在（能被
+      // /config/types 列出来），不是只活在前端这一次会话里的临时状态。
+      await api.put<SaveConfigResponse>(`/applications/${id}/config`, { type: t, push: false, value: '' })
+      toast.success(`已创建分区「${t}」`)
+      setAddingType(false)
+      setPartition(t)
+      types.reload()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    } finally {
+      setCreatingType(false)
+    }
+  }
+
+  /** Tab 在这个编辑框里是缩进，不是切到下一个控件——YAML 靠缩进表达层级，浏览器默认的"移走焦点"在这没用。 */
+  function handleTextareaKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key !== 'Tab') return
+    e.preventDefault()
+    const el = e.currentTarget
+    const start = el.selectionStart
+    const end = el.selectionEnd
+    setDraft(draft.slice(0, start) + '  ' + draft.slice(end))
+    requestAnimationFrame(() => {
+      el.selectionStart = el.selectionEnd = start + 2
+    })
+  }
 
   if (error) return <p className="text-sm text-destructive">{error}</p>
   if (loading) return <p className="text-sm text-muted-foreground">加载中…</p>
@@ -315,479 +192,112 @@ export default function ConfigCenter() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold">配置中心 · {currentApp.name}</h1>
+      <div className="flex items-center gap-2">
+        <Tabs value={partition} onValueChange={(v) => setPartition(v as ConfigPartition)}>
+          <TabsList>
+            {types.types.map((p) => (
+              <TabsTrigger key={p} value={p}>
+                {p}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+        {/* "+"建一个新分区——名字随便起，不是只能叫 WEB。确认后立刻落一个
+            空值版本，分区从这一刻起就是数据库里真实存在的东西。 */}
+        <Button variant="outline" size="icon-sm" aria-label="新建分区" onClick={openAddType}>
+          <Plus />
+        </Button>
         <div className="flex-1" />
         <Button variant="outline" render={<Link to="/config/versions" />}>
           版本历史
         </Button>
-        <Button variant="outline" onClick={() => setAdding(true)}>
-          新建配置项
-        </Button>
       </div>
 
-      <Tabs value={partition} onValueChange={(v) => setPartition(v as ConfigPartition)}>
-        <TabsList>
-          {partitions.map((p) => (
-            <TabsTrigger key={p} value={p}>
-              {p}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </Tabs>
-
-      {partition === 'WEB' && (
-        <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-          WEB 分区的内容会被下发到浏览器：这里的每一项都会由业务方转发给前端代码，任何人打开页面都能看到。
-          密钥类配置项必须建在 DEFAULT 分区——放进 WEB 分区没有任何机制能拦住，值会原样吐给浏览器。
-        </p>
+      {/* 只在**真的还没拿到过数据**时显示"加载中…"占位——useResource 的
+          reload（每次保存/删除/切分区之后都会触发）会把 loading 重新置
+          true，但不会把已经拿到的 data 清空。如果这里改成"只要 loading
+          就隐藏编辑框"，编辑框会在每次保存后瞬间卸载又重新挂载一次：
+          光标位置、正在输入的内容全部丢一遍，用户体验很差，测试里也会
+          撞上"元素被换了一个新的 DOM 节点"的时序坑。 */}
+      {snapshot.data === null && snapshot.loading && (
+        <p className="text-sm text-muted-foreground">加载中…</p>
       )}
-
-      {snapshot.loading && <p className="text-sm text-muted-foreground">加载中…</p>}
       {snapshot.error && <p className="text-sm text-destructive">{snapshot.error}</p>}
 
-      {!snapshot.loading && !snapshot.error && (
+      {snapshot.data !== null && !snapshot.error && (
         <>
-          {unsetCount > 0 && (
-            <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-              {unsetCount} 项未配置：代码里已经在读这些 key，但还没有人填过值。
-            </p>
-          )}
+          {/* 一整个 YAML 编辑框：一个字段就是一行 key: value，注释
+              （# ...）就是备注，不用再为每个字段单独维护类型/备注/值三样
+              东西。冒号后漏个空格（比如 port:4379）不会挡保存——打字校验
+              和真正落库都会自动补上那个空格。 */}
+          <Label htmlFor={`cfg-${partition}-yaml`} className="sr-only">
+            {partition} 分区的配置（YAML）
+          </Label>
+          <textarea
+            id={`cfg-${partition}-yaml`}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleTextareaKeyDown}
+            spellCheck={false}
+            placeholder={'upstream:\n  timeout: 3000 # 超时时间（毫秒）\n  retries: 3\nfee_rate: 0.02 # 手续费率\n'}
+            className={cn(
+              // 最高不超过默认高度（60vh）：resize-y 允许用户往小了拖，但不能
+              // 拖得比这更高——拖高了会把下面"仅保存/保存并推送/删除"这一排
+              // 按钮顶到视口外面去，够不着。
+              'h-[60vh] max-h-[60vh] w-full resize-y overflow-y-auto rounded-lg border bg-transparent p-3 font-mono text-sm leading-relaxed outline-none',
+              validationError ? 'border-destructive' : 'border-input',
+            )}
+          />
 
-          <div className="flex flex-wrap items-center gap-4 rounded-md border p-3">
-            <span className="text-sm font-medium">生效方式</span>
-            <div className="flex items-center gap-2">
-              <input
-                type="radio"
-                id={`cfg-${partition}-push-immediate`}
-                name={`cfg-${partition}-push-mode`}
-                className="size-4"
-                checked={push}
-                onChange={() => setPush(true)}
-              />
-              <Label htmlFor={`cfg-${partition}-push-immediate`} className="font-normal">
-                立即推送（默认）
-              </Label>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="radio"
-                id={`cfg-${partition}-push-lazy`}
-                name={`cfg-${partition}-push-mode`}
-                className="size-4"
-                checked={!push}
-                onChange={() => setPush(false)}
-              />
-              <Label htmlFor={`cfg-${partition}-push-lazy`} className="font-normal">
-                仅落库，实例重启后生效
-              </Label>
-            </div>
-            <div className="flex-1" />
-            <Button onClick={() => void handleSave()} disabled={saving || hasFieldErrors}>
-              保存
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => void handleSave(false)} disabled={saving || !dirty}>
+              仅保存
             </Button>
-          </div>
-
-          <div className="space-y-3">
-            {groups.length === 0 && <p className="text-sm text-muted-foreground">这个分区还没有任何配置项。</p>}
-            {groups.map(([name, keys]) => (
-              <div key={name} className="rounded-md border">
-                <button
-                  type="button"
-                  onClick={() => toggleGroup(name)}
-                  aria-expanded={!collapsed.has(name)}
-                  className="flex w-full items-center gap-2 rounded-t-md p-2 text-left text-sm font-medium hover:bg-muted/50"
-                >
-                  <span aria-hidden>{collapsed.has(name) ? '▸' : '▾'}</span>
-                  {name}
-                  <span className="text-xs font-normal text-muted-foreground">({keys.length})</span>
-                </button>
-                {!collapsed.has(name) && (
-                  <div className="divide-y border-t">
-                    {keys.map((key) => (
-                      <FieldRow
-                        key={key}
-                        partition={partition}
-                        fieldKey={key}
-                        field={draft[key]}
-                        rawText={rawText[key] ?? ''}
-                        error={fieldErrors[key] ?? ''}
-                        onValueChange={(v) => updateValue(key, v)}
-                        onDescChange={(d) => updateDesc(key, d)}
-                        onRawTextChange={(t) => updateRawText(key, t)}
-                        onRawTextBlur={() => commitRawText(key)}
-                        onRequestTypeChange={(next) => requestTypeChange(key, next)}
-                        onRequestDelete={() => setDeleteKey(key)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
+            <Button onClick={() => void handleSave(true)} disabled={saving || !dirty}>
+              保存并推送
+            </Button>
+            <div className="flex-1" />
+            <Button variant="destructive" onClick={() => setConfirmDelete(true)} disabled={deleting}>
+              删除
+            </Button>
           </div>
         </>
       )}
 
-      <AddFieldDialog open={adding} onOpenChange={setAdding} existingKeys={draft} onAdd={addField} />
-
-      <ConfirmDialog
-        open={deleteKey !== null}
-        onOpenChange={(v) => !v && setDeleteKey(null)}
-        title="删除配置项"
-        description={
-          deleteKey
-            ? `删除「${deleteKey}」。没有机制能确认它是否还被代码读取；删错了，运行中的实例会保持旧值并报错，新起的实例会起不来。这里的删除要点了下面的"保存"才真正生效。`
-            : ''
-        }
-        confirmLabel="确认删除"
-        onConfirm={confirmDelete}
-      />
-
-      <ConfirmDialog
-        open={typeChange !== null}
-        onOpenChange={(v) => !v && setTypeChange(null)}
-        title="修改配置项类型"
-        description={
-          typeChange
-            ? `把「${typeChange.key}」的类型从「${configValueTypeLabels[draft[typeChange.key]?.type ?? 'string']}」改成` +
-              `「${configValueTypeLabels[typeChange.next]}」。旧实例若收到推送会解析失败：它们的代码是按旧类型读这个值的，` +
-              `类型一变，反序列化会直接报错。请确认所有还在跑的实例都已经能处理新类型，或者先选"仅落库"，等实例逐个重启完再推送。`
-            : ''
-        }
-        confirmLabel="确认修改"
-        onConfirm={confirmTypeChange}
-      />
-    </div>
-  )
-}
-
-/** ValueControl 按类型渲染值控件，FieldRow 与 AddFieldDialog 共用。 */
-function ValueControl({
-  id,
-  ariaLabel,
-  type,
-  value,
-  rawText,
-  invalid,
-  onChange,
-  onRawTextChange,
-  onRawTextBlur,
-}: {
-  id: string
-  ariaLabel: string
-  type: ConfigValueType
-  /** bool/int/float/string 的当前值；array/object 时不读这个，读 rawText。 */
-  value: unknown
-  rawText: string
-  invalid: boolean
-  onChange: (v: unknown) => void
-  onRawTextChange: (text: string) => void
-  onRawTextBlur: () => void
-}) {
-  if (type === 'bool') {
-    return (
-      <div className="flex items-center gap-2">
-        <Switch id={id} aria-label={ariaLabel} checked={Boolean(value)} onCheckedChange={onChange} />
-        <span className="text-sm text-muted-foreground">{value ? '开' : '关'}</span>
-      </div>
-    )
-  }
-
-  if (type === 'array' || type === 'object') {
-    return (
-      <textarea
-        id={id}
-        aria-label={ariaLabel}
-        rows={4}
-        className={cn(
-          'w-full rounded-lg border bg-transparent px-2.5 py-1.5 font-mono text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50',
-          invalid ? 'border-destructive' : 'border-input',
-        )}
-        value={rawText}
-        onChange={(e) => onRawTextChange(e.target.value)}
-        onBlur={onRawTextBlur}
-      />
-    )
-  }
-
-  return (
-    <Input
-      id={id}
-      aria-label={ariaLabel}
-      type={type === 'int' || type === 'float' ? 'number' : 'text'}
-      step={type === 'float' ? 'any' : undefined}
-      // Input 组件自带 aria-invalid:border-destructive 之类的样式（见
-      // ui/input.tsx），数字字段校验失败时靠这个属性变红，和 array/object
-      // 的 textarea 视觉上保持一致，不用再手写一套 className 判断。
-      aria-invalid={invalid || undefined}
-      value={value === null || value === undefined ? '' : String(value)}
-      onChange={(e) => onChange(e.target.value)}
-    />
-  )
-}
-
-/** TypeSelect 是类型下拉，FieldRow 与 AddFieldDialog 共用。 */
-function TypeSelect({
-  id,
-  ariaLabel,
-  value,
-  onChange,
-}: {
-  id: string
-  ariaLabel: string
-  value: ConfigValueType
-  onChange: (v: ConfigValueType) => void
-}) {
-  return (
-    <Select value={value} onValueChange={(v) => onChange(v as ConfigValueType)}>
-      <SelectTrigger id={id} aria-label={ariaLabel} className="w-32">
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {valueTypeOptions.map((t) => (
-          <SelectItem key={t} value={t}>
-            {configValueTypeLabels[t]}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  )
-}
-
-function FieldRow({
-  partition,
-  fieldKey,
-  field,
-  rawText,
-  error,
-  onValueChange,
-  onDescChange,
-  onRawTextChange,
-  onRawTextBlur,
-  onRequestTypeChange,
-  onRequestDelete,
-}: {
-  partition: ConfigPartition
-  fieldKey: string
-  field: ConfigField
-  rawText: string
-  /** 这一项当前的校验错误文案，''表示没有错误。 */
-  error: string
-  onValueChange: (value: unknown) => void
-  onDescChange: (desc: string) => void
-  onRawTextChange: (text: string) => void
-  onRawTextBlur: () => void
-  onRequestTypeChange: (next: ConfigValueType) => void
-  onRequestDelete: () => void
-}) {
-  // 命名空间化：key 本身带点、比 connector 的字段名更容易撞——两个分区
-  // 各自的字段列表若不加区分会共享同一个 DOM id。分隔符用 `--`（而不是
-  // 单个 `-`）：key 本身允许出现 `-`，字段 "a" 的类型下拉
-  // （单分隔符会是 `cfg-DEFAULT-a-type`）会与字段 "a-type" 的值输入框
-  // （`cfg-DEFAULT-a-type`）撞 id——终审记的 Minor。`--` 不会出现在
-  // snake_case 的 key 里，同一撞法不会发生。
-  const domId = `cfg--${partition}--${fieldKey}`
-  const unset = field.value === null
-  const invalid = error !== ''
-
-  return (
-    <div className="space-y-2 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0 space-y-0.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="break-all font-mono text-sm">{fieldKey}</span>
-            {unset && <Badge variant="destructive">未配置</Badge>}
-          </div>
-          <div className="max-w-sm">
-            <Label htmlFor={`${domId}--desc`} className="sr-only">
-              {fieldKey} 的备注
-            </Label>
-            {/* 设计文档 §8：desc 每行可编辑，不是只在新建时能填一次的
-                只读展示——想改一个错别字不该被逼去走"删除+重建"那条路
-                （删除还正是这个页面自己要求二次确认、且明说"没有机制
-                确认它是否还被代码读取"的高风险操作）。 */}
-            <Input
-              id={`${domId}--desc`}
-              value={field.desc}
-              onChange={(e) => onDescChange(e.target.value)}
-              placeholder="备注"
-              className="h-7 text-xs"
-            />
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <TypeSelect
-            id={`${domId}--type`}
-            ariaLabel={`${fieldKey} 的类型`}
-            value={field.type}
-            onChange={onRequestTypeChange}
-          />
-          <Button variant="outline" size="sm" onClick={onRequestDelete}>
-            删除 {fieldKey}
-          </Button>
-        </div>
-      </div>
-
-      <ValueControl
-        id={domId}
-        ariaLabel={fieldKey}
-        type={field.type}
-        value={field.value}
-        rawText={rawText}
-        invalid={invalid}
-        onChange={onValueChange}
-        onRawTextChange={onRawTextChange}
-        onRawTextBlur={onRawTextBlur}
-      />
-      {invalid && <p className="text-sm text-destructive">{error}</p>}
-    </div>
-  )
-}
-
-function AddFieldDialog({
-  open,
-  onOpenChange,
-  existingKeys,
-  onAdd,
-}: {
-  open: boolean
-  onOpenChange: (v: boolean) => void
-  existingKeys: Record<string, ConfigField>
-  onAdd: (key: string, field: ConfigField) => void
-}) {
-  const [key, setKey] = useState('')
-  const [type, setType] = useState<ConfigValueType>('string')
-  const [desc, setDesc] = useState('')
-  const [boolValue, setBoolValue] = useState(false)
-  const [textValue, setTextValue] = useState('')
-  const [error, setError] = useState('')
-
-  // 每次打开都清空，不残留上一次没提交完的输入。
-  useEffect(() => {
-    if (!open) return
-    setKey('')
-    setType('string')
-    setDesc('')
-    setBoolValue(false)
-    setTextValue('')
-    setError('')
-  }, [open])
-
-  /** 切换类型时把值编辑器一并清空，避免上一个类型残留的文本串到新控件里。 */
-  function handleTypeChange(next: ConfigValueType) {
-    setType(next)
-    setBoolValue(false)
-    setTextValue('')
-    setError('')
-  }
-
-  function submit() {
-    const k = key.trim()
-    if (!k) {
-      setError('请输入 key')
-      return
-    }
-    if (Object.prototype.hasOwnProperty.call(existingKeys, k)) {
-      setError('这个 key 在当前分区已经存在')
-      return
-    }
-
-    let value: unknown
-    if (type === 'bool') {
-      // 开关没有"空"状态，天然满足"值必填"。
-      value = boolValue
-    } else if (type === 'array' || type === 'object') {
-      const t = textValue.trim()
-      // 值必填：这是凭空新建的条目，不像自动发现出来的未配置项那样
-      // 是"代码已声明、等人填"——没有任何代码强制它，留空没有意义。
-      if (!t) {
-        setError('值必填')
-        return
-      }
-      try {
-        const parsed = JSON.parse(t) as unknown
-        if (type === 'array' && !Array.isArray(parsed)) throw new Error()
-        if (type === 'object' && (Array.isArray(parsed) || typeof parsed !== 'object' || parsed === null)) {
-          throw new Error()
-        }
-        value = parsed
-      } catch {
-        setError(`值不是合法的 JSON${type === 'array' ? '数组' : '对象'}`)
-        return
-      }
-    } else if (type === 'int' || type === 'float') {
-      const t = textValue.trim()
-      if (!t) {
-        setError('值必填')
-        return
-      }
-      const n = Number(t)
-      if (!Number.isFinite(n) || (type === 'int' && !Number.isInteger(n))) {
-        setError(type === 'int' ? '不是合法的整数' : '不是合法的数字')
-        return
-      }
-      value = n
-    } else {
-      if (!textValue.trim()) {
-        setError('值必填')
-        return
-      }
-      value = textValue
-    }
-
-    onAdd(k, { type, desc, value })
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>新建配置项</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-4">
+      <Dialog open={addingType} onOpenChange={setAddingType}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>新建分区</DialogTitle>
+          </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="cfg-new-key">key</Label>
+            <Label htmlFor="cfg-new-type">分区名</Label>
             <Input
-              id="cfg-new-key"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder="upstream.timeout"
+              id="cfg-new-type"
+              value={newType}
+              onChange={(e) => setNewType(e.target.value)}
+              placeholder="WEB / MOBILE / ADMIN_PANEL…"
               className="font-mono"
             />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="cfg-new-type">类型</Label>
-            <TypeSelect id="cfg-new-type" ariaLabel="类型" value={type} onChange={handleTypeChange} />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="cfg-new-value">值</Label>
-            <ValueControl
-              id="cfg-new-value"
-              ariaLabel="值"
-              type={type}
-              value={type === 'bool' ? boolValue : textValue}
-              rawText={textValue}
-              invalid={false}
-              onChange={(v) => (type === 'bool' ? setBoolValue(Boolean(v)) : setTextValue(String(v)))}
-              onRawTextChange={setTextValue}
-              onRawTextBlur={() => {}}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="cfg-new-desc">备注</Label>
-            <Input id="cfg-new-desc" value={desc} onChange={(e) => setDesc(e.target.value)} />
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button type="button" onClick={submit}>
-            创建
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setAddingType(false)}>
+              取消
+            </Button>
+            <Button type="button" onClick={() => void confirmAddType()} disabled={creatingType}>
+              确认
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`删除「${partition}」分区`}
+        description={`删除「${partition}」分区的全部内容，包括所有历史版本，不可撤销——删完之后这个分区一个版本都不剩，没有任何东西可以回滚回去。运行中的实例会保留最后一次成功加载的值，直到重启或下次重新拉取才会感知到这个分区已经没了。`}
+        confirmLabel="确认删除"
+        onConfirm={() => void handleDeleteType()}
+      />
+    </div>
   )
 }

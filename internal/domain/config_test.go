@@ -1,116 +1,145 @@
 package domain_test
 
 import (
-	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/basicfu/fp/internal/domain"
 )
 
-func TestCoerceConfigValue(t *testing.T) {
+func TestParseConfigYAML(t *testing.T) {
 	cases := []struct {
-		name      string
-		valueType string
-		in        string
-		want      string // 期望的规范 JSON；wantErr 为 true 时忽略
-		wantErr   bool
+		name    string
+		in      string
+		want    map[string]any
+		wantErr bool
 	}{
-		// 原生类型直接过
-		{"bool 原生", domain.ConfigValueBool, `true`, `true`, false},
-		{"int 原生", domain.ConfigValueInt, `3`, `3`, false},
-		{"float 原生", domain.ConfigValueFloat, `0.02`, `0.02`, false},
-		{"string 原生", domain.ConfigValueString, `"商城"`, `"商城"`, false},
-		{"array 原生", domain.ConfigValueArray, `[1,2,3]`, `[1,2,3]`, false},
-		{"object 原生", domain.ConfigValueObject, `{"a":1}`, `{"a":1}`, false},
+		{"空字符串是空对象", "", map[string]any{}, false},
+		{"只有空白也是空对象", "   \n\t  ", map[string]any{}, false},
+		{"标量类型齐全", "b: true\ni: 3\nf: 0.02\ns: 商城\n",
+			map[string]any{"b": true, "i": 3, "f": 0.02, "s": "商城"}, false},
+		{"数组与嵌套对象", "arr:\n  - 1\n  - 2\nobj:\n  a: 1\n  b: 2\n",
+			map[string]any{"arr": []any{1, 2}, "obj": map[string]any{"a": 1, "b": 2}}, false},
+		// 注释不影响解析结果——它只在管理端展示原文时可见，不落进解析后的
+		// 对象，这正是"注释取代备注字段"这个设计的直接后果：SDK 从来读不到
+		// 备注，现在也读不到注释，符合预期，不是遗漏。
+		{"注释被忽略", "timeout: 3000 # 超时时间（毫秒）\n", map[string]any{"timeout": 3000}, false},
+		// 大整数必须原样保留精度：yaml.v3 把整数解成 int（64 位平台上是
+		// int64），不会像"先转成 any 再转回 JSON"那样静默舍入到 float64 的
+		// 53 位精度。
+		{"雪花 ID 级别的大整数", "id: 9007199254740993\n", map[string]any{"id": 9007199254740993}, false},
+		{"null 文档当空对象", "null", map[string]any{}, false},
+		{"波浪号也是 null 文档", "~", map[string]any{}, false},
 
-		// 弱转换：字符串形式的值也要能进
-		{"字符串进 int", domain.ConfigValueInt, `"3"`, `3`, false},
-		{"字符串进 bool", domain.ConfigValueBool, `"true"`, `true`, false},
-		{"字符串进 float", domain.ConfigValueFloat, `"0.02"`, `0.02`, false},
-		{"字符串进 array", domain.ConfigValueArray, `"[1,2]"`, `[1,2]`, false},
-		{"字符串进 object", domain.ConfigValueObject, `"{\"a\":1}"`, `{"a":1}`, false},
-		{"数字进 string", domain.ConfigValueString, `3`, `"3"`, false},
-
-		// 转不过去才报错
-		{"abc 进 int", domain.ConfigValueInt, `"abc"`, "", true},
-		{"小数进 int", domain.ConfigValueInt, `3.7`, "", true},
-		{"对象进 array", domain.ConfigValueArray, `{"a":1}`, "", true},
-		{"数组进 object", domain.ConfigValueObject, `[1,2]`, "", true},
-
-		// null 一律是"未配置"，任何类型都接受
-		{"null 进 int", domain.ConfigValueInt, `null`, `null`, false},
-		{"null 进 object", domain.ConfigValueObject, `null`, `null`, false},
-
-		// 大整数必须原样保留：转成 any 再转回来会静默舍入到 float64 精度。
-		{"object 里的大整数", domain.ConfigValueObject, `{"id":9007199254740993}`, `{"id":9007199254740993}`, false},
-		{"array 里的大整数", domain.ConfigValueArray, `[9007199254740993]`, `[9007199254740993]`, false},
-		// object 的 key 顺序必须原样保留，不能被重排成字母序。
-		{"object 的 key 顺序", domain.ConfigValueObject, `{"b":1,"a":2}`, `{"b":1,"a":2}`, false},
-		// compact：多余空白要去掉，但内容与顺序不变。
-		{"object 去空白", domain.ConfigValueObject, `{ "b" : 1 }`, `{"b":1}`, false},
+		{"顶层是裸标量应报错", "hello", nil, true},
+		{"顶层是数组应报错", "- a\n- b\n", nil, true},
+		{"缩进错误的非法 YAML 应报错", "a:\n  b: 1\n c: 2\n", nil, true},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := domain.CoerceConfigValue(c.valueType, json.RawMessage(c.in))
+			got, err := domain.ParseConfigYAML(c.in)
 			if c.wantErr {
 				if err == nil {
-					t.Fatalf("期望报错，实际得到 %s", got)
+					t.Fatalf("期望报错，实际得到 %#v", got)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("不该报错: %v", err)
 			}
-			if string(got) != c.want {
-				t.Fatalf("得到 %s，期望 %s", got, c.want)
+			if len(got) != len(c.want) {
+				t.Fatalf("得到 %#v，期望 %#v", got, c.want)
+			}
+			for k, wantV := range c.want {
+				gotV, ok := got[k]
+				if !ok {
+					t.Fatalf("缺少 key %q，得到 %#v", k, got)
+				}
+				if !deepEqualLoose(gotV, wantV) {
+					t.Fatalf("key %q: 得到 %#v（%T），期望 %#v（%T）", k, gotV, gotV, wantV, wantV)
+				}
 			}
 		})
 	}
 }
 
-func TestConfigFieldIsSet(t *testing.T) {
+// deepEqualLoose 比较解析结果，array/object 递归比较。不用
+// reflect.DeepEqual 直接比：yaml.v3 对 slice/map 里各元素的具体类型
+// （int vs int64 之类）不一定和测试用例手写的字面量完全一致，这里只关心
+// "值语义上相不相等"。
+func deepEqualLoose(a, b any) bool {
+	switch bv := b.(type) {
+	case []any:
+		av, ok := a.([]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range bv {
+			if !deepEqualLoose(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		av, ok := a.(map[string]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for k, v := range bv {
+			if !deepEqualLoose(av[k], v) {
+				return false
+			}
+		}
+		return true
+	default:
+		return a == b
+	}
+}
+
+// 分区名不再局限于 DEFAULT/WEB 两个固定值——管理端可以建任意名字的分区，
+// 校验只挡明显不合法的字符集（空、数字开头、带空白/斜杠这类会把 URL
+// 查询参数弄乱的字符、超长）。
+func TestIsConfigType(t *testing.T) {
+	for _, s := range []string{
+		domain.ConfigTypeDefault, domain.ConfigTypeWeb, "web", "MOBILE", "Admin_Panel", "a",
+		strings.Repeat("a", 64), // 边界：正好 64 个字符
+	} {
+		if !domain.IsConfigType(s) {
+			t.Fatalf("%q 应当是合法分区名", s)
+		}
+	}
+	for _, s := range []string{
+		"", "1web", "web app", "web/app", "web.app", "web-app",
+		strings.Repeat("a", 65), // 边界：超过 64 个字符
+	} {
+		if domain.IsConfigType(s) {
+			t.Fatalf("%q 不应当是合法分区名", s)
+		}
+	}
+}
+
+func TestNormalizeConfigYAML(t *testing.T) {
 	cases := []struct {
 		name string
-		raw  string
-		want bool
+		in   string
+		want string
 	}{
-		{"已配置", `3`, true},
-		{"配成了 false", `false`, true}, // false 是有效值，不是未配置
-		{"配成了 0", `0`, true},         // 0 同理
-		{"配成了空串", `""`, true},
-		{"JSON null 是未配置", `null`, false},
-		{"nil 是未配置", ``, false},
+		{"漏空格的标量值", "port:4379\n", "port: 4379\n"},
+		{"已经有空格的不受影响", "port: 4379\n", "port: 4379\n"},
+		{"多行都要补", "a:1\nb:2\n", "a: 1\nb: 2\n"},
+		{"只补第一个冒号，值里的冒号不动", "url:http://x.com:8080\n", "url: http://x.com:8080\n"},
+		{"列表项前缀不受影响", "- a:1\n", "- a: 1\n"},
+		{"缩进保留", "  port:4379\n", "  port: 4379\n"},
+		// 注释是自由文本，即使长得像"key:value"也不该被这条启发式规则误伤。
+		{"注释行不动", "# see:http://x\nport:4379\n", "# see:http://x\nport: 4379\n"},
+		{"空行不动", "a:1\n\nb:2\n", "a: 1\n\nb: 2\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f := domain.ConfigField{Type: domain.ConfigValueInt, Value: json.RawMessage(c.raw)}
-			if got := f.IsSet(); got != c.want {
-				t.Fatalf("IsSet() = %v，期望 %v", got, c.want)
+			if got := domain.NormalizeConfigYAML(c.in); got != c.want {
+				t.Fatalf("得到 %q，期望 %q", got, c.want)
 			}
 		})
-	}
-}
-
-func TestIsConfigTypeAndValueType(t *testing.T) {
-	for _, s := range []string{domain.ConfigTypeDefault, domain.ConfigTypeWeb} {
-		if !domain.IsConfigType(s) {
-			t.Fatalf("%q 应当是合法分区", s)
-		}
-	}
-	for _, s := range []string{"", "default", "web", "MOBILE"} {
-		if domain.IsConfigType(s) {
-			t.Fatalf("%q 不应当是合法分区", s)
-		}
-	}
-	for _, s := range []string{"bool", "int", "float", "string", "array", "object"} {
-		if !domain.IsConfigValueType(s) {
-			t.Fatalf("%q 应当是合法值类型", s)
-		}
-	}
-	for _, s := range []string{"", "duration", "secret", "Int"} {
-		if domain.IsConfigValueType(s) {
-			t.Fatalf("%q 不应当是合法值类型", s)
-		}
 	}
 }

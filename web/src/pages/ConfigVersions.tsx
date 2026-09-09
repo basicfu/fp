@@ -2,59 +2,92 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useCurrentApp } from '@/lib/current-app'
 import { toast } from 'sonner'
+import { load as loadYAML } from 'js-yaml'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ApiError, api } from '@/lib/api'
 import { formatTime } from '@/lib/format'
 import { useResource, errorMessage } from '@/lib/useResource'
-import type { ConfigField, ConfigPartition, ConfigSnapshot, ConfigVersion, SaveConfigResponse } from '@/lib/types'
-
-const partitions: ConfigPartition[] = ['DEFAULT', 'WEB']
+import { useConfigTypes } from '@/lib/useConfigTypes'
+import { cn } from '@/lib/utils'
+import { DEFAULT_PARTITION, type ConfigPartition, type ConfigSnapshot, type ConfigVersion, type SaveConfigResponse } from '@/lib/types'
 
 /**
- * valuesEqual 判断两个配置值是否"相同"，array/object 要按结构比较：两次
- * 从 JSON 解出来的对象即使内容一样也是不同的引用，`===` 恒为 false；纯
- * JSON.stringify 比较又会被 key 顺序碰巧不同坑到——虽然后端
- * CoerceConfigValue 特意保留原始字节顺序不重新序列化，就是为了让这层
- * "字节级 diff"稳定（见 internal/domain/config.go 的注释），但前端这层
- * 不应该依赖那份后端承诺，自己按结构递归比较更稳妥。
+ * parseYAMLObject 把版本快照的 YAML 原文解析成一个扁平化前的对象，解析
+ * 失败或顶层不是映射时按空对象处理——展示层的兜底：保存时后端早就拒绝过
+ * 不合法的 YAML，历史记录里理论上不会出现解析不出来的版本，这里只是
+ * 防御，不该让 diff 页面因为一份意外数据而崩溃。
  */
-function valuesEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
-    return a.every((v, i) => valuesEqual(v, b[i]))
+function parseYAMLObject(text: string): Record<string, unknown> {
+  if (text.trim() === '') return {}
+  try {
+    const v: unknown = loadYAML(text)
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, unknown>
+  } catch {
+    // 忽略，走下面的空对象兜底。
   }
-  const ao = a as Record<string, unknown>
-  const bo = b as Record<string, unknown>
-  const keysA = Object.keys(ao)
-  if (keysA.length !== Object.keys(bo).length) return false
-  return keysA.every((k) => Object.prototype.hasOwnProperty.call(bo, k) && valuesEqual(ao[k], bo[k]))
+  return {}
 }
 
 /**
- * diffFieldKeys 比较相邻两版的 fields，返回发生变化的 key（按字母序）。
- * 后端不存"这一版改了什么"，只能靠前端把两份完整快照拉全了自己比。
- *
- * "变化"三选一即算：key 只在一边出现（新增/删除）；或者两边都有但
- * type/desc/value 任意一项不同。没变的 key 一律不出现在结果里——这是
- * 辨别力所在：一个偷懒把整份 fields 都当"改动"的实现在这里就会露馅。
+ * flatten 把嵌套对象拍平成 "a.b.c" -> 叶子值 的映射，数组与标量都当叶子
+ * （不逐元素比较数组内部——那是"整个数组变了"还是"数组里改了一项"这种
+ * 更细的语义，对配置项这种量级没必要，改动清单反而会因为数组下标错位
+ * 显得琐碎）。
  */
-function diffFieldKeys(curr: Record<string, ConfigField>, prev: Record<string, ConfigField>): string[] {
-  const keys = new Set([...Object.keys(curr), ...Object.keys(prev)])
-  const changed: string[] = []
-  for (const key of keys) {
-    const c = curr[key]
-    const p = prev[key]
-    if (!c || !p || c.type !== p.type || c.desc !== p.desc || !valuesEqual(c.value, p.value)) {
-      changed.push(key)
-    }
+function flatten(obj: unknown, prefix = ''): Map<string, unknown> {
+  const out = new Map<string, unknown>()
+  const isPlainObject = obj !== null && typeof obj === 'object' && !Array.isArray(obj)
+  if (!isPlainObject) {
+    if (prefix) out.set(prefix, obj)
+    return out
   }
-  return changed.sort()
+  const entries = Object.entries(obj as Record<string, unknown>)
+  if (entries.length === 0) {
+    if (prefix) out.set(prefix, obj)
+    return out
+  }
+  for (const [k, v] of entries) {
+    const path = prefix ? `${prefix}.${k}` : k
+    for (const [p, val] of flatten(v, path)) out.set(p, val)
+  }
+  return out
+}
+
+function valuesEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/** formatDiffValue 是改动清单里一行的值展示：字符串不加引号（更好读），其余按 JSON 字面量。 */
+function formatDiffValue(v: unknown): string {
+  if (v === undefined) return ''
+  if (typeof v === 'string') return v
+  return JSON.stringify(v)
+}
+
+interface DiffLine {
+  kind: 'added' | 'removed'
+  path: string
+  value: unknown
+}
+
+/** diffValues 比较两份解析后的配置对象，返回 +/- 形式的改动清单，按 path 排序、删除排在同一 key 的新增前面。 */
+function diffValues(curr: Record<string, unknown>, prev: Record<string, unknown>): DiffLine[] {
+  const currFlat = flatten(curr)
+  const prevFlat = flatten(prev)
+  const keys = [...new Set([...currFlat.keys(), ...prevFlat.keys()])].sort()
+  const lines: DiffLine[] = []
+  for (const k of keys) {
+    const hasCurr = currFlat.has(k)
+    const hasPrev = prevFlat.has(k)
+    const same = hasCurr && hasPrev && valuesEqual(currFlat.get(k), prevFlat.get(k))
+    if (same) continue
+    if (hasPrev) lines.push({ kind: 'removed', path: k, value: prevFlat.get(k) })
+    if (hasCurr) lines.push({ kind: 'added', path: k, value: currFlat.get(k) })
+  }
+  return lines
 }
 
 /**
@@ -77,16 +110,17 @@ type RowDiff =
   | { kind: 'loading' }
   | { kind: 'initial' }
   | { kind: 'error'; message: string }
-  | { kind: 'diff'; changed: string[] }
+  | { kind: 'diff'; lines: DiffLine[] }
 
-/** 回滚会让哪些 key 变成未配置。known=false 表示数据不全，答不出来。 */
-type UnsetKeysResult = { known: true; keys: string[] } | { known: false }
+/** 回滚会让哪些 key 消失（当前有、目标版本没有）。known=false 表示数据不全，答不出来。 */
+type RemovedKeysResult = { known: true; keys: string[] } | { known: false }
 
 export default function ConfigVersions() {
   const { currentApp, apps, loading, error } = useCurrentApp()
   const id = currentApp?.id ?? ''
   const navigate = useNavigate()
-  const [partition, setPartition] = useState<ConfigPartition>('DEFAULT')
+  const [partition, setPartition] = useState<ConfigPartition>(DEFAULT_PARTITION)
+  const types = useConfigTypes(id)
 
   const versions = useResource(
     () =>
@@ -104,7 +138,6 @@ export default function ConfigVersions() {
   const [diffsReady, setDiffsReady] = useState(false)
 
   const [rollbackTarget, setRollbackTarget] = useState<number | null>(null)
-  const [rollbackPush, setRollbackPush] = useState(true)
   const [rollbackSaving, setRollbackSaving] = useState(false)
 
   // 版本列表到手后，为每一版及其"前一版"分别拉整份快照。
@@ -114,19 +147,6 @@ export default function ConfigVersions() {
   // 里的 alive 守卫同一个理由。
   useEffect(() => {
     const list = versions.data
-    // 【竞态修复】"列表本身还没拉回来"（list === null，组件刚挂载、或
-    // 分区刚切换、新分区的列表还在路上）和"列表拉回来了、但确实是空的"
-    // 是两件不同的事，不能塞进同一个 !list 判断——旧版本这里写的是
-    // `if (!list || list.length === 0)`，组件刚挂载时 versions.data 还是
-    // useState 的初始值 null，会落进这个分支把 diffsReady 提前置成
-    // true；等真正的列表到手、这一行第一次出现在页面上时，它的第一次
-    // 渲染用的还是这个"提前置真"的 diffsReady，按钮会先渲染成
-    // disabled=false，下一拍才被"真正"的 setDiffsReady(false) 纠正回去。
-    // 这个"先错后对"的窗口期是真实存在的（用可控延迟的 fetch 复现过，
-    // 见 ConfigVersions.test.tsx），不是理论上的边界情况：一个手速恰好
-    // 卡在这个窗口的管理员，点下去会打开一个基于"当前版本快照还不存在"
-    // 算出来的回滚弹窗。列表还没到手时什么都不做——diffsReady 的初始值
-    // 就是 false，按钮天然保持 disabled，不需要在这里重复断言一遍。
     if (!list) return
     setSnapshots({})
     setDiffsReady(false)
@@ -188,7 +208,10 @@ export default function ConfigVersions() {
     if (prev.status === 'loading') return { kind: 'loading' }
     if (prev.status === 'missing') return { kind: 'initial' }
     if (prev.status === 'error') return { kind: 'error', message: prev.message }
-    return { kind: 'diff', changed: diffFieldKeys(curr.snapshot.fields, prev.snapshot.fields) }
+    return {
+      kind: 'diff',
+      lines: diffValues(parseYAMLObject(curr.snapshot.value), parseYAMLObject(prev.snapshot.value)),
+    }
   }
 
   /** 当前（最新）版本的快照——versions 降序返回，第一项就是当前版本。 */
@@ -200,52 +223,42 @@ export default function ConfigVersions() {
   }
 
   /**
-   * 回滚到 targetSeq 后，"当前已配置、目标版本里未配置"的 key——它们会
-   * 变成未配置。判据有两条，**都**算作"会变成未配置"：
-   *
-   *   1. key 在目标版本里根本不存在这一条目（等价于被删除）
-   *   2. key 在目标版本里存在，但 value 是 JSON null——GetConfig/IsSet
-   *      会把这类项过滤掉，SDK 一样报 missing。只判"key 存不存在"会漏
-   *      掉这一种：某项在目标版本里是"已创建但没填值"，回滚后同样起
-   *      不来，却因为 key 还在 map 里而被判定成"没变化"。
-   *
-   * 当前版本里已经是 null 的 key 不算"变成"未配置——它本来就是未配置
-   * 状态，回滚不改变这一点，不必出现在提示里。
+   * 回滚到 targetSeq 后，"当前存在、目标版本里不存在"的 key——它们会
+   * 消失。YAML 自由编辑模型下没有"已建未填"这个中间态了，判据只有一条：
+   * 这个 key（拍平后的路径）当前有、目标版本没有。
    *
    * 运行中的实例保持旧值并报错、新起的实例缺值起不来，必须在回滚前说
    * 清楚。
-   *
-   * 这条判据现在与 ConfigCenter.tsx 里"N 项未配置"横幅的判据
-   * （`f.value === null`）口径一致了：两处对"未配置"的定义曾经不一样
-   * （那边看 value 是否为 null，这里只看 key 是否存在），现在统一。
    */
-  function willUnsetKeys(targetSeq: number): UnsetKeysResult {
+  function willRemoveKeys(targetSeq: number): RemovedKeysResult {
     const curr = currentSnapshot()
     const target = snapshots[targetSeq]
     if (!curr || target?.status !== 'ok') return { known: false }
-    const keys = Object.keys(curr.fields)
-      .filter((k) => curr.fields[k].value !== null) // 当前就未配置的不算"变成"
-      .filter((k) => !(k in target.snapshot.fields) || target.snapshot.fields[k].value === null)
-      .sort()
+    const currFlat = flatten(parseYAMLObject(curr.value))
+    const targetFlat = flatten(parseYAMLObject(target.snapshot.value))
+    const keys = [...currFlat.keys()].filter((k) => !targetFlat.has(k)).sort()
     return { known: true, keys }
   }
 
   function openRollback(seq: number) {
     setRollbackTarget(seq)
-    setRollbackPush(true)
   }
 
   async function confirmRollback() {
     if (rollbackTarget === null) return
+    // 目标版本与当前值完全一致时，后端不会为"什么都没变"这件事凭空生出
+    // 一个新版本号——用回滚前记下的最新 seq 和响应里的 seq 一比，就知道
+    // 后端是不是真的落了新版本，据此换一句不误导人的提示。
+    const latestSeqBefore = versions.data?.[0]?.seq
     setRollbackSaving(true)
     try {
       const res = await api.post<SaveConfigResponse>(`/applications/${id}/config/rollback`, {
         type: partition,
         seq: rollbackTarget,
-        push: rollbackPush,
+        push: true,
       })
       toast.success(
-        rollbackPush ? `已回滚并推送，当前版本 seq=${res.seq}` : `已回滚，seq=${res.seq}，实例重启后生效`,
+        res.seq === latestSeqBefore ? '这一版与当前内容完全一致，没有产生新版本' : `已回滚并推送，当前版本 seq=${res.seq}`,
       )
       navigate('/config')
     } catch (e) {
@@ -255,7 +268,8 @@ export default function ConfigVersions() {
     }
   }
 
-  const unsetResult: UnsetKeysResult = rollbackTarget !== null ? willUnsetKeys(rollbackTarget) : { known: true, keys: [] }
+  const removedResult: RemovedKeysResult =
+    rollbackTarget !== null ? willRemoveKeys(rollbackTarget) : { known: true, keys: [] }
 
   if (error) return <p className="text-sm text-destructive">{error}</p>
   if (loading) return <p className="text-sm text-muted-foreground">加载中…</p>
@@ -266,18 +280,13 @@ export default function ConfigVersions() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <div>
-          <Link to="/config" className="text-sm text-muted-foreground underline-offset-4 hover:underline">
-            ← 返回配置中心
-          </Link>
-          <h1 className="text-xl font-semibold">版本历史 · {currentApp.name}</h1>
-        </div>
-      </div>
+      <Link to="/config" className="text-sm text-muted-foreground underline-offset-4 hover:underline">
+        ← 返回配置中心
+      </Link>
 
       <Tabs value={partition} onValueChange={(v) => setPartition(v as ConfigPartition)}>
         <TabsList>
-          {partitions.map((p) => (
+          {types.types.map((p) => (
             <TabsTrigger key={p} value={p}>
               {p}
             </TabsTrigger>
@@ -291,8 +300,11 @@ export default function ConfigVersions() {
       {!versions.loading && !versions.error && (
         <div className="space-y-3">
           {versions.data?.length === 0 && <p className="text-sm text-muted-foreground">这个分区还没有任何版本。</p>}
-          {versions.data?.map((v) => {
+          {versions.data?.map((v, idx) => {
             const diff = rowDiff(v.seq)
+            // 第一项（idx===0）是当前版本——回滚到自己没有意义，这一行不
+            // 给"回滚到 vN"按钮。
+            const isCurrent = idx === 0
             return (
               <div key={v.seq} data-testid={`version-${v.seq}`} className="space-y-2 rounded-md border p-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -300,25 +312,37 @@ export default function ConfigVersions() {
                     <span className="font-mono text-sm font-medium">v{v.seq}</span>
                     <span className="text-xs text-muted-foreground">{formatTime(v.createdAt)}</span>
                     {diff.kind === 'initial' && <Badge variant="secondary">初始版本</Badge>}
+                    {isCurrent && <Badge variant="secondary">当前版本</Badge>}
                   </div>
-                  <Button variant="outline" size="sm" onClick={() => openRollback(v.seq)} disabled={!diffsReady}>
-                    回滚到 v{v.seq}
-                  </Button>
+                  {!isCurrent && (
+                    <Button variant="outline" size="sm" onClick={() => openRollback(v.seq)} disabled={!diffsReady}>
+                      回滚到 v{v.seq}
+                    </Button>
+                  )}
                 </div>
 
                 {diff.kind === 'loading' && <p className="text-sm text-muted-foreground">正在比对上一版本…</p>}
                 {diff.kind === 'error' && <p className="text-sm text-destructive">{diff.message}</p>}
                 {diff.kind === 'diff' && (
                   <>
-                    <ul data-testid={`changed-${v.seq}`} className="list-disc space-y-0.5 pl-5 text-sm">
-                      {diff.changed.map((k) => (
-                        <li key={k} className="font-mono">
-                          {k}
-                        </li>
-                      ))}
-                    </ul>
-                    {diff.changed.length === 0 && (
+                    {diff.lines.length === 0 && (
                       <p className="text-sm text-muted-foreground">与上一版相比没有变化。</p>
+                    )}
+                    {diff.lines.length > 0 && (
+                      <pre
+                        data-testid={`changed-${v.seq}`}
+                        className="overflow-x-auto rounded-md bg-muted/40 p-2 font-mono text-xs leading-relaxed"
+                      >
+                        {diff.lines.map((l, i) => (
+                          <div
+                            key={i}
+                            className={cn(l.kind === 'added' ? 'text-emerald-600 dark:text-emerald-400' : 'text-destructive')}
+                          >
+                            {l.kind === 'added' ? '+ ' : '- '}
+                            {l.path}: {formatDiffValue(l.value)}
+                          </div>
+                        ))}
+                      </pre>
                     )}
                   </>
                 )}
@@ -334,46 +358,16 @@ export default function ConfigVersions() {
             <DialogTitle>回滚到 v{rollbackTarget}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            {!unsetResult.known && (
+            {!removedResult.known && (
               <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-                无法确认回滚后是否有配置项会变成未配置（快照没能全部取到），请谨慎操作。
+                无法确认回滚后是否有配置项会被删除（快照没能全部取到），请谨慎操作。
               </p>
             )}
-            {unsetResult.known && unsetResult.keys.length > 0 && (
+            {removedResult.known && removedResult.keys.length > 0 && (
               <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-                回滚后以下配置项将变成未配置：{unsetResult.keys.join('、')}
+                回滚后以下配置项将被删除：{removedResult.keys.join('、')}
               </p>
             )}
-
-            <div className="flex flex-wrap items-center gap-4">
-              <span className="text-sm font-medium">生效方式</span>
-              <div className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  id="cfg-rollback-push-immediate"
-                  name="cfg-rollback-push-mode"
-                  className="size-4"
-                  checked={rollbackPush}
-                  onChange={() => setRollbackPush(true)}
-                />
-                <Label htmlFor="cfg-rollback-push-immediate" className="font-normal">
-                  立即推送（默认）
-                </Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  id="cfg-rollback-push-lazy"
-                  name="cfg-rollback-push-mode"
-                  className="size-4"
-                  checked={!rollbackPush}
-                  onChange={() => setRollbackPush(false)}
-                />
-                <Label htmlFor="cfg-rollback-push-lazy" className="font-normal">
-                  仅落库，实例重启后生效
-                </Label>
-              </div>
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRollbackTarget(null)}>

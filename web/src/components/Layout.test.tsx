@@ -36,7 +36,9 @@ test('渲染五个导航项，当前用户名、面包屑和页面内容都显�
   // shadcn 的 BreadcrumbPage 本身也带 role="link"（aria-disabled，标记当前页），
   // /applications 这种单段路径下面包屑文案和侧边栏导航项现在都是"应用列表"，
   // 会重名，所以把导航项的查询范围限定在侧边栏导航列表（data-sidebar="menu"）内。
-  const navMenu = document.querySelector('[data-sidebar="menu"]') as HTMLElement
+  // 表头的应用切换器现在也是一个 data-sidebar="menu"（团队切换器视觉一致），
+  // 所以还要再限定在 data-sidebar="content" 里，只留导航区那一个。
+  const navMenu = document.querySelector('[data-sidebar="content"] [data-sidebar="menu"]') as HTMLElement
   expect(within(navMenu).getByRole('link', { name: /应用列表/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /用户管理/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /角色管理/ })).toBeTruthy()

@@ -6,7 +6,6 @@ package integration_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"reflect"
@@ -299,21 +298,17 @@ func (e *phase2Env) updateSessionPolicy(t *testing.T, mutate func(*domain.Sessio
 	e.app = updated
 }
 
-// saveConfig 是 service.ConfigService.Save 的薄封装，供测试按 JSON 字面量
-// 直接写配置：fieldsJSON 是 map[string]domain.ConfigField 的 JSON 表示，
-// 形如 `{"fee_rate":{"type":"float","desc":"","value":0.02}}`。
+// saveConfig 是 service.ConfigService.Save 的薄封装，供测试按 YAML 字面量
+// 直接写配置：yamlText 就是管理端会提交的那份原文，形如
+// "fee_rate: 0.02\n"。
 //
 // 直接调 service 层、不经 HTTP：Task 8 的 httpapi 测试已经覆盖了
 // HTTP→service 这一段，本包（phase2Env）本来就没有 HTTP 服务端，这里要
 // 验证的是 service→Redis→gRPC→SDK 这条链路，从 service 层入口开始即可，
 // 见 phase2Services.configs 字段的注释。
-func (e *phase2Env) saveConfig(t *testing.T, typ, fieldsJSON string, push bool) int64 {
+func (e *phase2Env) saveConfig(t *testing.T, typ, yamlText string, push bool) int64 {
 	t.Helper()
-	var fields map[string]domain.ConfigField
-	if err := json.Unmarshal([]byte(fieldsJSON), &fields); err != nil {
-		t.Fatalf("解析测试用配置字段 JSON %q: %v", fieldsJSON, err)
-	}
-	seq, err := e.configs.Save(context.Background(), e.app.ID, typ, fields, push)
+	seq, err := e.configs.Save(context.Background(), e.app.ID, typ, yamlText, push)
 	if err != nil {
 		t.Fatalf("保存配置（分区 %s）: %v", typ, err)
 	}

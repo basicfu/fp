@@ -14,6 +14,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { formatTime } from '@/lib/format'
+import { toastFormErrors } from '@/lib/formErrors'
 import type { Role } from '@/lib/types'
 
 /** 「无父角色」在 Select 里的占位值。base-ui 的 SelectItem 不接受空串。 */
@@ -191,19 +192,17 @@ function CreateDialog({
         <DialogHeader>
           <DialogTitle>新建角色</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
             <Label htmlFor="key">标识</Label>
             <Input id="key" placeholder="商城管理员" {...register('key')} />
             <p className="text-xs text-muted-foreground">
               创建后<strong>不可修改</strong>：用户身上和已签发的会话里都按这个字符串引用它。
             </p>
-            {formState.errors.key && <p className="text-sm text-destructive">{formState.errors.key.message}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="name">显示名</Label>
             <Input id="name" placeholder="商城管理员" {...register('name')} />
-            {formState.errors.name && <p className="text-sm text-destructive">{formState.errors.name.message}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="parent">继承自</Label>
@@ -280,11 +279,10 @@ function EditDialog({
         <DialogHeader>
           <DialogTitle>编辑「{role.key}」</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
             <Label htmlFor="edit-name">显示名</Label>
             <Input id="edit-name" {...register('name')} />
-            {formState.errors.name && <p className="text-sm text-destructive">{formState.errors.name.message}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="edit-parent">继承自</Label>

@@ -142,23 +142,21 @@ export interface RoleGrant {
 
 // --- 配置中心 -------------------------------------------------------------
 
-/** 配置分区。同名 key 在两个分区下是两个独立的配置项，各有各的值与版本序列。 */
-export type ConfigPartition = 'DEFAULT' | 'WEB'
+/**
+ * 配置分区。同名 key 在两个分区下是两个独立的配置项，各有各的值与版本
+ * 序列。不再局限于 DEFAULT/WEB 两个固定值——管理端可以给一个应用建
+ * 任意名字的分区（后端 domain.IsConfigType 只挡明显不合法的字符集），
+ * 'DEFAULT' 是唯一保留名：应用天然就有，UI 上永远展示它这个标签页。
+ */
+export type ConfigPartition = string
 
-/** 配置项的值类型。与后端 domain.ConfigValue* 逐字一致。 */
-export type ConfigValueType = 'bool' | 'int' | 'float' | 'string' | 'array' | 'object'
-
-export interface ConfigField {
-  type: ConfigValueType
-  desc: string
-  /** null 表示"未配置"——它仍然是列表上待填的一行，不是不存在。 */
-  value: unknown
-}
+export const DEFAULT_PARTITION: ConfigPartition = 'DEFAULT'
 
 export interface ConfigSnapshot {
   /** 0 表示该分区还没有任何版本。 */
   seq: number
-  fields: Record<string, ConfigField>
+  /** 管理端提交的 YAML 原文，原样存取——注释就是备注，不再单独有 desc 字段。 */
+  value: string
 }
 
 /** 与 internal/httpapi/config.go 的 configVersionDTO 对应，供 Task 14 的版本历史页使用。 */

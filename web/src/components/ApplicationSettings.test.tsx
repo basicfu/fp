@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { toast } from 'sonner'
 import ApplicationSettings from './ApplicationSettings'
 import type { Application } from '@/lib/types'
 
@@ -85,8 +86,11 @@ test('保存会话策略时，提交给后端的字段是数字而不是字符�
   expect(typeof body.maxLifetimeSeconds).toBe('number')
 })
 
-test('延期间隔大于等于空闲超时时，前端拦截，不发请求且给出中文提示', async () => {
+// 校验失败不再常驻显示成一段 <p>（会跟着字段改来改去顶动布局），改成用
+// toast 报——与平台上其它表单同一条规则。
+test('延期间隔大于等于空闲超时时，前端拦截，不发请求且用 toast 给出中文提示', async () => {
   const fetchMock = stubFetchSequence()
+  const errorSpy = vi.spyOn(toast, 'error').mockImplementation(() => 'toast-id')
 
   render(<Harness initial={baseApp} />)
   const { form } = await openSessionForm()
@@ -95,7 +99,7 @@ test('延期间隔大于等于空闲超时时，前端拦截，不发请求且�
   fireEvent.change(extendInput, { target: { value: '99999999' } })
   fireEvent.submit(form)
 
-  await waitFor(() => expect(screen.getByText(/延期间隔必须小于空闲超时/)).toBeTruthy())
+  await waitFor(() => expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('延期间隔必须小于空闲超时')))
   expect(fetchMock.mock.calls.length).toBe(0)
 })
 

@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import ApplicationSettings from '@/components/ApplicationSettings'
 import { api } from '@/lib/api'
 import { errorMessage } from '@/lib/useResource'
+import { toastFormErrors } from '@/lib/formErrors'
 import { useCurrentApp } from '@/lib/current-app'
 import { cn } from '@/lib/utils'
 import { formatTime } from '@/lib/format'
@@ -131,17 +132,15 @@ function CreateDialog({
         <DialogHeader>
           <DialogTitle>新建应用</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
             <Label htmlFor="name">名称</Label>
             <Input id="name" {...register('name')} />
-            {formState.errors.name && <p className="text-sm text-destructive">{formState.errors.name.message}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="slug">slug</Label>
             <Input id="slug" placeholder="my-app" {...register('slug')} />
             <p className="text-xs text-muted-foreground">创建后不可修改。</p>
-            {formState.errors.slug && <p className="text-sm text-destructive">{formState.errors.slug.message}</p>}
           </div>
           <DialogFooter>
             <Button type="submit" disabled={formState.isSubmitting}>创建</Button>

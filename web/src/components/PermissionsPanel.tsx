@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
+import { toastFormErrors } from '@/lib/formErrors'
 import { formatDuration, formatTime } from '@/lib/format'
 import { permissionStatusLabels } from '@/lib/labels'
 import type { Application, PermissionPoint, Role } from '@/lib/types'
@@ -82,6 +83,9 @@ export default function PermissionsPanel({ app, onAppChanged }: { app: Applicati
         <Select
           value={app.defaultRoleKey || NO_DEFAULT}
           onValueChange={(v) => void setDefaultRole(v === NO_DEFAULT || v === null ? '' : v)}
+          // items 让 Select.Value 能把受控 value 映射回标签；缺了它，收起
+          // 状态在 items 未就绪前会直接显示 value 本身。
+          items={[{ value: NO_DEFAULT, label: '不设默认角色' }, ...(roles.data ?? []).map((r) => ({ value: r.key, label: r.key }))]}
         >
           <SelectTrigger id="default-role" className="w-56">
             <SelectValue placeholder="不设默认角色" />
@@ -275,7 +279,7 @@ function AddDialog({
         <DialogHeader>
           <DialogTitle>手动添加权限点</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
             <Label htmlFor="perm-key">标识</Label>
             <Input id="perm-key" placeholder="GET:/orders/{id}" className="font-mono" {...register('key')} />
@@ -284,7 +288,6 @@ function AddDialog({
               写 <span className="font-mono">/orders/{'{id}'}</span> 而不是 <span className="font-mono">/orders/123</span>，
               否则每个 id 都会变成一个独立的权限点。
             </p>
-            {formState.errors.key && <p className="text-sm text-destructive">{formState.errors.key.message}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="perm-name">名称</Label>
@@ -338,7 +341,7 @@ function EditDialog({
         <DialogHeader>
           <DialogTitle>编辑权限点</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
             <Label htmlFor="edit-perm-key">标识</Label>
             <Input id="edit-perm-key" className="font-mono" {...register('key')} />
@@ -346,7 +349,6 @@ function EditDialog({
               标识<strong>可以改</strong>（比如打错了一个字母）：已有的授权按内部 id 关联，会自动跟过来，
               改完立刻推送给接入方。但如果接入方代码里的路由还是旧值，下次上报会把旧的重新建出来。
             </p>
-            {formState.errors.key && <p className="text-sm text-destructive">{formState.errors.key.message}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="edit-perm-name">名称</Label>

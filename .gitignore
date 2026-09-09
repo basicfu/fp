@@ -11,6 +11,11 @@
 /config-im.yaml
 
 .idea/
+
+# Claude Code 的本机目录：settings.local.json 是个人配置，worktrees/ 是整份
+# 仓库拷贝（数百 MB）。要共享项目级配置（settings.json / launch.json），
+# 单独用 ! 放行那一个文件，不要整个目录入库。
+.claude/
 .superpowers/
 
 # 前端构建产物：由 scripts/build-web.sh 生成，go:embed（web/embed.go）

@@ -9,14 +9,14 @@ import (
 	"unicode"
 )
 
-// fp 的配置类型。**不带任何一门语言的特性**——没有 duration，因为其他
+// fp 的配置类型名，纯 SDK 内部概念：specsOf 用反射从 Go struct 字段类型
+// 推出这几个名字，只用来拼 MissingConfigError 里"该建一个什么类型的
+// key"这句提示。**不带任何一门语言的特性**——没有 duration，因为其他
 // 语言没这个概念；Go 的 time.Duration 是本 SDK 按毫秒当 int 处理的私事。
 //
-// 这几个字符串是**线上契约**，必须与服务端 internal/domain 的
-// ConfigValue* 逐字相同。两处分处 sdk/ 与 internal/（sdk 不得 import
-// internal），任何一边单独看都只是几个孤立的字符串常量，改错了
-// go build / vet / 全量测试照样全绿。配对由 internal/integration 里的
-// TestConfigValueTypesMatch 守护——那是唯一能同时看到两个包的地方。
+// 配置中心改成整份 YAML 存储之后，服务端不再声明每个 key 的类型（
+// internal/domain 已经没有对应的 ConfigValue* 常量了），这几个字符串
+// 也就不再是需要跨包对齐的"线上契约"，纯粹是这个 SDK 自己的展示文案。
 const (
 	cfgTypeBool   = "bool"
 	cfgTypeInt    = "int"
@@ -151,14 +151,4 @@ func toSnake(s string) string {
 		b.WriteRune(c)
 	}
 	return b.String()
-}
-
-// ExportedConfigTypes 返回 SDK 认识的全部 fp 类型。
-//
-// 导出它只为一个目的：让 internal/integration 能核对它与服务端
-// domain.IsConfigValueType 的取值集合一致（见 TestConfigValueTypesMatch）。
-// 业务方用不到这个函数。
-func ExportedConfigTypes() []string {
-	return []string{cfgTypeBool, cfgTypeInt, cfgTypeFloat,
-		cfgTypeString, cfgTypeArray, cfgTypeObject}
 }

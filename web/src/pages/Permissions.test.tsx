@@ -83,7 +83,10 @@ test('渲染当前应用的权限点管理', async () => {
     </MemoryRouter>,
   )
 
-  expect(screen.getByText(/权限管理/)).toBeTruthy()
+  // 页面级"权限管理 · 应用名"标题已经去掉（应用名已经在侧边栏的应用切换
+  // 器里显示，这里再重复一遍是冗余）——用 PermissionsPanel 一定会渲染的
+  // "默认角色"确认这是当前应用的权限点管理，而不是断言一个已经不存在的标题。
+  expect(screen.getByText('默认角色')).toBeTruthy()
   await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
 })
 

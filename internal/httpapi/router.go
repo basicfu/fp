@@ -104,6 +104,11 @@ func NewRouter(d Deps) http.Handler {
 			// PUT 而不是 PATCH：这是该分区配置的**全量替换**（新建、改值、
 			// 改类型、删除都走它），与 /applications/{id}/session 同一语义。
 			r.Put("/applications/{id}/config", cfgH.save)
+			// DELETE 删的是**整个分区**的全部历史版本，不是清空当前值——
+			// 与 PUT 一份空 value 是两件事（PUT 空值还会留一条"空"的新版本，
+			// DELETE 是把这个分区从数据库里彻底抹掉）。
+			r.Delete("/applications/{id}/config", cfgH.deleteType)
+			r.Get("/applications/{id}/config/types", cfgH.listTypes)
 			r.Get("/applications/{id}/config/versions", cfgH.listVersions)
 			r.Get("/applications/{id}/config/versions/{seq}", cfgH.getVersion)
 			r.Post("/applications/{id}/config/rollback", cfgH.rollback)

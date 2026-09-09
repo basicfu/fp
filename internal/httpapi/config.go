@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -15,19 +14,10 @@ type configHandler struct {
 	svc *service.ConfigService
 }
 
-// configFieldDTO 是 fields 里的一项。
-//
-// Value 用 json.RawMessage：值可能是数字、布尔、数组、对象中的任何一种，
-// 转成 any 再转回来会把整数变成 float64、把字段顺序打乱。原样透传。
-type configFieldDTO struct {
-	Type  string          `json:"type"`
-	Desc  string          `json:"desc"`
-	Value json.RawMessage `json:"value"`
-}
-
+// configDTO 是一个分区的一份快照——Value 是 YAML 原文，原样透传。
 type configDTO struct {
-	Seq    int64                     `json:"seq"`
-	Fields map[string]configFieldDTO `json:"fields"`
+	Seq   int64  `json:"seq"`
+	Value string `json:"value"`
 }
 
 type configVersionDTO struct {
@@ -36,8 +26,8 @@ type configVersionDTO struct {
 }
 
 type saveConfigRequest struct {
-	Type   string                    `json:"type"`
-	Fields map[string]configFieldDTO `json:"fields"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
 	// Push 为 true 立即推送；为 false 就是「仅落库，实例重启后生效」。
 	Push bool `json:"push"`
 }
@@ -53,21 +43,7 @@ type saveConfigResponse struct {
 }
 
 func toConfigDTO(c domain.Config) configDTO {
-	// 必须是非 nil 的空 map：nil 会被 encoding/json 编码成 null，
-	// 前端 Object.entries(null) 直接抛异常。
-	fields := make(map[string]configFieldDTO, len(c.Fields))
-	for k, f := range c.Fields {
-		fields[k] = configFieldDTO{Type: f.Type, Desc: f.Desc, Value: f.Value}
-	}
-	return configDTO{Seq: c.Seq, Fields: fields}
-}
-
-func toDomainFields(in map[string]configFieldDTO) map[string]domain.ConfigField {
-	out := make(map[string]domain.ConfigField, len(in))
-	for k, f := range in {
-		out[k] = domain.ConfigField{Type: f.Type, Desc: f.Desc, Value: f.Value}
-	}
-	return out
+	return configDTO{Seq: c.Seq, Value: c.Value}
 }
 
 func (h *configHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +71,7 @@ func (h *configHandler) save(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	seq, err := h.svc.Save(r.Context(), appID, req.Type, toDomainFields(req.Fields), req.Push)
+	seq, err := h.svc.Save(r.Context(), appID, req.Type, req.Value, req.Push)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -159,4 +135,36 @@ func (h *configHandler) rollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, saveConfigResponse{Seq: seq})
+}
+
+// listTypes 列出这个应用下保存过至少一个版本的分区名，供控制台画标签页
+// 用。DEFAULT 标签页永远展示这条 UI 规则由前端自己兜底，这里如实返回
+// 数据库里有什么。
+func (h *configHandler) listTypes(w http.ResponseWriter, r *http.Request) {
+	appID, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	types, err := h.svc.ListTypes(r.Context(), appID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, types)
+}
+
+// deleteType 删除该分区**全部**版本，包括历史——控制台在调用前必须先
+// 弹二次确认，说清楚这是不可撤销的。
+func (h *configHandler) deleteType(w http.ResponseWriter, r *http.Request) {
+	appID, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := h.svc.DeleteType(r.Context(), appID, r.URL.Query().Get("type")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }

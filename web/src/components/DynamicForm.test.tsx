@@ -1,5 +1,6 @@
 import { test, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { toast } from 'sonner'
 import { DynamicForm } from './DynamicForm'
 import type { Field } from '@/lib/types'
 
@@ -29,13 +30,16 @@ test('展示字段的 help 文案', () => {
   expect(screen.getByText('关闭后未注册手机号无法登录')).toBeDefined()
 })
 
-test('必填字段为空时不提交并给出提示', async () => {
+// 校验失败不再常驻显示成一段 <p>（那会让表单跟着按键增删的错误文案一跳
+// 一跳），改成点保存时用 toast 报——与平台上其它表单同一条规则。
+test('必填字段为空时不提交，用 toast 给出提示', async () => {
   const onSubmit = vi.fn()
+  const errorSpy = vi.spyOn(toast, 'error').mockImplementation(() => 'toast-id')
   const fields: Field[] = [{ key: 'apiKey', label: 'API 密钥', type: 'string', required: true }]
   render(<DynamicForm fields={fields} values={{}} onSubmit={onSubmit} />)
 
   submitForm()
-  await waitFor(() => expect(screen.getByText(/必填|不能为空|请填写/)).toBeDefined())
+  await waitFor(() => expect(errorSpy).toHaveBeenCalled())
   expect(onSubmit).not.toHaveBeenCalled()
 })
 

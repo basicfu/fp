@@ -55,10 +55,7 @@ export default function Layout() {
     <SidebarProvider>
       <Sidebar collapsible="icon">
         <SidebarHeader>
-          <div className="flex h-8 items-center px-2 text-lg font-semibold">fp</div>
-          <div className="group-data-[collapsible=icon]:hidden">
-            <AppSwitcher />
-          </div>
+          <AppSwitcher />
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>

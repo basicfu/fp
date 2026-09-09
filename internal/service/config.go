@@ -3,7 +3,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -46,26 +45,29 @@ func NewConfigService(pool *pgxpool.Pool, pub ConfigPublisher) *ConfigService {
 // 消失。这是当初选整版快照的两条理由之一。）
 const ConfigMaxVersions = 100
 
-// checkConfigType 校验分区取值。
+// checkConfigType 校验分区名的字符集（字母开头、字母数字下划线、不超过
+// 64 字符）。分区名本身是任意的——不再局限于 DEFAULT/WEB 两个固定值，
+// 这里只挡明显不合法的输入（空字符串、带斜杠问号这类会把 URL 查询参数
+// 弄乱的字符）。
 func checkConfigType(typ string) error {
 	if !domain.IsConfigType(typ) {
 		return domain.Fail(domain.ErrInvalidArgument, domain.CodeConfigTypeInvalid, "配置分区不合法").
-			WithDesc("未知分区 %q", typ)
+			WithDesc("分区名 %q 不合法：必须以字母开头，只能包含字母、数字、下划线，且不超过 64 个字符", typ)
 	}
 	return nil
 }
 
 // Current 返回该分区当前版本。
 //
-// 一个版本都没有时返回 Seq=0 与空 Fields，**不是** ErrNotFound：
+// 一个版本都没有时返回 Seq=0 与空 Value，**不是** ErrNotFound：
 // "这个应用还没配过任何东西"是正常状态，不是错误。控制台第一次打开、
 // SDK 第一次 Bind 走的都是这条路径。
 func (s *ConfigService) Current(ctx context.Context, appID uuid.UUID, typ string) (domain.Config, error) {
 	if err := checkConfigType(typ); err != nil {
 		return domain.Config{}, err
 	}
-	seq, fields, createdAt, err := s.scanOne(ctx, `
-		SELECT seq, fields, (extract(epoch FROM created_at) * 1000)::bigint
+	seq, value, createdAt, err := s.scanOne(ctx, `
+		SELECT seq, value, (extract(epoch FROM created_at) * 1000)::bigint
 		FROM config WHERE application_id = $1 AND type = $2
 		ORDER BY seq DESC LIMIT 1`, appID, typ)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -73,7 +75,7 @@ func (s *ConfigService) Current(ctx context.Context, appID uuid.UUID, typ string
 			ApplicationID: appID,
 			Type:          typ,
 			Seq:           0,
-			Fields:        map[string]domain.ConfigField{},
+			Value:         "",
 		}, nil
 	}
 	if err != nil {
@@ -83,7 +85,7 @@ func (s *ConfigService) Current(ctx context.Context, appID uuid.UUID, typ string
 		ApplicationID: appID,
 		Type:          typ,
 		Seq:           seq,
-		Fields:        fields,
+		Value:         value,
 		CreatedAt:     createdAt,
 	}, nil
 }
@@ -93,8 +95,8 @@ func (s *ConfigService) Version(ctx context.Context, appID uuid.UUID, typ string
 	if err := checkConfigType(typ); err != nil {
 		return domain.Config{}, err
 	}
-	retSeq, fields, createdAt, err := s.scanOne(ctx, `
-		SELECT seq, fields, (extract(epoch FROM created_at) * 1000)::bigint
+	retSeq, value, createdAt, err := s.scanOne(ctx, `
+		SELECT seq, value, (extract(epoch FROM created_at) * 1000)::bigint
 		FROM config WHERE application_id = $1 AND type = $2 AND seq = $3`, appID, typ, seq)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Config{}, domain.Fail(domain.ErrNotFound, domain.CodeConfigVersionNotFound, "配置版本不存在").
@@ -107,12 +109,12 @@ func (s *ConfigService) Version(ctx context.Context, appID uuid.UUID, typ string
 		ApplicationID: appID,
 		Type:          typ,
 		Seq:           retSeq,
-		Fields:        fields,
+		Value:         value,
 		CreatedAt:     createdAt,
 	}, nil
 }
 
-// ListVersions 返回最近 limit 个版本的元信息。元素的 Fields 恒为 nil——
+// ListVersions 返回最近 limit 个版本的元信息。元素的 Value 恒为空字符串——
 // 列表页只需要 seq 与时间，一次把 100 份完整快照读出来纯属浪费。
 func (s *ConfigService) ListVersions(ctx context.Context, appID uuid.UUID, typ string, limit int) ([]domain.Config, error) {
 	if err := checkConfigType(typ); err != nil {
@@ -144,80 +146,70 @@ func (s *ConfigService) ListVersions(ctx context.Context, appID uuid.UUID, typ s
 	return out, nil
 }
 
-// scanOne 跑一条只返回 (seq, fields, created_at) 的查询。
+// scanOne 跑一条只返回 (seq, value, created_at) 的查询。
 //
 // 它**只负责这三个值**，不去回填 ApplicationID / Type——那两个是调用方
 // 自己传进来的参数，调用方直接填即可。
 //
 // 没有行时原样返回 pgx.ErrNoRows（不包装），由调用方决定那是错误还是
 // 正常状态。
-func (s *ConfigService) scanOne(ctx context.Context, sql string, args ...any) (int64, map[string]domain.ConfigField, int64, error) {
+func (s *ConfigService) scanOne(ctx context.Context, sql string, args ...any) (int64, string, int64, error) {
 	var (
 		seq       int64
-		raw       []byte
+		value     string
 		createdAt int64
 	)
-	if err := s.pool.QueryRow(ctx, sql, args...).Scan(&seq, &raw, &createdAt); err != nil {
+	if err := s.pool.QueryRow(ctx, sql, args...).Scan(&seq, &value, &createdAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, nil, 0, err
+			return 0, "", 0, err
 		}
-		return 0, nil, 0, fmt.Errorf("service: 查询配置: %w", err)
+		return 0, "", 0, fmt.Errorf("service: 查询配置: %w", err)
 	}
-	fields := map[string]domain.ConfigField{}
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return 0, nil, 0, fmt.Errorf("service: 解析配置 fields: %w", err)
-	}
-	return seq, fields, createdAt, nil
+	return seq, value, createdAt, nil
 }
 
-// Save 用 fields 生成该分区的一个新版本，返回新版本的 seq。
+// Save 把 value（管理端提交的 YAML 原文）存成该分区的一个新版本，返回
+// 新版本的 seq。value 是**全量替换**不是合并：整份 YAML 文本原样落库，
+// 新建、改值、加注释、删掉某一行全都只是"这次提交的文本长什么样"，
+// 不需要区分"新建/编辑/删除"这几种动作——它们本来就是同一件事
+// （提交一份新文本）在语义上被强行拆成的几种前端操作。
 //
-// fields 是**全量替换**不是合并：新建、改值、改类型、改备注、删除配置项
-// 全都走这一个入口。删除就是"新的 fields 里没有那个 key"。
+// 提交前先跑 domain.NormalizeConfigYAML 补齐"key:value"漏掉的那个空格
+// （最常见的手填笔误），再校验：value 必须是能解析、且顶层是映射的
+// YAML，否则整份拒绝——这与旧版"逐字段转换、任何一项转不过去就整批拒绝"
+// 是同一条原则的延续，只是校验粒度从"每个字段的类型"变成了"整份文本的
+// 语法"。落库的是补完空格之后的文本，不是调用方原样传进来的那份——
+// 保存回显因此不再保证逐字节相同，这是 NormalizeConfigYAML 文档里写清楚
+// 的已知取舍。
 //
 // push 为 true 时保存后广播一次 ConfigChanged；为 false 就是控制台上的
 // 「仅落库，实例重启后生效」——它专门解决"发布前必须先改值、但一改旧实例
 // 立刻就会拿到"这个矛盾（设计文档第七节）。
 func (s *ConfigService) Save(
 	ctx context.Context, appID uuid.UUID, typ string,
-	fields map[string]domain.ConfigField, push bool,
+	value string, push bool,
 ) (int64, error) {
 	if err := checkConfigType(typ); err != nil {
 		return 0, err
 	}
 
-	// 先把每一项按自己声明的类型规范化。任何一项转不过去就整批拒绝——
-	// 一次保存是一个版本，不能出现"一半字段生效了"的版本。
-	normalized := make(map[string]domain.ConfigField, len(fields))
-	for k, f := range fields {
-		if !domain.IsConfigValueType(f.Type) {
-			return 0, domain.Fail(domain.ErrInvalidArgument, domain.CodeConfigTypeInvalid, "配置项类型不合法").
-				WithDesc("配置项 %q 的类型 %q 未知", k, f.Type)
-		}
-		v, err := domain.CoerceConfigValue(f.Type, f.Value)
-		if err != nil {
-			return 0, err
-		}
-		normalized[k] = domain.ConfigField{Type: f.Type, Desc: f.Desc, Value: v}
-	}
-
-	raw, err := json.Marshal(normalized)
-	if err != nil {
-		return 0, fmt.Errorf("service: 序列化配置 fields: %w", err)
+	value = domain.NormalizeConfigYAML(value)
+	if _, err := domain.ParseConfigYAML(value); err != nil {
+		return 0, err
 	}
 
 	// seq 在事务里取 MAX+1，靠主键约束兜并发。管理操作低频，冲突了让调用方
 	// 重试即可，不值得为它引入序列或咨询锁。
 	var seq int64
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			SELECT COALESCE(MAX(seq), 0) + 1 FROM config
 			WHERE application_id = $1 AND type = $2`, appID, typ).Scan(&seq); err != nil {
 			return fmt.Errorf("service: 取下一个配置版本号: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO config (application_id, type, seq, fields)
-			VALUES ($1, $2, $3, $4)`, appID, typ, seq, raw); err != nil {
+			INSERT INTO config (application_id, type, seq, value)
+			VALUES ($1, $2, $3, $4)`, appID, typ, seq, value); err != nil {
 			// INSERT 的主键冲突表示有并发的 Save 抢输了。转换为可被识别的
 			// domain.ErrConflict，让调用方据此重试而不是去解析 pgconn 错误。
 			var pgErr *pgconn.PgError
@@ -249,14 +241,19 @@ func (s *ConfigService) Save(
 	return seq, nil
 }
 
-// Rollback 把 seq 那一版的 fields 复制成一个新版本，返回新版本号。
+// Rollback 把 seq 那一版的 value 复制成一个新版本，返回新版本号。
 //
 // 复制而不是删除：v7 出了问题回滚到 v6，产出的是 v8，v7 原样留在历史里。
 // 这让"回滚本身"也可被回滚，审计链完整。
 //
 // 走 Save 而不是直接 INSERT ... SELECT：修剪、推送、以及"一次保存 = 一个
-// 版本"这套语义只该有一处实现。多出来的代价只是把 fields 在进程内绕一圈，
-// 一份几十项的 map，可以忽略。
+// 版本"这套语义只该有一处实现。多出来的代价只是把 value 这个字符串在
+// 进程内绕一圈，可以忽略。
+//
+// 例外：目标版本的内容与当前版本完全一致时不调用 Save——这种回滚不会
+// 让任何东西发生变化，不该单纯因为点了一次"回滚"就凭空多出一个版本号，
+// 把历史记录撑得比实际发生过的变更还长。此时原样返回当前版本号，不落
+// 库也不推送。
 func (s *ConfigService) Rollback(
 	ctx context.Context, appID uuid.UUID, typ string, seq int64, push bool,
 ) (int64, error) {
@@ -264,5 +261,59 @@ func (s *ConfigService) Rollback(
 	if err != nil {
 		return 0, err
 	}
-	return s.Save(ctx, appID, typ, old.Fields, push)
+	current, err := s.Current(ctx, appID, typ)
+	if err != nil {
+		return 0, err
+	}
+	if current.Value == old.Value {
+		return current.Seq, nil
+	}
+	return s.Save(ctx, appID, typ, old.Value, push)
+}
+
+// ListTypes 返回这个应用下**保存过至少一个版本**的分区名，升序排列。
+//
+// DEFAULT 在不在这份列表里如实反映数据库——它是不是"应用天然就有、UI
+// 永远展示"这条 UI 规则，由调用方（管理端）自己在展示层兜底，service
+// 层不负责伪造一个从未真实存在过的分区。
+func (s *ConfigService) ListTypes(ctx context.Context, appID uuid.UUID) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT type FROM config WHERE application_id = $1 ORDER BY type`, appID)
+	if err != nil {
+		return nil, fmt.Errorf("service: 查询配置分区列表: %w", err)
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("service: 扫描配置分区: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("service: 遍历配置分区: %w", err)
+	}
+	return out, nil
+}
+
+// DeleteType 删除该分区**全部**版本，包括历史——不是新建一个空版本，是把
+// 这个分区从数据库里彻底抹掉，删完之后 Version 对它的任何 seq 都会返回
+// ErrNotFound，没有任何一版可以回滚回去。管理端必须在调用前二次确认，
+// 且要在提示里说清楚"这是不可撤销的"。
+//
+// 故意不广播 ConfigChanged：删除是这个页面里最危险的操作，不该在没人
+// 明确要求"立即生效"的情况下让运行中的实例瞬间失去这个分区的值——这里
+// 采用与"仅落库"相同的保守默认，运行中的实例保留最后一次成功加载的值，
+// 直到重启或下次重新拉取才会感知到分区已经没了。
+func (s *ConfigService) DeleteType(ctx context.Context, appID uuid.UUID, typ string) error {
+	if err := checkConfigType(typ); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `
+		DELETE FROM config WHERE application_id = $1 AND type = $2`, appID, typ); err != nil {
+		return fmt.Errorf("service: 删除配置分区: %w", err)
+	}
+	return nil
 }

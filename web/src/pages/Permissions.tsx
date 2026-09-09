@@ -12,7 +12,6 @@ export default function Permissions() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">权限管理 · {currentApp.name}</h1>
       <PermissionsPanel app={currentApp} onAppChanged={reload} />
     </div>
   )

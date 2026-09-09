@@ -96,6 +96,9 @@ export default function Users() {
           // Record<string, string>，直接把 v 塞进去在 tsc -b 下报
           // TS2322，所以把 v === null 与 v === ALL 一并归一成空字符串。
           onValueChange={(v) => update({ status: v === ALL || v === null ? '' : v, page: '' })}
+          // items 让 Select.Value 能把受控 value 映射回中文标签；缺了它，
+          // 收起状态会直接显示 value 本身（如 "active"）而不是"已启用"。
+          items={[{ value: ALL, label: '全部状态' }, ...(Object.keys(statusLabels) as UserStatus[]).map((s) => ({ value: s, label: statusLabels[s] }))]}
         >
           <SelectTrigger className="w-40"><SelectValue placeholder="全部状态" /></SelectTrigger>
           <SelectContent>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
@@ -38,16 +39,19 @@ func (s *configServer) GetConfig(ctx context.Context, req *fpv1.GetConfigRequest
 		return nil, StatusFrom(err)
 	}
 
-	// 只装已配置的项。未配置（value 为 JSON null）留在库里是为了让控制台
-	// 有那一行待填，但对 SDK 来说它等于不存在——SDK 的 missing 就是
-	// "struct 里有、这里没有"。
-	values := make(map[string]json.RawMessage, len(cfg.Fields))
-	for k, f := range cfg.Fields {
-		if f.IsSet() {
-			values[k] = f.Value
-		}
+	// 存的是 YAML 原文，SDK 要的是扁平 {key: JSON值}——这里是唯一的翻译层：
+	// 把 YAML 解析成 map[string]any 再序列化成 JSON 字符串。YAML 里写了的
+	// key 就是"已配置"，没写就是不存在，不再需要 IsSet 那样的过滤：
+	// 旧模型里"建了字段但没填值"这个占位态在自由编辑的 YAML 里没有对应物，
+	// 解析出来的 map 天然就是全部已配置的项。
+	parsed, err := domain.ParseConfigYAML(cfg.Value)
+	if err != nil {
+		// Save 已经校验过 YAML 合法性，这里理论上不会失败；万一存量数据
+		// 或人工改过库里的内容导致解析出错，当成内部错误处理，不该让 SDK
+		// 拿到一份看似成功、实际半份的配置。
+		return nil, StatusFrom(err)
 	}
-	raw, err := json.Marshal(values)
+	raw, err := json.Marshal(parsed)
 	if err != nil {
 		return nil, StatusFrom(err)
 	}

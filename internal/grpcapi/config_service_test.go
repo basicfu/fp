@@ -13,19 +13,15 @@ import (
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
 
-// GetConfig 只返回已配置的项：value 为 JSON null 的"未配置"项不出现，
-// SDK 因此可以把 missing 算成"struct 里有、values 里没有"。
-//
-// 【辨别力】必须同时造出"已配置"和"未配置"两种项：只造一种的话，
-// 一个不做过滤、把 null 也吐出去的实现照样会绿。
-func TestGetConfigOmitsUnsetFields(t *testing.T) {
+// GetConfig 是唯一的翻译层：把存储的 YAML 原文解析成扁平 {key: JSON值}
+// 再序列化成字符串。这里验证解析结果里各种类型的值都翻译对了——尤其是
+// 大整数不能被静默舍入到 float64 精度。
+func TestGetConfigReturnsParsedValues(t *testing.T) {
 	e := newGRPCEnv(t)
 	ctx := context.Background()
 
-	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
-		"fee_rate": {Type: domain.ConfigValueFloat, Value: json.RawMessage(`0.02`)},
-		"api_key":  {Type: domain.ConfigValueString, Value: json.RawMessage(`null`)},
-	}, false); err != nil {
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault,
+		"fee_rate: 0.02\nid: 9007199254740993\nenabled: true\nname: 商城\n", false); err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
 
@@ -46,8 +42,14 @@ func TestGetConfigOmitsUnsetFields(t *testing.T) {
 	if got := string(values["fee_rate"]); got != "0.02" {
 		t.Fatalf("fee_rate = %s，期望 0.02", got)
 	}
-	if _, ok := values["api_key"]; ok {
-		t.Fatal("未配置的 api_key 不该出现在 values 里")
+	if got := string(values["id"]); got != "9007199254740993" {
+		t.Fatalf("id = %s，期望 9007199254740993（精度不能被舍入）", got)
+	}
+	if got := string(values["enabled"]); got != "true" {
+		t.Fatalf("enabled = %s，期望 true", got)
+	}
+	if got := string(values["name"]); got != `"商城"` {
+		t.Fatalf("name = %s，期望 \"商城\"", got)
 	}
 }
 
@@ -57,8 +59,8 @@ func TestGetConfigIsolatesPartitions(t *testing.T) {
 	e := newGRPCEnv(t)
 	ctx := context.Background()
 
-	mustSaveTyped(t, e, domain.ConfigTypeDefault, `"后端"`)
-	mustSaveTyped(t, e, domain.ConfigTypeWeb, `"前端"`)
+	mustSaveYAML(t, e, domain.ConfigTypeDefault, "site.title: 后端\n")
+	mustSaveYAML(t, e, domain.ConfigTypeWeb, "site.title: 前端\n")
 
 	for _, c := range []struct{ typ, want string }{
 		{domain.ConfigTypeDefault, `"后端"`},
@@ -78,16 +80,18 @@ func TestGetConfigIsolatesPartitions(t *testing.T) {
 	}
 }
 
-func TestGetConfigRejectsUnknownPartition(t *testing.T) {
+// 分区名不再局限于 DEFAULT/WEB——MOBILE 这类自定义名字现在合法，
+// 这里改成断言字符集明显不合法的分区名（数字开头）仍然被拒绝。
+func TestGetConfigRejectsInvalidPartitionName(t *testing.T) {
 	e := newGRPCEnv(t)
 	_, err := e.configClient.GetConfig(e.authed(context.Background()),
-		&fpv1.GetConfigRequest{Type: "MOBILE"})
+		&fpv1.GetConfigRequest{Type: "1mobile"})
 	if err == nil {
-		t.Fatal("未知分区应当被拒绝")
+		t.Fatal("不合法的分区名应当被拒绝")
 	}
 	// 状态码走既有的 StatusFrom 映射，与 HTTP 层的 400 一一对应。
 	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Fatalf("未知分区返回 %v，期望 InvalidArgument", code)
+		t.Fatalf("不合法的分区名返回 %v，期望 InvalidArgument", code)
 	}
 }
 
@@ -108,13 +112,11 @@ func TestGetConfigEmptyPartition(t *testing.T) {
 	}
 }
 
-// mustSaveTyped 在给定分区保存一个 site.title 字符串配置项（push=false，
-// 这里只测 gRPC 出口读到的落库结果，用不到 Redis 广播）。
-func mustSaveTyped(t *testing.T, e *grpcEnv, typ, jsonValue string) {
+// mustSaveYAML 在给定分区保存一份 YAML 原文（push=false，这里只测 gRPC
+// 出口读到的落库结果，用不到 Redis 广播）。
+func mustSaveYAML(t *testing.T, e *grpcEnv, typ, yamlText string) {
 	t.Helper()
-	if _, err := e.configs.Save(context.Background(), e.app.ID, typ, map[string]domain.ConfigField{
-		"site.title": {Type: domain.ConfigValueString, Value: json.RawMessage(jsonValue)},
-	}, false); err != nil {
+	if _, err := e.configs.Save(context.Background(), e.app.ID, typ, yamlText, false); err != nil {
 		t.Fatalf("保存分区 %s 失败: %v", typ, err)
 	}
 }
@@ -129,9 +131,7 @@ func TestGetConfigRejectsDisabledApplication(t *testing.T) {
 	ctx := context.Background()
 
 	// 先存一份配置，确保失败原因是"应用被停用"而不是"没有配置"。
-	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
-		"fee_rate": {Type: domain.ConfigValueFloat, Value: json.RawMessage(`0.02`)},
-	}, false); err != nil {
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, "fee_rate: 0.02\n", false); err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
 	e.disableApplication(t)
@@ -162,9 +162,7 @@ func TestWatchDeliversConfigChanged(t *testing.T) {
 		t.Fatalf("首条消息应当是 ready，得到 %v / %v", msg, err)
 	}
 
-	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeWeb, map[string]domain.ConfigField{
-		"site.title": {Type: domain.ConfigValueString, Value: json.RawMessage(`"商城"`)},
-	}, true); err != nil {
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeWeb, "site.title: 商城\n", true); err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
 
@@ -200,9 +198,7 @@ func TestWatchSilentWhenPushDisabled(t *testing.T) {
 		t.Fatalf("首条消息应当是 ready，得到 %v / %v", msg, err)
 	}
 
-	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, map[string]domain.ConfigField{
-		"n": {Type: domain.ConfigValueInt, Value: json.RawMessage(`1`)},
-	}, false); err != nil {
+	if _, err := e.configs.Save(ctx, e.app.ID, domain.ConfigTypeDefault, "n: 1\n", false); err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
 

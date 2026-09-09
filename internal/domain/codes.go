@@ -56,9 +56,10 @@ const (
 	// CodeConnectorConfigInvalid 的 Detail 带 field（出问题的配置项键），
 	// 让控制台将来能把错误定位到具体表单字段上。
 	CodeConnectorConfigInvalid = "CONNECTOR_CONFIG_INVALID"
-	// CodeConfigValueInvalid 是配置值按声明类型转换失败。Detail 里带原值与目标类型。
+	// CodeConfigValueInvalid 是提交的配置不是一份合法的 YAML（或者顶层不是
+	// 映射）。Detail 里带解析错误。
 	CodeConfigValueInvalid = "CONFIG_VALUE_INVALID"
-	// CodeConfigTypeInvalid 覆盖分区与值类型两处的取值不合法。
+	// CodeConfigTypeInvalid 是配置分区取值不合法（不是 DEFAULT/WEB）。
 	CodeConfigTypeInvalid          = "CONFIG_TYPE_INVALID"
 	CodePhoneInvalid               = "PHONE_INVALID"
 	CodePasswordTooShort           = "PASSWORD_TOO_SHORT"

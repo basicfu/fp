@@ -69,11 +69,16 @@
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
+    /* 侧边栏这五个 token 照抄 shadcn-admin.netlify.app 实测的计算值（不是
+       脚手架默认的纯灰度），悬浮/选中背景色和其余大部分组件一样带一点
+       冷色调，不是无意义的随机差异。--sidebar-primary 等主题色不在这里，
+       那几个由 [data-theme=...] 按用户选的强调色驱动，照抄会废掉主题
+       切换功能。 */
+    --sidebar: oklch(1 0 0);
+    --sidebar-foreground: oklch(0.129 0.042 264.695);
+    --sidebar-accent: oklch(0.968 0.007 247.896);
+    --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
+    --sidebar-border: oklch(0.929 0.013 255.508);
 }
 
 .dark {
@@ -96,10 +101,11 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
+    /* 同上，深色这五个 token 也照抄参考站的实测值。 */
+    --sidebar: oklch(0.129 0.042 264.695);
+    --sidebar-foreground: oklch(0.984 0.003 247.858);
+    --sidebar-accent: oklch(0.279 0.041 260.031);
+    --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
     --sidebar-border: oklch(1 0 0 / 10%);
 }
 

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import { toastFormErrors } from '@/lib/formErrors'
 import type { Field } from '@/lib/types'
 
 type Values = Record<string, unknown>
@@ -97,7 +98,11 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
   }
 
   return (
-    <form onSubmit={handleSubmit((raw) => onSubmit(buildPayload(raw)))} className="space-y-4" noValidate>
+    <form
+      onSubmit={handleSubmit((raw) => onSubmit(buildPayload(raw)), toastFormErrors)}
+      className="space-y-4"
+      noValidate
+    >
       {fields.map((f) => (
         <div key={f.key} className="space-y-2">
           {f.type === 'bool' ? (
@@ -131,9 +136,6 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
             </>
           )}
           {f.help && <p className="text-xs text-muted-foreground">{f.help}</p>}
-          {formState.errors[f.key] && (
-            <p className="text-sm text-destructive">{String(formState.errors[f.key]?.message)}</p>
-          )}
         </div>
       ))}
       <Button type="submit" disabled={formState.isSubmitting}>

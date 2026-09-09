@@ -11,6 +11,9 @@ export default defineConfig({
     alias: { '@': path.resolve(__dirname, './src') },
   },
   server: {
+    // 监听 0.0.0.0：同一局域网内的其他设备（手机、另一台机器）也能通过
+    // 本机 IP 访问这个开发服务器，不仅限于 localhost。
+    host: '0.0.0.0',
     // 开发时把 API 转发给本机的 fp，浏览器看到的仍是同源，
     // 管理端会话 cookie 因此能正常带上。
     proxy: { '/admin/api': 'http://localhost:8080' },

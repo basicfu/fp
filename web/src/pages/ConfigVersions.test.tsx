@@ -1,24 +1,9 @@
-// 【与 brief 的出入】brief 给的 Step 1 示例代码块本身编译不过（结尾多了一个
-// 悬空的 `})`），而且假定了一个"点开就能看到完整回滚提示"的时序：
-// "将变成未配置"这条提示依赖当前版本与目标版本的两份完整快照，这两份是
-// 组件挂载后才异步拉回来的，不能假设 [回滚到 vN] 按钮一出现数据就已经
-// 齐了。真这么假设，测试会在本机偶发通过、在 CI 上偶发失败（点太快，
-// 拉到的是不完整数据）。这里在按钮变为可点（disabled=false）之后再点，
-// 复现的是"数据没齐之前挡住用户手误"这个真实场景，而不是掩盖竞态。
-//
-// 另外，brief 例子里 `screen.getByText(/\bb\b/)` 直接搜整个文档：背景的
-// 版本列表里 v2 那一行的"改动清单"本来就含有同一个 key "b"（这正是这条
-// 用例要制造的场景——b 是 v2 才加的，回滚到 v1 会丢），弹窗打开后背景并不
-// 会被卸载（Dialog 只是浮层），两处"b"同时在场，不加范围限定会命中两个
-// 元素、报"找到多个元素"而不是验证弹窗内容。这里改成先拿到
-// role="dialog" 的容器，再用 @testing-library/react 自带的 within 把查询
-// 限定在弹窗里。
-//
 // 仓库**没有**装 @testing-library/user-event（不在 package.json 里），
 // 用既有的 fireEvent，写法照 ApplicationSettings.test.tsx。
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
+import { toast } from 'sonner'
 import ConfigVersions from './ConfigVersions'
 import { CurrentAppContext } from '@/lib/current-app'
 import type { CurrentAppValue } from '@/lib/current-app'
@@ -31,7 +16,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 /**
- * stubVersions 支持 Task 14 用到的三个接口：
+ * stubVersions 支持版本历史页用到的三个接口：
  * - GET  .../config/versions        → list（不管 query 里的 type 是什么，
  *   固定返回同一份列表——分区只影响 URL，不影响这里的假数据）
  * - GET  .../config/versions/{seq}  → snapshots[seq]；snapshots 里没有的
@@ -57,6 +42,9 @@ function stubVersions(
     if (method === 'POST' && url.includes('/config/rollback')) {
       const maxSeq = Math.max(0, ...list.map((v) => v.seq))
       return jsonResponse({ seq: maxSeq + 1 })
+    }
+    if (url.includes('/config/types')) {
+      return jsonResponse(['DEFAULT'])
     }
     const versionMatch = /\/config\/versions\/(\d+)/.exec(url)
     if (versionMatch) {
@@ -100,6 +88,9 @@ function stubVersionsWithGatedSnapshot(
   gate: Promise<void>,
 ) {
   const fn = vi.fn(async (url: string) => {
+    if (url.includes('/config/types')) {
+      return jsonResponse(['DEFAULT'])
+    }
     const versionMatch = /\/config\/versions\/(\d+)/.exec(url)
     if (versionMatch) {
       await gate
@@ -172,21 +163,15 @@ async function findEnabledButton(name: string): Promise<HTMLButtonElement> {
   return btn as HTMLButtonElement
 }
 
-test('列出版本并标出每版改了哪些 key，最老一版没有更老版本可比时标成"初始版本"', async () => {
+test('列出版本并标出每版改了哪些 key（+/- 形式），最老一版没有更老版本可比时标成"初始版本"', async () => {
   stubVersions(
     [
       { seq: 2, createdAt: 1757000000 },
       { seq: 1, createdAt: 1756000000 },
     ],
     {
-      1: { seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } },
-      2: {
-        seq: 2,
-        fields: {
-          a: { type: 'int', desc: '', value: 1 },
-          b: { type: 'int', desc: '', value: 2 },
-        },
-      },
+      1: { seq: 1, value: 'a: 1\n' },
+      2: { seq: 2, value: 'a: 1\nb: 2\n' },
     },
   )
   renderPage()
@@ -195,15 +180,11 @@ test('列出版本并标出每版改了哪些 key，最老一版没有更老版�
   expect(screen.getByTestId('version-2')).toBeTruthy()
 
   // "改了哪些"是相邻两版 diff 出来的，后端不存这个字段。
-  // 【辨别力】v2 里没变的 a 不能出现在改动清单里，否则一个"把整份 fields
+  // 【辨别力】v2 里没变的 a 不能出现在改动清单里，否则一个"把整份内容
   // 都列成改动"的实现同样会绿。
-  //
-  // 断言落在**改动清单这个容器**上，不是整行的 textContent——整行还带着
-  // 版本号、时间戳、按钮文案，用 not.toContain('a') 去查一个单字母会被
-  // 那些文字里任意一个 a 误伤，测试会因为无关的文案改动而假红。
   const changed = await screen.findByTestId('changed-2')
-  const keys = Array.from(changed.querySelectorAll('li')).map((li) => li.textContent)
-  expect(keys).toEqual(['b'])
+  expect(changed.textContent).toContain('+ b: 2')
+  expect(changed.textContent).not.toContain('a: 1')
 
   // v1 是这个分区最老的一版（seq-1=0 从未存在过），没有更老的版本可比，
   // 标成"初始版本"，不是渲染一份对不出前一版的空 diff。
@@ -215,59 +196,69 @@ test('最老一行的前一版已被修剪查不到时，同样标成"初始版�
   // ConfigService.Save 里超过 ConfigMaxVersions 后从最老开始删的情形——
   // 这里要验证的是"请求发出去了、服务端 404"这条路径，不是 seq<1 那种
   // 本地就能判断、不必发请求的平凡情形。
-  stubVersions([{ seq: 6, createdAt: 6 }], { 6: { seq: 6, fields: { x: { type: 'int', desc: '', value: 1 } } } })
+  stubVersions([{ seq: 6, createdAt: 6 }], { 6: { seq: 6, value: 'x: 1\n' } })
   renderPage()
 
   const row = await screen.findByTestId('version-6')
   expect(await within(row).findByText('初始版本')).toBeTruthy()
 })
 
-test('回滚前提示哪些项将变成未配置', async () => {
+// 改类型（int → object）在新模型下就是把同一个 key 的值从标量改写成
+// 映射——diff 应该把它当成"这个 path 的值变了"，而不是拆成两条无关的
+// 增/删（如果内部按嵌套结构拍平，object 变量下的子 key 会被拆成新的
+// path，这里用一个标量→标量的改动更贴近"改了一个值"的常见场景）。
+test('值变了（不是新增/删除）会同时出现一条 - 旧值和一条 + 新值', async () => {
   stubVersions(
     [
       { seq: 2, createdAt: 2 },
       { seq: 1, createdAt: 1 },
     ],
     {
-      1: { seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } },
-      2: {
-        seq: 2,
-        fields: {
-          a: { type: 'int', desc: '', value: 1 },
-          b: { type: 'int', desc: '', value: 2 },
-        },
-      },
+      1: { seq: 1, value: 'timeout: 3000\n' },
+      2: { seq: 2, value: 'timeout: 5000\n' },
+    },
+  )
+  renderPage()
+
+  const changed = await screen.findByTestId('changed-2')
+  expect(changed.textContent).toContain('- timeout: 3000')
+  expect(changed.textContent).toContain('+ timeout: 5000')
+})
+
+test('回滚前提示哪些配置项将被删除', async () => {
+  stubVersions(
+    [
+      { seq: 2, createdAt: 2 },
+      { seq: 1, createdAt: 1 },
+    ],
+    {
+      1: { seq: 1, value: 'a: 1\n' },
+      2: { seq: 2, value: 'a: 1\nb: 2\n' },
     },
   )
   renderPage()
 
   fireEvent.click(await findEnabledButton('回滚到 v1'))
 
-  // v2 才新增的 b 在 v1 里没有——回滚后它会变成未配置，运行中的实例
-  // 保持旧值并报错，新起的实例会缺值起不来。这条提示必须出现。
+  // v2 才新增的 b 在 v1 里没有——回滚后它会消失，运行中的实例保持旧值
+  // 并报错，新起的实例会缺值起不来。这条提示必须出现。
   const dialog = await screen.findByRole('dialog')
-  expect(within(dialog).getByText(/回滚后以下配置项将变成未配置/)).toBeTruthy()
+  expect(within(dialog).getByText(/回滚后以下配置项将被删除/)).toBeTruthy()
   expect(within(dialog).getByText(/\bb\b/)).toBeTruthy()
 })
 
-// 【终审必须修】上面那条测试只造了"key 在目标版本里根本不存在"这一种
-// 会变成未配置的情形。真实还可达的另一种是：key 在目标版本里存在，但
-// value 是 JSON null（这一项当时"已创建但没填值"）——旧实现只判
-// `!(k in target.fields)`，会把这种情形错判成"没变化"，回滚提示对着一个
-// 会导致新实例起不来的操作完全沉默。ConfigCenter.tsx 的 commitRawText
-// 会在 array/object 的文本框清空时把 value 写成 null 并允许保存，所以
-// v6 填了值、v5 是未配置、从 v6 回滚到 v5 这个场景是真实可达的。
-test('回滚前提示——目标版本里 key 存在但 value 是 null，同样算变成未配置', async () => {
+// 嵌套 key 同样要能被识别成"会被删除"：YAML 支持真正的嵌套结构（不再
+// 只是靠 key 里带点模拟的扁平命名），拍平成 upstream.timeout 这样的
+// 路径来比较。
+test('回滚前提示——嵌套 key 在目标版本里不存在，同样算会被删除', async () => {
   stubVersions(
     [
       { seq: 2, createdAt: 2 },
       { seq: 1, createdAt: 1 },
     ],
     {
-      // v1（回滚目标）：endpoints 这一项存在于 fields 里，但没填值。
-      1: { seq: 1, fields: { endpoints: { type: 'array', desc: '', value: null } } },
-      // v2（当前版本）：填成了一个非空数组。
-      2: { seq: 2, fields: { endpoints: { type: 'array', desc: '', value: ['a'] } } },
+      1: { seq: 1, value: 'upstream:\n  timeout: 3000\n' },
+      2: { seq: 2, value: 'upstream:\n  timeout: 3000\n  retries: 3\n' },
     },
   )
   renderPage()
@@ -275,8 +266,8 @@ test('回滚前提示——目标版本里 key 存在但 value 是 null，同样
   fireEvent.click(await findEnabledButton('回滚到 v1'))
 
   const dialog = await screen.findByRole('dialog')
-  expect(within(dialog).getByText(/回滚后以下配置项将变成未配置/)).toBeTruthy()
-  expect(within(dialog).getByText(/endpoints/)).toBeTruthy()
+  expect(within(dialog).getByText(/回滚后以下配置项将被删除/)).toBeTruthy()
+  expect(within(dialog).getByText(/upstream\.retries/)).toBeTruthy()
 })
 
 // 【审查追加】上面这条测试点按钮前先等它变成 enabled（findEnabledButton），
@@ -288,7 +279,7 @@ test('回滚前提示——目标版本里 key 存在但 value 是 null，同样
 // 渲染、背景快照批量还没回来"这个窗口期在测试里拉长，在窗口期内断言按钮
 // 确实是 disabled，再放行、确认它变 enabled 且弹窗显示的是具体 key 列表
 // 而不是"数据不全"的兜底文案。
-test('背景快照批量还没拉回来之前，[回滚到 vN] 必须保持 disabled；拉回来后显示具体的未配置清单', async () => {
+test('背景快照批量还没拉回来之前，[回滚到 vN] 必须保持 disabled；拉回来后显示具体的删除清单', async () => {
   const gate = deferred()
   stubVersionsWithGatedSnapshot(
     [
@@ -296,14 +287,8 @@ test('背景快照批量还没拉回来之前，[回滚到 vN] 必须保持 disa
       { seq: 1, createdAt: 1 },
     ],
     {
-      1: { seq: 1, fields: { a: { type: 'int', desc: '', value: 1 } } },
-      2: {
-        seq: 2,
-        fields: {
-          a: { type: 'int', desc: '', value: 1 },
-          b: { type: 'int', desc: '', value: 2 },
-        },
-      },
+      1: { seq: 1, value: 'a: 1\n' },
+      2: { seq: 2, value: 'a: 1\nb: 2\n' },
     },
     gate.promise,
   )
@@ -325,37 +310,26 @@ test('背景快照批量还没拉回来之前，[回滚到 vN] 必须保持 disa
   // 数据已经就绪：弹窗必须显示具体的 key 列表，不能是"数据不全，无法
   // 确认"的兜底文案——那条兜底是留给数据真的取不到的时候用的安全网，
   // 此刻数据齐了，不该触发。
-  expect(within(dialog).getByText(/回滚后以下配置项将变成未配置/)).toBeTruthy()
+  expect(within(dialog).getByText(/回滚后以下配置项将被删除/)).toBeTruthy()
   expect(within(dialog).getByText(/\bb\b/)).toBeTruthy()
   expect(within(dialog).queryByText(/无法确认/)).toBeNull()
 })
 
-test('回滚同样要选生效方式', async () => {
+// "生效方式"单选（立即推送 / 仅落库）已经去掉了——回滚不再有选择，
+// 一律立即推送，这条测试钉住 POST body 里的 push 恒为 true。
+test('确认回滚时 POST body 的 push 恒为 true', async () => {
   const calls: Array<{ method: string; body: unknown }> = []
-  stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } }, calls)
+  stubVersions(
+    [
+      { seq: 2, createdAt: 2 },
+      { seq: 1, createdAt: 1 },
+    ],
+    { 1: { seq: 1, value: 'a: 1\n' }, 2: { seq: 2, value: 'a: 2\n' } },
+    calls,
+  )
   renderPage()
 
   fireEvent.click(await findEnabledButton('回滚到 v1'))
-  fireEvent.click(screen.getByLabelText(/仅落库/))
-  fireEvent.click(screen.getByRole('button', { name: '确认回滚' }))
-
-  await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
-  const body = calls.find((c) => c.method === 'POST')!.body as { type: string; seq: number; push: boolean }
-  expect(body).toEqual({ type: 'DEFAULT', seq: 1, push: false })
-})
-
-// 【审查追加】上面那条测试断言的是 push:false 这一侧（点了"仅落库"才
-// 确认），从未验证过保持默认"立即推送"不动时，POST body 里的 push 是
-// 不是真的是 true——把实现里的 push: rollbackPush 硬编码成 push: false
-// 之后，上面那条测试依然全绿（它本来就期望 false）。这条测试补 push:true
-// 这一侧：不碰生效方式，直接确认。
-test('回滚保持默认的立即推送不动时，POST body 的 push 是 true', async () => {
-  const calls: Array<{ method: string; body: unknown }> = []
-  stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } }, calls)
-  renderPage()
-
-  fireEvent.click(await findEnabledButton('回滚到 v1'))
-  // 不碰"生效方式"单选，保持默认的"立即推送"。
   fireEvent.click(screen.getByRole('button', { name: '确认回滚' }))
 
   await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
@@ -363,8 +337,88 @@ test('回滚保持默认的立即推送不动时，POST body 的 push 是 true',
   expect(body).toEqual({ type: 'DEFAULT', seq: 1, push: true })
 })
 
+// 当前（最新）版本本身没有"回滚到 vN"按钮——回滚到自己没有意义。
+test('最新版本那一行不出现"回滚到 vN"按钮，更早的版本仍然有', async () => {
+  stubVersions(
+    [
+      { seq: 2, createdAt: 2 },
+      { seq: 1, createdAt: 1 },
+    ],
+    { 1: { seq: 1, value: 'a: 1\n' }, 2: { seq: 2, value: 'a: 2\n' } },
+  )
+  renderPage()
+
+  const row2 = await screen.findByTestId('version-2')
+  expect(within(row2).queryByRole('button', { name: '回滚到 v2' })).toBeNull()
+  const row1 = await screen.findByTestId('version-1')
+  expect(within(row1).getByRole('button', { name: '回滚到 v1' })).toBeTruthy()
+})
+
+// 目标版本的内容和当前版本完全一样时，后端不会为"什么都没变"这件事
+// 凭空生出一个新版本——POST /config/rollback 原样返回当前 seq。前端要
+// 据此换一句不误导人的提示，而不是照常说"已回滚并推送，seq=X"。
+test('目标版本内容与当前版本完全一致时，不产生新版本，toast 提示内容未变化', async () => {
+  const calls: Array<{ method: string; body: unknown }> = []
+  const fn = vi.fn(async (url: string, init?: RequestInit) => {
+    const method = init?.method ?? 'GET'
+    const body = init?.body ? (JSON.parse(init.body as string) as unknown) : undefined
+    calls.push({ method, body })
+    if (method === 'POST' && url.includes('/config/rollback')) {
+      return jsonResponse({ seq: 2 })
+    }
+    if (url.includes('/config/types')) return jsonResponse(['DEFAULT'])
+    const versionMatch = /\/config\/versions\/(\d+)/.exec(url)
+    if (versionMatch) {
+      const snapshots: Record<number, ConfigSnapshot> = { 1: { seq: 1, value: 'a: 1\n' }, 2: { seq: 2, value: 'a: 1\n' } }
+      const snap = snapshots[Number(versionMatch[1])]
+      if (!snap) return jsonResponse({ code: 'CONFIG_VERSION_NOT_FOUND', msg: '配置版本不存在' }, 404)
+      return jsonResponse(snap)
+    }
+    if (url.includes('/config/versions')) {
+      return jsonResponse([
+        { seq: 2, createdAt: 2 },
+        { seq: 1, createdAt: 1 },
+      ])
+    }
+    throw new Error(`没料到的请求 ${method} ${url}`)
+  })
+  vi.stubGlobal('fetch', fn)
+  const successSpy = vi.spyOn(toast, 'success').mockImplementation(() => 'toast-id')
+
+  renderPage()
+  fireEvent.click(await findEnabledButton('回滚到 v1'))
+  fireEvent.click(await screen.findByRole('button', { name: '确认回滚' }))
+
+  await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
+  await waitFor(() =>
+    expect(successSpy).toHaveBeenCalledWith('这一版与当前内容完全一致，没有产生新版本'),
+  )
+})
+
+// 标签页不再固定是 DEFAULT/WEB 两个——按 /config/types 实际返回的分区名
+// 动态生成，DEFAULT 永远在场（即使这个应用还没对它存过版本）。
+test('标签页按实际存在的分区动态生成，DEFAULT 永远在场', async () => {
+  const fn = vi.fn(async (url: string) => {
+    if (url.includes('/config/types')) return jsonResponse(['MOBILE', 'WEB'])
+    if (url.includes('/config/versions')) return jsonResponse([])
+    throw new Error(`没料到的请求 ${url}`)
+  })
+  vi.stubGlobal('fetch', fn)
+  renderPage()
+
+  expect(await screen.findByRole('tab', { name: 'DEFAULT' })).toBeTruthy()
+  expect(screen.getByRole('tab', { name: 'MOBILE' })).toBeTruthy()
+  expect(screen.getByRole('tab', { name: 'WEB' })).toBeTruthy()
+})
+
 test('回滚成功后跳回配置中心页', async () => {
-  stubVersions([{ seq: 1, createdAt: 1 }], { 1: { seq: 1, fields: {} } })
+  stubVersions(
+    [
+      { seq: 2, createdAt: 2 },
+      { seq: 1, createdAt: 1 },
+    ],
+    { 1: { seq: 1, value: 'a: 1\n' }, 2: { seq: 2, value: 'a: 2\n' } },
+  )
   renderPage()
 
   fireEvent.click(await findEnabledButton('回滚到 v1'))
