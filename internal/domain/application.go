@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -114,8 +115,10 @@ type Application struct {
 	DefaultRoleKey string
 	RedirectURIs   []string // OIDC 预留
 	GrantTypes     []string // OIDC 预留
-	CreatedAt      int64
-	UpdatedAt      int64
+	// IM 是该应用在 fp-im 里的接入配置。默认关。
+	IM        IMConfig
+	CreatedAt int64
+	UpdatedAt int64
 }
 
 // ApplicationConnector 是某个应用对某种登录方式的启用状态与配置。
@@ -123,4 +126,90 @@ type ApplicationConnector struct {
 	Type    string
 	Enabled bool
 	Config  map[string]any
+}
+
+// IM 连接策略。取值必须与 internal/im/model.Policy 逐字相同——那两组常量
+// 分处 internal/domain 与 internal/im/model（后者不得依赖前者），任何一边
+// 单独看都只是孤立的字符串字面量，改错了 go build/vet/全量测试照样全绿。
+// 配对关系由 internal/integration 的测试守护。
+const (
+	IMConnPolicyReplace = "replace" // 新连接顶掉同 subject 的旧连接
+	IMConnPolicyReject  = "reject"  // 已有连接时拒绝新连接
+	IMConnPolicyLimit   = "limit"   // 最多 ConnLimit 条，超出拒新
+)
+
+// IMBizAuth 是业务方自有认证的回调配置。整组为 nil 表示这个应用不支持
+// 业务方令牌。
+//
+// 用嵌套（指针）而不是铺平成三个字段：铺平之后"支不支持"就得靠"地址是不是
+// 空串"这种间接判断。落库时对应可空的 jsonb 列，SQL 的 NULL 是同一个语义。
+type IMBizAuth struct {
+	VerifyURL string `json:"verify_url"`
+	// TimeoutMs 是整个回调请求的超时。用毫秒而不是 time.Duration：它要原样
+	// 落进 jsonb，而 time.Duration 的 JSON 表示是纳秒整数，既难读又容易错
+	// 一个数量级。
+	TimeoutMs int32 `json:"timeout_ms"`
+	CacheSize int32 `json:"cache_size"`
+}
+
+// IMConfig 是一个应用在 fp-im 里的接入配置。
+type IMConfig struct {
+	// Enabled 关着时这个应用连不上 fp-im：业务 server 接不进来，client
+	// 握手也拒。默认 false。
+	Enabled     bool       `json:"enabled"`
+	ConnPolicy  string     `json:"conn_policy"`
+	ConnLimit   int32      `json:"conn_limit"`
+	AllowGuest  bool       `json:"allow_guest"`
+	GuestIPRate int32      `json:"guest_ip_rate"`
+	BizAuth     *IMBizAuth `json:"biz_auth,omitempty"`
+}
+
+// DefaultIMConfig 返回新建应用的默认 IM 配置。
+func DefaultIMConfig() IMConfig {
+	return IMConfig{
+		Enabled:     false,
+		ConnPolicy:  IMConnPolicyReplace,
+		ConnLimit:   5,
+		AllowGuest:  false,
+		GuestIPRate: 20,
+	}
+}
+
+// Validate 校验 IM 配置。
+//
+// Enabled 为 false 时直接放行：还没打开就先拦人，等于逼人一次填全才能存
+// 草稿。真正会被 fp-im 读到的只有打开之后的配置。
+func (c IMConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	switch c.ConnPolicy {
+	case IMConnPolicyReplace, IMConnPolicyReject:
+	case IMConnPolicyLimit:
+		if c.ConnLimit < 1 {
+			return Failf(ErrInvalidArgument, CodeInvalidArgument, "策略为 limit 时 conn_limit 必须 >= 1")
+		}
+	default:
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "未知的 conn_policy %q", c.ConnPolicy)
+	}
+	if c.AllowGuest && c.GuestIPRate < 1 {
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "允许访客时 guest_ip_rate 必须 >= 1")
+	}
+	if c.BizAuth != nil {
+		if c.BizAuth.VerifyURL == "" {
+			return Failf(ErrInvalidArgument, CodeInvalidArgument, "配了 biz_auth 但缺 verify_url")
+		}
+		// 必须 HTTPS：client 的令牌明文走在请求体里，明文传输等于把所有
+		// 业务方令牌交给中间人。
+		if !strings.HasPrefix(c.BizAuth.VerifyURL, "https://") {
+			return Failf(ErrInvalidArgument, CodeInvalidArgument, "biz_auth.verify_url 必须是 https")
+		}
+		if c.BizAuth.TimeoutMs <= 0 {
+			return Failf(ErrInvalidArgument, CodeInvalidArgument, "biz_auth.timeout_ms 必须大于 0")
+		}
+		if c.BizAuth.CacheSize <= 0 {
+			return Failf(ErrInvalidArgument, CodeInvalidArgument, "biz_auth.cache_size 必须大于 0")
+		}
+	}
+	return nil
 }

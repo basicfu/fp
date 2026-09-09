@@ -64,3 +64,60 @@ func TestIdleTimeoutFor(t *testing.T) {
 		t.Errorf("mobile 回落 = %v, want %v", got, want)
 	}
 }
+
+func TestIMConfigValidate(t *testing.T) {
+	base := domain.DefaultIMConfig()
+	base.Enabled = true
+	if err := base.Validate(); err != nil {
+		t.Fatalf("默认配置打开后被拒：%v", err)
+	}
+
+	// 关着的时候不校验其余项：还没配就先拦人，等于逼人一次填全才能存草稿。
+	off := domain.IMConfig{Enabled: false, ConnPolicy: "whatever", ConnLimit: -1}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("im_enabled=false 时不该校验其余项：%v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		mut  func(*domain.IMConfig)
+	}{
+		{"未知策略", func(c *domain.IMConfig) { c.ConnPolicy = "whatever" }},
+		{"limit 策略下上限为零", func(c *domain.IMConfig) {
+			c.ConnPolicy = domain.IMConnPolicyLimit
+			c.ConnLimit = 0
+		}},
+		{"允许访客但限流为零", func(c *domain.IMConfig) { c.AllowGuest = true; c.GuestIPRate = 0 }},
+		{"biz_auth 缺地址", func(c *domain.IMConfig) {
+			c.BizAuth = &domain.IMBizAuth{TimeoutMs: 2000, CacheSize: 10}
+		}},
+		{"biz_auth 明文 http", func(c *domain.IMConfig) {
+			c.BizAuth = &domain.IMBizAuth{VerifyURL: "http://x/v", TimeoutMs: 2000, CacheSize: 10}
+		}},
+		{"biz_auth 超时为零", func(c *domain.IMConfig) {
+			c.BizAuth = &domain.IMBizAuth{VerifyURL: "https://x/v", CacheSize: 10}
+		}},
+		{"biz_auth 缓存容量为零", func(c *domain.IMConfig) {
+			c.BizAuth = &domain.IMBizAuth{VerifyURL: "https://x/v", TimeoutMs: 2000}
+		}},
+	} {
+		c := base
+		tc.mut(&c)
+		if c.Validate() == nil {
+			t.Errorf("%s 必须被拒绝", tc.name)
+		}
+	}
+
+	ok := base
+	ok.BizAuth = &domain.IMBizAuth{VerifyURL: "https://x/v", TimeoutMs: 2000, CacheSize: 10}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("合法的 biz_auth 被拒：%v", err)
+	}
+}
+
+// TestDefaultIMConfigIsDisabled 钉住"新版 fp 发布后对现网零影响"的那条依据。
+func TestDefaultIMConfigIsDisabled(t *testing.T) {
+	if domain.DefaultIMConfig().Enabled {
+		t.Fatal("IM 默认必须是关的——这是新版 fp 发布后不影响现网的全部依据")
+	}
+}
