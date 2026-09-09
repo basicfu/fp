@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
@@ -30,6 +31,20 @@ type Deps struct {
 	// AppSecretCacheTTL 是应用凭据验证结果的缓存时长，也是 appSecret
 	// 轮换的生效上限。为 0 时取 5 分钟。
 	AppSecretCacheTTL time.Duration
+
+	// IMCreds 校验 fp-im 网关的凭据。为 nil 时任何 fp-caller-type: im 的
+	// 调用都会被拒——这让测试里绕开 New 直接构造 Server 的既有用法不受影响。
+	IMCreds IMCredentialVerifier
+	// IMSecretCacheTTL 为 0 时取 DefaultIMSecretCacheTTL（10 秒）。
+	IMSecretCacheTTL time.Duration
+}
+
+// deniedIMCreds 在没有配置 IM 凭据校验器时拒绝一切 im 调用。
+// 用一个恒失败的实现而不是把 nil 判断散在各调用点：调用路径只有一条。
+type deniedIMCreds struct{}
+
+func (deniedIMCreds) Verify(context.Context, string) error {
+	return domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "IM 凭据无效")
 }
 
 // Server 是 fp 面向 SDK 的 gRPC 服务。
@@ -77,7 +92,15 @@ func New(d Deps) *Server {
 	if ttl == 0 {
 		ttl = 5 * time.Minute
 	}
-	verifier := newAppVerifier(d.Apps, ttl)
+	imTTL := d.IMSecretCacheTTL
+	if imTTL == 0 {
+		imTTL = DefaultIMSecretCacheTTL
+	}
+	imCreds := d.IMCreds
+	if imCreds == nil {
+		imCreds = deniedIMCreds{}
+	}
+	verifier := newAppVerifier(d.Apps, ttl, imCreds, imTTL)
 	hub := NewRevokeHub(d.Pub)
 	configHub := NewConfigHub(d.ConfigPub)
 

@@ -89,6 +89,8 @@ func run() error {
 	logSvc := service.NewLoginLogService(pool)
 	authzSvc := service.NewAuthzService(pool)
 
+	imCredSvc := service.NewIMCredentialService(pool)
+
 	configPub := store.NewConfigPublisher(rdb)
 	configSvc := service.NewConfigService(pool, configPub)
 
@@ -185,6 +187,7 @@ func run() error {
 	grpcSrv := grpcapi.New(grpcapi.Deps{
 		Auth:      authSvc,
 		Apps:      appSvc,
+		IMCreds:   imCredSvc,
 		Pub:       revokePub,
 		Authz:     authzSvc,
 		Configs:   configSvc,

@@ -39,7 +39,7 @@ func ctxWith(appID, secret string) context.Context {
 
 func newTestVerifier() (*appVerifier, *countingApps) {
 	apps := &countingApps{appID: "app-1", secret: "s3cret"}
-	return newAppVerifier(apps, 5*time.Minute), apps
+	return newAppVerifier(apps, 5*time.Minute, &countingIMCreds{secret: "im-secret"}, 10*time.Second), apps
 }
 
 func TestUnaryRejectsMissingMetadata(t *testing.T) {
@@ -121,7 +121,7 @@ func TestFailedVerificationIsNotCached(t *testing.T) {
 // TestCacheExpires 确认 TTL 真的生效，appSecret 轮换后旧值不会永远有效。
 func TestCacheExpires(t *testing.T) {
 	apps := &countingApps{appID: "app-1", secret: "s3cret"}
-	v := newAppVerifier(apps, time.Millisecond)
+	v := newAppVerifier(apps, time.Millisecond, &countingIMCreds{secret: "im-secret"}, time.Millisecond)
 	pass := func(ctx context.Context, _ any) (any, error) { return nil, nil }
 
 	if _, err := v.UnaryInterceptor(ctxWith("app-1", "s3cret"), nil, &grpc.UnaryServerInfo{}, pass); err != nil {
@@ -181,3 +181,137 @@ type fakeServerStream struct {
 }
 
 func (f *fakeServerStream) Context() context.Context { return f.ctx }
+
+// countingIMCreds 是 IMCredentialVerifier 的计数桩。
+type countingIMCreds struct {
+	calls  atomic.Int32
+	secret string
+}
+
+func (c *countingIMCreds) Verify(_ context.Context, secret string) error {
+	c.calls.Add(1)
+	if secret != c.secret {
+		return domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "IM 凭据无效")
+	}
+	return nil
+}
+
+func newTestVerifierWithIM() (*appVerifier, *countingApps, *countingIMCreds) {
+	apps := &countingApps{appID: "app-1", secret: "s3cret"}
+	imc := &countingIMCreds{secret: "im-secret"}
+	return newAppVerifier(apps, 5*time.Minute, imc, 10*time.Second), apps, imc
+}
+
+func ctxWithType(appID, secret, callerType string) context.Context {
+	md := metadata.Pairs(mdAppID, appID, mdAppSecret, secret)
+	if callerType != "" {
+		md.Set(MDCallerType, callerType)
+	}
+	return metadata.NewIncomingContext(context.Background(), md)
+}
+
+// TestCallerTypeIsAuthoritative 钉住这条设计：fp-caller-type 决定**只**比对
+// 哪一份凭据，不是"提示先试哪个、失败再试另一个"。
+//
+// 声明本身不授予任何东西——声明 im 却拿着 app secret 一样失败——所以让它
+// 权威在安全上零损失，却把最坏情况从两次 bcrypt（各 50–100ms）砍到一次。
+func TestCallerTypeIsAuthoritative(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		callerType string
+		appID      string
+		secret     string
+		wantErr    bool
+	}{
+		{"普通调用用 app secret", "", "app-1", "s3cret", false},
+		{"普通调用拿 IM secret", "", "app-1", "im-secret", true},
+		{"im 调用用 IM secret", CallerTypeIM, "app-1", "im-secret", false},
+		{"im 调用拿 app secret", CallerTypeIM, "app-1", "s3cret", true},
+		{"未知的 caller type", "gateway", "app-1", "im-secret", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _, _ := newTestVerifierWithIM()
+			_, err := v.authenticate(ctxWithType(tc.appID, tc.secret, tc.callerType))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v，wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestCallerTypeOnlyOneBcrypt 钉住"只比对一份"：im 调用不能顺带去验
+// app secret，反之亦然。两次 bcrypt 各 50–100ms，热路径上翻倍不可接受。
+func TestCallerTypeOnlyOneBcrypt(t *testing.T) {
+	v, apps, imc := newTestVerifierWithIM()
+	if _, err := v.authenticate(ctxWithType("app-1", "im-secret", CallerTypeIM)); err != nil {
+		t.Fatal(err)
+	}
+	if n := apps.calls.Load(); n != 0 {
+		t.Errorf("im 调用触碰了应用凭据校验 %d 次，应当为 0", n)
+	}
+	if n := imc.calls.Load(); n != 1 {
+		t.Errorf("IM 凭据校验 %d 次，应当恰好 1 次", n)
+	}
+
+	v2, apps2, imc2 := newTestVerifierWithIM()
+	if _, err := v2.authenticate(ctxWithType("app-1", "s3cret", "")); err != nil {
+		t.Fatal(err)
+	}
+	if n := imc2.calls.Load(); n != 0 {
+		t.Errorf("普通调用触碰了 IM 凭据校验 %d 次，应当为 0", n)
+	}
+	if n := apps2.calls.Load(); n != 1 {
+		t.Errorf("应用凭据校验 %d 次，应当恰好 1 次", n)
+	}
+}
+
+// TestNoCallerTypeBehavesExactlyAsBefore 钉住"新版 fp 发布后对现网零影响"：
+// 不带 fp-caller-type 的调用，从 metadata 解析到 ctx 内容，行为必须与改动前
+// 逐字相同。
+func TestNoCallerTypeBehavesExactlyAsBefore(t *testing.T) {
+	v, _, _ := newTestVerifierWithIM()
+	ctx, err := v.authenticate(ctxWith("app-1", "s3cret"))
+	if err != nil {
+		t.Fatalf("既有调用方式必须原样可用：%v", err)
+	}
+	if got, ok := appIDFrom(ctx); !ok || got != "app-1" {
+		t.Fatalf("appId 未放进 ctx，got %q ok=%v", got, ok)
+	}
+	if got := callerTypeFrom(ctx); got != "" {
+		t.Fatalf("未声明时 callerType 应为空，got %q", got)
+	}
+}
+
+// TestIMCallerRequiresAppID：im 调用同样要带 app-id。它能调的四个 RPC 全都
+// 需要 app 作用域——只是这个 appId 来自 client 的 ws 握手帧、逐调用附上，
+// 而不是钉在连接的凭据里。
+func TestIMCallerRequiresAppID(t *testing.T) {
+	v, _, _ := newTestVerifierWithIM()
+	md := metadata.Pairs(mdAppSecret, "im-secret", MDCallerType, CallerTypeIM)
+	if _, err := v.authenticate(metadata.NewIncomingContext(context.Background(), md)); err == nil {
+		t.Fatal("im 调用缺 fp-app-id 必须报错")
+	}
+}
+
+// TestIMSecretCacheOnlyCachesSuccess：与应用凭据同一纪律。
+func TestIMSecretCacheOnlyCachesSuccess(t *testing.T) {
+	v, _, imc := newTestVerifierWithIM()
+	for i := 0; i < 3; i++ {
+		if _, err := v.authenticate(ctxWithType("app-1", "im-secret", CallerTypeIM)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := imc.calls.Load(); n != 1 {
+		t.Fatalf("成功结果回源 %d 次，应当只有 1 次", n)
+	}
+
+	imc.calls.Store(0)
+	for i := 0; i < 3; i++ {
+		if _, err := v.authenticate(ctxWithType("app-1", "wrong", CallerTypeIM)); err == nil {
+			t.Fatal("错误的 IM 凭据必须被拒")
+		}
+	}
+	if n := imc.calls.Load(); n != 3 {
+		t.Fatalf("失败结果回源 %d 次，失败不缓存意味着每次都要回源", n)
+	}
+}
