@@ -22,8 +22,33 @@ export interface Application {
   /** 这个应用里每个人自动拥有的角色 key。空串表示不设。 */
   defaultRoleKey: string
   session: SessionPolicy
+  im: IMConfig
   createdAt: number
   updatedAt: number
+}
+
+/** 连接策略：新连顶旧连 / 已有连接就拒新 / 限制并发条数。 */
+export type IMConnPolicy = 'replace' | 'reject' | 'limit'
+
+/** 业务方自有认证的回调配置。null 表示这个应用不支持业务方令牌。 */
+export interface IMBizAuth {
+  verifyUrl: string
+  timeoutMs: number
+  cacheSize: number
+}
+
+/** 应用在 fp-im 里的接入配置。enabled 关着时这个应用连不上 fp-im。 */
+export interface IMConfig {
+  enabled: boolean
+  connPolicy: IMConnPolicy
+  connLimit: number
+  allowGuest: boolean
+  guestIpRate: number
+  bizAuth: IMBizAuth | null
+}
+
+export interface IMCredentialStatus {
+  exists: boolean
 }
 
 export interface CreateApplicationResponse {

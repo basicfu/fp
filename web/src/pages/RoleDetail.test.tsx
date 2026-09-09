@@ -1,3 +1,4 @@
+import { disabledIMConfig } from '@/lib/testFixtures'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -31,6 +32,7 @@ const apps: Application[] = [
       extendIntervalSeconds: 1,
       tokenCacheTtlSeconds: 1,
     },
+    im: disabledIMConfig,
     createdAt: 1700000000000,
     updatedAt: 1700000000000,
   },

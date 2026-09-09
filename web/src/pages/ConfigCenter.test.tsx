@@ -2,6 +2,7 @@
 // `@testing-library/user-event`，但这个包**不在** package.json 的
 // devDependencies 里，加进去会违反"不引入新依赖"的硬约束。改用仓库里
 // 已经在用的 `fireEvent`（同样来自 @testing-library/react）。
+import { disabledIMConfig } from '@/lib/testFixtures'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
@@ -73,6 +74,7 @@ const fixedApp: Application = {
     extendIntervalSeconds: 1,
     tokenCacheTtlSeconds: 1,
   },
+  im: disabledIMConfig,
   createdAt: 1,
   updatedAt: 1,
 }

@@ -1,3 +1,4 @@
+import { disabledIMConfig } from '@/lib/testFixtures'
 import { useState } from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
@@ -23,6 +24,7 @@ const baseApp: Application = {
     extendIntervalSeconds: 600,
     tokenCacheTtlSeconds: 30,
   },
+  im: disabledIMConfig,
   createdAt: 1700000000000,
   updatedAt: 1700000000000,
 }
