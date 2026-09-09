@@ -83,14 +83,19 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 		maxStale = a.c.opts.MaxStaleness
 	}
 
-	if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheFresh {
+	// 作用域不匹配等同于未命中：同一个 token 在不同应用下是两个不同的
+	// 判定，见 entry.appID 的注释。
+	app := a.c.effectiveAppID(ctx)
+	if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheFresh && e.appID == app {
 		return identityFrom(e, false), nil
 	}
 
 	// singleflight：缓存过期的瞬间，同一个 token 的并发请求会同时 miss。
 	// 不合并的话，一个热门用户的 N 个并发请求会同时打到 fp——正是缓存
 	// 要防的惊群。功能上完全正常，只有 fp 的负载会被放大 N 倍。
-	v, err, _ := a.sf.Do(token, func() (any, error) {
+	// singleflight 的键也必须带上作用域：两个并发调用若只按 token 合并，
+	// 跟随者会拿到领导者那个作用域的判定。
+	v, err, _ := a.sf.Do(app+":"+token, func() (any, error) {
 		// 必须在发 RPC 之前抓这个代际：RPC 在飞行途中，同一个 token 可能被
 		// drop（撤销推送、或另一个 goroutine 的 Logout）或 purge，那样这次
 		// 回源带回的判定已经不可信，回填时必须能识别出"代际变过"并放弃
@@ -113,6 +118,7 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 			return nil, err
 		}
 		e := entry{
+			appID:     app,
 			userID:    res.GetUserId(),
 			sessionID: res.GetSessionId(),
 			rotatedTo: res.GetNewToken(),
@@ -165,7 +171,7 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 	//
 	// 只有在调用方显式允许时，才用"刚才验过的那个身份"兜底。
 	if maxStale > 0 {
-		if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheStale {
+		if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheStale && e.appID == app {
 			a.c.opts.Logger.Warn("fpsdk: fp 不可达，使用陈旧的校验结果",
 				"userId", e.userID, "err", err)
 			return identityFrom(e, true), nil

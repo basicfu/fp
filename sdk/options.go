@@ -16,8 +16,20 @@ type Options struct {
 	// Addr 是 fp 的 gRPC 地址，形如 "fp.internal:9090"。
 	Addr string
 	// AppID / AppSecret 是应用凭据，来自 fp 控制台。
+	//
+	// CallerType 为 CallerTypeIM 时 AppID 可以为空：那种客户端的连接没有
+	// 固定 app，作用域逐调用附上（见 WithAppID）。
 	AppID     string
 	AppSecret string
+
+	// CallerType 声明调用方类型，空表示普通业务应用（默认，行为与不设这个
+	// 字段完全一致）。业务方**不要**设它。
+	//
+	// 设为 CallerTypeIM 时：AppID 允许为空；凭据里输出 fp-caller-type: im
+	// 而不输出 fp-app-id。fp 对这类调用方开放的是与业务方完全不同的一组
+	// 接口——不能 Login、不能读配置中心，能调 ValidateToken/Watch 与
+	// IMGateway 的两个 RPC。
+	CallerType string
 
 	// Insecure 允许明文连接。
 	//
@@ -101,7 +113,9 @@ func (o Options) validate() error {
 	switch {
 	case o.Addr == "":
 		return errors.New("fpsdk: Options.Addr 不能为空")
-	case o.AppID == "":
+	case o.CallerType != "" && o.CallerType != CallerTypeIM:
+		return errors.New("fpsdk: Options.CallerType 只能为空或 " + CallerTypeIM)
+	case o.AppID == "" && o.CallerType != CallerTypeIM:
 		return errors.New("fpsdk: Options.AppID 不能为空")
 	case o.AppSecret == "":
 		return errors.New("fpsdk: Options.AppSecret 不能为空")
@@ -117,18 +131,31 @@ func (o Options) validate() error {
 	return nil
 }
 
+// CallerTypeIM 表示本客户端是 fp-im 网关，凭据是 IM secret 而不是某个应用
+// 的 appSecret。**业务方不要用它。**
+const CallerTypeIM = "im"
+
 // appCredentials 把应用凭据附加到每个 RPC 的 metadata 上。
 type appCredentials struct {
 	appID, secret string
+	callerType    string
 	insecure      bool
 }
 
 func newAppCredentials(o Options) appCredentials {
-	return appCredentials{appID: o.AppID, secret: o.AppSecret, insecure: o.Insecure}
+	return appCredentials{appID: o.AppID, secret: o.AppSecret, callerType: o.CallerType, insecure: o.Insecure}
 }
 
 // GetRequestMetadata 实现 credentials.PerRPCCredentials。
 func (c appCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	if c.callerType == CallerTypeIM {
+		// 不输出 fp-app-id：作用域由调用方逐调用附上（WithAppID）。两个都出
+		// 的话 metadata 里会有两个值，服务端取哪个是未定义行为。
+		return map[string]string{
+			"fp-app-secret":  c.secret,
+			"fp-caller-type": CallerTypeIM,
+		}, nil
+	}
 	return map[string]string{
 		"fp-app-id":     c.appID,
 		"fp-app-secret": c.secret,

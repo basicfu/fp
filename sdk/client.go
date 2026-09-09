@@ -51,10 +51,15 @@ type Client struct {
 	rpc  fpv1.AuthServiceClient
 	// cfgRPC 是配置中心的 RPC 客户端，供 Bind/BindType 拉取配置用。
 	cfgRPC fpv1.ConfigServiceClient
+	// imRPC 是 IM 网关接口的 RPC 客户端，只有 CallerType 为 CallerTypeIM 的
+	// 客户端用得到。
+	imRPC fpv1.IMGatewayServiceClient
 
-	// auth 与 authz 在 New 里构造一次，之后不再替换，因此无需同步保护。
-	auth  *Auth
-	authz *Authz
+	// auth / authz / imGateway 在 New 里构造一次，之后不再替换，因此无需
+	// 同步保护。
+	auth      *Auth
+	authz     *Authz
+	imGateway *IMGateway
 
 	// streamUp 是推送流的健康状态。它驱动缓存窗口的收紧，
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
@@ -243,6 +248,7 @@ func New(opts Options) (*Client, error) {
 		opts: opts, conn: conn,
 		rpc:       fpv1.NewAuthServiceClient(conn),
 		cfgRPC:    fpv1.NewConfigServiceClient(conn),
+		imRPC:     fpv1.NewIMGatewayServiceClient(conn),
 		cfgReload: make(chan struct{}, 1),
 		cancel:    cancel,
 	}
@@ -251,6 +257,7 @@ func New(opts Options) (*Client, error) {
 	// nil 解引用——而且只在恰好有事件到达时才崩，本地测试多半复现不出来。
 	c.auth = &Auth{c: c, cache: cch}
 	c.authz = &Authz{}
+	c.imGateway = &IMGateway{c: c}
 
 	c.wg.Add(1)
 	go func() {

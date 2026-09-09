@@ -9,6 +9,17 @@ import (
 
 // entry 是一次校验结果的缓存内容。
 type entry struct {
+	// appID 是这条判定所属的应用作用域。
+	//
+	// 缓存键是 token，而 token 全局唯一——单看这一点会以为不需要这个字段。
+	// 但一条连接可以服务多个应用（CallerType 为 im 的客户端就是这样），
+	// 那时"同一个 token 在不同应用作用域下的判定"是**两个不同的问题**：
+	// fp 侧的 sess.AppID != app.ID 会拒掉跨应用的那次，而缓存如果只按
+	// token 命中，就会拿应用 Y 的判定去放行一个声称属于应用 X 的握手——
+	// 正是那条检查要防的串号，而且完全绕过了 fp。
+	//
+	// 普通客户端的作用域恒定，这个字段恒等，不改变任何行为。
+	appID     string
 	userID    string
 	sessionID string
 	// rotatedTo 非空表示这个 token 已被 fp 轮换。中间件每次命中都要把它

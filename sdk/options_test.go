@@ -1,6 +1,7 @@
 package fpsdk
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -111,5 +112,64 @@ func TestStaleFallbackIsOffByDefault(t *testing.T) {
 	}
 	if o.DegradedCacheTTL <= 0 {
 		t.Fatalf("DegradedCacheTTL 默认值为 %v", o.DegradedCacheTTL)
+	}
+}
+
+// TestCallerTypeIMAllowsEmptyAppID：fp-im 的连接没有固定 app——它的 appId
+// 来自每个 client 的 ws 握手帧，逐调用附上（见 WithAppID）。
+func TestCallerTypeIMAllowsEmptyAppID(t *testing.T) {
+	o := Options{Addr: "x:9090", AppSecret: "s", CallerType: CallerTypeIM}
+	if err := o.validate(); err != nil {
+		t.Fatalf("CallerType=im 时应允许空 AppID：%v", err)
+	}
+}
+
+// TestDefaultCallerTypeStillRequiresAppID：这条不能因为新增字段而放松。
+func TestDefaultCallerTypeStillRequiresAppID(t *testing.T) {
+	o := Options{Addr: "x:9090", AppSecret: "s"}
+	if err := o.validate(); err == nil {
+		t.Fatal("默认调用方仍然必须填 AppID")
+	}
+}
+
+func TestUnknownCallerTypeRejected(t *testing.T) {
+	o := Options{Addr: "x:9090", AppID: "a", AppSecret: "s", CallerType: "gateway"}
+	if err := o.validate(); err == nil {
+		t.Fatal("未知的 CallerType 必须报错")
+	}
+}
+
+// TestIMCredentialsOmitAppID：im 凭据不输出 fp-app-id，为逐调用附上的那个
+// 让路。两个都出的话 metadata 里会有两个值，服务端 first() 取哪个是未定义
+// 行为。
+func TestIMCredentialsOmitAppID(t *testing.T) {
+	c := newAppCredentials(Options{AppID: "ignored", AppSecret: "s", CallerType: CallerTypeIM, Insecure: true})
+	md, err := c.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := md["fp-app-id"]; ok {
+		t.Fatal("im 凭据不能输出 fp-app-id")
+	}
+	if md["fp-caller-type"] != CallerTypeIM {
+		t.Fatalf("fp-caller-type = %q, want %q", md["fp-caller-type"], CallerTypeIM)
+	}
+	if md["fp-app-secret"] != "s" {
+		t.Fatalf("fp-app-secret = %q", md["fp-app-secret"])
+	}
+}
+
+// TestDefaultCredentialsUnchanged 钉住"已接入的 SDK 一个字节都不用改"。
+func TestDefaultCredentialsUnchanged(t *testing.T) {
+	c := newAppCredentials(Options{AppID: "app1", AppSecret: "s", Insecure: true})
+	md, err := c.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md["fp-app-id"] != "app1" || md["fp-app-secret"] != "s" {
+		t.Fatalf("既有凭据形状变了：%v", md)
+	}
+	if _, ok := md["fp-caller-type"]; ok {
+		t.Fatal("默认调用方不该出现 fp-caller-type")
 	}
 }

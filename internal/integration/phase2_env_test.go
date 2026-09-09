@@ -52,6 +52,8 @@ type phase2Services struct {
 	// HTTP→service 这一段，这里的测试直接调它的 Save，验证 service→
 	// Redis→gRPC→SDK 剩下这一段完整链路。
 	configs *service.ConfigService
+	// imCreds 供 IM 网关身份的测试生成凭据。
+	imCreds *service.IMCredentialService
 }
 
 func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Services {
@@ -73,7 +75,8 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	if err := registry.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
-	apps := service.NewApplicationService(pool, registry)
+	apps := service.NewApplicationService(pool, registry, service.WithIMConfigPublisher(configPub))
+	imCreds := service.NewIMCredentialService(pool)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// []RateRule{} 是显式关闭频率限制，仅用于测试——生产装配千万别照抄，
@@ -93,7 +96,7 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	return phase2Services{
 		apps: apps, users: users, sessions: sessions,
 		accounts: accounts, auth: auth, sms: sms, revokePub: revokePub, authz: authz,
-		configPub: configPub, configs: configs,
+		configPub: configPub, configs: configs, imCreds: imCreds,
 	}
 }
 
@@ -192,7 +195,7 @@ func (e *phase2Env) startServer(t *testing.T) {
 
 	srv := grpcapi.New(grpcapi.Deps{
 		Auth: e.auth, Apps: e.apps, Pub: e.revokePub, Authz: e.authz,
-		Configs: e.configs, ConfigPub: e.configPub,
+		Configs: e.configs, ConfigPub: e.configPub, IMCreds: e.imCreds,
 	})
 	e.server = srv
 
