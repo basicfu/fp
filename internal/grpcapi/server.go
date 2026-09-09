@@ -130,6 +130,7 @@ func New(d Deps) *Server {
 		Hub: hub, ConfigHub: configHub,
 	}))
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))
+	fpv1.RegisterIMGatewayServiceServer(srv, newIMServer(d.Apps))
 
 	return &Server{grpc: srv, hub: hub, configHub: configHub}
 }

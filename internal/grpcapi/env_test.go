@@ -63,6 +63,8 @@ type grpcEnv struct {
 	configs      *service.ConfigService
 	configClient fpv1.ConfigServiceClient
 
+	imClient fpv1.IMGatewayServiceClient
+
 	// imCreds 与 imSecret 供 imAuthed 构造"fp-im 网关"身份的调用。
 	imCreds  *service.IMCredentialService
 	imSecret string
@@ -199,6 +201,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 
 	env.client = fpv1.NewAuthServiceClient(conn)
 	env.configClient = fpv1.NewConfigServiceClient(conn)
+	env.imClient = fpv1.NewIMGatewayServiceClient(conn)
 	return env
 }
 
