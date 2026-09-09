@@ -75,6 +75,7 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 |---|---|---|
 | `Addr` | fp 的 gRPC 地址，如 `"fp.internal:9090"` | 必填 |
 | `AppID` / `AppSecret` | 应用凭据，来自 fp 控制台创建应用 | 必填 |
+| `CallerType` | **业务方不要用**，见下方说明 | `""` |
 | `Insecure` | 允许明文连接 | `false` |
 | `TLSConfig` | 自定义 TLS 配置 | `nil`（用系统根证书） |
 | `ValidateTimeout` | 单次校验回源的超时 | 2 秒 |
@@ -87,6 +88,14 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 
 **`Insecure` 生产环境绝不能开**——`AppSecret` 随每个 RPC 的 metadata 发送，
 明文连接等于把它印在网线上。只用于本地开发。
+
+> **`CallerType` 是给 fp-im 网关自己用的，业务方不要设。** 设成
+> `fpsdk.CallerTypeIM` 之后 fp 开放的是一组**收窄过**的接口：`Login` /
+> `Logout` / `SendLoginCode` / `GetPolicy` / `ReportPermissions` /
+> `GetConfig` 一律 `PermissionDenied`，只剩下 `Auth().Validate` 和网关专用
+> 的 `IMGateway()`；作用域也不再钉在连接上，`AppID` 允许留空，改由
+> `fpsdk.WithAppID(ctx, app)` 逐调用附上。业务方设了它只会得到一堆
+> `PermissionDenied`。
 
 ### 连接健康与降级
 
@@ -338,6 +347,21 @@ import fpim "github.com/basicfu/fp/sdk/im"
 - **`fpim.Client`**——Go 编写的设备端/程序化客户端连 fp-im 的 WebSocket。
   浏览器前端走 JS SDK，不使用这个类型。
 
+### 前置：在控制台把这个应用的 IM 接入打开
+
+fp-im 自己不存任何应用配置，连接策略、访客开关、是否允许接入全部来自
+fp。所以接入前必须先在 fp 控制台的「应用 → IM 设置」里打开 IM 接入，
+否则业务后端与设备端**都连不上**，凭据再正确也一样。
+
+这带来两条运行期后果，接入前值得先知道：
+
+- **业务后端连 fp-im 时，fp 必须可达。** fp-im 拿不到任何应用的
+  `AppSecret`（fp 只存 bcrypt 哈希），只能把凭据转给 fp 核实。校验成功的
+  结果在 fp-im 侧缓存 5 分钟，fp 的短暂抖动因此不会打断已经接入过的业务
+  后端重连；但**冷启动**时 fp 不可达就是接不进来。
+- **控制台把 IM 接入关掉时，已经在线的连接不会被踢**，但新的握手一律被
+  拒——与应用被停用（`status=disabled`）的语义一致。重新打开即恢复。
+
 ### Server（业务后端）
 
 ```go
@@ -360,6 +384,25 @@ results, err := srv.PushMany(ctx, []fpim.Subject{fpim.User(id1), fpim.Guest(id2)
 sessions, err := srv.Sessions(ctx, fpim.User(userID))
 err = srv.Kick(ctx, fpim.User(userID)) // 不传 connID 表示踢掉该用户全部连接
 ```
+
+**`NewServer` 不会因为凭据不对而报错。** 它只做参数校验，gRPC 是懒连接，
+真正的接入校验发生在后台那条流上。所以凭据错、IM 接入没开、fp 不可达这
+三种情况的表现都一样：`NewServer` 正常返回，`srv.StreamHealthy()` 一直是
+`false`，`Push`/`Kick`/`Sessions` 全部返回 `fpim.ErrUnavailable`，日志里
+反复出现 `fpim: 流断开`。**区别在那条日志带的 gRPC 状态码上**：
+
+| 状态码 | 含义 | 怎么办 |
+|---|---|---|
+| `FailedPrecondition`「该应用未在 fp 控制台启用 IM 接入」 | 凭据是对的，开关没开 | 去控制台打开 IM 接入，不用查 secret |
+| `Unauthenticated`「应用凭据无效」 | `AppID`/`AppSecret` 不对，或 fp 不可达 | 先核对凭据，再看 fp 是否健康 |
+
+这两种刻意分开：能拿到 `FailedPrecondition` 的调用方已经证明自己持有那份
+`AppSecret`，告诉它真实原因不泄露任何东西；压成"凭据无效"只会让人去查一
+个根本没错的 secret。反过来 `Unauthenticated` 刻意不区分"应用不存在"和
+"secret 不对"——那个区别会泄露某个 appId 是否存在。
+
+上线时把 `StreamHealthy()` 接到健康检查里：这是唯一能把上面这些情况和
+"一切正常但暂时没消息"区分开的信号。
 
 `Subject` 用 `fpim.User(id)` / `fpim.Guest(id)` / `fpim.Biz(id)` 构造，
 分别对应登录用户、访客、业务方自有认证体系的用户，三者在网关侧的存储
@@ -387,7 +430,7 @@ err = c.Send(ctx, []byte(`{"hi":1}`))
 | 关闭码 | 含义 | 是否自动重连 |
 |---|---|---|
 | `CloseAuthFailed`（4001） | token 无效/过期 | 否，需重新登录换凭据 |
-| `ClosePolicyRejected`（4002） | 被应用的连接策略拒绝 | 否 |
+| `ClosePolicyRejected`（4002） | 被应用的连接策略拒绝——最常见的是控制台没打开 IM 接入，其次是超过 `ConnLimit`、访客被禁 | 否 |
 | `CloseKicked`（4003） | 被顶替或业务方主动踢下线 | 否 |
 | `CloseUnavailable`（4004） | 网关依赖的后端暂时不可用 | 是，退避重连 |
 | `CloseIdleTimeout`（4005） | 空闲太久被网关清理，一切正常 | 是，立即重连不退避 |
@@ -406,6 +449,10 @@ err = c.Send(ctx, []byte(`{"hi":1}`))
   看到并管理这个应用的权限点。
 - 需要连接 fp-im 时，`ServerConfig`/`ClientConfig` 同样把 `Insecure` 保持
   `false`。
+- 用到 fp-im 的应用，先在控制台打开 IM 接入，并确认 fp-im 到 fp 的网络
+  可达——fp-im 的每一次凭据校验都要回源 fp（成功结果缓存 5 分钟）。
+- 把 `srv.StreamHealthy()` 接进业务后端的健康检查；它是"接入流真的通了"
+  的唯一信号，`NewServer` 返回成功并不代表接进去了。
 - 需要"fp 挂了也不完全瘫痪"的降级能力时，评估是否开启
   `AllowStaleOnOutage`，并明确 `MaxStaleness` 的业务含义（延用的是登录时
   验证过的旧身份，不是重新鉴权）。
@@ -424,6 +471,12 @@ fp 短暂不可达且本地没有可用缓存。这是有意设计——见 [错
 **`Load()` 拿到的配置/身份指针能不能改？**
 不能。它们被所有 goroutine 共享，下一次热更新会整体替换指针而不是就地
 改字段，就地修改会产生竞态。需要独立副本自己深拷贝。
+
+**业务后端连 fp-im 一直不通，`NewServer` 却没报错？**
+它是懒连接，不通只体现在 `StreamHealthy()` 为 `false` 和日志里的
+`fpim: 流断开`。先看那条日志的状态码：`FailedPrecondition` 是控制台没打开
+IM 接入（凭据没问题），`Unauthenticated` 才是凭据不对或 fp 不可达。见
+[Server（业务后端）](#server业务后端)。
 
 **一个进程要建几个 `Client`？**
 一个。`Client`/`Auth`/`Authz` 都是并发安全的，多个 `Client` 只会浪费连接
