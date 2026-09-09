@@ -118,6 +118,11 @@ func (s *Source) OnReload(fn func()) {
 	s.mu.Unlock()
 }
 
+// Load 满足 auth.AppConfigSource。本地文件已经全量在内存里，没有"按需
+// 加载"这回事——这个实现存在只是为了让本包在接口拆分后继续编译，它会
+// 随整个包一起被 fpappcfg 取代。
+func (s *Source) Load(context.Context, string) error { return nil }
+
 func (s *Source) Get(app string) (model.AppConfig, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

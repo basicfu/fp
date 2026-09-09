@@ -214,6 +214,7 @@ func (p *Pub) Publish(_ context.Context, node string, env bus.Envelope) (int64, 
 // Apps 是 auth.AppConfigSource 的假实现。
 type Apps map[string]model.AppConfig
 
+func (a Apps) Load(context.Context, string) error     { return nil }
 func (a Apps) Get(app string) (model.AppConfig, bool) { c, ok := a[app]; return c, ok }
 func (a Apps) Apps() []string {
 	var out []string

@@ -12,6 +12,7 @@ import (
 
 type apps map[string]model.AppConfig
 
+func (a apps) Load(context.Context, string) error     { return nil }
 func (a apps) Get(app string) (model.AppConfig, bool) { c, ok := a[app]; return c, ok }
 func (a apps) Apps() []string                         { return nil }
 

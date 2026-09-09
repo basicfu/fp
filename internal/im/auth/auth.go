@@ -32,8 +32,18 @@ type Authenticator interface {
 	Verify(ctx context.Context, req VerifyRequest) (model.Subject, error)
 }
 
-// AppConfigSource 提供 app 级配置。Get 必须是纯内存读：握手与 Push 的热路径都会调它。
+// AppConfigSource 提供 app 级配置。
+//
+// 拆成 Load 与 Get 两个方法，是因为配置的来源从本地文件变成了 fp：拉取有
+// 网络 I/O，而 Get 在握手与 Push 的热路径上被调用，必须是纯内存读。
+//
+// 调用约定是"冷路径先 Load，之后热路径随便 Get"——某个 app 的握手一定先于
+// 它的任何消息投递，所以这个顺序天然成立。
 type AppConfigSource interface {
+	// Load 确保 app 的配置已在本地缓存里。可能有网络 I/O。
+	Load(ctx context.Context, app string) error
+	// Get 是纯内存读。
 	Get(app string) (model.AppConfig, bool)
+	// Apps 返回已缓存的 app 列表。
 	Apps() []string
 }
