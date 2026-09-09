@@ -34,8 +34,39 @@ type applicationDTO struct {
 	// 空串表示不设默认角色。
 	DefaultRoleKey string           `json:"defaultRoleKey"`
 	Session        sessionPolicyDTO `json:"session"`
+	IM             imConfigDTO      `json:"im"`
 	CreatedAt      int64            `json:"createdAt"`
 	UpdatedAt      int64            `json:"updatedAt"`
+}
+
+// imConfigDTO 是应用的 IM 接入配置。
+//
+// bizAuth 用指针：null 表示"这个应用不支持业务方令牌"，与 domain 侧的
+// nil 指针、以及库里的 SQL NULL 是同一个语义，中间不做任何转译。
+type imConfigDTO struct {
+	Enabled     bool          `json:"enabled"`
+	ConnPolicy  string        `json:"connPolicy"`
+	ConnLimit   int32         `json:"connLimit"`
+	AllowGuest  bool          `json:"allowGuest"`
+	GuestIPRate int32         `json:"guestIpRate"`
+	BizAuth     *imBizAuthDTO `json:"bizAuth"`
+}
+
+type imBizAuthDTO struct {
+	VerifyURL string `json:"verifyUrl"`
+	TimeoutMs int32  `json:"timeoutMs"`
+	CacheSize int32  `json:"cacheSize"`
+}
+
+func toIMConfigDTO(c domain.IMConfig) imConfigDTO {
+	out := imConfigDTO{
+		Enabled: c.Enabled, ConnPolicy: c.ConnPolicy, ConnLimit: c.ConnLimit,
+		AllowGuest: c.AllowGuest, GuestIPRate: c.GuestIPRate,
+	}
+	if b := c.BizAuth; b != nil {
+		out.BizAuth = &imBizAuthDTO{VerifyURL: b.VerifyURL, TimeoutMs: b.TimeoutMs, CacheSize: b.CacheSize}
+	}
+	return out
 }
 
 func toApplicationDTO(a domain.Application) applicationDTO {
@@ -50,8 +81,40 @@ func toApplicationDTO(a domain.Application) applicationDTO {
 			ExtendIntervalSeconds:    a.Session.ExtendIntervalSeconds,
 			TokenCacheTTLSeconds:     a.Session.TokenCacheTTLSeconds,
 		},
+		IM:        toIMConfigDTO(a.IM),
 		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
+}
+
+// updateIM 全量替换应用的 IM 接入配置。
+//
+// 用 PUT 而不是 PATCH：这是整块替换（关掉 bizAuth 就是把它设成 null），
+// 与 /session 同一语义。保存时就校验，不留到 fp-im 解析时才报——那时报错
+// 的是错的人：运维在控制台点了保存、以为成功了，故障却在网关那边冒出来。
+func (h *applicationHandler) updateIM(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req imConfigDTO
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	cfg := domain.IMConfig{
+		Enabled: req.Enabled, ConnPolicy: req.ConnPolicy, ConnLimit: req.ConnLimit,
+		AllowGuest: req.AllowGuest, GuestIPRate: req.GuestIPRate,
+	}
+	if b := req.BizAuth; b != nil {
+		cfg.BizAuth = &domain.IMBizAuth{VerifyURL: b.VerifyURL, TimeoutMs: b.TimeoutMs, CacheSize: b.CacheSize}
+	}
+	app, err := h.svc.SetIMConfig(r.Context(), id, cfg)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
 }
 
 func (h *applicationHandler) list(w http.ResponseWriter, r *http.Request) {

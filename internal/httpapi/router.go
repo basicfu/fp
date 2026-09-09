@@ -23,6 +23,8 @@ type Deps struct {
 	Registry *connector.Registry
 	Authz    *service.AuthzService
 	Configs  *service.ConfigService
+	// IMCreds 管理 fp-im 网关的凭据。为 nil 时那两条路由不挂载。
+	IMCreds *service.IMCredentialService
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -57,6 +59,7 @@ func NewRouter(d Deps) http.Handler {
 	connH := &connectorHandler{registry: d.Registry}
 	authzH := &authzHandler{svc: d.Authz, apps: d.Apps}
 	cfgH := &configHandler{svc: d.Configs}
+	imCredH := &imCredentialHandler{svc: d.IMCreds}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -97,6 +100,9 @@ func NewRouter(d Deps) http.Handler {
 			// 一两项的"局部更新"必然 400。用 PATCH 命名等于承诺了一个做不到的
 			// 语义。趁还没有任何消费方，先把动词改对。
 			r.Put("/applications/{id}/session", appH.updateSession)
+			// PUT 而不是 PATCH：这是 IM 接入配置的**全量替换**（关掉 bizAuth
+			// 就是把它设成 null），与上面 /session 同一语义。
+			r.Put("/applications/{id}/im", appH.updateIM)
 			r.Get("/applications/{id}/connectors", appH.listConnectors)
 			r.Put("/applications/{id}/connectors/{type}", appH.putConnector)
 
@@ -112,6 +118,13 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/applications/{id}/config/versions", cfgH.listVersions)
 			r.Get("/applications/{id}/config/versions/{seq}", cfgH.getVersion)
 			r.Post("/applications/{id}/config/rollback", cfgH.rollback)
+
+			// IM 网关凭据。全库只有一份，所以不带 id。IMCreds 为 nil 时
+			// （只测别的东西的装配）整组不挂载，而不是挂上去再空指针。
+			if d.IMCreds != nil {
+				r.Get("/im-credential", imCredH.status)
+				r.Post("/im-credential/rotate", imCredH.rotate)
+			}
 
 			r.Get("/users", userH.list)
 			r.Get("/users/{id}", userH.get)

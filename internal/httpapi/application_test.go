@@ -321,3 +321,77 @@ func TestBadUUIDReturns400(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
+
+// TestPutIMConfigValidatesBeforeSaving：保存时就校验，别留到 fp-im 解析时
+// 才报——那时报错的是错的人：运维在控制台点了保存、以为成功了，故障却在
+// 网关那边冒出来。
+func TestPutIMConfigValidatesBeforeSaving(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	appID := createAppID(t, h, token)
+
+	body := `{"enabled":true,"connPolicy":"replace","connLimit":5,"allowGuest":false,` +
+		`"guestIpRate":20,"bizAuth":{"verifyUrl":"http://insecure/v","timeoutMs":2000,"cacheSize":10}}`
+	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+appID+"/im", body)
+	if rec.Code != 400 {
+		t.Fatalf("明文 http 的 verifyUrl 必须 400，got %d：%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPutIMConfigRejectsUnknownField：与仓库既有纪律一致，DTO 字段名拼错
+// 是 400 而不是静默丢弃。
+func TestPutIMConfigRejectsUnknownField(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	appID := createAppID(t, h, token)
+	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+appID+"/im",
+		`{"enabled":true,"connPolicyy":"replace"}`)
+	if rec.Code != 400 {
+		t.Fatalf("未知字段必须 400，got %d：%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPutIMConfigRoundTrip：保存后应用 DTO 里能读回来，bizAuth 置 null
+// 表示不支持业务方令牌。
+func TestPutIMConfigRoundTrip(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	appID := createAppID(t, h, token)
+
+	body := `{"enabled":true,"connPolicy":"limit","connLimit":3,"allowGuest":true,` +
+		`"guestIpRate":30,"bizAuth":{"verifyUrl":"https://biz/v","timeoutMs":1500,"cacheSize":100}}`
+	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+appID+"/im", body)
+	if rec.Code != 200 {
+		t.Fatalf("保存失败：%d %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"enabled":true`, `"connPolicy":"limit"`, `"connLimit":3`,
+		`"guestIpRate":30`, `"verifyUrl":"https://biz/v"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("响应里缺 %s：%s", want, rec.Body.String())
+		}
+	}
+
+	// 整组置空。
+	rec = do(t, h, token, http.MethodPut, "/admin/api/applications/"+appID+"/im",
+		`{"enabled":true,"connPolicy":"replace","connLimit":5,"allowGuest":false,"guestIpRate":20,"bizAuth":null}`)
+	if rec.Code != 200 {
+		t.Fatalf("清空 bizAuth 失败：%d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"bizAuth":null`) {
+		t.Fatalf("bizAuth 应为 null：%s", rec.Body.String())
+	}
+}
+
+// createAppID 建一个应用并返回它的主键 id，供 IM 配置那几条测试复用。
+func createAppID(t *testing.T, h http.Handler, token string) string {
+	t.Helper()
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications",
+		`{"name":"im-`+t.Name()+`","slug":"im-`+strings.ToLower(t.Name())+`"}`)
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+	if created.Application.ID == "" {
+		t.Fatalf("建应用失败：%d %s", rec.Code, rec.Body.String())
+	}
+	return created.Application.ID
+}

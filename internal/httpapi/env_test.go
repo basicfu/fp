@@ -45,6 +45,7 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 		Logs:     logs,
 		Registry: reg,
 		Configs:  configs,
+		IMCreds:  service.NewIMCredentialService(pool),
 	}
 
 	ctx := context.Background()
