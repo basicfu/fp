@@ -18,6 +18,9 @@ const configBufferSize = 8
 
 // ConfigEvent 是推给一条 Watch 流的配置事件。
 type ConfigEvent struct {
+	// IMAppID 非空表示这是一条**应用 IM 接入配置变更**，值是该应用对外的
+	// app_id；此时 Type 与 Seq 无意义。只有 IM 网关的通配订阅者会收到。
+	IMAppID string
 	// Type 是变了的分区。**空串表示"分区未知，请重拉全部绑定"**，
 	// 来源是 store.ConfigSignal.Gap（Redis 订阅重建，漏读且不知道漏了哪些）。
 	Type string
@@ -45,7 +48,10 @@ type ConfigHub struct {
 
 type configSub struct {
 	appID uuid.UUID
-	ch    chan ConfigEvent
+	// all 为 true 时不按 app 过滤，且**只**收 IM 那一类事件：IM 网关不读
+	// 配置中心（requireNotIM 拦着 GetConfig），推给它也没有意义。
+	all bool
+	ch  chan ConfigEvent
 }
 
 func newConfigHub() *ConfigHub {
@@ -103,8 +109,18 @@ func (h *ConfigHub) run(ctx context.Context, signals <-chan store.ConfigSignal) 
 	}
 }
 
-// Subscribe 登记一个订阅者，返回它的事件 channel 与摘除函数。
+// Subscribe 登记一个只收指定应用的配置中心变更的订阅者。
 func (h *ConfigHub) Subscribe(appID uuid.UUID) (<-chan ConfigEvent, func()) {
+	return h.subscribeWith(configSub{appID: appID})
+}
+
+// SubscribeAll 登记一个 IM 网关订阅者：只收 IM 接入配置变更（以及 Gap），
+// 不按 app 过滤，也不收配置中心的分区变更。
+func (h *ConfigHub) SubscribeAll() (<-chan ConfigEvent, func()) {
+	return h.subscribeWith(configSub{all: true})
+}
+
+func (h *ConfigHub) subscribeWith(proto configSub) (<-chan ConfigEvent, func()) {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -114,7 +130,8 @@ func (h *ConfigHub) Subscribe(appID uuid.UUID) (<-chan ConfigEvent, func()) {
 	}
 	h.next++
 	id := h.next
-	sub := &configSub{appID: appID, ch: make(chan ConfigEvent, configBufferSize)}
+	sub := &proto
+	sub.ch = make(chan ConfigEvent, configBufferSize)
 	h.subs[id] = sub
 	h.mu.Unlock()
 
@@ -154,18 +171,35 @@ func (h *ConfigHub) Close() {
 // 全程持写锁：摘除要删 map、关 channel，与发送必须互斥，否则会出现
 // "向已关闭的 channel 发送"。配置变更是极低频事件，写锁的代价可以忽略。
 func (h *ConfigHub) fanout(sig store.ConfigSignal) {
+	isIM := !sig.Gap && sig.Kind == store.ConfigKindIM
 	ev := ConfigEvent{Type: sig.Type, Seq: sig.Seq}
+	if isIM {
+		ev = ConfigEvent{IMAppID: sig.ExternalAppID}
+	}
 	if sig.Gap {
 		// 订阅重建，漏读且不知道漏了哪些——空串让 SDK 重拉全部绑定。
+		// Gap 对两类订阅者都成立：IM 网关收到一条空的 IM 事件同样会重拉
+		// 它缓存的全部应用配置。
 		ev = ConfigEvent{}
 	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for id, sub := range h.subs {
-		// Gap 发给所有人；普通信号只发给它自己那个应用。
-		if !sig.Gap && sub.appID != sig.AppID {
-			continue
+		// 三条分派规则：
+		//   Gap        → 发给所有人（两类订阅者都要重拉）
+		//   IM 变更    → 只发给通配订阅者（业务方 SDK 不认识也不需要）
+		//   配置中心变更 → 只发给它自己那个应用的订阅者（IM 网关不读配置中心）
+		switch {
+		case sig.Gap:
+		case isIM:
+			if !sub.all {
+				continue
+			}
+		default:
+			if sub.all || sub.appID != sig.AppID {
+				continue
+			}
 		}
 		select {
 		case sub.ch <- ev:

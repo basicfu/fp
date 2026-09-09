@@ -65,6 +65,9 @@ func run() error {
 	sessionStore := store.NewSessionStore(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
 	epochStore := store.NewEpochStore(rdb)
+	// configPub 要在 appSvc 之前构造：应用的 IM 接入配置变更也走这条广播
+	// （见 service.WithIMConfigPublisher）。
+	configPub := store.NewConfigPublisher(rdb)
 
 	userSvc := service.NewUserService(pool)
 	codeSvc := notify.NewCodeService(rdb)
@@ -77,7 +80,7 @@ func run() error {
 		return err
 	}
 
-	appSvc := service.NewApplicationService(pool, registry)
+	appSvc := service.NewApplicationService(pool, registry, service.WithIMConfigPublisher(configPub))
 
 	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore)
 
@@ -91,7 +94,6 @@ func run() error {
 
 	imCredSvc := service.NewIMCredentialService(pool)
 
-	configPub := store.NewConfigPublisher(rdb)
 	configSvc := service.NewConfigService(pool, configPub)
 
 	// 短信供应商：四项阿里云凭据齐全就用真实供应商——不管是不是生产环境，

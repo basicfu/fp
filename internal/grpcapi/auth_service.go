@@ -251,7 +251,13 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 		events, unsubscribe = s.hub.Subscribe(app.ID)
 	}
 	defer unsubscribe()
-	configEvents, unsubscribeConfig := s.configHub.Subscribe(app.ID)
+	var configEvents <-chan ConfigEvent
+	var unsubscribeConfig func()
+	if callerTypeFrom(ctx) == CallerTypeIM {
+		configEvents, unsubscribeConfig = s.configHub.SubscribeAll()
+	} else {
+		configEvents, unsubscribeConfig = s.configHub.Subscribe(app.ID)
+	}
 	defer unsubscribeConfig()
 
 	if err := stream.Send(&fpv1.WatchResponse{
@@ -291,6 +297,18 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 				// 缓冲满被摘掉，或 hub 关闭。都是正常结束——SDK 重连后
 				// 会在收到 ready 时重拉配置，不会漏。
 				return nil
+			}
+			// IM 网关那条流收到的是 AppIMConfigChanged：它不读配置中心，
+			// 收到 ConfigChanged 也无从处理。
+			if ev.IMAppID != "" {
+				if err := stream.Send(&fpv1.WatchResponse{
+					Event: &fpv1.WatchResponse_AppImConfigChanged{
+						AppImConfigChanged: &fpv1.AppIMConfigChanged{AppId: ev.IMAppID},
+					},
+				}); err != nil {
+					return err
+				}
+				continue
 			}
 			if err := stream.Send(&fpv1.WatchResponse{
 				Event: &fpv1.WatchResponse_ConfigChanged{

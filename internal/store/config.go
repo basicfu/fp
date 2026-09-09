@@ -37,13 +37,37 @@ type ConfigSignal struct {
 	// 挡在 wire 之外。
 	Gap bool `json:"-"`
 
+	// Kind 区分配置中心的分区变更与应用 IM 接入配置的变更。
+	//
+	// 空串（老消息、以及配置中心自己发的）按 ConfigKindCenter 处理，
+	// 所以这个字段是向后兼容的：升级期间新旧实例混跑，旧实例发的消息没有
+	// 这个字段，新实例照样当成配置中心变更处理。
+	Kind string `json:"kind,omitempty"`
+
 	AppID uuid.UUID `json:"appId"`
+	// ExternalAppID 是应用对外的 app_id（不是主键 uuid）。只在 Kind 为
+	// ConfigKindIM 时有值。
+	//
+	// 为什么 IM 这一路要多带一个标识：配置中心的订阅者是"某个应用的一条
+	// Watch 流"，扇出时按 AppID 匹配得到订阅者自己就知道是谁；而 IM 网关
+	// 的 Watch 流是**通配**的，一条流服务所有应用，事件里不带对外 app_id
+	// 的话它无从知道该重拉哪个应用的配置。
+	ExternalAppID string `json:"externalAppId,omitempty"`
 	// Type 是分区，取值见 domain.ConfigType*。
 	Type string `json:"type"`
 	// Seq 是新版本号，仅用于日志与排障。SDK 收到信号后拉的是"当前版本"
 	// 而不是"第 Seq 版"——这让丢失一条信号的后果被下一条信号自动修复。
 	Seq int64 `json:"seq"`
 }
+
+// 配置变更信号的种类。
+const (
+	// ConfigKindCenter 是配置中心的分区变更。空串也按它处理——老消息没有
+	// Kind 字段，升级期间新旧实例混跑必须互认。
+	ConfigKindCenter = ""
+	// ConfigKindIM 是应用 IM 接入配置的变更，只推给 IM 网关的通配订阅者。
+	ConfigKindIM = "im"
+)
 
 // ConfigPublisher 广播配置变更。
 type ConfigPublisher struct {
@@ -66,6 +90,24 @@ func (p *ConfigPublisher) Publish(ctx context.Context, appID uuid.UUID, typ stri
 	}
 	if err := p.rdb.Publish(ctx, configChannel, raw).Err(); err != nil {
 		return fmt.Errorf("store: 广播配置变更事件: %w", err)
+	}
+	return nil
+}
+
+// PublishIM 广播一次应用 IM 接入配置的变更。
+//
+// 与 Publish 共用同一条 Redis 频道和同一套订阅重建/Gap 处理：那套推理
+// （订阅重建时会漏读且不知道漏了哪些，只能让订阅方全量重拉）对两者完全
+// 一样，另开一条频道等于把它抄第二遍。
+//
+// 没有订阅者时不算错误，理由同 Publish：值已经落库，推送只是加速手段。
+func (p *ConfigPublisher) PublishIM(ctx context.Context, appID uuid.UUID, externalAppID string) error {
+	raw, err := json.Marshal(ConfigSignal{Kind: ConfigKindIM, AppID: appID, ExternalAppID: externalAppID})
+	if err != nil {
+		return fmt.Errorf("store: 序列化 IM 配置变更事件: %w", err)
+	}
+	if err := p.rdb.Publish(ctx, configChannel, raw).Err(); err != nil {
+		return fmt.Errorf("store: 广播 IM 配置变更事件: %w", err)
 	}
 	return nil
 }

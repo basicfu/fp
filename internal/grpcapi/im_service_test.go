@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -142,5 +143,84 @@ func TestVerifyAppCredentialAcceptsValidSecret(t *testing.T) {
 		e.imAuthed(context.Background(), e.appID),
 		&fpv1.VerifyAppCredentialRequest{Secret: e.secret}); err != nil {
 		t.Fatalf("合法凭据被拒：%v", err)
+	}
+}
+
+// TestIMConfigChangePushesToIMWatcher 钉住热更新链路：控制台改完 IM 配置，
+// fp-im 的 Watch 流上要收到通知，而不是等它自己轮询。
+//
+// 这条链路替掉了 fp-im 早期那套"每 10 秒看一次 apps 文件 mtime"。
+func TestIMConfigChangePushesToIMWatcher(t *testing.T) {
+	e := newGRPCEnv(t)
+	enableIM(t, e, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stream, err := e.client.Watch(e.imAuthed(ctx, e.appID))
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if ev, err := stream.Recv(); err != nil || ev.GetReady() == nil {
+		t.Fatalf("首帧应当是 ready，got %+v err=%v", ev, err)
+	}
+
+	cfg := domain.DefaultIMConfig()
+	cfg.Enabled = true
+	cfg.GuestIPRate = 99
+	if _, err := e.apps.SetIMConfig(context.Background(), e.app.ID, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	ev, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	changed := ev.GetAppImConfigChanged()
+	if changed == nil {
+		t.Fatalf("收到的事件不是 AppIMConfigChanged：%+v", ev)
+	}
+	if changed.GetAppId() != e.appID {
+		t.Fatalf("app_id = %q, want %q", changed.GetAppId(), e.appID)
+	}
+}
+
+// TestIMConfigChangeNotPushedToNormalWatcher：普通业务方 SDK 不该收到这类
+// 事件——它们不认识这个 oneof 分支，也不该被无关的通知打扰。
+func TestIMConfigChangeNotPushedToNormalWatcher(t *testing.T) {
+	e := newGRPCEnv(t)
+	enableIM(t, e, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stream, err := e.client.Watch(e.authed(ctx))
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if ev, err := stream.Recv(); err != nil || ev.GetReady() == nil {
+		t.Fatalf("首帧应当是 ready，got %+v err=%v", ev, err)
+	}
+
+	cfg := domain.DefaultIMConfig()
+	cfg.Enabled = true
+	cfg.GuestIPRate = 88
+	if _, err := e.apps.SetIMConfig(context.Background(), e.app.ID, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// 用一条随后发生的、普通订阅者**确实**该收到的事件当路标：如果 IM 事件
+	// 被错误地推给了普通流，它会排在这条前面先被收到。光靠"等一会儿没东西"
+	// 是会撒谎的假通过——机器慢一点就等不到本该来的那条。
+	if _, err := e.configs.Save(context.Background(), e.app.ID, "DEFAULT", "a: 1\n", true); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if ev.GetAppImConfigChanged() != nil {
+		t.Fatalf("普通订阅者收到了 IM 配置变更：%+v", ev)
+	}
+	if ev.GetConfigChanged() == nil {
+		t.Fatalf("期望收到配置中心变更，got %+v", ev)
 	}
 }

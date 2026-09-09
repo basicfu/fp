@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 
 	"github.com/google/uuid"
@@ -47,6 +48,8 @@ type ConnectorSchemas interface {
 type ApplicationService struct {
 	pool    *pgxpool.Pool
 	schemas ConnectorSchemas
+	// configPub 为 nil 时 SetIMConfig 只写库不推送，见 WithIMConfigPublisher。
+	configPub IMConfigPublisher
 }
 
 // NewApplicationService 构造 ApplicationService。
@@ -54,8 +57,33 @@ type ApplicationService struct {
 // schemas 为 nil 时 SetConnector 会直接报错而不是跳过校验——失败关闭。
 // 让 nil 等于"不校验"的话，任何一个忘了注入的调用点都会静默地失去全部
 // 配置校验，而没有任何测试会变红。
-func NewApplicationService(pool *pgxpool.Pool, schemas ConnectorSchemas) *ApplicationService {
-	return &ApplicationService{pool: pool, schemas: schemas}
+// ApplicationOption 是 NewApplicationService 的可选依赖。
+//
+// 用变参选项而不是往构造函数上加形参：configPub 只被 SetIMConfig 这一条
+// 路径用到，而构造点有十几个（绝大多数是压根不碰 IM 的测试）。改签名会让
+// 它们全部跟着改一遍，读 diff 的人还得逐个确认"这个 nil 是有意的吗"。
+type ApplicationOption func(*ApplicationService)
+
+// WithIMConfigPublisher 注入 IM 接入配置变更的广播器。
+//
+// 不注入时 SetIMConfig 照常写库、只是不推送，fp-im 那边的缓存要等它下次
+// 重启才更新。生产装配（cmd/fp）必须注入。
+func WithIMConfigPublisher(pub IMConfigPublisher) ApplicationOption {
+	return func(s *ApplicationService) { s.configPub = pub }
+}
+
+// IMConfigPublisher 是 ApplicationService 对广播器的全部依赖。
+// *store.ConfigPublisher 满足它。
+type IMConfigPublisher interface {
+	PublishIM(ctx context.Context, appID uuid.UUID, externalAppID string) error
+}
+
+func NewApplicationService(pool *pgxpool.Pool, schemas ConnectorSchemas, opts ...ApplicationOption) *ApplicationService {
+	s := &ApplicationService{pool: pool, schemas: schemas}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Create 新建应用，返回应用与仅此一次可见的明文 appSecret。
@@ -527,6 +555,14 @@ func (s *ApplicationService) SetIMConfig(ctx context.Context, id uuid.UUID, cfg 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新 IM 配置: %w", err)
+	}
+	// 广播失败只记日志，不影响返回：配置已经落库，那是权威事实。漏推一条
+	// 通知的后果是 fp-im 的缓存最多陈旧到它下次重启，而让整个保存失败会让
+	// 人以为没存上、反复重试——那才是更糟的结果。
+	if s.configPub != nil {
+		if err := s.configPub.PublishIM(ctx, app.ID, app.AppID); err != nil {
+			slog.Error("service: 广播 IM 配置变更失败", "appId", app.AppID, "err", err)
+		}
 	}
 	return app, nil
 }

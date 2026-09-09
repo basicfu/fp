@@ -111,11 +111,12 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
 		t.Fatalf("注册 sms_code: %v", err)
 	}
-	apps := service.NewApplicationService(pool, reg)
+	// configPub 提前到这里构造：apps 也要用它广播 IM 接入配置变更。
+	configPub := store.NewConfigPublisher(rdb)
+	apps := service.NewApplicationService(pool, reg, service.WithIMConfigPublisher(configPub))
 	// configPub 同时喂给 configs（发布配置变更）和 configHub（订阅配置变更）
 	// ——两个方向共用同一个 *store.ConfigPublisher，与上面 revokePub 的
 	// 装配方式、以及生产环境 cmd/fp/main.go 的装配都一致。
-	configPub := store.NewConfigPublisher(rdb)
 	configs := service.NewConfigService(pool, configPub)
 	imCreds := service.NewIMCredentialService(pool)
 
