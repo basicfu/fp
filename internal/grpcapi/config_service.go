@@ -25,6 +25,9 @@ func newConfigServer(cfgs *service.ConfigService, apps AppLookup) *configServer 
 // 与 Watch 一样走 GetActiveByAppID：停用的应用不该还能拉到配置，
 // 否则 status 又变成一个没人读的死开关（Watch 那里踩过这个）。
 func (s *configServer) GetConfig(ctx context.Context, req *fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
 	appIDStr, err := callerAppID(ctx)
 	if err != nil {
 		return nil, err

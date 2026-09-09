@@ -66,7 +66,46 @@ func callerAppID(ctx context.Context) (string, error) {
 	return appID, nil
 }
 
+// requireNotIM 拒绝 fp-im 网关调用面向业务应用的接口。
+//
+// 双向隔离而不是提权：type=im 能做的事是普通应用的一个**不同**子集，不是
+// 超集。最关键的是 Login/SendLoginCode——能签发会话意味着一份泄露的 IM
+// 凭据可以对任意应用冒充任意用户。ReportPermissions/GetPolicy 与配置读取
+// 同理：那些是业务方自己的东西，网关没有任何理由碰。
+func requireNotIM(ctx context.Context) error {
+	if callerTypeFrom(ctx) == CallerTypeIM {
+		return status.Error(codes.PermissionDenied, "IM 网关凭据不能调用该接口")
+	}
+	return nil
+}
+
+// requireIMEnabled 在调用方是 fp-im 网关时，额外要求该应用打开了 im_enabled。
+//
+// 这是"关掉开关后不再允许新连接"的**权威**判定点。fp-im 自己也会在握手前
+// 查一次，但它读的是自己的缓存，而缓存靠推送刷新、推送会漏（见 WatchPurge
+// 的注释）。只留 fp-im 那一次的话，漏一次推送这个开关就悄悄失效。
+//
+// 只在 im 调用方身上多读一行：普通调用方直接返回，一次额外查询都不付。
+// 给 im 调用方多付这一次是可接受的——fp-im 侧的 ValidateToken 结果由 SDK
+// 按 cache_ttl_ms 缓存，这条路径远没有它看起来那么热。
+func (s *authServer) requireIMEnabled(ctx context.Context, appID string) error {
+	if callerTypeFrom(ctx) != CallerTypeIM {
+		return nil
+	}
+	app, err := s.apps.GetActiveByAppID(ctx, appID)
+	if err != nil {
+		return StatusFrom(err)
+	}
+	if !app.IM.Enabled {
+		return status.Error(codes.FailedPrecondition, "该应用未启用 IM 接入")
+	}
+	return nil
+}
+
 func (s *authServer) SendLoginCode(ctx context.Context, req *fpv1.SendLoginCodeRequest) (*fpv1.SendLoginCodeResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
 	appID, err := callerAppID(ctx)
 	if err != nil {
 		return nil, err
@@ -78,6 +117,9 @@ func (s *authServer) SendLoginCode(ctx context.Context, req *fpv1.SendLoginCodeR
 }
 
 func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
 	appID, err := callerAppID(ctx)
 	if err != nil {
 		return nil, err
@@ -101,6 +143,9 @@ func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.L
 }
 
 func (s *authServer) Logout(ctx context.Context, req *fpv1.LogoutRequest) (*fpv1.LogoutResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
 	appID, err := callerAppID(ctx)
 	if err != nil {
 		return nil, err
@@ -114,6 +159,9 @@ func (s *authServer) Logout(ctx context.Context, req *fpv1.LogoutRequest) (*fpv1
 func (s *authServer) ValidateToken(ctx context.Context, req *fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
 	appID, err := callerAppID(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.requireIMEnabled(ctx, appID); err != nil {
 		return nil, err
 	}
 	res, err := s.auth.ValidateToken(ctx, appID, req.GetToken())
@@ -268,6 +316,9 @@ func revokeEvent(ev domain.RevokeEvent) *fpv1.RevokeEvent {
 //
 // 快照里没有的权限点**不会被删除**——处理规则见 service.ReportPermissions。
 func (s *authServer) ReportPermissions(ctx context.Context, req *fpv1.ReportPermissionsRequest) (*fpv1.ReportPermissionsResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
 	if err := s.requireAuthz(); err != nil {
 		return nil, err
 	}
@@ -289,6 +340,9 @@ func (s *authServer) ReportPermissions(ctx context.Context, req *fpv1.ReportPerm
 
 // GetPolicy 返回本应用的完整策略快照。
 func (s *authServer) GetPolicy(ctx context.Context, _ *fpv1.GetPolicyRequest) (*fpv1.GetPolicyResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
 	if err := s.requireAuthz(); err != nil {
 		return nil, err
 	}
@@ -324,6 +378,11 @@ func (s *authServer) callerApp(ctx context.Context) (*domain.Application, error)
 	app, err := s.apps.GetActiveByAppID(ctx, appIDStr)
 	if err != nil {
 		return nil, StatusFrom(err)
+	}
+	// im 调用方额外要求打开了 IM 接入。这里已经拿到了 app，不必像
+	// requireIMEnabled 那样再读一次。
+	if callerTypeFrom(ctx) == CallerTypeIM && !app.IM.Enabled {
+		return nil, status.Error(codes.FailedPrecondition, "该应用未启用 IM 接入")
 	}
 	return app, nil
 }

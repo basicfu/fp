@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/basicfu/fp/internal/domain"
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
 
@@ -299,5 +300,94 @@ func TestWatchRejectsDisabledApplication(t *testing.T) {
 	// 断言写在 Watch 的返回值上会永远通过——又是一条"绿着但什么都没测"的测试。
 	if _, err := stream.Recv(); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("停用应用后 Watch 首次 Recv 返回 %v，期望 PermissionDenied", status.Code(err))
+	}
+}
+
+// TestIMCallerCannotMintSessions 是 IM 凭据泄露时的爆炸半径边界。
+//
+// type=im 不是普通应用的超集。如果它能 Login，一份泄露的 IM 凭据就等于能对
+// **任意**应用冒充**任意**用户——那比"读到某个应用的 IM 配置"严重一个量级。
+// 隔离之后 IM 凭据的能力被压到"只能核实，不能签发"。
+func TestIMCallerCannotMintSessions(t *testing.T) {
+	env := newGRPCEnv(t)
+	ctx := env.imAuthed(context.Background(), env.appID)
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"Login", func() error {
+			_, err := env.client.Login(ctx, &fpv1.LoginRequest{ConnectorType: "password"})
+			return err
+		}},
+		{"SendLoginCode", func() error {
+			_, err := env.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: "13800000000"})
+			return err
+		}},
+		{"Logout", func() error {
+			_, err := env.client.Logout(ctx, &fpv1.LogoutRequest{Token: "t"})
+			return err
+		}},
+		{"ReportPermissions", func() error {
+			_, err := env.client.ReportPermissions(ctx, &fpv1.ReportPermissionsRequest{})
+			return err
+		}},
+		{"GetPolicy", func() error {
+			_, err := env.client.GetPolicy(ctx, &fpv1.GetPolicyRequest{})
+			return err
+		}},
+	} {
+		if got := status.Code(tc.call()); got != codes.PermissionDenied {
+			t.Errorf("%s: code = %v, want PermissionDenied", tc.name, got)
+		}
+	}
+}
+
+// TestIMCallerCanValidate：隔离是双向的，不是把 im 关在门外。
+// ValidateToken 正是 fp-im 存在的理由。
+func TestIMCallerCanValidate(t *testing.T) {
+	env := newGRPCEnv(t)
+	cfg := domain.DefaultIMConfig()
+	cfg.Enabled = true
+	if _, err := env.apps.SetIMConfig(context.Background(), env.app.ID, cfg); err != nil {
+		t.Fatal(err)
+	}
+	// 先用普通身份登录拿一个真 token，再用 im 身份去验它。
+	token := env.loginWithPassword(t, env.authed(context.Background()))
+
+	res, err := env.client.ValidateToken(
+		env.imAuthed(context.Background(), env.appID), &fpv1.ValidateTokenRequest{Token: token})
+	if err != nil {
+		t.Fatalf("im 调用方必须能验 token：%v", err)
+	}
+	if res.GetUserId() == "" {
+		t.Fatal("校验结果里没有 user_id")
+	}
+}
+
+// TestIMCallerValidateRequiresIMEnabled 是设计文档 9.4 那条「权威判定」。
+//
+// fp-im 自己也会在握手前查一次 im_enabled，但它读的是**自己的缓存**；这里
+// 读的是**库**。只留前者的话，"关掉 im_enabled 后不再允许新连接"就依赖
+// fp-im 缓存的新鲜度——而 fp 自己的设计里就承认推送会漏（WatchPurge 存在的
+// 全部理由就是"Redis 订阅重建时会漏读事件且不知道漏了哪些"）。漏一次推送
+// 这个开关就悄悄失效，新 client 照连不误且没有任何报错。
+//
+// 代价是零：callerApp 本来就要读那一行查 status，im_enabled 在同一行上。
+func TestIMCallerValidateRequiresIMEnabled(t *testing.T) {
+	env := newGRPCEnv(t)
+	// env.app 默认 im_enabled=false。
+	token := env.loginWithPassword(t, env.authed(context.Background()))
+
+	_, err := env.client.ValidateToken(
+		env.imAuthed(context.Background(), env.appID), &fpv1.ValidateTokenRequest{Token: token})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("im 调用方在 im_enabled=false 时 code = %v, want FailedPrecondition", got)
+	}
+
+	// 普通调用方完全不受影响——给它加这条判断会把所有没开 IM 的应用弄挂。
+	if _, err := env.client.ValidateToken(
+		env.authed(context.Background()), &fpv1.ValidateTokenRequest{Token: token}); err != nil {
+		t.Fatalf("普通调用方不该被 im_enabled 影响：%v", err)
 	}
 }

@@ -62,6 +62,10 @@ type grpcEnv struct {
 	// 不是本任务（GetConfig 读路径）额外造一份假装配。
 	configs      *service.ConfigService
 	configClient fpv1.ConfigServiceClient
+
+	// imCreds 与 imSecret 供 imAuthed 构造"fp-im 网关"身份的调用。
+	imCreds  *service.IMCredentialService
+	imSecret string
 }
 
 // fakeClock 让测试能精确推进服务端时钟。
@@ -111,6 +115,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	// 装配方式、以及生产环境 cmd/fp/main.go 的装配都一致。
 	configPub := store.NewConfigPublisher(rdb)
 	configs := service.NewConfigService(pool, configPub)
+	imCreds := service.NewIMCredentialService(pool)
 
 	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
 	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的
@@ -134,6 +139,16 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		pool:     pool,
 		clock:    clk,
 		configs:  configs,
+		imCreds:  imCreds,
+	}
+
+	// 生成一份 IM 凭据，供 imAuthed 构造 fp-caller-type: im 的调用。
+	{
+		secret, err := imCreds.Rotate(context.Background())
+		if err != nil {
+			t.Fatalf("生成 IM 凭据: %v", err)
+		}
+		env.imSecret = secret
 	}
 
 	// 创建一个启用了 password 与 sms_code 两种登录方式的应用，
@@ -155,7 +170,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	t.Cleanup(cancelRun)
 
-	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub})
+	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub, IMCreds: imCreds})
 	env.server = srv
 
 	lis := bufconn.Listen(1 << 20)
@@ -190,6 +205,13 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 // authed 返回带本应用凭据的 ctx。
 func (e *grpcEnv) authed(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, mdAppID, e.appID, mdAppSecret, e.secret)
+}
+
+// imAuthed 返回一份"fp-im 网关"身份的 ctx：凭据是 IM secret，app 作用域
+// 逐调用附上（appID 参数），与生产环境里 fp-im 的调用形状一致。
+func (e *grpcEnv) imAuthed(ctx context.Context, appID string) context.Context {
+	return metadata.AppendToOutgoingContext(ctx,
+		mdAppID, appID, mdAppSecret, e.imSecret, MDCallerType, CallerTypeIM)
 }
 
 // testApplication 是一个已创建、已启用 password 与 sms_code 登录方式的应用，

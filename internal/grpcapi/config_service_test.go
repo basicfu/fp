@@ -220,3 +220,14 @@ func TestWatchSilentWhenPushDisabled(t *testing.T) {
 		// 什么都没来，正是期望
 	}
 }
+
+// TestIMCallerCannotReadConfig 是双向隔离在配置中心这一侧的对称断言。
+// 配置中心是业务方自己的东西，网关没有任何理由碰。
+func TestIMCallerCannotReadConfig(t *testing.T) {
+	e := newGRPCEnv(t)
+	_, err := e.configClient.GetConfig(
+		e.imAuthed(context.Background(), e.appID), &fpv1.GetConfigRequest{Type: "DEFAULT"})
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied", got)
+	}
+}
