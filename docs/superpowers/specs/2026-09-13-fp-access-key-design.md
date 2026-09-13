@@ -58,7 +58,7 @@ CREATE TABLE access_key (
     access_key_id text NOT NULL UNIQUE,
     secret        text NOT NULL,                  -- 明文，见「已接受的风险」
     remark        text NOT NULL,
-    role_key      text REFERENCES role(key) ON DELETE RESTRICT,  -- 可为空
+    role_key      text REFERENCES role(key),  -- 可为空；默认的 NO ACTION 挡住删除，不做 SET NULL/CASCADE
     allowed_ips   cidr[] NOT NULL DEFAULT '{}',   -- 空表示不校验 IP，最多 50 条
     status        text NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISABLED')),
     expires_at    timestamptz,                    -- NULL 表示永不过期
