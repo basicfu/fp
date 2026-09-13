@@ -17,6 +17,7 @@
 | `POST /api/login/code` | 给手机号发登录验证码。body: `{"phone":"13800138000"}` |
 | `POST /api/login` | 用手机号 + 验证码换 token。body: `{"phone":"...","code":"..."}`。成功后响应体带 `token`，并顺手把它写进一个 cookie |
 | `GET /api/me` | 受保护路由，`auth.Middleware` 一行接入。返回 `{"userId","sessionId","stale"}` |
+| `GET /api/partner/ping` | 第三方签名调用示例。返回 `{"accessKeyId","remark"}` |
 | `GET /healthz` | 暴露 `client.StreamHealthy()`——撤销推送流是否健康，手工验收第 4 步要看它 |
 
 `GET /api/me` 接受 `Authorization: Bearer <token>`，也接受名为 `fp_token`
@@ -279,3 +280,13 @@ demo 侧的重试退避封顶在 30 秒，但底层 gRPC 连接自己也有一�
 可能封顶在一两分钟的重连退避，两层叠加，实测重新变回 `true` 可能要等
 将近一到两分钟，不是卡住了。赶时间的话重启 demo 进程（`./scripts/demo.sh`）
 比等更快——一次全新的 `fpsdk.New` 不背负这层退避历史。
+
+## 第三方签名调用
+
+演示访问密钥（AccessKey）的完整流程，这是给第三方程序用的接入方式。
+
+1. 启动 demo（它会上报 `GET:/api/partner/ping`）。
+2. 控制台建角色「合作方」，在「角色管理 → 授权」里勾上 `GET:/api/partner/ping`。
+3. 控制台「访问密钥」新建一把绑定「合作方」的 key，记下 AK 与 SK。
+4. `go run ./examples/demo/partner -ak <AK> -sk <SK>` → `200 {"accessKeyId":…}`。
+5. 在控制台停用这把 key，再跑一次 → `403 {"code":"ACCESS_KEY_DISABLED",…}`。

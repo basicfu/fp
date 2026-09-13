@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -86,11 +87,38 @@ func main() {
 	// 受保护路由：一行中间件。
 	mux.Handle("GET /api/me", auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, _ := fpsdk.IdentityFrom(r.Context())
+		if id.IsAnonymous() {
+			fpsdk.WriteError(w, fpsdk.ErrNoToken)
+			return
+		}
 		writeJSON(w, map[string]any{
 			"userId":    id.UserID,
 			"sessionId": id.SessionID,
 			"stale":     id.Stale,
 		})
+	})))
+
+	// 第三方签名调用：访问密钥请求同样经过 auth.Middleware，再按角色判定能不能调。
+	// ServeMux 取不到路由模式，权限点 key 手写，并在启动时上报给 fp。
+	const partnerPattern = "/api/partner/ping"
+	if err := client.ReportPermissions(context.Background(), []fpsdk.PermissionPoint{
+		{Key: fpsdk.PermissionKey(http.MethodGet, partnerPattern), Name: "第三方连通性检查"},
+	}); err != nil {
+		log.Printf("上报权限点失败: %v", err)
+	}
+	mux.Handle("GET "+partnerPattern, auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ok, err := client.Authz().Allow(r.Context(), http.MethodGet, partnerPattern)
+		id, _ := fpsdk.IdentityFrom(r.Context())
+		switch {
+		case err != nil:
+			fpsdk.WriteError(w, fpsdk.ErrUnavailable)
+		case !ok && id.IsAnonymous():
+			fpsdk.WriteError(w, fpsdk.ErrNoToken)
+		case !ok:
+			http.Error(w, "forbidden", http.StatusForbidden)
+		default:
+			writeJSON(w, map[string]any{"accessKeyId": id.AccessKeyID, "remark": id.AccessKeyRemark})
+		}
 	})))
 
 	// 健康检查同时暴露推送流状态，方便手工验收时观察降级

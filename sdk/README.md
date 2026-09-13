@@ -41,6 +41,10 @@ auth := client.Auth()
 mux := http.NewServeMux()
 mux.Handle("GET /api/me", auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
     id, _ := fpsdk.IdentityFrom(r.Context())
+    if id.IsAnonymous() {
+        fpsdk.WriteError(w, fpsdk.ErrNoToken)
+        return
+    }
     fmt.Fprintf(w, "userId=%s", id.UserID)
 })))
 log.Fatal(http.ListenAndServe(":8090", mux))
@@ -83,6 +87,8 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 | `DegradedCacheTTL` | 推送流断开时缓存的有效期上限 | 5 秒 |
 | `AllowStaleOnOutage` | fp 不可达时能否使用已过期的缓存条目 | `false` |
 | `MaxStaleness` | `AllowStaleOnOutage` 开启时，过期条目最多能延用多久 | 5 分钟 |
+| `MaxSignedBodyBytes` | 访问密钥请求的请求体大小上限 | 10MB |
+| `NonceCapacity` | nonce 去重表的容量，满了回 503 | 200000 |
 | `Logger` | SDK 内部日志 | `slog.Default()` |
 | `OnRevoke` | 收到撤销事件时的回调 | `nil` |
 
@@ -163,6 +169,7 @@ id, ok := fpsdk.IdentityFrom(r.Context())
 | `RotatedTo` | 非空表示 token 已轮换，中间件已自动处理；手动调 `Validate` 时需要自己交付 |
 | `Stale` | `true` 表示这是 fp 不可达期间返回的陈旧结果，高危操作应拒绝 |
 | `GuestID` | 非空表示这是访客身份（`IsGuest()` 判断），与 `UserID` 互斥 |
+| `AccessKeyID` / `AccessKeyRemark` | 访问密钥请求才有值，与 `UserID` 互斥 |
 
 ### 手动校验
 
@@ -196,7 +203,7 @@ err = auth.Logout(ctx, token)
 
 ### 访客模式
 
-`MiddlewareOptions.AllowGuest = true` 时，请求没带 token 但带了合法的
+没开 `AllowGuest` 时访客头被忽略，请求按匿名处理。`MiddlewareOptions.AllowGuest = true` 时，请求没带 token 但带了合法的
 `X-Guest-Id`（`fpsdk.GuestIDHeader`，前端生成并持久化的 uuid v4）会被当
 访客放行，`Identity.GuestID` 非空、`UserID` 为空。访客标识不经过 fp
 签发也不做签名验证，只校验格式；真正需要区分权限时按 `IsGuest()` 自行
@@ -276,6 +283,14 @@ _ = client.ReportPermissions(context.Background(), a.Collect(r)) // 传顶层路
 
 其他框架（gin / echo / 裸 `net/http`）没有现成适配器，按同样的模式自己
 接：认证中间件之后，从 context 取路由模式，调 `Authz().Allow`。
+
+### 匿名请求与 GUEST
+
+没带任何凭据的请求会被认证中间件放行为匿名身份（`id.IsAnonymous()` 为 true），鉴权时只有内置角色 `GUEST`；登录用户判定时也自动拥有 `GUEST`。控制台给 GUEST 授权的接口未登录也能调，其余接口匿名请求回 401。带了 token 但无效的请求仍然是 401，不会被当成匿名。**所有路由都要挂鉴权**（`fpchi` 在顶层 `r.Use(a.Middleware())` 即可）。
+
+### 访问密钥（第三方程序调用）
+
+第三方程序用控制台发放的 AccessKey 签名调用，认证中间件自动校验，不需要额外配置：身份里 `id.IsAccessKey()` 为 true，鉴权只按 key 绑定的角色判定、不拥有 GUEST。来源 IP 取 `X-Forwarded-For` 的第一个地址，部署时最外层代理必须覆盖这个头。签名规则、测试向量与错误码见 [`docs/access-key.md`](../docs/access-key.md)。
 
 ## 4. 配置中心
 
