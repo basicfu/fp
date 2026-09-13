@@ -132,6 +132,11 @@ func (a *Adapter) Middleware() func(http.Handler) http.Handler {
 				return
 			}
 			if !allowed {
+				// 匿名请求被拒回 401：前端据此去登录。登录用户与访问密钥被拒才是 403。
+				if id, ok := fpsdk.IdentityFrom(req.Context()); ok && id.IsAnonymous() {
+					http.Error(w, "未登录", http.StatusUnauthorized)
+					return
+				}
 				http.Error(w, "没有权限", http.StatusForbidden)
 				return
 			}

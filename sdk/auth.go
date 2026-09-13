@@ -46,11 +46,22 @@ type Identity struct {
 	// X-Guest-Id（仅 MiddlewareOptions.AllowGuest 开启时才会被采信）。
 	// 与 UserID 互斥——一次请求要么是登录用户要么是访客，不会同时非空。
 	GuestID string
+	// AccessKeyID 非空表示调用方是第三方程序（访问密钥签名），与 UserID、GuestID 互斥。
+	AccessKeyID string
+	// AccessKeyRemark 是控制台上填的备注（哪个合作方），供业务方打日志。
+	AccessKeyRemark string
 }
 
 // IsGuest 报告这个身份是否来自访客标识而不是 fp 校验过的 token。
 // id 为 nil 时返回 false，方便在未经检查的调用点直接判断。
 func (id *Identity) IsGuest() bool { return id != nil && id.GuestID != "" }
+
+// IsAccessKey 报告这个身份是否来自访问密钥签名。
+func (id *Identity) IsAccessKey() bool { return id != nil && id.AccessKeyID != "" }
+
+// IsAnonymous 报告这个请求既没有登录用户、也不是访问密钥（访客也算匿名）。
+// 匿名请求鉴权时只有 GUEST。
+func (id *Identity) IsAnonymous() bool { return id == nil || (id.UserID == "" && id.AccessKeyID == "") }
 
 // Auth 是认证能力。用 (*Client).Auth() 取得，并发安全。
 type Auth struct {

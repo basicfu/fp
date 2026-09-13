@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -23,19 +24,40 @@ func okHandler(seen *Identity) http.Handler {
 	})
 }
 
-func TestMiddlewareRejectsMissingToken(t *testing.T) {
-	env := newStubEnv(t, okValidate("u1", 30_000))
-	called := false
-	h := env.auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+// 没带任何凭据的请求按匿名放行，鉴权时只有 GUEST；不产生回源。
+func TestMiddlewarePassesAnonymousWithoutCredentials(t *testing.T) {
+	var calls atomic.Int32
+	env := newStubEnv(t, func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
+		calls.Add(1)
+		return &fpv1.ValidateTokenResponse{UserId: "u1", CacheTtlMs: 30_000}, nil
+	})
+	var got *Identity
+	h := env.auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got, _ = IdentityFrom(r.Context())
+	}))
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("无 token 返回 %d，期望 401", rec.Code)
+	if rec.Code != http.StatusOK || got == nil || !got.IsAnonymous() {
+		t.Fatalf("code=%d identity=%+v，期望匿名放行", rec.Code, got)
 	}
-	if called {
-		t.Fatal("无 token 时业务 handler 仍被调用了")
+	if calls.Load() != 0 {
+		t.Fatal("匿名请求不应回源 fp")
+	}
+}
+
+// 【辨别力】带了 token 但无效：直接 401，绝不降级成匿名。
+func TestMiddlewareInvalidTokenIsNotDowngradedToAnonymous(t *testing.T) {
+	env := newStubEnv(t, failValidate())
+	called := false
+	h := env.auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer bad")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || called {
+		t.Fatalf("code=%d called=%v，期望 401 且不进 handler", rec.Code, called)
 	}
 }
 
@@ -341,24 +363,19 @@ func TestMiddlewareAllowGuestRejectsMalformedGuestID(t *testing.T) {
 	}
 }
 
-// TestMiddlewareAllowGuestOffRejectsGuestHeader 确认开关默认关闭这条硬约束：
-// 不开 AllowGuest 时，带合法访客头的请求必须和"完全没带任何凭据"表现完全
-// 一致地被拒——加了这个开关不能让访客头在关闭状态下产生任何行为变化。
-func TestMiddlewareAllowGuestOffRejectsGuestHeader(t *testing.T) {
+// AllowGuest 关闭时忽略访客头：与没带凭据一样按匿名处理，GuestID 为空。
+func TestMiddlewareAllowGuestOffIgnoresGuestHeader(t *testing.T) {
 	env := newStubEnv(t, okValidate("u1", 30_000))
-	called := false
-	h := env.auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-
+	var got *Identity
+	h := env.auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got, _ = IdentityFrom(r.Context())
+	}))
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.Header.Set(GuestIDHeader, "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("AllowGuest 关闭时带访客头仍应 401，实际 %d", rec.Code)
-	}
-	if called {
-		t.Fatal("AllowGuest 关闭时业务 handler 不该被调用")
+	if rec.Code != http.StatusOK || got == nil || !got.IsAnonymous() || got.GuestID != "" {
+		t.Fatalf("code=%d identity=%+v，期望匿名且不采信访客头", rec.Code, got)
 	}
 }
 

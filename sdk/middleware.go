@@ -32,6 +32,11 @@ func IdentityFrom(ctx context.Context) (*Identity, bool) {
 	return id, ok
 }
 
+// WithIdentity 把身份放进 context。供框架适配器与测试使用，业务代码通常不需要。
+func WithIdentity(ctx context.Context, id *Identity) context.Context {
+	return context.WithValue(ctx, identityCtxKey{}, id)
+}
+
 // MiddlewareOptions 定制中间件行为。零值即默认行为。
 type MiddlewareOptions struct {
 	// TokenFrom 自定义 token 提取。为 nil 时先看 Authorization: Bearer，
@@ -57,8 +62,8 @@ type MiddlewareOptions struct {
 
 	// AllowGuest 开启后，请求没带 token 但带了合法的 GuestIDHeader 时，
 	// 以访客身份放行（Identity.GuestID 非空，UserID 为空），具体权限由
-	// 业务方自己按 fp-im 的 guest 角色再判一次。默认 false：不开的时候，
-	// 带访客头的请求必须和现在完全一样地被拒，不能有任何行为变化。
+	// 业务方自己按 fp-im 的 guest 角色再判一次。默认 false：不开时忽略
+	// 访客头，与没带凭据一样按匿名处理（GuestID 为空）。
 	//
 	// 访客标识不经过 fp 签发、也不带签名——它就是前端生成并持久化的一个
 	// 随机 uuid v4，本来就没有"验证"这一步可做。这里只做格式校验。
@@ -101,21 +106,22 @@ func (a *Auth) MiddlewareWith(opts MiddlewareOptions) func(http.Handler) http.Ha
 			// 令牌优先：没有 token 才考虑访客头。同时带两者时（比如客户端
 			// 刚登录但还没来得及清掉本地存的访客 id）必须走 token 这条路，
 			// 不能把一个已登录用户悄悄降级成访客。
-			if token == "" && opts.AllowGuest {
-				if gid := r.Header.Get(GuestIDHeader); gid != "" {
-					// 只做格式校验，不做签名验证——理由见
-					// MiddlewareOptions.AllowGuest 的注释。
-					if !isUUIDv4(gid) {
-						// 格式不合法直接拒绝，而不是当成"没带凭据"放过去
-						// 继续匿名处理：格式错误意味着调用方（前端或
-						// fp-im 网关）本身有 bug，静默降级会让这个 bug
-						// 混进正常的匿名流量里，很难被人发现。
-						opts.OnError(w, r, ErrUnauthorized)
-						return
+			if token == "" {
+				// 完全没带凭据：按匿名放行，鉴权时只有 GUEST。带了凭据但无效的走不到这里，
+				// 那种必须 401——降级成匿名会让登录过期的用户悄悄变成访客，不会被提示重新登录。
+				id := &Identity{}
+				if opts.AllowGuest {
+					if gid := r.Header.Get(GuestIDHeader); gid != "" {
+						// 只做格式校验；格式错说明调用方有 bug，直接拒而不是混进匿名流量。
+						if !isUUIDv4(gid) {
+							opts.OnError(w, r, ErrUnauthorized)
+							return
+						}
+						id.GuestID = gid
 					}
-					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityCtxKey{}, &Identity{GuestID: gid})))
-					return
 				}
+				next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
+				return
 			}
 
 			id, err := a.Validate(r.Context(), token)
@@ -134,7 +140,7 @@ func (a *Auth) MiddlewareWith(opts MiddlewareOptions) func(http.Handler) http.Ha
 				opts.OnRotate(w, r, id.RotatedTo)
 			}
 
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityCtxKey{}, id)))
+			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
 		})
 	}
 }

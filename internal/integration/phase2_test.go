@@ -37,7 +37,8 @@ func TestSDKInitAndReject(t *testing.T) {
 	}
 }
 
-// TestMiddlewareEndToEnd 覆盖验收项 6：带 token 放行、无 token 401。
+// TestMiddlewareEndToEnd 覆盖验收项 6：带 token 放行、无 token 按匿名放行
+// （fp 访问密钥/GUEST 变更后的新语义——不再是 401）、乱码 token 拒绝。
 func TestMiddlewareEndToEnd(t *testing.T) {
 	e := newPhase2Env(t)
 	waitUntil(t, e.sdk.StreamHealthy, "建流后应变为健康")
@@ -74,14 +75,21 @@ func TestMiddlewareEndToEnd(t *testing.T) {
 		}
 	})
 
-	t.Run("不带token拒绝", func(t *testing.T) {
+	t.Run("不带token按匿名放行", func(t *testing.T) {
+		// 行为变更（fp 访问密钥/GUEST spec）：完全没带凭据不再是 401，
+		// 而是按匿名放行，鉴权时只有内置角色 GUEST。这里同时确认注入的
+		// 身份确实是匿名的（UserID 为空），不是把之前请求的用户悄悄带过来。
+		gotUserID = "上一次请求遗留的哨兵值"
 		resp, err := srv.Client().Get(srv.URL)
 		if err != nil {
 			t.Fatalf("请求失败: %v", err)
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("状态码 = %d, want 401", resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("状态码 = %d, want 200（无凭据应按匿名放行）", resp.StatusCode)
+		}
+		if gotUserID != "" {
+			t.Fatalf("匿名请求的 UserID = %q, want 空", gotUserID)
 		}
 	})
 

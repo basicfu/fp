@@ -54,10 +54,23 @@ func (a *Authz) Allow(ctx context.Context, method, pattern string) (bool, error)
 		// 回 403 会让调用方以为是权限配置问题，而真实原因是中间件没挂对。
 		return false, ErrNoIdentity
 	}
-	return a.AllowRoles(id.Roles, method, pattern)
+	a.mu.RLock()
+	snap, ready := a.compiled, a.ready
+	a.mu.RUnlock()
+	if !ready {
+		return false, ErrPolicyUnavailable
+	}
+	// 匿名请求与登录用户都拥有内置的 GUEST；访问密钥只有绑定的角色。
+	extra := authzcore.GuestRoleKey
+	if id.IsAccessKey() {
+		extra = ""
+	}
+	return snap.AllowWith(id.Roles, extra, authzcore.PermissionKey(method, pattern)), nil
 }
 
 // AllowRoles 用显式给出的角色做判定，供不使用 fpsdk 认证中间件的调用方使用。
+// 不会自动并入 GUEST——GUEST 的并入只发生在 Allow（从 context 里的身份判断
+// 是否匿名/访问密钥）；直接传角色时，角色表示什么就是什么。
 func (a *Authz) AllowRoles(roles []string, method, pattern string) (bool, error) {
 	a.mu.RLock()
 	snap, ready := a.compiled, a.ready

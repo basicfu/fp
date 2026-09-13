@@ -623,3 +623,30 @@ func TestCollectAndMatchAgreeOnAdvancedPatterns(t *testing.T) {
 		})
 	}
 }
+
+// 鉴权被拒时：匿名请求回 401（该去登录），登录用户与访问密钥回 403。
+func TestDeniedStatusDependsOnIdentity(t *testing.T) {
+	r := chi.NewRouter()
+	r.Use(New(&fakeDecider{}).Middleware()) // 空表：一律拒绝
+	r.Get("/orders/{id}", func(http.ResponseWriter, *http.Request) {})
+
+	cases := []struct {
+		name string
+		id   *fpsdk.Identity
+		want int
+	}{
+		{"匿名", &fpsdk.Identity{}, http.StatusUnauthorized},
+		{"访客", &fpsdk.Identity{GuestID: "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"}, http.StatusUnauthorized},
+		{"登录用户", &fpsdk.Identity{UserID: "u1"}, http.StatusForbidden},
+		{"访问密钥", &fpsdk.Identity{AccessKeyID: "FPAK1"}, http.StatusForbidden},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/orders/1", nil)
+		req = req.WithContext(fpsdk.WithIdentity(req.Context(), c.id))
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != c.want {
+			t.Errorf("%s: code = %d, want %d", c.name, rec.Code, c.want)
+		}
+	}
+}
