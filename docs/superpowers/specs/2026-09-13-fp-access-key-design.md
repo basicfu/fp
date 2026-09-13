@@ -115,7 +115,7 @@ message AccessKeyUsage { string access_key_id = 1; int64 last_used_at_ms = 2; }
 
 | 事件 | 触发 | 发给 |
 |---|---|---|
-| `AccessKeyChanged{access_key_id}`（`WatchResponse` 新增字段 8） | key 的任何写操作 | 所有应用 |
+| `AccessKeyChanged{access_key_id}`（`WatchResponse` 新增字段 8） | key 的修改、停用、删除（新建不推：SDK 还没有它的缓存） | 所有应用 |
 | `PolicyChanged`（已有字段 4，补上发送） | 改角色授权、删除或修改权限点 | 权限点所属应用 |
 | `PolicyChanged` | 改角色继承、删除角色 | 所有应用 |
 
