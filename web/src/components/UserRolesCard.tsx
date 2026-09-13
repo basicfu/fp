@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
+import { GUEST_ROLE_KEY } from '@/lib/roles'
 import type { Application, Role } from '@/lib/types'
 
 /**
@@ -22,7 +23,7 @@ export default function UserRolesCard({ userId }: { userId: string }) {
   const [saving, setSaving] = useState(false)
 
   const current = assigned.data?.roles ?? []
-  const available = (all.data ?? []).filter((r) => !current.includes(r.key))
+  const available = (all.data ?? []).filter((r) => !current.includes(r.key) && r.key !== GUEST_ROLE_KEY)
   const defaults = (apps.data ?? []).filter((a) => a.defaultRoleKey !== '')
 
   async function save(next: string[]) {
@@ -102,6 +103,10 @@ export default function UserRolesCard({ userId }: { userId: string }) {
             ))}
           </p>
         )}
+
+        <p className="text-xs text-muted-foreground">
+          所有用户还自动拥有内置角色 <span className="font-mono">GUEST</span>（未登录的请求也有它），不需要分配。
+        </p>
 
         <p className="text-xs text-muted-foreground">
           角色刻在已签发的会话里。改动会立刻推送给接入方，让它们丢掉这个用户的缓存并重新校验，

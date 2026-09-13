@@ -4,6 +4,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -15,6 +16,7 @@ import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { formatTime } from '@/lib/format'
 import { toastFormErrors } from '@/lib/formErrors'
+import { GUEST_ROLE_KEY } from '@/lib/roles'
 import type { Role } from '@/lib/types'
 
 /** 「无父角色」在 Select 里的占位值。base-ui 的 SelectItem 不接受空串。 */
@@ -92,6 +94,11 @@ export default function Roles() {
                     <Link to={`/roles/${r.id}`} className="font-medium underline-offset-4 hover:underline">
                       {r.key}
                     </Link>
+                    {r.key === GUEST_ROLE_KEY && (
+                      <Badge variant="secondary" className="ml-2">
+                        内置
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">{r.name}</TableCell>
                   <TableCell className="text-muted-foreground">
@@ -102,7 +109,12 @@ export default function Roles() {
                     <Button variant="outline" size="sm" onClick={() => setEditing(r)}>
                       编辑
                     </Button>
-                    <Button variant="outline" size="sm" onClick={() => setDeleting(r)}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={r.key === GUEST_ROLE_KEY}
+                      onClick={() => setDeleting(r)}
+                    >
                       删除
                     </Button>
                   </TableCell>
@@ -143,7 +155,8 @@ export default function Roles() {
         description={
           deleting
             ? `删除「${deleting.key}」会同时把它从所有持有它的用户身上摘掉，并解除它的全部授权；` +
-              `如果有应用把它设成了默认角色，那个设置也会被清空。已登录的用户要等会话刷新后才会失去这个角色。此操作不可撤销。`
+              `如果有应用把它设成了默认角色，那个设置也会被清空。已登录的用户要等会话刷新后才会失去这个角色。此操作不可撤销。` +
+              `有访问密钥绑定时无法删除，需要先改绑或删除这些密钥。`
             : ''
         }
         confirmLabel="确认删除"
@@ -288,6 +301,7 @@ function EditDialog({
             <Label htmlFor="edit-parent">继承自</Label>
             <Select
               value={parentId || NO_PARENT}
+              disabled={role.key === GUEST_ROLE_KEY}
               onValueChange={(v) => setParentId(v === NO_PARENT || v === null ? '' : v)}
             >
               <SelectTrigger id="edit-parent">
@@ -305,6 +319,9 @@ function EditDialog({
                   ))}
               </SelectContent>
             </Select>
+            {role.key === GUEST_ROLE_KEY && (
+              <p className="text-xs text-muted-foreground">内置角色 GUEST 不能设置父角色。</p>
+            )}
           </div>
           <p className="text-xs text-muted-foreground">
             标识 <span className="font-mono">{role.key}</span> 不可修改。

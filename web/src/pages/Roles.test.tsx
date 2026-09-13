@@ -1,6 +1,7 @@
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
+import { Toaster } from 'sonner'
 import Roles from './Roles'
 import type { Role } from '@/lib/types'
 
@@ -124,4 +125,36 @@ test('编辑对话框不提供修改标识的输入框', async () => {
 
   await waitFor(() => expect(screen.getByLabelText('显示名')).toBeTruthy())
   expect(screen.queryByLabelText('标识')).toBeNull()
+})
+
+test('GUEST 标「内置」且删除按钮不可用', async () => {
+  stubFetch([...roles, { id: 'g', key: 'GUEST', name: '访客', parentId: '', createdAt: 1700000000000 }])
+  renderRoles()
+  const row = (await waitFor(() => screen.getByRole('link', { name: 'GUEST' }))).closest('tr')!
+  expect(row.textContent).toContain('内置')
+  const del = Array.from(row.querySelectorAll('button')).find((b) => b.textContent === '删除') as HTMLButtonElement
+  expect(del.disabled).toBe(true)
+})
+
+test('删除被访问密钥绑定的角色时提示绑定数量', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((_url: string, init?: RequestInit) =>
+      Promise.resolve(
+        (init?.method ?? 'GET') === 'DELETE'
+          ? new Response(JSON.stringify({ code: 'ROLE_IN_USE', msg: '有 2 把访问密钥绑定了该角色，请先改绑或删除这些密钥' }), { status: 409 })
+          : new Response(JSON.stringify(roles), { status: 200 }),
+      ),
+    ),
+  )
+  render(
+    <MemoryRouter>
+      <Roles />
+      <Toaster />
+    </MemoryRouter>,
+  )
+  const row = (await waitFor(() => screen.getByRole('link', { name: '商城管理员' }))).closest('tr')!
+  fireEvent.click(Array.from(row.querySelectorAll('button')).find((b) => b.textContent === '删除')!)
+  fireEvent.click(await waitFor(() => screen.getByRole('button', { name: '确认删除' })))
+  expect(await screen.findByText(/2 把访问密钥/)).toBeTruthy()
 })

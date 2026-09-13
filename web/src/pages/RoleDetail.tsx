@@ -10,7 +10,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { permissionStatusLabels } from '@/lib/labels'
-import type { Application, Effect, PermissionPoint, Role, RoleGrant } from '@/lib/types'
+import { GUEST_ROLE_KEY } from '@/lib/roles'
+import type { AccessKey, Application, Effect, PermissionPoint, Role, RoleGrant } from '@/lib/types'
 
 /**
  * RoleDetail 是授权编辑器：给一个角色勾选它能用哪些权限点。
@@ -36,6 +37,15 @@ export default function RoleDetail() {
   const r = role.data?.find((x) => x.id === id)
   const parent = r?.parentId ? role.data?.find((x) => x.id === r.parentId) : undefined
 
+  const roleKey = role.data?.find((x) => x.id === id)?.key ?? ''
+  const bound = useResource(
+    () =>
+      roleKey
+        ? api.get<AccessKey[]>(`/access-keys?roleKey=${encodeURIComponent(roleKey)}`)
+        : Promise.resolve([] as AccessKey[]),
+    [roleKey],
+  )
+
   if (role.loading) return <p className="text-sm text-muted-foreground">加载中…</p>
   if (role.error) return <p className="text-sm text-destructive">{role.error}</p>
   if (!r) return <p className="text-sm text-destructive">角色不存在</p>
@@ -50,6 +60,20 @@ export default function RoleDetail() {
         {r.name !== r.key && <span className="text-sm text-muted-foreground">{r.name}</span>}
         {parent && <Badge variant="secondary">继承自 {parent.key}</Badge>}
       </div>
+
+      {(bound.data?.length ?? 0) > 0 && (
+        <p className="rounded-md border bg-muted/30 p-3 text-sm">
+          这个角色绑定了 {bound.data!.length} 把访问密钥，这里的授权改动会立即作用到这些第三方。{' '}
+          <Link to={`/access-keys?role=${encodeURIComponent(r.key)}`} className="underline underline-offset-4">
+            查看这些密钥
+          </Link>
+        </p>
+      )}
+      {r.key === GUEST_ROLE_KEY && (
+        <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+          GUEST 是内置角色：未登录的请求和所有登录用户都拥有它，访问密钥不拥有它。只能配置「允许」——配「拒绝」会连带拒掉所有登录用户。
+        </p>
+      )}
 
       {parent && (
         <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
@@ -102,6 +126,7 @@ export default function RoleDetail() {
               grants={grants.data?.grants ?? []}
               loading={perms.loading || grants.loading}
               error={perms.error || grants.error}
+              allowDeny={r.key !== GUEST_ROLE_KEY}
               onChanged={grants.reload}
             />
           )}
@@ -117,6 +142,7 @@ function GrantTable({
   grants,
   loading,
   error,
+  allowDeny,
   onChanged,
 }: {
   roleId: string
@@ -124,6 +150,7 @@ function GrantTable({
   grants: RoleGrant[]
   loading: boolean
   error: string
+  allowDeny: boolean
   onChanged: () => void
 }) {
   const [keyword, setKeyword] = useState('')
@@ -203,6 +230,7 @@ function GrantTable({
                     <EffectPicker
                       value={cur}
                       disabled={saving === p.id}
+                      allowDeny={allowDeny}
                       onChange={(next) => void set(p, next)}
                     />
                   </TableCell>
@@ -237,15 +265,17 @@ const options: { value: Effect; label: string }[] = [
 function EffectPicker({
   value,
   disabled,
+  allowDeny,
   onChange,
 }: {
   value: Effect
   disabled: boolean
+  allowDeny: boolean
   onChange: (v: Effect) => void
 }) {
   return (
     <div className="inline-flex gap-1">
-      {options.map((o) => (
+      {options.filter((o) => allowDeny || o.value !== 'deny').map((o) => (
         <Button
           key={o.value || 'none'}
           size="sm"
