@@ -194,3 +194,16 @@ func TestSDKDoesNotImportWebFrameworks(t *testing.T) {
 		}
 	})
 }
+
+// TestAksignUsesOnlyStdlib 守住"sdk/aksign 只依赖标准库"：第三方 import 它不能被带进 gRPC。
+func TestAksignUsesOnlyStdlib(t *testing.T) {
+	root := filepath.Join(archTestDir(t), "aksign")
+	walkNonTestGoFiles(t, root, nil, func(path string, file *ast.File, _ *token.FileSet) {
+		for _, imp := range file.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if first, _, _ := strings.Cut(p, "/"); strings.Contains(first, ".") {
+				t.Errorf("%s imports %q：sdk/aksign 只能依赖标准库", path, p)
+			}
+		}
+	})
+}

@@ -130,3 +130,26 @@ func TestPermissionKey(t *testing.T) {
 		t.Fatalf("PermissionKey = %q", got)
 	}
 }
+
+func TestAllowWithExtraRole(t *testing.T) {
+	snap := authzcore.Compile([]authzcore.RolePolicy{
+		{RoleKey: authzcore.GuestRoleKey, Allow: []string{"GET:/pub"}},
+		{RoleKey: "blocked", Deny: []string{"GET:/pub"}},
+		{RoleKey: "user", Allow: []string{"GET:/me"}},
+	})
+	cases := []struct {
+		name, extra, key string
+		roles            []string
+		want             bool
+	}{
+		{"并入 GUEST 后放行", authzcore.GuestRoleKey, "GET:/pub", []string{"user"}, true},
+		{"不并入就拒绝", "", "GET:/pub", []string{"user"}, false},
+		{"显式角色的 deny 盖过 GUEST 的 allow", authzcore.GuestRoleKey, "GET:/pub", []string{"blocked"}, false},
+		{"extra 为空不影响原有判定", "", "GET:/me", []string{"user"}, true},
+	}
+	for _, c := range cases {
+		if got := snap.AllowWith(c.roles, c.extra, c.key); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}

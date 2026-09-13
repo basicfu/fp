@@ -17,6 +17,9 @@ type RolePolicy struct {
 	Deny    []string
 }
 
+// GuestRoleKey 是内置访客角色：匿名请求只有它，登录用户判定时并入它，访问密钥不拥有它。
+const GuestRoleKey = "GUEST"
+
 // PermissionKey 拼出权限点的 key。
 //
 // 上报、服务端存储、SDK 判定三处必须用同一个函数而不是各自拼字符串：格式
@@ -73,30 +76,42 @@ func Compile(roles []RolePolicy) *Snapshot {
 	return s
 }
 
+// AllowWith 与 Allow 规则相同，但把 extraRole 也当作持有的角色（空串表示没有）。
+// 用它并入 GUEST，不必为每个请求分配新的角色切片。
+func (s *Snapshot) AllowWith(roleKeys []string, extraRole, permissionKey string) bool {
+	if s == nil {
+		return false
+	}
+	allowed := false
+	check := func(k string) (denied bool) {
+		sets, ok := s.roles[k]
+		if !ok {
+			return false
+		}
+		if _, d := sets.deny[permissionKey]; d {
+			return true
+		}
+		if _, a := sets.allow[permissionKey]; a {
+			allowed = true
+		}
+		return false
+	}
+	for _, k := range roleKeys {
+		if check(k) {
+			return false
+		}
+	}
+	if extraRole != "" && check(extraRole) {
+		return false
+	}
+	return allowed
+}
+
 // Allow 判定持有 roleKeys 的用户能否使用 permissionKey。
 //
 // 规则与 Compile 之前完全一致：**有 deny 即拒，有 allow 即过，都没有则拒**。
 // nil 快照一律拒绝——调用方应当在此之前就用"策略未就绪"把请求拦下，
 // 这里兜底成默认拒绝而不是放行。
 func (s *Snapshot) Allow(roleKeys []string, permissionKey string) bool {
-	if s == nil {
-		return false
-	}
-	allowed := false
-	for _, k := range roleKeys {
-		sets, ok := s.roles[k]
-		if !ok {
-			continue
-		}
-		if _, denied := sets.deny[permissionKey]; denied {
-			// deny 一票否决，不必再看其余角色。
-			return false
-		}
-		if _, ok := sets.allow[permissionKey]; ok {
-			allowed = true
-		}
-	}
-	// 不能在找到 allow 时提前 return：后面的角色可能带 deny，而 deny-override
-	// 要求 deny 胜出。必须把持有的角色全部看完。
-	return allowed
+	return s.AllowWith(roleKeys, "", permissionKey)
 }
