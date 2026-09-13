@@ -39,13 +39,17 @@ func Signature(secret, stringToSign string) string {
 
 // SplitRequestURI 把 request-target 拆成原样 path 与 query。绝对形式只取 path 部分。
 func SplitRequestURI(requestURI string) (rawPath, rawQuery string) {
-	if i := strings.Index(requestURI, "://"); i >= 0 {
-		rest := requestURI[i+3:]
-		j := strings.IndexByte(rest, '/')
-		if j < 0 {
-			return "/", ""
+	// origin-form 总是以 "/" 开头；只有不是 origin-form 时才处理绝对形式。
+	// 这样可以避免被 query 参数里的 "://" (比如跳转 URL) 误判。
+	if !strings.HasPrefix(requestURI, "/") {
+		if i := strings.Index(requestURI, "://"); i >= 0 {
+			rest := requestURI[i+3:]
+			j := strings.IndexByte(rest, '/')
+			if j < 0 {
+				return "/", ""
+			}
+			requestURI = rest[j:]
 		}
-		requestURI = rest[j:]
 	}
 	rawPath, rawQuery, _ = strings.Cut(requestURI, "?")
 	return rawPath, rawQuery

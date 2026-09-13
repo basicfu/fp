@@ -77,6 +77,7 @@ func TestSplitRequestURI(t *testing.T) {
 		{"/a%2Fb?x", "/a%2Fb", "x"},
 		{"http://h:8080/a?x=1", "/a", "x=1"},
 		{"http://h", "/", ""},
+		{"/redirect?url=http://evil.com/steal", "/redirect", "url=http://evil.com/steal"},
 	}
 	for _, c := range cases {
 		if p, q := SplitRequestURI(c.in); p != c.path || q != c.query {
