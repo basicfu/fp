@@ -72,6 +72,13 @@ const (
 	RevokeReasonPasswordChanged = "password_changed"
 )
 
+// 撤销频道上承载的事件种类。空串是撤销本身；另两种复用这条频道，
+// 这样 Redis 订阅重建时现有的 Purge 兜底对它们同样生效。
+const (
+	EventKindAccessKeyChanged = "access_key_changed"
+	EventKindPolicyChanged    = "policy_changed"
+)
+
 // RevokeEvent 是一次撤销的广播消息。
 //
 // SDK 按 token 缓存校验结果，因此事件必须携带具体的 token 列表，
@@ -91,4 +98,8 @@ type RevokeEvent struct {
 	AppID  uuid.UUID `json:"appId"`
 	Reason string    `json:"reason"`
 	At     int64     `json:"at"`
+	// Kind 为空表示撤销；非空时 Tokens、UserIDs、Reason 无意义。
+	Kind string `json:"kind,omitempty"`
+	// AccessKeyID 只在 Kind 为 EventKindAccessKeyChanged 时有值。
+	AccessKeyID string `json:"accessKeyId,omitempty"`
 }

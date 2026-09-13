@@ -81,6 +81,18 @@ const (
 	// CodePermissionDenied 是 SDK 鉴权失败时返回给业务方的码。
 	CodePermissionDenied = "PERMISSION_DENIED"
 
+	// 访问密钥。
+
+	CodeAccessKeyInvalid  = "ACCESS_KEY_INVALID"
+	CodeAccessKeyDisabled = "ACCESS_KEY_DISABLED"
+	CodeAccessKeyExpired  = "ACCESS_KEY_EXPIRED"
+	// CodeAccessKeyNotFound 是控制台按 id 找不到 key；SDK 侧的"AK 不存在"用 CodeAccessKeyInvalid。
+	CodeAccessKeyNotFound = "ACCESS_KEY_NOT_FOUND"
+	// CodeRoleInUse：删除仍被访问密钥绑定的角色。
+	CodeRoleInUse = "ROLE_IN_USE"
+	// CodeRoleBuiltin：对内置 GUEST 做了不允许的操作。
+	CodeRoleBuiltin = "ROLE_BUILTIN"
+
 	// 资源不存在。
 
 	CodeUserNotFound           = "USER_NOT_FOUND"
@@ -156,6 +168,13 @@ var codeSentinels = map[string]error{
 	CodePermissionNotFound: ErrNotFound,
 	CodePermissionKeyTaken: ErrConflict,
 	CodePermissionDenied:   ErrForbidden,
+
+	CodeAccessKeyInvalid:  ErrUnauthorized,
+	CodeAccessKeyDisabled: ErrForbidden,
+	CodeAccessKeyExpired:  ErrForbidden,
+	CodeAccessKeyNotFound: ErrNotFound,
+	CodeRoleInUse:         ErrConflict,
+	CodeRoleBuiltin:       ErrInvalidArgument,
 
 	CodeInternal: ErrInternal,
 }
