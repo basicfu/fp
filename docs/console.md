@@ -92,6 +92,16 @@ Vite 把 `/admin/api` 代理到 `localhost:8080`，浏览器看到的仍是同�
 
 GUEST 是内置角色——未登录请求和所有登录用户都拥有它，访问密钥不拥有；不能删除、不能设父角色、只能配「允许」。
 
+**升级前检查**：迁移 `00011_access_key.sql` 用 `INSERT ... ON CONFLICT (key) DO NOTHING` 建这个角色——如果目标 fp 实例的数据库里已经存在一个 key 为 `GUEST` 的角色（不管什么原因建的），迁移不会覆盖它，它现有的全部授权会在迁移跑完的瞬间立刻对所有匿名请求（allow）和所有登录用户（deny）生效，没有任何提示。升级前建议先查一遍：
+
+```sql
+SELECT r.key, rp.effect, count(*) FROM role r
+LEFT JOIN role_permission rp ON rp.role_id = r.id
+WHERE r.key = 'GUEST' GROUP BY 1, 2;
+```
+
+有结果就人工核对这些授权是否符合预期，再执行迁移。
+
 授权编辑器（`/roles/:id`）要先选一个应用：角色是全局的、权限点是按应用存的，
 把几个应用几百个权限点混在一张表里既没法看也容易误授。选中的应用记在
 URL 的 `?app=` 上，刷新和分享链接都能回到同一个视图。

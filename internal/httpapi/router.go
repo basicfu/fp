@@ -129,8 +129,11 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/im-credential/rotate", imCredH.rotate)
 			}
 
-			// 访问密钥。全局，不带应用 id。AccessKeys 为 nil 时整组不挂载。
-			if d.AccessKeys != nil {
+			// 访问密钥。全局，不带应用 id。AccessKeys 为 nil 时整组不挂载；
+			// 同时要求 Authz 非 nil——akH.permissions 内部会调
+			// h.authz.RolePermissionsByApp，只给 AccessKeys 不给 Authz 的装配会在
+			// 那个接口空指针 panic，防御性判空。
+			if d.AccessKeys != nil && d.Authz != nil {
 				r.Get("/access-keys", akH.list)
 				r.Post("/access-keys", akH.create)
 				r.Get("/access-keys/{id}", akH.get)

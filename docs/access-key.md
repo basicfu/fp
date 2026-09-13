@@ -94,7 +94,7 @@ resp, err := http.DefaultClient.Do(req)
 
 ## 7. 业务方的部署要求
 
-- 最外层代理必须用真实客户端地址**覆盖** `X-Forwarded-For`（nginx：`proxy_set_header X-Forwarded-For $remote_addr;`），不能追加。SDK 取它的第一个地址判断 IP 白名单。
+- 最外层代理必须用真实客户端地址**覆盖** `X-Forwarded-For`（nginx：`proxy_set_header X-Forwarded-For $remote_addr;`），**不能追加**。若使用追加式配置（如 nginx 的 `$proxy_add_x_forwarded_for`），客户端自己带的 XFF 会排在第一位，**IP 白名单将完全失效且没有任何报错**。SDK 取的是这个头的第一个地址。
 - 中间网关不能改写路径与 query，否则签名必然失败。
 - 所有路由都要挂鉴权：认证中间件会放行签名正确的访问密钥请求与匿名请求，能调什么由鉴权决定。
 - 先发布 fp，再升级业务方的 SDK。

@@ -140,6 +140,11 @@ func TestAccessKeyRejections(t *testing.T) {
 		{"AK 不存在", nil, fpDenied(codes.Unauthenticated, CodeAccessKeyInvalid), nil, sign("GET", "", now, "n", testSK), 401, CodeAccessKeyInvalid},
 		{"key 已停用", nil, fpDenied(codes.PermissionDenied, CodeAccessKeyDisabled), nil, sign("GET", "", now, "n", testSK), 403, CodeAccessKeyDisabled},
 		{"key 已过期", nil, fpDenied(codes.PermissionDenied, CodeAccessKeyExpired), nil, sign("GET", "", now, "n", testSK), 403, CodeAccessKeyExpired},
+		// 【辨别力】fe.Code 是 SDK 不认识的结构化错误码：业务方自己的 app 被停用、
+		// appSecret 轮换后没更新之类，不是 AccessKey 本身的问题，不能坍缩成
+		// 401 ACCESS_KEY_INVALID。"APP_DISABLED" 只是模拟值，不需要是真实的
+		// 域错误码常量。
+		{"业务方应用被停用（非 AccessKey 码不能坍缩成 401）", nil, fpDenied(codes.PermissionDenied, "APP_DISABLED"), nil, sign("GET", "", now, "n", testSK), 503, "service unavailable"},
 		{"签名不匹配", okAccessKey(), nil, nil, sign("GET", "", now, "n", "wrong"), 401, CodeSignatureMismatch},
 		{"body 超过上限", okAccessKey(), nil, func(o *Options) { o.MaxSignedBodyBytes = 4 }, sign("POST", "12345", now, "n", testSK), 413, CodeBodyTooLarge},
 		{"IP 不在白名单", okAccessKey("10.0.0.0/8"), nil, nil, sign("GET", "", now, "n", testSK), 403, CodeIPDenied},

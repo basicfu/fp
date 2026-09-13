@@ -61,7 +61,7 @@ export function IpTextarea({ id, value, onChange }: { id: string; value: string;
         placeholder={'每行一个 IP 或网段，例如\n203.0.113.7\n10.0.0.0/8'}
         className="w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
-      <p className="text-xs text-muted-foreground">留空表示不校验 IP；最多 50 条。</p>
+      <p className="text-xs text-muted-foreground">留空表示不校验 IP；最多 50 条。依赖最外层代理正确配置来源 IP，配置不当会导致白名单静默失效。</p>
     </>
   )
 }

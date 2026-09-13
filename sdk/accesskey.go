@@ -67,6 +67,10 @@ func (a *Auth) verifyAccessKey(r *http.Request) (*Identity, error) {
 	switch err := a.c.nonces.add(akID+":"+nonce, ts+int64(signatureWindow/time.Second), now.Unix()); {
 	case errors.Is(err, errNonceUsed):
 		return nil, akErr(ErrUnauthorized, CodeNonceUsed, "nonce 已经使用过")
+	case errors.Is(err, errNonceFull):
+		// 默认配置下约 222 req/s 就会触发——值得被人看到，而不是悄悄 503。
+		a.c.opts.Logger.Warn("fpsdk: nonce 表已满，本次访问密钥请求按不可用处理", "accessKeyId", akID)
+		return nil, errors.Join(ErrUnavailable, err)
 	case err != nil:
 		return nil, errors.Join(ErrUnavailable, err)
 	}
@@ -116,6 +120,9 @@ func (a *Auth) accessKey(ctx context.Context, akID string) (*accessKeyEntry, []s
 		for _, s := range res.GetAllowedIps() {
 			p, perr := netip.ParsePrefix(s)
 			if perr != nil {
+				// 每个请求都会走到这里且不缓存——不打日志的话运维侧永远看不到信号。
+				a.c.opts.Logger.Error("fpsdk: fp 下发的访问密钥 IP 白名单无法解析",
+					"accessKeyId", akID, "cidr", s, "err", perr)
 				return nil, fmt.Errorf("fpsdk: fp 下发的 IP 白名单 %q 无法解析: %w", s, perr)
 			}
 			allowed = append(allowed, p)
@@ -142,10 +149,22 @@ func (a *Auth) accessKey(ctx context.Context, akID string) (*accessKeyEntry, []s
 	var fe *Error
 	if errors.As(translate(err), &fe) {
 		switch fe.Code {
+		case CodeAccessKeyInvalid:
+			// fp 侧"AK 不存在"用的就是这个码。显式列出来，不依赖下面按 gRPC
+			// code 兜底的第二个 switch 碰巧给出同样的结果。
+			return nil, nil, false, akErr(ErrUnauthorized, CodeAccessKeyInvalid, "AccessKey 无效")
 		case CodeAccessKeyDisabled:
 			return nil, nil, false, akErr(ErrForbidden, fe.Code, "AccessKey 已停用")
 		case CodeAccessKeyExpired:
 			return nil, nil, false, akErr(ErrForbidden, fe.Code, "AccessKey 已过期")
+		default:
+			// fe.Code 是一个不认识的结构化错误码：fp 给出了确定答案，但不是
+			// AccessKey 本身的问题（业务方自己的 app 被停用、appSecret 轮换后
+			// 没更新、app 被删除……）。不能冒充"AccessKey 无效"——那会让第三方
+			// 合作方去查一把好好的 key，真正该查的是业务方自己的 fp 应用配置。
+			// 归到 ErrUnavailable（503），docs/access-key.md 里"业务方暂时无法
+			// 校验，稍后重试"这句措辞对这种情况反而是准确的。
+			return nil, nil, false, errors.Join(ErrUnavailable, err)
 		}
 	}
 	switch status.Code(err) {
