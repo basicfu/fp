@@ -66,8 +66,23 @@ func TestAuthzWritesPublishPolicyChanged(t *testing.T) {
 	role := e.mustRole(t, "角色", nil)
 	perm := e.mustPerm(t, "GET:/x")
 
+	eventCount := func() int {
+		pub.mu.Lock()
+		defer pub.mu.Unlock()
+		return len(pub.events)
+	}
+	// checked 记录上一次 check 通过时的事件总数：每一步都要求恰好新增一条，
+	// 不能只看 pub.last(t)返回了什么——events 是只追加、从不重置的切片，
+	// 如果某一步的生产代码漏调 announcePolicy，pub.last(t) 会原样吐出上一步
+	// 遗留的旧事件；这条测试里连续三步的 wantApp 都是 e.app.ID，旧事件的
+	// AppID 恰好对得上，断言会假通过，测试起不到回归护栏的作用。
+	checked := 0
 	check := func(step string, wantApp uuid.UUID) {
 		t.Helper()
+		if got := eventCount(); got != checked+1 {
+			t.Fatalf("%s: 事件数 = %d，want %d（这一步应当恰好新增一条 PolicyChanged，不能是上一步遗留的）", step, got, checked+1)
+		}
+		checked++
 		if ev := pub.last(t); ev.Kind != domain.EventKindPolicyChanged || ev.AppID != wantApp {
 			t.Fatalf("%s: 事件 = %+v，want kind=%s app=%v", step, ev, domain.EventKindPolicyChanged, wantApp)
 		}
