@@ -69,6 +69,11 @@ type Client struct {
 	// 无需额外同步保护——并发安全由 nonceStore 自身的锁提供。
 	nonces *nonceStore
 
+	// usage 按分钟记录每把访问密钥最后一次校验通过的时间，由后台 goroutine
+	// 每 usageFlushInterval 批量上报一次，Close 时再补报最后一批。构造之后
+	// 不再替换，并发安全由 usageRecorder 自身的锁提供。
+	usage *usageRecorder
+
 	// bindingsMu 保护 bindings：Bind/BindType 可能在任意 goroutine 里被
 	// 业务方调用，注册与推送触发遍历（runConfigReload）必须互斥。
 	bindingsMu sync.Mutex
@@ -270,6 +275,7 @@ func New(opts Options) (*Client, error) {
 	c.authz = &Authz{}
 	c.imGateway = &IMGateway{c: c}
 	c.nonces = newNonceStore(opts.NonceCapacity)
+	c.usage = newUsageRecorder()
 
 	c.wg.Add(1)
 	go func() {
@@ -281,6 +287,16 @@ func New(opts Options) (*Client, error) {
 		defer c.wg.Done()
 		c.runConfigReload(ctx)
 	}()
+	c.wg.Add(2)
+	go func() {
+		defer c.wg.Done()
+		runEvery(ctx, opts.usageFlushInterval, c.flushUsage)
+	}()
+	go func() {
+		defer c.wg.Done()
+		// 兜底：推送的 PolicyChanged 丢了，也能在一个周期内追上。
+		runEvery(ctx, opts.policyRefreshInterval, c.refreshPolicy)
+	}()
 	return c, nil
 }
 
@@ -289,6 +305,12 @@ func (c *Client) StreamHealthy() bool { return c.streamUp.Load() }
 
 // Close 关闭连接并停止后台循环。
 func (c *Client) Close() error {
+	// 先报最后一批使用时间：连接一关就发不出去了。用独立的超时 context，
+	// 不依赖即将被取消的 c.cancel/即将关闭的连接——否则这一批必然报不出去。
+	flushCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	c.flushUsage(flushCtx)
+	cancel()
+
 	c.cancel()
 	err := c.conn.Close()
 	c.wg.Wait()
@@ -425,6 +447,9 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 			// 只丢这个用户的缓存，不影响他的登录态——角色变更是**刷新**
 			// 而不是撤销。下次校验时 fp 会带回新角色。
 			c.auth.cache.dropUser(msg.GetUserRoleChanged().GetUserId())
+		case msg.GetAccessKeyChanged() != nil:
+			// 丢掉这把 key 的缓存，下次请求重新向 fp 取：停用、删除、改角色、改白名单都靠它立即生效。
+			c.auth.cache.drop(accessKeyCacheKey(msg.GetAccessKeyChanged().GetAccessKeyId()))
 		case msg.GetConfigChanged() != nil:
 			// 无差别重载全部绑定，不按 Type 分派：一个进程最多两份绑定，
 			// 多拉一次 GetConfig 的代价可以忽略，而"快照没变就不触发

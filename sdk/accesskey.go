@@ -78,6 +78,7 @@ func (a *Auth) verifyAccessKey(r *http.Request) (*Identity, error) {
 			return nil, akErr(ErrForbidden, CodeIPDenied, "来源 IP 不在白名单内")
 		}
 	}
+	a.c.usage.record(akID, now)
 	return &Identity{AccessKeyID: info.id, AccessKeyRemark: info.remark, Roles: roles, Stale: stale}, nil
 }
 

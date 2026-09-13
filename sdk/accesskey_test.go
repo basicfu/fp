@@ -27,9 +27,10 @@ func okAccessKey(ips ...string) *fpv1.GetAccessKeyResponse {
 	return &fpv1.GetAccessKeyResponse{Secret: testSK, Remark: "顺丰", Roles: []string{"partner"}, AllowedIps: ips, CacheTtlMs: 30_000}
 }
 
-// akStub 起一个桩服务端：GetAccessKey 返回 res 或 err，并统计调用次数。等推送流就绪后才返回，
-// 否则 ready 触发的 purge 会冲掉测试刚写进去的缓存。
-func akStub(t *testing.T, res *fpv1.GetAccessKeyResponse, err error, opt ...func(*Options)) (*stubEnv, *atomic.Int32) {
+// akStubWith 起一个桩服务端：GetAccessKey 返回 res 或 err，并统计调用次数。等推送流就绪后才返回，
+// 否则 ready 触发的 purge 会冲掉测试刚写进去的缓存。customize 在桩服务端起监听之前被调用，
+// 供调用方按需编排 reportUsage/getPolicy 等其它字段；为 nil 时不做任何改动。
+func akStubWith(t *testing.T, customize func(*stubServer), res *fpv1.GetAccessKeyResponse, err error, opt ...func(*Options)) (*stubEnv, *atomic.Int32) {
 	t.Helper()
 	calls := &atomic.Int32{}
 	stub := &stubServer{
@@ -40,6 +41,9 @@ func akStub(t *testing.T, res *fpv1.GetAccessKeyResponse, err error, opt ...func
 			calls.Add(1)
 			return res, err
 		},
+	}
+	if customize != nil {
+		customize(stub)
 	}
 	addr, stop := startStub(t, "", stub)
 	opts := Options{Addr: addr, AppID: "t", AppSecret: "t", Insecure: true}
@@ -58,6 +62,12 @@ func akStub(t *testing.T, res *fpv1.GetAccessKeyResponse, err error, opt ...func
 	env := &stubEnv{stub: stub, client: client, auth: client.Auth(), addr: addr, stop: stop}
 	env.waitUntil(t, client.StreamHealthy, "推送流没有就绪")
 	return env, calls
+}
+
+// akStub 是 akStubWith 在不需要编排桩服务端其它字段时的简写。
+func akStub(t *testing.T, res *fpv1.GetAccessKeyResponse, err error, opt ...func(*Options)) (*stubEnv, *atomic.Int32) {
+	t.Helper()
+	return akStubWith(t, nil, res, err, opt...)
 }
 
 // signedRequest 造一个按规则签好名的服务端请求（RemoteAddr 是 httptest 默认的 192.0.2.1）。

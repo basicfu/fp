@@ -88,15 +88,21 @@ type Options struct {
 	// NonceCapacity 是本进程记住的 nonce 条数上限。满了拒绝新的签名请求（503），
 	// 不挤掉旧记录——挤掉等于关掉防重放。默认 200000。
 	NonceCapacity int
+
+	// usageFlushInterval、policyRefreshInterval 只供包内测试缩短周期，零值取默认。
+	usageFlushInterval    time.Duration
+	policyRefreshInterval time.Duration
 }
 
 const (
-	defaultValidateTimeout    = 2 * time.Second
-	defaultCacheSize          = 10000
-	defaultDegradedCacheTTL   = 5 * time.Second
-	defaultMaxStaleness       = 5 * time.Minute
-	defaultMaxSignedBodyBytes = 10 << 20
-	defaultNonceCapacity      = 200_000
+	defaultValidateTimeout       = 2 * time.Second
+	defaultCacheSize             = 10000
+	defaultDegradedCacheTTL      = 5 * time.Second
+	defaultMaxStaleness          = 5 * time.Minute
+	defaultMaxSignedBodyBytes    = 10 << 20
+	defaultNonceCapacity         = 200_000
+	defaultUsageFlushInterval    = time.Minute
+	defaultPolicyRefreshInterval = 5 * time.Minute
 )
 
 func (o *Options) applyDefaults() {
@@ -120,6 +126,12 @@ func (o *Options) applyDefaults() {
 	}
 	if o.NonceCapacity <= 0 {
 		o.NonceCapacity = defaultNonceCapacity
+	}
+	if o.usageFlushInterval <= 0 {
+		o.usageFlushInterval = defaultUsageFlushInterval
+	}
+	if o.policyRefreshInterval <= 0 {
+		o.policyRefreshInterval = defaultPolicyRefreshInterval
 	}
 }
 
