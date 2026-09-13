@@ -46,7 +46,7 @@ func akStubWith(t *testing.T, customize func(*stubServer), res *fpv1.GetAccessKe
 		customize(stub)
 	}
 	addr, stop := startStub(t, "", stub)
-	opts := Options{Addr: addr, AppID: "t", AppSecret: "t", Insecure: true}
+	opts := Options{Addr: addr, AppID: "t", AppSecret: "t"}
 	for _, o := range opt {
 		o(&opts)
 	}
