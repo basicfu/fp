@@ -37,6 +37,9 @@ type Deps struct {
 	IMCreds IMCredentialVerifier
 	// IMSecretCacheTTL 为 0 时取 DefaultIMSecretCacheTTL（10 秒）。
 	IMSecretCacheTTL time.Duration
+
+	// AccessKeys 提供访问密钥的校验材料与使用时间记录。为 nil 时两个 RPC 返回 Unimplemented。
+	AccessKeys *service.AccessKeyService
 }
 
 // deniedIMCreds 在没有配置 IM 凭据校验器时拒绝一切 im 调用。
@@ -128,6 +131,7 @@ func New(d Deps) *Server {
 		Auth: d.Auth,
 		Apps: d.Apps, Authz: d.Authz,
 		Hub: hub, ConfigHub: configHub,
+		AccessKeys: d.AccessKeys,
 	}))
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))
 	fpv1.RegisterIMGatewayServiceServer(srv, newIMServer(d.Apps))

@@ -54,6 +54,9 @@ type phase2Services struct {
 	configs *service.ConfigService
 	// imCreds 供 IM 网关身份的测试生成凭据。
 	imCreds *service.IMCredentialService
+	// accessKeys 是访问密钥的 service 层入口，喂给 startServer 里的
+	// grpcapi.Deps.AccessKeys。
+	accessKeys *service.AccessKeyService
 }
 
 func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Services {
@@ -85,7 +88,8 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	sender.AddProvider(sms)
 
 	accounts := service.NewAccountService(users, sessions, epochs, logs)
-	authz := service.NewAuthzService(pool)
+	authz := service.NewAuthzService(pool, service.WithAuthzPublisher(revokePub))
+	accessKeys := service.NewAccessKeyService(pool, revokePub)
 	auth := service.NewAuthService(service.AuthDeps{
 		Apps: apps, Users: users, Sessions: sessions, Logs: logs,
 		Registry: registry, Notifier: sender, Codes: codes, Authz: authz,
@@ -96,7 +100,7 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	return phase2Services{
 		apps: apps, users: users, sessions: sessions,
 		accounts: accounts, auth: auth, sms: sms, revokePub: revokePub, authz: authz,
-		configPub: configPub, configs: configs, imCreds: imCreds,
+		configPub: configPub, configs: configs, imCreds: imCreds, accessKeys: accessKeys,
 	}
 }
 
@@ -196,6 +200,7 @@ func (e *phase2Env) startServer(t *testing.T) {
 	srv := grpcapi.New(grpcapi.Deps{
 		Auth: e.auth, Apps: e.apps, Pub: e.revokePub, Authz: e.authz,
 		Configs: e.configs, ConfigPub: e.configPub, IMCreds: e.imCreds,
+		AccessKeys: e.accessKeys,
 	})
 	e.server = srv
 

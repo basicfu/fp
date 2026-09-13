@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -37,20 +38,26 @@ type AuthServerDeps struct {
 	Apps AppLookup
 	// Authz 处理权限点上报与策略拉取。
 	Authz *service.AuthzService
+	// AccessKeys 提供访问密钥的校验材料与使用时间记录。为 nil 时两个 RPC 返回 Unimplemented。
+	AccessKeys *service.AccessKeyService
 }
 
 // NewAuthServer 构造 gRPC 认证服务。
 func NewAuthServer(d AuthServerDeps) fpv1.AuthServiceServer {
-	return &authServer{auth: d.Auth, hub: d.Hub, configHub: d.ConfigHub, apps: d.Apps, authz: d.Authz}
+	return &authServer{
+		auth: d.Auth, hub: d.Hub, configHub: d.ConfigHub, apps: d.Apps, authz: d.Authz,
+		accessKeys: d.AccessKeys,
+	}
 }
 
 type authServer struct {
 	fpv1.UnimplementedAuthServiceServer
-	auth      *service.AuthService
-	hub       *RevokeHub
-	configHub *ConfigHub
-	apps      AppLookup
-	authz     *service.AuthzService
+	auth       *service.AuthService
+	hub        *RevokeHub
+	configHub  *ConfigHub
+	apps       AppLookup
+	authz      *service.AuthzService
+	accessKeys *service.AccessKeyService
 }
 
 // callerAppID 取出拦截器已认证的 appId。
@@ -292,9 +299,7 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 					},
 				}
 			} else {
-				msg = &fpv1.WatchResponse{
-					Event: &fpv1.WatchResponse_Revoke{Revoke: revokeEvent(ev.Revoke)},
-				}
+				msg = eventMessage(ev.Revoke)
 			}
 			if err := stream.Send(msg); err != nil {
 				return err
@@ -345,6 +350,22 @@ func revokeEvent(ev domain.RevokeEvent) *fpv1.RevokeEvent {
 		out.AppId = ev.AppID.String()
 	}
 	return out
+}
+
+// eventMessage 把撤销频道上的事件翻译成对应的推送消息。
+func eventMessage(ev domain.RevokeEvent) *fpv1.WatchResponse {
+	switch ev.Kind {
+	case domain.EventKindAccessKeyChanged:
+		return &fpv1.WatchResponse{Event: &fpv1.WatchResponse_AccessKeyChanged{
+			AccessKeyChanged: &fpv1.AccessKeyChanged{AccessKeyId: ev.AccessKeyID},
+		}}
+	case domain.EventKindPolicyChanged:
+		return &fpv1.WatchResponse{Event: &fpv1.WatchResponse_PolicyChanged{
+			PolicyChanged: &fpv1.PolicyChanged{Version: ev.At},
+		}}
+	default:
+		return &fpv1.WatchResponse{Event: &fpv1.WatchResponse_Revoke{Revoke: revokeEvent(ev)}}
+	}
 }
 
 // ReportPermissions 接收业务方 SDK 启动时上报的权限点全量快照。
@@ -435,4 +456,61 @@ func (s *authServer) requireAuthz() error {
 		return status.Error(codes.Unimplemented, "该 fp 部署未启用授权模块")
 	}
 	return nil
+}
+
+// GetAccessKey 给业务方 SDK 取访问密钥的校验材料。
+func (s *authServer) GetAccessKey(ctx context.Context, req *fpv1.GetAccessKeyRequest) (*fpv1.GetAccessKeyResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
+	if s.accessKeys == nil {
+		return nil, status.Error(codes.Unimplemented, "该 fp 部署未启用访问密钥")
+	}
+	app, err := s.callerApp(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m, err := s.accessKeys.Resolve(ctx, app, req.GetAccessKeyId())
+	if err != nil {
+		return nil, StatusFrom(err)
+	}
+	ips := make([]string, 0, len(m.Key.AllowedIPs))
+	for _, p := range m.Key.AllowedIPs {
+		ips = append(ips, p.String())
+	}
+	var roles []string
+	if m.Key.RoleKey != "" {
+		roles = []string{m.Key.RoleKey}
+	}
+	return &fpv1.GetAccessKeyResponse{
+		Secret: m.Key.Secret, Remark: m.Key.Remark, Roles: roles, AllowedIps: ips,
+		CacheTtlMs: m.CacheTTL.Milliseconds(),
+	}, nil
+}
+
+// ReportAccessKeyUsage 记录 SDK 上报的最后使用时间。同一把 key 出现多次时取最新。
+func (s *authServer) ReportAccessKeyUsage(ctx context.Context, req *fpv1.ReportAccessKeyUsageRequest) (*fpv1.ReportAccessKeyUsageResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
+	if s.accessKeys == nil {
+		return nil, status.Error(codes.Unimplemented, "该 fp 部署未启用访问密钥")
+	}
+	if _, err := s.callerApp(ctx); err != nil {
+		return nil, err
+	}
+	usages := map[string]time.Time{}
+	for _, u := range req.GetUsages() {
+		if u.GetAccessKeyId() == "" || u.GetLastUsedAtMs() <= 0 {
+			continue
+		}
+		at := time.UnixMilli(u.GetLastUsedAtMs())
+		if cur, ok := usages[u.GetAccessKeyId()]; !ok || at.After(cur) {
+			usages[u.GetAccessKeyId()] = at
+		}
+	}
+	if err := s.accessKeys.RecordUsage(ctx, usages); err != nil {
+		return nil, StatusFrom(err)
+	}
+	return &fpv1.ReportAccessKeyUsageResponse{}, nil
 }
