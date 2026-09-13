@@ -227,3 +227,64 @@ func TestAccessKeyFpUnavailableIs503(t *testing.T) {
 		t.Fatalf("fp 不可达应 503 而不是 401，got %d", rec.Code)
 	}
 }
+
+// fp 回源返回的访问密钥材料缺 secret 时必须拒绝，不能拿空串当 HMAC 密钥用——
+// 空密钥的 HMAC 谁都能复现，一旦真的发生（proto 字段号漂移、数据不完整），
+// 校验还会"成功"，且没有任何异常信号。fp 现在的实现不会返回空 secret，
+// 这是防御性加固，不是修复现有 bug。
+func TestAccessKeyEmptySecretIsRejected(t *testing.T) {
+	res := okAccessKey()
+	res.Secret = ""
+	env, _ := akStub(t, res, nil)
+	h := env.auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, signedRequest(t, "GET", "/x", "", time.Now().Unix(), "n1", testSK))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("空 secret 应 503 而不是放行，got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 【辨别力】访问密钥的缓存条目绝不能被 token 校验当成一次成功的登录判定复用。
+//
+// verifyAccessKey 为了取 SK 会在验签**之前**回源并把 "ak:<id>" 这个键的角色
+// 信息写进缓存——哪怕这次请求最终因为签名不对被拒。cache 是 token 与访问
+// 密钥共用的同一张表，如果 Validate 的缓存命中判断只看 appID、不看
+// entry.accessKey，攻击者只需要知道目标 AK 的 ID（AK 本身不是秘密，业务方
+// 日志、URL 里都可能出现），发一个签名随便填的访问密钥请求把缓存写热，
+// 再把 "ak:<目标AK>" 原样当 token 发过来，就能在同一个 app 作用域下
+// （单 app 部署恒成立）冒充该 AK 绑定的角色——全程不需要 SK、不需要正确签名。
+//
+// 装配：先用错误的密钥发一次访问密钥请求（预期 401，但副作用是把
+// ak:<testAK> 这个缓存键写热）；再把这个键的字面值原样当 Bearer token
+// 发一次普通请求。断言拿到的身份不带 okAccessKey() 绑定的 "partner" 角色——
+// 如果 auth.go 的两处 Validate 缓存命中判断少了 e.accessKey == nil，
+// 这里会命中被污染的缓存条目，泄漏 AK 的角色。
+func TestAccessKeyCacheEntryNeverAuthenticatesAsToken(t *testing.T) {
+	env, _ := akStub(t, okAccessKey(), nil)
+
+	akHandler := env.auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	rec := httptest.NewRecorder()
+	akHandler.ServeHTTP(rec, signedRequest(t, "GET", "/x", "", time.Now().Unix(), "n1", "wrong-secret"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("前置条件：伪造签名的访问密钥请求应 401（但仍会把缓存写热），got %d", rec.Code)
+	}
+
+	var got *Identity
+	tokenHandler := env.auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got, _ = IdentityFrom(r.Context())
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/y", nil)
+	req.Header.Set("Authorization", "Bearer "+accessKeyCacheKey(testAK))
+	rec2 := httptest.NewRecorder()
+	tokenHandler.ServeHTTP(rec2, req)
+
+	if got == nil {
+		t.Fatalf("请求未被放行：code=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	for _, role := range got.Roles {
+		if role == "partner" {
+			t.Fatalf("token 校验命中了访问密钥的缓存条目，冒充了它绑定的角色：code=%d identity=%+v",
+				rec2.Code, got)
+		}
+	}
+}

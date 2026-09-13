@@ -102,8 +102,19 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 
 	// 作用域不匹配等同于未命中：同一个 token 在不同应用下是两个不同的
 	// 判定，见 entry.appID 的注释。
+	//
+	// e.accessKey == nil 同样必须检查：cache 是 token 与访问密钥共用的
+	// 同一张表（键分别是 token 原文与 "ak:"+id，见 accessKeyCacheKey）。
+	// 访问密钥的校验（accesskey.go 的 verifyAccessKey）在验签**之前**就会
+	// 为了取 SK 而回源、把 "ak:<目标AK>" 这个键的角色信息写进缓存——哪怕
+	// 这次请求最终因为签名不对被拒。如果这里不排除 accessKey 非 nil 的
+	// 条目，攻击者只需要知道一个目标 AK 的 ID（AK 本身不是秘密），发一个
+	// 签名随便填的访问密钥请求把缓存写热，再把 "ak:<目标AK>" 原样当 token
+	// 发过来：只要这次的 app 作用域凑巧一致（单 app 部署下永远一致），
+	// 就会被当成已验证身份放行，还带着该 AK 绑定的角色——全程不需要 SK、
+	// 不需要正确签名。
 	app := a.c.effectiveAppID(ctx)
-	if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheFresh && e.appID == app {
+	if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheFresh && e.appID == app && e.accessKey == nil {
 		return identityFrom(e, false), nil
 	}
 
@@ -188,7 +199,8 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 	//
 	// 只有在调用方显式允许时，才用"刚才验过的那个身份"兜底。
 	if maxStale > 0 {
-		if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheStale && e.appID == app {
+		// e.accessKey == nil 的理由同上面 cacheFresh 分支的注释。
+		if e, state := a.cache.get(token, maxTTL, maxStale); state == cacheStale && e.appID == app && e.accessKey == nil {
 			a.c.opts.Logger.Warn("fpsdk: fp 不可达，使用陈旧的校验结果",
 				"userId", e.userID, "err", err)
 			return identityFrom(e, true), nil

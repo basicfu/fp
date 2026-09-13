@@ -103,6 +103,14 @@ func (a *Auth) accessKey(ctx context.Context, akID string) (*accessKeyEntry, []s
 		if err != nil {
 			return nil, err
 		}
+		if res.GetSecret() == "" {
+			// 防御性加固：fp 现在的实现不会返回空 secret，但空密钥的 HMAC 谁都能
+			// 复现——万一 proto 字段号漂移或数据不完整，绝不能把这种响应当成
+			// 校验材料缓存下来，那等于把这把 key 对全世界开放，而且校验还会
+			// "成功"，不会有任何异常信号。落到外层"回源失败"的处理路径（503），
+			// 而不是当成校验通过。
+			return nil, errors.New("fpsdk: fp 返回的访问密钥材料缺少 secret")
+		}
 		allowed := make([]netip.Prefix, 0, len(res.GetAllowedIps()))
 		for _, s := range res.GetAllowedIps() {
 			p, perr := netip.ParsePrefix(s)
@@ -111,7 +119,14 @@ func (a *Auth) accessKey(ctx context.Context, akID string) (*accessKeyEntry, []s
 			}
 			allowed = append(allowed, p)
 		}
-		e := entry{roles: res.GetRoles(), accessKey: &accessKeyEntry{
+		// appID 记下这条条目取自哪个应用作用域，语义与 token 条目一致（见
+		// entry.appID 的注释）。真正把这条访问密钥条目与 token 条目分开、
+		// 不让 Validate 把它当 token 判定复用的，是 auth.go 两处缓存命中
+		// 判断里的 e.accessKey == nil——appID 相同不代表可以互认，两者是
+		// 双重防线：appID 在跨应用场景（比如 CallerTypeIM 的逐调用作用域）
+		// 下天然隔开不同判定，accessKey == nil 在同一应用作用域下把两类
+		// 条目分开（同一应用下 appID 恒等，单靠它无法区分）。
+		e := entry{appID: a.c.effectiveAppID(ctx), roles: res.GetRoles(), accessKey: &accessKeyEntry{
 			id: akID, secret: res.GetSecret(), remark: res.GetRemark(), allowed: allowed,
 		}}
 		a.cache.putIfGen(key, e, time.Duration(res.GetCacheTtlMs())*time.Millisecond, gen)
