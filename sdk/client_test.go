@@ -30,6 +30,13 @@ type stubServer struct {
 	// 未赋值时按 UnimplementedConfigServiceServer 处理（返回 codes.Unimplemented），
 	// 与 login/logout 的既有约定一致——只有明确需要它的测试才配置。
 	getConfig func(*fpv1.GetConfigRequest) (*fpv1.GetConfigResponse, error)
+
+	// getAccessKey/reportUsage/getPolicy 供 Task 9~11 的访问密钥测试编排返回值。
+	// 未赋值时按 UnimplementedAuthServiceServer 处理（返回 codes.Unimplemented），
+	// 与 login/logout 的既有约定一致——只有明确需要它们的测试才配置。
+	getAccessKey func(*fpv1.GetAccessKeyRequest) (*fpv1.GetAccessKeyResponse, error)
+	reportUsage  func(*fpv1.ReportAccessKeyUsageRequest) (*fpv1.ReportAccessKeyUsageResponse, error)
+	getPolicy    func(*fpv1.GetPolicyRequest) (*fpv1.GetPolicyResponse, error)
 }
 
 func (s *stubServer) ValidateToken(_ context.Context, req *fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
@@ -60,6 +67,27 @@ func (s *stubServer) GetConfig(_ context.Context, req *fpv1.GetConfigRequest) (*
 		return s.UnimplementedConfigServiceServer.GetConfig(context.Background(), req)
 	}
 	return s.getConfig(req)
+}
+
+func (s *stubServer) GetAccessKey(ctx context.Context, req *fpv1.GetAccessKeyRequest) (*fpv1.GetAccessKeyResponse, error) {
+	if s.getAccessKey == nil {
+		return s.UnimplementedAuthServiceServer.GetAccessKey(ctx, req)
+	}
+	return s.getAccessKey(req)
+}
+
+func (s *stubServer) ReportAccessKeyUsage(ctx context.Context, req *fpv1.ReportAccessKeyUsageRequest) (*fpv1.ReportAccessKeyUsageResponse, error) {
+	if s.reportUsage == nil {
+		return s.UnimplementedAuthServiceServer.ReportAccessKeyUsage(ctx, req)
+	}
+	return s.reportUsage(req)
+}
+
+func (s *stubServer) GetPolicy(ctx context.Context, req *fpv1.GetPolicyRequest) (*fpv1.GetPolicyResponse, error) {
+	if s.getPolicy == nil {
+		return s.UnimplementedAuthServiceServer.GetPolicy(ctx, req)
+	}
+	return s.getPolicy(req)
 }
 
 func (s *stubServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fpv1.WatchResponse]) error {

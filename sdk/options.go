@@ -82,13 +82,21 @@ type Options struct {
 	//
 	// 为 nil 表示不关心，是绝大多数 SDK 使用方的默认状态，不会因此崩溃。
 	OnRevoke func(RevokeEvent)
+
+	// MaxSignedBodyBytes 是访问密钥签名请求的 body 上限，超出回 413。默认 10MB。
+	MaxSignedBodyBytes int64
+	// NonceCapacity 是本进程记住的 nonce 条数上限。满了拒绝新的签名请求（503），
+	// 不挤掉旧记录——挤掉等于关掉防重放。默认 200000。
+	NonceCapacity int
 }
 
 const (
-	defaultValidateTimeout  = 2 * time.Second
-	defaultCacheSize        = 10000
-	defaultDegradedCacheTTL = 5 * time.Second
-	defaultMaxStaleness     = 5 * time.Minute
+	defaultValidateTimeout    = 2 * time.Second
+	defaultCacheSize          = 10000
+	defaultDegradedCacheTTL   = 5 * time.Second
+	defaultMaxStaleness       = 5 * time.Minute
+	defaultMaxSignedBodyBytes = 10 << 20
+	defaultNonceCapacity      = 200_000
 )
 
 func (o *Options) applyDefaults() {
@@ -106,6 +114,12 @@ func (o *Options) applyDefaults() {
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
+	}
+	if o.MaxSignedBodyBytes <= 0 {
+		o.MaxSignedBodyBytes = defaultMaxSignedBodyBytes
+	}
+	if o.NonceCapacity <= 0 {
+		o.NonceCapacity = defaultNonceCapacity
 	}
 }
 
@@ -127,6 +141,10 @@ func (o Options) validate() error {
 		return errors.New("fpsdk: Options.DegradedCacheTTL 不能为负")
 	case o.MaxStaleness < 0:
 		return errors.New("fpsdk: Options.MaxStaleness 不能为负")
+	case o.MaxSignedBodyBytes < 0:
+		return errors.New("fpsdk: Options.MaxSignedBodyBytes 不能为负")
+	case o.NonceCapacity < 0:
+		return errors.New("fpsdk: Options.NonceCapacity 不能为负")
 	}
 	return nil
 }

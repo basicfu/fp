@@ -1,6 +1,7 @@
 package fpsdk
 
 import (
+	"net/netip"
 	"sync/atomic"
 	"time"
 
@@ -29,12 +30,23 @@ type entry struct {
 	// roles 是该用户在本应用的有效角色，鉴权判定用它。
 	// 跟着身份一起缓存：判定因此完全不碰网络。
 	roles []string
+	// accessKey 非 nil 表示这是访问密钥的缓存条目（键见 accessKeyCacheKey），roles 同样有效。
+	accessKey *accessKeyEntry
 
 	// cachedAt 与 ttl 分开存，过期判定在 get 里现算。
 	// 合并成一个 expiresAt 就无法在读取时收紧窗口——见下方 get 的说明。
 	cachedAt time.Time
 	ttl      time.Duration
 }
+
+// accessKeyEntry 是一把访问密钥的校验材料。
+type accessKeyEntry struct {
+	id, secret, remark string
+	allowed            []netip.Prefix
+}
+
+// accessKeyCacheKey 给访问密钥条目加前缀：token 是 base64url，不含冒号，两类键不会相撞。
+func accessKeyCacheKey(id string) string { return "ak:" + id }
 
 // cacheState 是一次查询的结果状态。
 type cacheState int

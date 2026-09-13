@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/sdk/aksign"
 )
 
 // DefaultCookieName 是默认的会话 cookie 名。
@@ -101,6 +103,17 @@ func (a *Auth) MiddlewareWith(opts MiddlewareOptions) func(http.Handler) http.Ha
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(aksign.HeaderAccessKey) != "" {
+				// 带了访问密钥就只走访问密钥：校验失败直接拒，不降级成 token 或匿名。
+				id, err := a.verifyAccessKey(r)
+				if err != nil {
+					opts.OnError(w, r, err)
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
+				return
+			}
+
 			token := opts.TokenFrom(r)
 
 			// 令牌优先：没有 token 才考虑访客头。同时带两者时（比如客户端
@@ -194,6 +207,14 @@ func defaultOnRotate(opts MiddlewareOptions) func(http.ResponseWriter, *http.Req
 // 或 ErrRateLimited（验证码发送被限流）误判成 401，会让客户端把一次
 // 纯粹的输入问题或频率问题当成鉴权失败去清 cookie、跳登录页。
 func WriteError(w http.ResponseWriter, err error) {
+	// 访问密钥的拒绝原因走结构化响应（错误码 + 待签名串），不是固定文案——
+	// 第三方接入方需要 code 去分支、需要 stringToSign 去逐行核对签名。
+	var ake *AccessKeyError
+	if errors.As(err, &ake) {
+		writeAccessKeyError(w, ake)
+		return
+	}
+
 	switch {
 	case errors.Is(err, ErrNoToken), errors.Is(err, ErrUnauthorized):
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -211,6 +232,13 @@ func WriteError(w http.ResponseWriter, err error) {
 		// 429：被服务端限流（验证码发送过于频繁），用户的凭据没有任何
 		// 问题，同样不该被当成鉴权失败。
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
+	case errors.Is(err, ErrForbidden):
+		// 403：凭据本身有效，但不被允许（访问密钥已停用/已过期、来源 IP
+		// 不在白名单）。不是"你是谁没验证"，是"你是谁我知道，但不让进"。
+		http.Error(w, "forbidden", http.StatusForbidden)
+	case errors.Is(err, ErrBodyTooLarge):
+		// 413：签名请求的 body 超过 Options.MaxSignedBodyBytes。
+		http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 	default:
 		// 服务端返回了一个 SDK 还没有对应哨兵错误的 gRPC code——保守
 		// 起见按拒绝处理，而不是放行一个无法归类的错误。这不是"正常

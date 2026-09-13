@@ -65,6 +65,10 @@ type Client struct {
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
 	streamUp atomic.Bool
 
+	// nonces 记住本进程见过的访问密钥 (AK, nonce)，防重放。构造之后只读，
+	// 无需额外同步保护——并发安全由 nonceStore 自身的锁提供。
+	nonces *nonceStore
+
 	// bindingsMu 保护 bindings：Bind/BindType 可能在任意 goroutine 里被
 	// 业务方调用，注册与推送触发遍历（runConfigReload）必须互斥。
 	bindingsMu sync.Mutex
@@ -265,6 +269,7 @@ func New(opts Options) (*Client, error) {
 	c.auth = &Auth{c: c, cache: cch}
 	c.authz = &Authz{}
 	c.imGateway = &IMGateway{c: c}
+	c.nonces = newNonceStore(opts.NonceCapacity)
 
 	c.wg.Add(1)
 	go func() {

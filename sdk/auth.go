@@ -27,6 +27,10 @@ var (
 	// ErrRateLimited 被服务端限流（例如验证码发送过于频繁）。
 	// 同样不该被当成鉴权失败——用户的凭据没有任何问题。
 	ErrRateLimited = errors.New("fpsdk: 请求过于频繁")
+	// ErrForbidden 凭据有效但不被允许：访问密钥已停用、已过期，或来源 IP 不在白名单。
+	ErrForbidden = errors.New("fpsdk: 禁止访问")
+	// ErrBodyTooLarge 签名请求的 body 超过 Options.MaxSignedBodyBytes。
+	ErrBodyTooLarge = errors.New("fpsdk: 请求体过大")
 )
 
 // Identity 是一次成功校验得到的身份。
@@ -68,6 +72,8 @@ type Auth struct {
 	c     *Client
 	cache *cache
 	sf    singleflight.Group
+	// akSF 是访问密钥回源的合并锁，键空间与 sf（token 回源）分开。
+	akSF singleflight.Group
 }
 
 // Validate 校验 token，命中本地缓存时不产生任何网络往返。
