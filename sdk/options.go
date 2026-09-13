@@ -2,7 +2,6 @@ package fpsdk
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log/slog"
 	"time"
@@ -30,14 +29,6 @@ type Options struct {
 	// 接口——不能 Login、不能读配置中心，能调 ValidateToken/Watch 与
 	// IMGateway 的两个 RPC。
 	CallerType string
-
-	// Insecure 允许明文连接。
-	//
-	// **生产绝不要开。** appSecret 随每个 RPC 的 metadata 发送，明文传输
-	// 等于把一个能签发任意用户会话的凭据印在网线上。只在本地开发用。
-	Insecure bool
-	// TLSConfig 自定义 TLS 配置。为 nil 且 Insecure 为 false 时用系统根证书。
-	TLSConfig *tls.Config
 
 	// ValidateTimeout 是单次回源的超时。默认 2 秒。
 	ValidateTimeout time.Duration
@@ -169,11 +160,10 @@ const CallerTypeIM = "im"
 type appCredentials struct {
 	appID, secret string
 	callerType    string
-	insecure      bool
 }
 
 func newAppCredentials(o Options) appCredentials {
-	return appCredentials{appID: o.AppID, secret: o.AppSecret, callerType: o.CallerType, insecure: o.Insecure}
+	return appCredentials{appID: o.AppID, secret: o.AppSecret, callerType: o.CallerType}
 }
 
 // GetRequestMetadata 实现 credentials.PerRPCCredentials。
@@ -192,9 +182,6 @@ func (c appCredentials) GetRequestMetadata(context.Context, ...string) (map[stri
 	}, nil
 }
 
-// RequireTransportSecurity 实现 credentials.PerRPCCredentials。
-//
-// 返回 true 时 grpc-go 会拒绝在明文连接上发送这些凭据——这正是我们要的：
-// appSecret 一旦被抓包，攻击者就能签发任意用户的会话。只有显式设了
-// Insecure 才放行明文。
-func (c appCredentials) RequireTransportSecurity() bool { return !c.insecure }
+// RequireTransportSecurity 实现 credentials.PerRPCCredentials。业务层连接
+// 一律明文，TLS 终结交给部署时的反代（如 nginx）。
+func (c appCredentials) RequireTransportSecurity() bool { return false }

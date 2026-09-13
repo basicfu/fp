@@ -33,25 +33,21 @@
 
 ## 环境变量
 
-`main.go` 只读这四个：
+`main.go` 只读这三个：
 
 | 变量 | 说明 |
 |---|---|
 | `FP_ADDR` | fp 的 gRPC 地址，如 `127.0.0.1:9090` |
 | `FP_APP_ID` / `FP_APP_SECRET` | 应用凭据，来自下面手工验收第 1 步 |
-| `FP_INSECURE` | 设为 `1` 时用明文连接。**只能用于本地开发** |
 
 `FP_APP_ID` / `FP_APP_SECRET` 是凭据，和 PG/Redis 密码一样只能进
 git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
 `. scripts/env.sh` 从 `.env.local` 载入这两个变量再起 demo（`scripts/run.sh`
-不再走这条路——fp 自己的配置已经全在 `config.yaml` 里）；`FP_ADDR` / `FP_INSECURE` 在
-`scripts/demo.sh` 里给了本地开发的默认值（`127.0.0.1:9090` /`1`），不用
-额外配置。
+不再走这条路——fp 自己的配置已经全在 `config.yaml` 里）；`FP_ADDR` 在
+`scripts/demo.sh` 里给了本地开发的默认值（`127.0.0.1:9090`），不用额外配置。
 
-**`FP_INSECURE=1` 只能用于本地开发。** 生产环境绝不能开：appSecret 会
-随每个 RPC 以明文发送在网络上，明文连接等于把它直接印在网线上。生产
-环境要给 fp 配真实证书，SDK 侧不要设这个环境变量（`Insecure` 零值就是
-`false`）。
+SDK 与 fp 之间一律走明文 gRPC，生产环境的 TLS 终结交给部署时前面的反代
+（如 nginx），业务层不处理证书。
 
 ## 手工验收四步
 

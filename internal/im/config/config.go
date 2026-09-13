@@ -77,11 +77,6 @@ type Endpoint struct {
 
 // FPSDK 是 fp SDK 的连接参数。Addr 是 fp 的 **gRPC** 地址，不是 HTTP。
 //
-// 这里没有 insecure 开关：传输安全由 Config.Insecure() 从 env 推导。一个
-// 默认值为 true 的 insecure 旋钮，最可能的失效方式就是有人把它连同整份 dev
-// 配置抄到生产上，而 appSecret 随每个 RPC 的 metadata 明文发送，抓到包就
-// 等于拿到一个能签发任意用户会话的凭据。
-//
 // Addr 为空**不由本包校验**——config 不知道谁会用这个地址，"谁用谁校验"。
 // 空值仍然会在启动装配阶段炸掉，那是 fpauth.New 的职责（见那里的
 // TestNewRequiresFPAddr）。
@@ -130,15 +125,6 @@ type Pipeline struct {
 // 类型保持 time.Duration（而不是本包的 Duration）：
 // internal/integration/im_parity_test.go 拿它直接跟 fpim.PingInterval 比。
 const MinIdleTimeout = 2 * 25 * time.Second
-
-// IsProd 报告当前是否为生产环境。
-func (c *Config) IsProd() bool { return strings.EqualFold(c.Env, "prod") }
-
-// Insecure 报告 fp-im 连 fp 的 gRPC 是否走明文。
-//
-// **前提**：fp 的 gRPC 服务端目前没有传 grpc.Creds，只服务明文，所以
-// env: prod 下这条 TLS 必须由 fp 前面的反代 / 网关终结。见 docs/im.md。
-func (c *Config) Insecure() bool { return !c.IsProd() }
 
 // Load 读 path 指向的 YAML 文件，填默认值并校验。
 func Load(path string) (*Config, error) {

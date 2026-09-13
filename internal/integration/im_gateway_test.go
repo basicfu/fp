@@ -23,7 +23,6 @@ func newIMClient(t *testing.T, e *phase2Env) *fpsdk.Client {
 		Addr:       e.addr,
 		AppSecret:  secret,
 		CallerType: fpsdk.CallerTypeIM,
-		Insecure:   true,
 	})
 	if err != nil {
 		t.Fatalf("建 IM 客户端: %v", err)

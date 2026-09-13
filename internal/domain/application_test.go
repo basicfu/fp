@@ -91,9 +91,6 @@ func TestIMConfigValidate(t *testing.T) {
 		{"biz_auth 缺地址", func(c *domain.IMConfig) {
 			c.BizAuth = &domain.IMBizAuth{TimeoutMs: 2000, CacheSize: 10}
 		}},
-		{"biz_auth 明文 http", func(c *domain.IMConfig) {
-			c.BizAuth = &domain.IMBizAuth{VerifyURL: "http://x/v", TimeoutMs: 2000, CacheSize: 10}
-		}},
 		{"biz_auth 超时为零", func(c *domain.IMConfig) {
 			c.BizAuth = &domain.IMBizAuth{VerifyURL: "https://x/v", CacheSize: 10}
 		}},

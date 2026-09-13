@@ -12,9 +12,6 @@ import { errorMessage } from '@/lib/useResource'
 import { toastFormErrors } from '@/lib/formErrors'
 import type { Application } from '@/lib/types'
 
-// verifyUrl 必须是 https：client 的令牌明文走在请求体里，明文传输等于把
-// 所有业务方令牌交给中间人。后端也会拦，这里拦一道是为了不让人白填一屏
-// 再被服务端打回来。
 const schema = z
   .object({
     enabled: z.boolean(),
@@ -38,9 +35,6 @@ const schema = z
       ctx.addIssue({ code: 'custom', path: ['guestIpRate'], message: '允许访客时限流必须 ≥ 1' })
     }
     if (!v.bizAuthEnabled) return
-    if (!v.verifyUrl.startsWith('https://')) {
-      ctx.addIssue({ code: 'custom', path: ['verifyUrl'], message: '回调地址必须是 https' })
-    }
     if (v.timeoutMs <= 0) {
       ctx.addIssue({ code: 'custom', path: ['timeoutMs'], message: '超时必须大于 0' })
     }
@@ -171,10 +165,7 @@ export default function ApplicationIMSettings({ app, onSaved }: { app: Applicati
                 <>
                   <div className="space-y-2">
                     <Label htmlFor="im-verifyUrl">回调地址</Label>
-                    <Input id="im-verifyUrl" placeholder="https://biz.example.com/verify" {...register('verifyUrl')} />
-                    <p className="text-xs text-muted-foreground">
-                      必须是 https —— 令牌明文走在请求体里。
-                    </p>
+                    <Input id="im-verifyUrl" placeholder="http://biz.example.com/verify" {...register('verifyUrl')} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="im-timeoutMs">回调超时（毫秒）</Label>

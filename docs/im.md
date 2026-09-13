@@ -25,13 +25,8 @@ URL 抄进 `config-im.yaml` 的 `redis.url`——旧版那条"`FP_IM_REDIS_URL` 
 页签），明文只显示一次。全部 fp-im 实例共用同一份。轮换后旧凭据最多再活
 10 秒——那是 fp 侧凭据缓存的 TTL，因泄露而轮换时要知道。
 
-**传输安全没有开关，由 `env` 推导**：`env: dev` 明文，`env: prod` 走 TLS。一个
-默认为 true 的 `insecure` 旋钮最可能的失效方式就是被连同整份 dev 配置抄到生产上，
-而 `appSecret` 是随每个 RPC 的 metadata 明文发的。
-
-> **【部署硬要求】** fp 的 gRPC 服务端目前没有传 `grpc.Creds`，只服务明文。所以
-> `env: prod` 下 fp-im 连 fp 的那条 TLS **必须**由 fp 前面的反代 / 网关终结。
-> 在给 fp 的 gRPC 补上 TLS 之前，这不是可选项。
+fp-im 连 fp 的 gRPC 走明文，与 fp 自身的 gRPC/HTTP 一致——部署时统一由前面的
+nginx 终结 TLS（对外 443），业务层不处理证书。
 
 ## 接入应用的配置
 
@@ -51,9 +46,8 @@ fp-im **不再持有任何应用的 `app_secret`**——fp 只存 bcrypt 哈希�
 （`status=disabled`）逐字相同：两者都只影响新的认证，不主动撤销已签发的东西。
 要立刻踢人用 server SDK 的 `Kick`。
 
-`biz_auth` 整组为空表示这个应用不支持业务方令牌。`verify_url` 必填且必须是
-https（令牌明文走在请求体里）；`timeout` 缺省 2 秒，是整个请求的超时；
-`cache_size` 缺省 10000。
+`biz_auth` 整组为空表示这个应用不支持业务方令牌。`verify_url` 必填；`timeout`
+缺省 2 秒，是整个请求的超时；`cache_size` 缺省 10000。
 
 运维要留意三点：
 

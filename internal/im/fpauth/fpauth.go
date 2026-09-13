@@ -27,8 +27,7 @@ type Config struct {
 	FPAddr string
 	// Secret 是 IM 凭据，来自 config-im.yaml 的 fpsdk.secret，在 fp 控制台
 	// 生成。全部 fp-im 实例共用同一份。
-	Secret   string
-	Insecure bool
+	Secret string
 	// OnRevoke 在 token 被撤销时调用，fp-im 用它关 ws。
 	OnRevoke func(app string, tokens []string)
 	// AllApps 返回本节点当前持有配置（也就是有过连接）的全部 app。
@@ -63,7 +62,6 @@ func New(cfg Config) (*Authenticator, error) {
 		Addr:       cfg.FPAddr,
 		AppSecret:  cfg.Secret,
 		CallerType: fpsdk.CallerTypeIM,
-		Insecure:   cfg.Insecure,
 		Logger:     cfg.Logger,
 		OnRevoke:   a.dispatchRevoke,
 	})

@@ -80,8 +80,6 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 | `Addr` | fp 的 gRPC 地址，如 `"fp.internal:9090"` | 必填 |
 | `AppID` / `AppSecret` | 应用凭据，来自 fp 控制台创建应用 | 必填 |
 | `CallerType` | **业务方不要用**，见下方说明 | `""` |
-| `Insecure` | 允许明文连接 | `false` |
-| `TLSConfig` | 自定义 TLS 配置 | `nil`（用系统根证书） |
 | `ValidateTimeout` | 单次校验回源的超时 | 2 秒 |
 | `CacheSize` | 本地校验结果缓存的容量（条） | 10000 |
 | `DegradedCacheTTL` | 推送流断开时缓存的有效期上限 | 5 秒 |
@@ -91,9 +89,6 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 | `NonceCapacity` | nonce 去重表的容量，满了回 503 | 200000 |
 | `Logger` | SDK 内部日志 | `slog.Default()` |
 | `OnRevoke` | 收到撤销事件时的回调 | `nil` |
-
-**`Insecure` 生产环境绝不能开**——`AppSecret` 随每个 RPC 的 metadata 发送，
-明文连接等于把它印在网线上。只用于本地开发。
 
 > **`CallerType` 是给 fp-im 网关自己用的，业务方不要设。** 设成
 > `fpsdk.CallerTypeIM` 之后 fp 开放的是一组**收窄过**的接口：`Login` /
@@ -456,14 +451,11 @@ err = c.Send(ctx, []byte(`{"hi":1}`))
 
 ## 6. 生产环境清单
 
-- `Insecure` 保持 `false`，配好证书。
 - `MiddlewareOptions.CookieSecure` 显式设 `true`。
 - `AllowGuest` 只在真的需要匿名访问时开启。
 - 传入自己的 `Logger`（默认打到 `slog.Default()`）。
 - 启动时调用一次 `ReportPermissions`（或用 `fpchi.Collect`），让控制台能
   看到并管理这个应用的权限点。
-- 需要连接 fp-im 时，`ServerConfig`/`ClientConfig` 同样把 `Insecure` 保持
-  `false`。
 - 用到 fp-im 的应用，先在控制台打开 IM 接入，并确认 fp-im 到 fp 的网络
   可达——fp-im 的每一次凭据校验都要回源 fp（成功结果缓存 5 分钟）。
 - 把 `srv.StreamHealthy()` 接进业务后端的健康检查；它是"接入流真的通了"

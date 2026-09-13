@@ -140,7 +140,7 @@ func (x *GetAppIMConfigResponse) GetBizAuth() *IMBizAuth {
 
 type IMBizAuth struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// verify_url 必须是 https：client 的令牌明文走在请求体里。
+	// verify_url 是业务方核实令牌的回调地址。
 	VerifyUrl string `protobuf:"bytes,1,opt,name=verify_url,json=verifyUrl,proto3" json:"verify_url,omitempty"`
 	// timeout_ms 是整个回调请求的超时，必须明显小于握手的 5 秒上限——配大了
 	// 会让 client 先被握手超时踢掉，拿到的关闭码方向完全反了。

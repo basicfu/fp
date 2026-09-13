@@ -204,7 +204,7 @@ func TestImTwoNodesEndToEnd(t *testing.T) {
 	b := startNode(t, rdb, uniqueNodeID("im-b"), apps, authn)
 
 	// 业务 server 连节点 B。
-	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: b.grpcAddr, AppID: "a1", AppSecret: "s1", Insecure: true})
+	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: b.grpcAddr, AppID: "a1", AppSecret: "s1"})
 	if err != nil {
 		t.Fatalf("fpim.NewServer: %v", err)
 	}

@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -198,11 +197,6 @@ func (c IMConfig) Validate() error {
 	if c.BizAuth != nil {
 		if c.BizAuth.VerifyURL == "" {
 			return Failf(ErrInvalidArgument, CodeInvalidArgument, "配了 biz_auth 但缺 verify_url")
-		}
-		// 必须 HTTPS：client 的令牌明文走在请求体里，明文传输等于把所有
-		// 业务方令牌交给中间人。
-		if !strings.HasPrefix(c.BizAuth.VerifyURL, "https://") {
-			return Failf(ErrInvalidArgument, CodeInvalidArgument, "biz_auth.verify_url 必须是 https")
 		}
 		if c.BizAuth.TimeoutMs <= 0 {
 			return Failf(ErrInvalidArgument, CodeInvalidArgument, "biz_auth.timeout_ms 必须大于 0")

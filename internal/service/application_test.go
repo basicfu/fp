@@ -652,7 +652,7 @@ func TestSetIMConfigRejectsInvalid(t *testing.T) {
 	}
 	bad := domain.DefaultIMConfig()
 	bad.Enabled = true
-	bad.BizAuth = &domain.IMBizAuth{VerifyURL: "http://biz/v", TimeoutMs: 1500, CacheSize: 100}
+	bad.BizAuth = &domain.IMBizAuth{VerifyURL: "", TimeoutMs: 1500, CacheSize: 100}
 	if _, err := svc.SetIMConfig(ctx, app.ID, bad); err == nil {
 		t.Fatal("非法配置必须在写库之前被拒")
 	}

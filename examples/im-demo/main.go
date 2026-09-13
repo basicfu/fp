@@ -23,12 +23,6 @@ func main() {
 		Addr:      envOr("FP_IM_ADDR", "localhost:9091"),
 		AppID:     os.Getenv("FP_APP_ID"),
 		AppSecret: os.Getenv("FP_APP_SECRET"),
-		// 与姊妹示例 examples/demo 用同一个开关（FP_INSECURE=1），而不是
-		// 硬编码 true：这份文件的头注释自称"照抄就是接入网关要写的全部
-		// 代码"，硬编码会让照抄的人把明文传密钥的写法一起带进生产——见
-		// sdk/im/server.go ServerConfig.Insecure 的注释，appSecret 会随
-		// 每个 RPC 以明文发送，生产环境绝不能开。
-		Insecure: os.Getenv("FP_INSECURE") == "1",
 	})
 	if err != nil {
 		slog.Error("连接 fp-im 失败", "err", err)

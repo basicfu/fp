@@ -35,25 +35,13 @@ func TestOptionsFillDefaults(t *testing.T) {
 	}
 }
 
-// TestInsecureRequiresExplicitOptIn 钉住传输安全的默认值。
-//
-// appSecret 随每个 RPC 的 metadata 发送。明文传输等于把它印在网线上，
-// 任何能抓包的人都能拿到一个可以签发任意用户会话的凭据。
-// 所以默认必须要求 TLS，明文只能显式 opt-in。
-func TestInsecureRequiresExplicitOptIn(t *testing.T) {
-	var o Options
-	o.applyDefaults()
-	if o.Insecure {
-		t.Fatal("默认允许明文——appSecret 会在网络上裸奔")
-	}
-
-	creds := newAppCredentials(o)
-	if !creds.RequireTransportSecurity() {
-		t.Fatal("默认凭据不要求传输层安全")
-	}
-	insecureCreds := newAppCredentials(Options{Insecure: true})
-	if insecureCreds.RequireTransportSecurity() {
-		t.Fatal("Insecure=true 时仍要求传输层安全，本地开发无法连接")
+// TestRequireTransportSecurityIsAlwaysFalse 钉住业务层一律明文连接：
+// appCredentials 不应阻止在明文 gRPC 连接上发送凭据，TLS 终结交给部署时
+// 的反代（如 nginx）。
+func TestRequireTransportSecurityIsAlwaysFalse(t *testing.T) {
+	creds := newAppCredentials(Options{})
+	if creds.RequireTransportSecurity() {
+		t.Fatal("RequireTransportSecurity 应恒为 false")
 	}
 }
 
@@ -143,7 +131,7 @@ func TestUnknownCallerTypeRejected(t *testing.T) {
 // 让路。两个都出的话 metadata 里会有两个值，服务端 first() 取哪个是未定义
 // 行为。
 func TestIMCredentialsOmitAppID(t *testing.T) {
-	c := newAppCredentials(Options{AppID: "ignored", AppSecret: "s", CallerType: CallerTypeIM, Insecure: true})
+	c := newAppCredentials(Options{AppID: "ignored", AppSecret: "s", CallerType: CallerTypeIM})
 	md, err := c.GetRequestMetadata(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +149,7 @@ func TestIMCredentialsOmitAppID(t *testing.T) {
 
 // TestDefaultCredentialsUnchanged 钉住"已接入的 SDK 一个字节都不用改"。
 func TestDefaultCredentialsUnchanged(t *testing.T) {
-	c := newAppCredentials(Options{AppID: "app1", AppSecret: "s", Insecure: true})
+	c := newAppCredentials(Options{AppID: "app1", AppSecret: "s"})
 	md, err := c.GetRequestMetadata(context.Background())
 	if err != nil {
 		t.Fatal(err)

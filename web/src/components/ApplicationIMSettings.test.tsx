@@ -1,5 +1,5 @@
 import { test, expect, vi, afterEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import ApplicationIMSettings from './ApplicationIMSettings'
 import { disabledIMConfig } from '@/lib/testFixtures'
 import type { Application } from '@/lib/types'
@@ -55,26 +55,4 @@ test('并发上限只在 limit 策略下出现', () => {
     <ApplicationIMSettings app={withIM({ enabled: true, connPolicy: 'limit', connLimit: 3 })} onSaved={() => {}} />,
   )
   expect(screen.getByLabelText('并发上限')).toBeTruthy()
-})
-
-// 前端先拦一道：令牌明文走在请求体里，明文 http 等于把所有业务方令牌交给
-// 中间人。后端也会拦，这里拦是为了不让人白填一屏再被打回来——而且必须
-// **不发请求**，否则这道拦截等于没有。
-test('回调地址不是 https 时不发请求', async () => {
-  const fetchMock = vi.fn()
-  vi.stubGlobal('fetch', fetchMock)
-
-  render(
-    <ApplicationIMSettings
-      app={withIM({
-        enabled: true,
-        bizAuth: { verifyUrl: 'http://insecure/v', timeoutMs: 2000, cacheSize: 10 },
-      })}
-      onSaved={() => {}}
-    />,
-  )
-
-  fireEvent.click(screen.getByRole('button', { name: '保存' }))
-  await waitFor(() => expect(screen.getByLabelText('回调地址')).toBeTruthy())
-  expect(fetchMock).not.toHaveBeenCalled()
 })

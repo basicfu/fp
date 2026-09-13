@@ -159,28 +159,6 @@ func TestDurationRejectsBareNumber(t *testing.T) {
 	}
 }
 
-// TestInsecureDerivesFromEnv 钉住设计第六节：删掉 insecure 旋钮之后，fp-im
-// 连 fp 走不走明文完全由 env 决定。这条判定有真实的安全后果——appSecret 随
-// 每个 RPC 的 metadata 发送，明文传输等于把一个能签发任意用户会话的凭据
-// 印在网线上。
-func TestInsecureDerivesFromEnv(t *testing.T) {
-	for _, tt := range []struct {
-		env  string
-		want bool
-	}{
-		{"dev", true},
-		{"", true},
-		{"prod", false},
-		{"PROD", false},
-		{"Prod", false},
-		{"production", true}, // 只认 prod，不做前缀匹配
-	} {
-		if got := (&Config{Env: tt.env}).Insecure(); got != tt.want {
-			t.Errorf("Env=%q Insecure() = %v, want %v", tt.env, got, tt.want)
-		}
-	}
-}
-
 func TestLoadRejectsBadPipelineAndRenew(t *testing.T) {
 	_, err := Load(writeConfig(t, minimal+"pipeline:\n  flush_size: 64\n"))
 	if err == nil || !strings.Contains(err.Error(), "pipeline.flush_interval") {

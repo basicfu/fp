@@ -80,7 +80,6 @@ func TestAppConfigValidateBizAuth(t *testing.T) {
 		biz  BizAuth
 	}{
 		{"缺地址", BizAuth{Timeout: Duration(time.Second), CacheSize: 10}},
-		{"明文 HTTP", BizAuth{VerifyURL: "http://x/verify", Timeout: Duration(time.Second), CacheSize: 10}},
 		{"超时为零", BizAuth{VerifyURL: "https://x/verify", CacheSize: 10}},
 		{"超时为负", BizAuth{VerifyURL: "https://x/verify", Timeout: Duration(-time.Second), CacheSize: 10}},
 		{"缓存容量为零", BizAuth{VerifyURL: "https://x/verify", Timeout: Duration(time.Second)}},

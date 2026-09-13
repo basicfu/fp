@@ -2,7 +2,6 @@ package fpim
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -13,7 +12,6 @@ import (
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
@@ -52,12 +50,6 @@ type ServerConfig struct {
 	// （fp-app-id / fp-app-secret）。
 	AppID     string
 	AppSecret string
-
-	// Insecure 允许明文连接。生产绝不要开，见 sdk/options.go 里 Insecure
-	// 字段的同一条理由：凭据会随每个 RPC 的 metadata 明文发送。
-	Insecure bool
-	// TLSConfig 自定义 TLS 配置。为 nil 且 Insecure 为 false 时用系统根证书。
-	TLSConfig *tls.Config
 
 	// RequestTimeout 是单次请求（Push/PushMany/Sessions/Kick）的超时。
 	// 默认 5 秒。
@@ -153,16 +145,17 @@ type Event struct {
 // 理由），键名一致是业务方能用同一对凭据同时接入身份平台与 fp-im 网关的
 // 唯一保证，只能靠约定 + 两边各自的测试守住，见 ServerConfig.AppID 的注释。
 type appCreds struct {
-	id       string
-	secret   string
-	insecure bool
+	id     string
+	secret string
 }
 
 func (c appCreds) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
 	return map[string]string{"fp-app-id": c.id, "fp-app-secret": c.secret}, nil
 }
 
-func (c appCreds) RequireTransportSecurity() bool { return !c.insecure }
+// RequireTransportSecurity 实现 credentials.PerRPCCredentials。业务层连接
+// 一律明文，TLS 终结交给部署时的反代（如 nginx）。
+func (c appCreds) RequireTransportSecurity() bool { return false }
 
 // Server 是业务 server 接入 fp-im 网关的入口：发推送、踢人、查会话，
 // 并通过 OnMessage/OnEvent 接收 client 发上来的消息与连接事件。
@@ -247,15 +240,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	cfg.applyDefaults()
 
-	transport := credentials.NewTLS(cfg.TLSConfig)
-	if cfg.Insecure {
-		cfg.Logger.Warn("fpim: 以明文连接 fp-im，appSecret 将以明文传输——只应在开发环境使用")
-		transport = insecure.NewCredentials()
-	}
-
 	conn, err := grpc.NewClient(cfg.Addr,
-		grpc.WithTransportCredentials(transport),
-		grpc.WithPerRPCCredentials(appCreds{id: cfg.AppID, secret: cfg.AppSecret, insecure: cfg.Insecure}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithPerRPCCredentials(appCreds{id: cfg.AppID, secret: cfg.AppSecret}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                KeepaliveTime,
 			Timeout:             10 * time.Second,

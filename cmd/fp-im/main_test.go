@@ -85,8 +85,6 @@ func testConfig(t *testing.T) *config.Config {
 		t.Fatal("缺少 FP_TEST_REDIS_URL，请用 ./scripts/test.sh 跑测试")
 	}
 	return &config.Config{
-		// dev 而不是 prod：Insecure() 由它推导，下面那个必然不通的地址
-		// 也就不会去要求 TLS。
 		Env:   "dev",
 		Log:   config.Log{Level: "warn"},
 		HTTP:  config.HTTP{Addr: "127.0.0.1:0"},
@@ -188,7 +186,7 @@ func TestServeDeliversFirstConnectEventAfterStartup(t *testing.T) {
 
 	// 节点 B：业务 server 接在这里。它自己不会有任何 ws 连接。
 	_, _, grpcB, _ := startTestNode(t, testConfig(t), guestApps())
-	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: grpcB, AppID: "a1", AppSecret: "s1", Insecure: true})
+	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: grpcB, AppID: "a1", AppSecret: "s1"})
 	if err != nil {
 		t.Fatalf("fpim.NewServer: %v", err)
 	}
@@ -490,7 +488,7 @@ func TestServeGracefulShutdownClosesWebSockets(t *testing.T) {
 	// 还活着的 server 流——这条流也顺带验证了关闭顺序（先断 ws、再停
 	// gRPC），顺序反了断开事件就没有出口。
 	_, wsURL, grpcAddr, stop := startTestNode(t, testConfig(t), guestApps())
-	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: grpcAddr, AppID: "a1", AppSecret: "s1", Insecure: true})
+	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: grpcAddr, AppID: "a1", AppSecret: "s1"})
 	if err != nil {
 		t.Fatalf("fpim.NewServer: %v", err)
 	}

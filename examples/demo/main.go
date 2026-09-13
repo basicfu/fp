@@ -22,9 +22,6 @@ func main() {
 		Addr:      os.Getenv("FP_ADDR"),
 		AppID:     os.Getenv("FP_APP_ID"),
 		AppSecret: os.Getenv("FP_APP_SECRET"),
-		// 本地开发没有 TLS。生产环境绝不要开——
-		// appSecret 会随每个 RPC 以明文发送。
-		Insecure: os.Getenv("FP_INSECURE") == "1",
 	})
 	if err != nil {
 		log.Fatal(err)

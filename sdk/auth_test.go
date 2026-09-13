@@ -467,7 +467,6 @@ func newStubEnvFull(t *testing.T, stub *stubServer, opt ...func(*Options)) *stub
 		Addr:      addr,
 		AppID:     "t",
 		AppSecret: "t",
-		Insecure:  true,
 	}
 	for _, o := range opt {
 		o(&opts)

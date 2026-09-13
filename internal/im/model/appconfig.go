@@ -3,7 +3,6 @@ package model
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -87,11 +86,6 @@ func (c AppConfig) Validate() error {
 	if c.BizAuth != nil {
 		if c.BizAuth.VerifyURL == "" {
 			return fmt.Errorf("model: app %q 配了 biz_auth 但缺 verify_url", c.AppID)
-		}
-		// 必须 HTTPS：client 的令牌明文走在请求体里，明文传输等于把
-		// 所有业务方令牌交给中间人。
-		if !strings.HasPrefix(c.BizAuth.VerifyURL, "https://") {
-			return fmt.Errorf("model: app %q 的 verify_url 必须是 https", c.AppID)
 		}
 		if c.BizAuth.Timeout <= 0 {
 			return fmt.Errorf("model: app %q 的 biz_auth.timeout 必须大于 0", c.AppID)

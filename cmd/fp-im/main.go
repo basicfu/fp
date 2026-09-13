@@ -136,7 +136,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	// 两行都执行完之后。
 	var apps *fpappcfg.Source
 	fpAuthn, err := fpauth.New(fpauth.Config{
-		FPAddr: cfg.FPSDK.Addr, Secret: cfg.FPSDK.Secret, Insecure: cfg.Insecure(), Logger: log,
+		FPAddr: cfg.FPSDK.Addr, Secret: cfg.FPSDK.Secret, Logger: log,
 		OnRevoke: func(app string, tokens []string) { h.OnRevoked(context.Background(), app, tokens) },
 		// AllApps 只服务一件事：RevokeEvent.AppID 为空串的跨应用撤销
 		// （改密、冻结）要逐个 app 投递，见 fpauth.dispatchRevoke。

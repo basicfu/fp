@@ -24,11 +24,8 @@ grpc:
 redis:
   url: redis://:password@127.0.0.1:6379/0
 
-# fp SDK 的连接参数。addr 是 fp 的 gRPC 地址，不是 HTTP。
-#
-# 没有 insecure 开关：传输安全由上面的 env 推导——dev 明文，prod 走 TLS。
-# 【部署硬要求】fp 的 gRPC 服务端目前只服务明文，所以 env: prod 下这条 TLS
-# 必须由 fp 前面的反代 / 网关终结。
+# fp SDK 的连接参数。addr 是 fp 的 gRPC 地址，不是 HTTP，走明文，部署时由
+# 前面的 nginx 统一终结 TLS。
 #
 # secret 是 IM 凭据，在 fp 控制台生成（应用管理页 →「IM 接入」页签），
 # 明文只显示一次。全部 fp-im 实例共用同一份。轮换后旧凭据最多再活 10 秒。

@@ -127,8 +127,8 @@ type phase2Env struct {
 // 应用、一个真实监听端口上的 grpcapi.Server，以及一个已连上它的 SDK 客户端。
 //
 // opts 用于在连接建立前调整 SDK 的 Options（例如打开 AllowStaleOnOutage、
-// 改小 DegradedCacheTTL）——追加在默认值（Addr/AppID/AppSecret/Insecure）
-// 之后应用，因此可以覆盖除这四项之外的任何字段。
+// 改小 DegradedCacheTTL）——追加在默认值（Addr/AppID/AppSecret）之后应用，
+// 因此可以覆盖除这三项之外的任何字段。
 func newPhase2Env(t *testing.T, opts ...func(*fpsdk.Options)) *phase2Env {
 	t.Helper()
 
@@ -269,17 +269,12 @@ func (e *phase2Env) restartFp(t *testing.T) {
 }
 
 // dial 建一个连到本实例的 SDK 客户端。
-//
-// Insecure: true——测试环境没有 TLS。这正是 Insecure 这个选项存在的理由，
-// 也是它必须默认关闭的理由：集成测试里出现它是合理的，生产配置里出现就是
-// 事故。
 func (e *phase2Env) dial(t *testing.T, opts ...func(*fpsdk.Options)) *fpsdk.Client {
 	t.Helper()
 	o := fpsdk.Options{
 		Addr:      e.addr,
 		AppID:     e.appID,
 		AppSecret: e.appSecret,
-		Insecure:  true,
 	}
 	for _, fn := range opts {
 		fn(&o)

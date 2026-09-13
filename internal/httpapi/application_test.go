@@ -330,10 +330,10 @@ func TestPutIMConfigValidatesBeforeSaving(t *testing.T) {
 	appID := createAppID(t, h, token)
 
 	body := `{"enabled":true,"connPolicy":"replace","connLimit":5,"allowGuest":false,` +
-		`"guestIpRate":20,"bizAuth":{"verifyUrl":"http://insecure/v","timeoutMs":2000,"cacheSize":10}}`
+		`"guestIpRate":20,"bizAuth":{"verifyUrl":"","timeoutMs":2000,"cacheSize":10}}`
 	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+appID+"/im", body)
 	if rec.Code != 400 {
-		t.Fatalf("明文 http 的 verifyUrl 必须 400，got %d：%s", rec.Code, rec.Body.String())
+		t.Fatalf("缺 verifyUrl 必须 400，got %d：%s", rec.Code, rec.Body.String())
 	}
 }
 

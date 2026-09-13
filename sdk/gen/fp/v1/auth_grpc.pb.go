@@ -50,7 +50,7 @@ type AuthServiceClient interface {
 	// Watch 是撤销事件的推送流。
 	//
 	// 它同时承担第二个职责：让这条 gRPC 连接**永不空闲**。
-	// 一元 RPC 与本流复用同一条 TCP/TLS 连接，流长期存在意味着
+	// 一元 RPC 与本流复用同一条 TCP 连接，流长期存在意味着
 	// 回源永远走热连接，不会付 2–5ms 的冷连接代价。
 	Watch(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WatchRequest, WatchResponse], error)
 	// ReportPermissions 由业务方 SDK 在启动时调用，上报自己的权限点全量快照。
@@ -186,7 +186,7 @@ type AuthServiceServer interface {
 	// Watch 是撤销事件的推送流。
 	//
 	// 它同时承担第二个职责：让这条 gRPC 连接**永不空闲**。
-	// 一元 RPC 与本流复用同一条 TCP/TLS 连接，流长期存在意味着
+	// 一元 RPC 与本流复用同一条 TCP 连接，流长期存在意味着
 	// 回源永远走热连接，不会付 2–5ms 的冷连接代价。
 	Watch(grpc.BidiStreamingServer[WatchRequest, WatchResponse]) error
 	// ReportPermissions 由业务方 SDK 在启动时调用，上报自己的权限点全量快照。

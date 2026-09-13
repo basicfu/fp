@@ -23,7 +23,6 @@ func newTestAuthenticator(t *testing.T, cfg Config) *Authenticator {
 	if cfg.Secret == "" {
 		cfg.Secret = "im-secret"
 	}
-	cfg.Insecure = true
 	a, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)

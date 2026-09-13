@@ -104,7 +104,7 @@ func waitUntil(t *testing.T, cond func() bool, msg string) {
 func TestServerPushSessionsAndCredentials(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestServerPushSessionsAndCredentials(t *testing.T) {
 func TestServerHandlersReceiveInboundAndEvents(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
 	defer s.Close()
 	var mu sync.Mutex
 	var inbound []Inbound
@@ -155,7 +155,7 @@ func TestServerHandlersReceiveInboundAndEvents(t *testing.T) {
 
 func TestServerPushFailsFastWhenStreamDown(t *testing.T) {
 	_, addr, stop := startStub(t)
-	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
 	defer s.Close()
 	waitUntil(t, s.StreamHealthy, "流应就绪")
 	stop()
@@ -182,7 +182,7 @@ func TestServerPushFailsFastWhenStreamDown(t *testing.T) {
 // "立刻失败"与"等到超时"两种情形可靠区分开。
 func TestServerInFlightPushFailsFastOnDisconnect(t *testing.T) {
 	stub, addr, stop := startStub(t)
-	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true, RequestTimeout: 10 * time.Second})
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", RequestTimeout: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestServerInFlightPushFailsFastOnDisconnect(t *testing.T) {
 func TestServerPushInsideOnMessageDoesNotDeadlock(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true, RequestTimeout: 3 * time.Second})
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", RequestTimeout: 3 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestServerPushInsideOnMessageDoesNotDeadlock(t *testing.T) {
 func TestServerPreservesEventBeforeMessageOrder(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
 	defer s.Close()
 
 	var mu sync.Mutex
@@ -385,7 +385,7 @@ func TestServerPreservesEventBeforeMessageOrder(t *testing.T) {
 func TestServerPreservesMessageBeforeEventOrder(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
 	defer s.Close()
 
 	var mu sync.Mutex
@@ -468,7 +468,7 @@ func TestServerPreservesMessageBeforeEventOrder(t *testing.T) {
 func TestServerDropsFramesWhenQueueFull(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
 	defer s.Close()
 
 	started := make(chan struct{})
@@ -532,7 +532,7 @@ func TestServerDropsFramesWhenQueueFull(t *testing.T) {
 func TestServerDropsUnknownEventKind(t *testing.T) {
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", Insecure: true})
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
 	defer s.Close()
 	var mu sync.Mutex
 	var events []Event
