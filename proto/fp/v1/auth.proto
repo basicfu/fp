@@ -37,6 +37,12 @@ service AuthService {
   // GetPolicy 拉取本应用的完整策略快照。SDK 启动时调一次，
   // 之后靠 Watch 上的 PolicyChanged 事件触发重拉。
   rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+
+  // GetAccessKey 取一把访问密钥的校验材料（含 SK）。SDK 本地缓存未命中时调用。
+  rpc GetAccessKey(GetAccessKeyRequest) returns (GetAccessKeyResponse);
+
+  // ReportAccessKeyUsage 批量上报签名校验通过的时间，fp 据此更新最后使用时间。
+  rpc ReportAccessKeyUsage(ReportAccessKeyUsageRequest) returns (ReportAccessKeyUsageResponse);
 }
 
 // SendLoginCodeRequest 是一次发码请求。
@@ -166,6 +172,8 @@ message WatchResponse {
     // app_im_config_changed 表示某个应用的 IM 接入配置变了，fp-im 应当重拉
     // 一次 GetAppIMConfig。只有 fp-caller-type: im 的流会收到。
     AppIMConfigChanged app_im_config_changed = 7;
+    // access_key_changed 表示某把访问密钥被修改、停用或删除，SDK 应丢掉它的缓存。
+    AccessKeyChanged access_key_changed = 8;
   }
 }
 
@@ -258,3 +266,33 @@ message ConfigChanged {
   // 这让丢失一条通知的后果被下一条自动修复。
   int64 version = 2;
 }
+
+message AccessKeyChanged {
+  string access_key_id = 1;
+}
+
+message GetAccessKeyRequest {
+  string access_key_id = 1;
+}
+
+message GetAccessKeyResponse {
+  string secret = 1;
+  string remark = 2;
+  // roles 是绑定的角色，当前 0 或 1 个。
+  repeated string roles = 3;
+  // allowed_ips 是 IP 白名单（CIDR），空表示不校验。
+  repeated string allowed_ips = 4;
+  // cache_ttl_ms = min(应用的 token_cache_ttl, 到期剩余时间)，0 表示不缓存。
+  int64 cache_ttl_ms = 5;
+}
+
+message ReportAccessKeyUsageRequest {
+  repeated AccessKeyUsage usages = 1;
+}
+
+message AccessKeyUsage {
+  string access_key_id = 1;
+  int64 last_used_at_ms = 2;
+}
+
+message ReportAccessKeyUsageResponse {}

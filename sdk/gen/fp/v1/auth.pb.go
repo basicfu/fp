@@ -622,6 +622,7 @@ type WatchResponse struct {
 	//	*WatchResponse_UserRoleChanged
 	//	*WatchResponse_ConfigChanged
 	//	*WatchResponse_AppImConfigChanged
+	//	*WatchResponse_AccessKeyChanged
 	Event         isWatchResponse_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -727,6 +728,15 @@ func (x *WatchResponse) GetAppImConfigChanged() *AppIMConfigChanged {
 	return nil
 }
 
+func (x *WatchResponse) GetAccessKeyChanged() *AccessKeyChanged {
+	if x != nil {
+		if x, ok := x.Event.(*WatchResponse_AccessKeyChanged); ok {
+			return x.AccessKeyChanged
+		}
+	}
+	return nil
+}
+
 type isWatchResponse_Event interface {
 	isWatchResponse_Event()
 }
@@ -771,6 +781,11 @@ type WatchResponse_AppImConfigChanged struct {
 	AppImConfigChanged *AppIMConfigChanged `protobuf:"bytes,7,opt,name=app_im_config_changed,json=appImConfigChanged,proto3,oneof"`
 }
 
+type WatchResponse_AccessKeyChanged struct {
+	// access_key_changed 表示某把访问密钥被修改、停用或删除，SDK 应丢掉它的缓存。
+	AccessKeyChanged *AccessKeyChanged `protobuf:"bytes,8,opt,name=access_key_changed,json=accessKeyChanged,proto3,oneof"`
+}
+
 func (*WatchResponse_Revoke) isWatchResponse_Event() {}
 
 func (*WatchResponse_Ready) isWatchResponse_Event() {}
@@ -784,6 +799,8 @@ func (*WatchResponse_UserRoleChanged) isWatchResponse_Event() {}
 func (*WatchResponse_ConfigChanged) isWatchResponse_Event() {}
 
 func (*WatchResponse_AppImConfigChanged) isWatchResponse_Event() {}
+
+func (*WatchResponse_AccessKeyChanged) isWatchResponse_Event() {}
 
 // AppIMConfigChanged 是一次 IM 接入配置变更的通知。
 //
@@ -1321,6 +1338,305 @@ func (x *ConfigChanged) GetVersion() int64 {
 	return 0
 }
 
+type AccessKeyChanged struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccessKeyId   string                 `protobuf:"bytes,1,opt,name=access_key_id,json=accessKeyId,proto3" json:"access_key_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccessKeyChanged) Reset() {
+	*x = AccessKeyChanged{}
+	mi := &file_fp_v1_auth_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccessKeyChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccessKeyChanged) ProtoMessage() {}
+
+func (x *AccessKeyChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccessKeyChanged.ProtoReflect.Descriptor instead.
+func (*AccessKeyChanged) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *AccessKeyChanged) GetAccessKeyId() string {
+	if x != nil {
+		return x.AccessKeyId
+	}
+	return ""
+}
+
+type GetAccessKeyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccessKeyId   string                 `protobuf:"bytes,1,opt,name=access_key_id,json=accessKeyId,proto3" json:"access_key_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetAccessKeyRequest) Reset() {
+	*x = GetAccessKeyRequest{}
+	mi := &file_fp_v1_auth_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAccessKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAccessKeyRequest) ProtoMessage() {}
+
+func (x *GetAccessKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAccessKeyRequest.ProtoReflect.Descriptor instead.
+func (*GetAccessKeyRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *GetAccessKeyRequest) GetAccessKeyId() string {
+	if x != nil {
+		return x.AccessKeyId
+	}
+	return ""
+}
+
+type GetAccessKeyResponse struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Secret string                 `protobuf:"bytes,1,opt,name=secret,proto3" json:"secret,omitempty"`
+	Remark string                 `protobuf:"bytes,2,opt,name=remark,proto3" json:"remark,omitempty"`
+	// roles 是绑定的角色，当前 0 或 1 个。
+	Roles []string `protobuf:"bytes,3,rep,name=roles,proto3" json:"roles,omitempty"`
+	// allowed_ips 是 IP 白名单（CIDR），空表示不校验。
+	AllowedIps []string `protobuf:"bytes,4,rep,name=allowed_ips,json=allowedIps,proto3" json:"allowed_ips,omitempty"`
+	// cache_ttl_ms = min(应用的 token_cache_ttl, 到期剩余时间)，0 表示不缓存。
+	CacheTtlMs    int64 `protobuf:"varint,5,opt,name=cache_ttl_ms,json=cacheTtlMs,proto3" json:"cache_ttl_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetAccessKeyResponse) Reset() {
+	*x = GetAccessKeyResponse{}
+	mi := &file_fp_v1_auth_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAccessKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAccessKeyResponse) ProtoMessage() {}
+
+func (x *GetAccessKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAccessKeyResponse.ProtoReflect.Descriptor instead.
+func (*GetAccessKeyResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *GetAccessKeyResponse) GetSecret() string {
+	if x != nil {
+		return x.Secret
+	}
+	return ""
+}
+
+func (x *GetAccessKeyResponse) GetRemark() string {
+	if x != nil {
+		return x.Remark
+	}
+	return ""
+}
+
+func (x *GetAccessKeyResponse) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+func (x *GetAccessKeyResponse) GetAllowedIps() []string {
+	if x != nil {
+		return x.AllowedIps
+	}
+	return nil
+}
+
+func (x *GetAccessKeyResponse) GetCacheTtlMs() int64 {
+	if x != nil {
+		return x.CacheTtlMs
+	}
+	return 0
+}
+
+type ReportAccessKeyUsageRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Usages        []*AccessKeyUsage      `protobuf:"bytes,1,rep,name=usages,proto3" json:"usages,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportAccessKeyUsageRequest) Reset() {
+	*x = ReportAccessKeyUsageRequest{}
+	mi := &file_fp_v1_auth_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportAccessKeyUsageRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportAccessKeyUsageRequest) ProtoMessage() {}
+
+func (x *ReportAccessKeyUsageRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportAccessKeyUsageRequest.ProtoReflect.Descriptor instead.
+func (*ReportAccessKeyUsageRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *ReportAccessKeyUsageRequest) GetUsages() []*AccessKeyUsage {
+	if x != nil {
+		return x.Usages
+	}
+	return nil
+}
+
+type AccessKeyUsage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccessKeyId   string                 `protobuf:"bytes,1,opt,name=access_key_id,json=accessKeyId,proto3" json:"access_key_id,omitempty"`
+	LastUsedAtMs  int64                  `protobuf:"varint,2,opt,name=last_used_at_ms,json=lastUsedAtMs,proto3" json:"last_used_at_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccessKeyUsage) Reset() {
+	*x = AccessKeyUsage{}
+	mi := &file_fp_v1_auth_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccessKeyUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccessKeyUsage) ProtoMessage() {}
+
+func (x *AccessKeyUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccessKeyUsage.ProtoReflect.Descriptor instead.
+func (*AccessKeyUsage) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *AccessKeyUsage) GetAccessKeyId() string {
+	if x != nil {
+		return x.AccessKeyId
+	}
+	return ""
+}
+
+func (x *AccessKeyUsage) GetLastUsedAtMs() int64 {
+	if x != nil {
+		return x.LastUsedAtMs
+	}
+	return 0
+}
+
+type ReportAccessKeyUsageResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportAccessKeyUsageResponse) Reset() {
+	*x = ReportAccessKeyUsageResponse{}
+	mi := &file_fp_v1_auth_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportAccessKeyUsageResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportAccessKeyUsageResponse) ProtoMessage() {}
+
+func (x *ReportAccessKeyUsageResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportAccessKeyUsageResponse.ProtoReflect.Descriptor instead.
+func (*ReportAccessKeyUsageResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{27}
+}
+
 var File_fp_v1_auth_proto protoreflect.FileDescriptor
 
 const file_fp_v1_auth_proto_rawDesc = "" +
@@ -1365,7 +1681,7 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\arotated\x18\x04 \x01(\bR\arotated\x12\x1b\n" +
 	"\tnew_token\x18\x05 \x01(\tR\bnewToken\x12\x14\n" +
 	"\x05roles\x18\x06 \x03(\tR\x05roles\"\x0e\n" +
-	"\fWatchRequest\"\xb0\x03\n" +
+	"\fWatchRequest\"\xf9\x03\n" +
 	"\rWatchResponse\x12,\n" +
 	"\x06revoke\x18\x01 \x01(\v2\x12.fp.v1.RevokeEventH\x00R\x06revoke\x12)\n" +
 	"\x05ready\x18\x02 \x01(\v2\x11.fp.v1.WatchReadyH\x00R\x05ready\x12)\n" +
@@ -1373,7 +1689,8 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x0epolicy_changed\x18\x04 \x01(\v2\x14.fp.v1.PolicyChangedH\x00R\rpolicyChanged\x12D\n" +
 	"\x11user_role_changed\x18\x05 \x01(\v2\x16.fp.v1.UserRoleChangedH\x00R\x0fuserRoleChanged\x12=\n" +
 	"\x0econfig_changed\x18\x06 \x01(\v2\x14.fp.v1.ConfigChangedH\x00R\rconfigChanged\x12N\n" +
-	"\x15app_im_config_changed\x18\a \x01(\v2\x19.fp.v1.AppIMConfigChangedH\x00R\x12appImConfigChangedB\a\n" +
+	"\x15app_im_config_changed\x18\a \x01(\v2\x19.fp.v1.AppIMConfigChangedH\x00R\x12appImConfigChanged\x12G\n" +
+	"\x12access_key_changed\x18\b \x01(\v2\x17.fp.v1.AccessKeyChangedH\x00R\x10accessKeyChangedB\a\n" +
 	"\x05event\"+\n" +
 	"\x12AppIMConfigChanged\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\")\n" +
@@ -1399,7 +1716,25 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x06policy\x18\x01 \x01(\v2\x10.fp.v1.AppPolicyR\x06policy\"=\n" +
 	"\rConfigChanged\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\x03R\aversion2\xe0\x03\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion\"6\n" +
+	"\x10AccessKeyChanged\x12\"\n" +
+	"\raccess_key_id\x18\x01 \x01(\tR\vaccessKeyId\"9\n" +
+	"\x13GetAccessKeyRequest\x12\"\n" +
+	"\raccess_key_id\x18\x01 \x01(\tR\vaccessKeyId\"\x9f\x01\n" +
+	"\x14GetAccessKeyResponse\x12\x16\n" +
+	"\x06secret\x18\x01 \x01(\tR\x06secret\x12\x16\n" +
+	"\x06remark\x18\x02 \x01(\tR\x06remark\x12\x14\n" +
+	"\x05roles\x18\x03 \x03(\tR\x05roles\x12\x1f\n" +
+	"\vallowed_ips\x18\x04 \x03(\tR\n" +
+	"allowedIps\x12 \n" +
+	"\fcache_ttl_ms\x18\x05 \x01(\x03R\n" +
+	"cacheTtlMs\"L\n" +
+	"\x1bReportAccessKeyUsageRequest\x12-\n" +
+	"\x06usages\x18\x01 \x03(\v2\x15.fp.v1.AccessKeyUsageR\x06usages\"[\n" +
+	"\x0eAccessKeyUsage\x12\"\n" +
+	"\raccess_key_id\x18\x01 \x01(\tR\vaccessKeyId\x12%\n" +
+	"\x0flast_used_at_ms\x18\x02 \x01(\x03R\flastUsedAtMs\"\x1e\n" +
+	"\x1cReportAccessKeyUsageResponse2\x8a\x05\n" +
 	"\vAuthService\x12J\n" +
 	"\rSendLoginCode\x12\x1b.fp.v1.SendLoginCodeRequest\x1a\x1c.fp.v1.SendLoginCodeResponse\x122\n" +
 	"\x05Login\x12\x13.fp.v1.LoginRequest\x1a\x14.fp.v1.LoginResponse\x125\n" +
@@ -1407,7 +1742,9 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\rValidateToken\x12\x1b.fp.v1.ValidateTokenRequest\x1a\x1c.fp.v1.ValidateTokenResponse\x126\n" +
 	"\x05Watch\x12\x13.fp.v1.WatchRequest\x1a\x14.fp.v1.WatchResponse(\x010\x01\x12V\n" +
 	"\x11ReportPermissions\x12\x1f.fp.v1.ReportPermissionsRequest\x1a .fp.v1.ReportPermissionsResponse\x12>\n" +
-	"\tGetPolicy\x12\x17.fp.v1.GetPolicyRequest\x1a\x18.fp.v1.GetPolicyResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
+	"\tGetPolicy\x12\x17.fp.v1.GetPolicyRequest\x1a\x18.fp.v1.GetPolicyResponse\x12G\n" +
+	"\fGetAccessKey\x12\x1a.fp.v1.GetAccessKeyRequest\x1a\x1b.fp.v1.GetAccessKeyResponse\x12_\n" +
+	"\x14ReportAccessKeyUsage\x12\".fp.v1.ReportAccessKeyUsageRequest\x1a#.fp.v1.ReportAccessKeyUsageResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
 
 var (
 	file_fp_v1_auth_proto_rawDescOnce sync.Once
@@ -1421,65 +1758,77 @@ func file_fp_v1_auth_proto_rawDescGZIP() []byte {
 	return file_fp_v1_auth_proto_rawDescData
 }
 
-var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_fp_v1_auth_proto_goTypes = []any{
-	(*SendLoginCodeRequest)(nil),      // 0: fp.v1.SendLoginCodeRequest
-	(*SendLoginCodeResponse)(nil),     // 1: fp.v1.SendLoginCodeResponse
-	(*LoginRequest)(nil),              // 2: fp.v1.LoginRequest
-	(*LoginResponse)(nil),             // 3: fp.v1.LoginResponse
-	(*UserInfo)(nil),                  // 4: fp.v1.UserInfo
-	(*LogoutRequest)(nil),             // 5: fp.v1.LogoutRequest
-	(*LogoutResponse)(nil),            // 6: fp.v1.LogoutResponse
-	(*ValidateTokenRequest)(nil),      // 7: fp.v1.ValidateTokenRequest
-	(*ValidateTokenResponse)(nil),     // 8: fp.v1.ValidateTokenResponse
-	(*WatchRequest)(nil),              // 9: fp.v1.WatchRequest
-	(*WatchResponse)(nil),             // 10: fp.v1.WatchResponse
-	(*AppIMConfigChanged)(nil),        // 11: fp.v1.AppIMConfigChanged
-	(*PolicyChanged)(nil),             // 12: fp.v1.PolicyChanged
-	(*UserRoleChanged)(nil),           // 13: fp.v1.UserRoleChanged
-	(*WatchReady)(nil),                // 14: fp.v1.WatchReady
-	(*WatchPurge)(nil),                // 15: fp.v1.WatchPurge
-	(*ReportPermissionsRequest)(nil),  // 16: fp.v1.ReportPermissionsRequest
-	(*PermissionPoint)(nil),           // 17: fp.v1.PermissionPoint
-	(*ReportPermissionsResponse)(nil), // 18: fp.v1.ReportPermissionsResponse
-	(*GetPolicyRequest)(nil),          // 19: fp.v1.GetPolicyRequest
-	(*GetPolicyResponse)(nil),         // 20: fp.v1.GetPolicyResponse
-	(*ConfigChanged)(nil),             // 21: fp.v1.ConfigChanged
-	nil,                               // 22: fp.v1.LoginRequest.CredentialsEntry
-	(*RevokeEvent)(nil),               // 23: fp.v1.RevokeEvent
-	(*AppPolicy)(nil),                 // 24: fp.v1.AppPolicy
+	(*SendLoginCodeRequest)(nil),         // 0: fp.v1.SendLoginCodeRequest
+	(*SendLoginCodeResponse)(nil),        // 1: fp.v1.SendLoginCodeResponse
+	(*LoginRequest)(nil),                 // 2: fp.v1.LoginRequest
+	(*LoginResponse)(nil),                // 3: fp.v1.LoginResponse
+	(*UserInfo)(nil),                     // 4: fp.v1.UserInfo
+	(*LogoutRequest)(nil),                // 5: fp.v1.LogoutRequest
+	(*LogoutResponse)(nil),               // 6: fp.v1.LogoutResponse
+	(*ValidateTokenRequest)(nil),         // 7: fp.v1.ValidateTokenRequest
+	(*ValidateTokenResponse)(nil),        // 8: fp.v1.ValidateTokenResponse
+	(*WatchRequest)(nil),                 // 9: fp.v1.WatchRequest
+	(*WatchResponse)(nil),                // 10: fp.v1.WatchResponse
+	(*AppIMConfigChanged)(nil),           // 11: fp.v1.AppIMConfigChanged
+	(*PolicyChanged)(nil),                // 12: fp.v1.PolicyChanged
+	(*UserRoleChanged)(nil),              // 13: fp.v1.UserRoleChanged
+	(*WatchReady)(nil),                   // 14: fp.v1.WatchReady
+	(*WatchPurge)(nil),                   // 15: fp.v1.WatchPurge
+	(*ReportPermissionsRequest)(nil),     // 16: fp.v1.ReportPermissionsRequest
+	(*PermissionPoint)(nil),              // 17: fp.v1.PermissionPoint
+	(*ReportPermissionsResponse)(nil),    // 18: fp.v1.ReportPermissionsResponse
+	(*GetPolicyRequest)(nil),             // 19: fp.v1.GetPolicyRequest
+	(*GetPolicyResponse)(nil),            // 20: fp.v1.GetPolicyResponse
+	(*ConfigChanged)(nil),                // 21: fp.v1.ConfigChanged
+	(*AccessKeyChanged)(nil),             // 22: fp.v1.AccessKeyChanged
+	(*GetAccessKeyRequest)(nil),          // 23: fp.v1.GetAccessKeyRequest
+	(*GetAccessKeyResponse)(nil),         // 24: fp.v1.GetAccessKeyResponse
+	(*ReportAccessKeyUsageRequest)(nil),  // 25: fp.v1.ReportAccessKeyUsageRequest
+	(*AccessKeyUsage)(nil),               // 26: fp.v1.AccessKeyUsage
+	(*ReportAccessKeyUsageResponse)(nil), // 27: fp.v1.ReportAccessKeyUsageResponse
+	nil,                                  // 28: fp.v1.LoginRequest.CredentialsEntry
+	(*RevokeEvent)(nil),                  // 29: fp.v1.RevokeEvent
+	(*AppPolicy)(nil),                    // 30: fp.v1.AppPolicy
 }
 var file_fp_v1_auth_proto_depIdxs = []int32{
-	22, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
+	28, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
 	4,  // 1: fp.v1.LoginResponse.user:type_name -> fp.v1.UserInfo
-	23, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
+	29, // 2: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
 	14, // 3: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
 	15, // 4: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
 	12, // 5: fp.v1.WatchResponse.policy_changed:type_name -> fp.v1.PolicyChanged
 	13, // 6: fp.v1.WatchResponse.user_role_changed:type_name -> fp.v1.UserRoleChanged
 	21, // 7: fp.v1.WatchResponse.config_changed:type_name -> fp.v1.ConfigChanged
 	11, // 8: fp.v1.WatchResponse.app_im_config_changed:type_name -> fp.v1.AppIMConfigChanged
-	17, // 9: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
-	24, // 10: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
-	0,  // 11: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
-	2,  // 12: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
-	5,  // 13: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
-	7,  // 14: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
-	9,  // 15: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
-	16, // 16: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
-	19, // 17: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
-	1,  // 18: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
-	3,  // 19: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
-	6,  // 20: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
-	8,  // 21: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
-	10, // 22: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
-	18, // 23: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
-	20, // 24: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
-	18, // [18:25] is the sub-list for method output_type
-	11, // [11:18] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	22, // 9: fp.v1.WatchResponse.access_key_changed:type_name -> fp.v1.AccessKeyChanged
+	17, // 10: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
+	30, // 11: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
+	26, // 12: fp.v1.ReportAccessKeyUsageRequest.usages:type_name -> fp.v1.AccessKeyUsage
+	0,  // 13: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
+	2,  // 14: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
+	5,  // 15: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
+	7,  // 16: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
+	9,  // 17: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
+	16, // 18: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
+	19, // 19: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
+	23, // 20: fp.v1.AuthService.GetAccessKey:input_type -> fp.v1.GetAccessKeyRequest
+	25, // 21: fp.v1.AuthService.ReportAccessKeyUsage:input_type -> fp.v1.ReportAccessKeyUsageRequest
+	1,  // 22: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
+	3,  // 23: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
+	6,  // 24: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
+	8,  // 25: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
+	10, // 26: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
+	18, // 27: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
+	20, // 28: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
+	24, // 29: fp.v1.AuthService.GetAccessKey:output_type -> fp.v1.GetAccessKeyResponse
+	27, // 30: fp.v1.AuthService.ReportAccessKeyUsage:output_type -> fp.v1.ReportAccessKeyUsageResponse
+	22, // [22:31] is the sub-list for method output_type
+	13, // [13:22] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_fp_v1_auth_proto_init() }
@@ -1496,6 +1845,7 @@ func file_fp_v1_auth_proto_init() {
 		(*WatchResponse_UserRoleChanged)(nil),
 		(*WatchResponse_ConfigChanged)(nil),
 		(*WatchResponse_AppImConfigChanged)(nil),
+		(*WatchResponse_AccessKeyChanged)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1503,7 +1853,7 @@ func file_fp_v1_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_auth_proto_rawDesc), len(file_fp_v1_auth_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   23,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

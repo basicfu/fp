@@ -19,13 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AuthService_SendLoginCode_FullMethodName     = "/fp.v1.AuthService/SendLoginCode"
-	AuthService_Login_FullMethodName             = "/fp.v1.AuthService/Login"
-	AuthService_Logout_FullMethodName            = "/fp.v1.AuthService/Logout"
-	AuthService_ValidateToken_FullMethodName     = "/fp.v1.AuthService/ValidateToken"
-	AuthService_Watch_FullMethodName             = "/fp.v1.AuthService/Watch"
-	AuthService_ReportPermissions_FullMethodName = "/fp.v1.AuthService/ReportPermissions"
-	AuthService_GetPolicy_FullMethodName         = "/fp.v1.AuthService/GetPolicy"
+	AuthService_SendLoginCode_FullMethodName        = "/fp.v1.AuthService/SendLoginCode"
+	AuthService_Login_FullMethodName                = "/fp.v1.AuthService/Login"
+	AuthService_Logout_FullMethodName               = "/fp.v1.AuthService/Logout"
+	AuthService_ValidateToken_FullMethodName        = "/fp.v1.AuthService/ValidateToken"
+	AuthService_Watch_FullMethodName                = "/fp.v1.AuthService/Watch"
+	AuthService_ReportPermissions_FullMethodName    = "/fp.v1.AuthService/ReportPermissions"
+	AuthService_GetPolicy_FullMethodName            = "/fp.v1.AuthService/GetPolicy"
+	AuthService_GetAccessKey_FullMethodName         = "/fp.v1.AuthService/GetAccessKey"
+	AuthService_ReportAccessKeyUsage_FullMethodName = "/fp.v1.AuthService/ReportAccessKeyUsage"
 )
 
 // AuthServiceClient is the client API for AuthService service.
@@ -57,6 +59,10 @@ type AuthServiceClient interface {
 	// GetPolicy 拉取本应用的完整策略快照。SDK 启动时调一次，
 	// 之后靠 Watch 上的 PolicyChanged 事件触发重拉。
 	GetPolicy(ctx context.Context, in *GetPolicyRequest, opts ...grpc.CallOption) (*GetPolicyResponse, error)
+	// GetAccessKey 取一把访问密钥的校验材料（含 SK）。SDK 本地缓存未命中时调用。
+	GetAccessKey(ctx context.Context, in *GetAccessKeyRequest, opts ...grpc.CallOption) (*GetAccessKeyResponse, error)
+	// ReportAccessKeyUsage 批量上报签名校验通过的时间，fp 据此更新最后使用时间。
+	ReportAccessKeyUsage(ctx context.Context, in *ReportAccessKeyUsageRequest, opts ...grpc.CallOption) (*ReportAccessKeyUsageResponse, error)
 }
 
 type authServiceClient struct {
@@ -140,6 +146,26 @@ func (c *authServiceClient) GetPolicy(ctx context.Context, in *GetPolicyRequest,
 	return out, nil
 }
 
+func (c *authServiceClient) GetAccessKey(ctx context.Context, in *GetAccessKeyRequest, opts ...grpc.CallOption) (*GetAccessKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAccessKeyResponse)
+	err := c.cc.Invoke(ctx, AuthService_GetAccessKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *authServiceClient) ReportAccessKeyUsage(ctx context.Context, in *ReportAccessKeyUsageRequest, opts ...grpc.CallOption) (*ReportAccessKeyUsageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportAccessKeyUsageResponse)
+	err := c.cc.Invoke(ctx, AuthService_ReportAccessKeyUsage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AuthServiceServer is the server API for AuthService service.
 // All implementations must embed UnimplementedAuthServiceServer
 // for forward compatibility.
@@ -169,6 +195,10 @@ type AuthServiceServer interface {
 	// GetPolicy 拉取本应用的完整策略快照。SDK 启动时调一次，
 	// 之后靠 Watch 上的 PolicyChanged 事件触发重拉。
 	GetPolicy(context.Context, *GetPolicyRequest) (*GetPolicyResponse, error)
+	// GetAccessKey 取一把访问密钥的校验材料（含 SK）。SDK 本地缓存未命中时调用。
+	GetAccessKey(context.Context, *GetAccessKeyRequest) (*GetAccessKeyResponse, error)
+	// ReportAccessKeyUsage 批量上报签名校验通过的时间，fp 据此更新最后使用时间。
+	ReportAccessKeyUsage(context.Context, *ReportAccessKeyUsageRequest) (*ReportAccessKeyUsageResponse, error)
 	mustEmbedUnimplementedAuthServiceServer()
 }
 
@@ -199,6 +229,12 @@ func (UnimplementedAuthServiceServer) ReportPermissions(context.Context, *Report
 }
 func (UnimplementedAuthServiceServer) GetPolicy(context.Context, *GetPolicyRequest) (*GetPolicyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPolicy not implemented")
+}
+func (UnimplementedAuthServiceServer) GetAccessKey(context.Context, *GetAccessKeyRequest) (*GetAccessKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAccessKey not implemented")
+}
+func (UnimplementedAuthServiceServer) ReportAccessKeyUsage(context.Context, *ReportAccessKeyUsageRequest) (*ReportAccessKeyUsageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportAccessKeyUsage not implemented")
 }
 func (UnimplementedAuthServiceServer) mustEmbedUnimplementedAuthServiceServer() {}
 func (UnimplementedAuthServiceServer) testEmbeddedByValue()                     {}
@@ -336,6 +372,42 @@ func _AuthService_GetPolicy_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AuthService_GetAccessKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAccessKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).GetAccessKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_GetAccessKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).GetAccessKey(ctx, req.(*GetAccessKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuthService_ReportAccessKeyUsage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportAccessKeyUsageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).ReportAccessKeyUsage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_ReportAccessKeyUsage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).ReportAccessKeyUsage(ctx, req.(*ReportAccessKeyUsageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AuthService_ServiceDesc is the grpc.ServiceDesc for AuthService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -366,6 +438,14 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetPolicy",
 			Handler:    _AuthService_GetPolicy_Handler,
+		},
+		{
+			MethodName: "GetAccessKey",
+			Handler:    _AuthService_GetAccessKey_Handler,
+		},
+		{
+			MethodName: "ReportAccessKeyUsage",
+			Handler:    _AuthService_ReportAccessKeyUsage_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

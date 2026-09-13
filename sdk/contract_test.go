@@ -87,6 +87,9 @@ func TestAuthServiceSurface(t *testing.T) {
 		// 授权模块新增：上报权限点、拉取策略快照。
 		"ReportPermissions": {false, false},
 		"GetPolicy":         {false, false},
+		// 访问密钥：取校验材料、上报使用时间。
+		"GetAccessKey":         {false, false},
+		"ReportAccessKeyUsage": {false, false},
 	}
 
 	methods := svc.Methods()
@@ -119,5 +122,13 @@ func TestRevokeEventCarriesTokens(t *testing.T) {
 	}
 	if !f.IsList() || f.Kind() != protoreflect.StringKind {
 		t.Fatalf("RevokeEvent.tokens 是 %v（list=%v），期望 repeated string", f.Kind(), f.IsList())
+	}
+}
+
+// TestWatchResponseCarriesAccessKeyChanged 钉住事件的字段号：老 SDK 靠 oneof 的未知分支忽略它。
+func TestWatchResponseCarriesAccessKeyChanged(t *testing.T) {
+	f := fpv1.File_fp_v1_auth_proto.Messages().ByName("WatchResponse").Fields().ByName("access_key_changed")
+	if f == nil || f.Number() != 8 {
+		t.Fatalf("WatchResponse.access_key_changed 缺失或字段号不是 8: %v", f)
 	}
 }
