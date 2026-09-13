@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/sdk/authzcore"
 )
 
 // AuthzService 管理角色、权限点与它们之间的授权关系。
@@ -19,11 +20,55 @@ type AuthzService struct {
 	pool *pgxpool.Pool
 	// staleAfter 是权限点判定"过渡中"的阈值。
 	staleAfter time.Duration
+	// pub 在授权相关的写操作成功后广播 PolicyChanged；为 nil 时不广播
+	// （未注入时，例如尚未接线的调用点），不影响写操作本身。
+	pub EventPublisher
+}
+
+// AuthzOption 配置 AuthzService 的可选依赖。
+type AuthzOption func(*AuthzService)
+
+// WithAuthzPublisher 注入事件发布器：角色、权限点、授权关系的写操作成功后
+// 会广播 PolicyChanged，让业务方 SDK 知道要重新拉策略。
+func WithAuthzPublisher(pub EventPublisher) AuthzOption {
+	return func(s *AuthzService) { s.pub = pub }
 }
 
 // NewAuthzService 构造 AuthzService。
-func NewAuthzService(pool *pgxpool.Pool) *AuthzService {
-	return &AuthzService{pool: pool, staleAfter: domain.DefaultStaleAfter}
+func NewAuthzService(pool *pgxpool.Pool, opts ...AuthzOption) *AuthzService {
+	s := &AuthzService{pool: pool, staleAfter: domain.DefaultStaleAfter}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// announcePolicy 通知 SDK 重拉策略。appID 为 uuid.Nil 表示所有应用。
+func (s *AuthzService) announcePolicy(ctx context.Context, appID uuid.UUID) {
+	publishEvent(ctx, s.pub, domain.RevokeEvent{
+		Kind: domain.EventKindPolicyChanged, AppID: appID, At: time.Now().UnixMilli(),
+	})
+}
+
+// roleKeyByID 取角色 key，不存在返回 ROLE_NOT_FOUND。
+func (s *AuthzService) roleKeyByID(ctx context.Context, id uuid.UUID) (string, error) {
+	var key string
+	err := s.pool.QueryRow(ctx, `SELECT key FROM role WHERE id = $1`, id).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", domain.Fail(domain.ErrNotFound, domain.CodeRoleNotFound, "角色不存在")
+	}
+	if err != nil {
+		return "", fmt.Errorf("service: 查询角色: %w", err)
+	}
+	return key, nil
+}
+
+// pgForeignKeyViolation 是 PostgreSQL 外键约束冲突的 SQLSTATE。
+const pgForeignKeyViolation = "23503"
+
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +107,13 @@ func (s *AuthzService) UpdateRole(ctx context.Context, id uuid.UUID, name string
 		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleCycle, "角色不能以自己为父角色")
 	}
 	if parentID != nil {
+		key, err := s.roleKeyByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if key == authzcore.GuestRoleKey {
+			return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 GUEST 不能设置父角色")
+		}
 		cyclic, err := s.wouldCycle(ctx, id, *parentID)
 		if err != nil {
 			return nil, err
@@ -80,6 +132,7 @@ func (s *AuthzService) UpdateRole(ctx context.Context, id uuid.UUID, name string
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新角色: %w", err)
 	}
+	s.announcePolicy(ctx, uuid.Nil)
 	return r, nil
 }
 
@@ -125,9 +178,27 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var key string
-	if err := tx.QueryRow(ctx, `DELETE FROM role WHERE id = $1 RETURNING key`, id).Scan(&key); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT key FROM role WHERE id = $1 FOR UPDATE`, id).Scan(&key); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.Fail(domain.ErrNotFound, domain.CodeRoleNotFound, "角色不存在")
+		}
+		return fmt.Errorf("service: 查询角色: %w", err)
+	}
+	if key == authzcore.GuestRoleKey {
+		return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 GUEST 不能删除")
+	}
+	var bound int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM access_key WHERE role_key = $1`, key).Scan(&bound); err != nil {
+		return fmt.Errorf("service: 统计绑定该角色的访问密钥: %w", err)
+	}
+	if bound > 0 {
+		return domain.Failf(domain.ErrConflict, domain.CodeRoleInUse,
+			"有 %d 把访问密钥绑定了该角色，请先改绑或删除这些密钥", bound).WithField("count", bound)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM role WHERE id = $1`, id); err != nil {
+		// 外键兜底：计数之后、删除之前有人给这个角色绑了新 key。
+		if isForeignKeyViolation(err) {
+			return domain.Fail(domain.ErrConflict, domain.CodeRoleInUse, "有访问密钥绑定了该角色，请先改绑或删除这些密钥")
 		}
 		return fmt.Errorf("service: 删除角色: %w", err)
 	}
@@ -136,7 +207,6 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 		WHERE roles @> ARRAY[$1::text]`, key); err != nil {
 		return fmt.Errorf("service: 清理用户角色: %w", err)
 	}
-	// 把默认角色指向它的应用也要清掉，否则那些应用的用户会拿到一个不存在的角色。
 	if _, err := tx.Exec(ctx,
 		`UPDATE application SET default_role_key = '' WHERE default_role_key = $1`, key); err != nil {
 		return fmt.Errorf("service: 清理应用默认角色: %w", err)
@@ -144,6 +214,7 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("service: 提交删除角色: %w", err)
 	}
+	s.announcePolicy(ctx, uuid.Nil)
 	return nil
 }
 

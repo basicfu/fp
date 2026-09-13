@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/google/uuid"
 
@@ -143,4 +144,84 @@ func (s *AuthzService) PolicyVersion(ctx context.Context, appID uuid.UUID) (int6
 		return 0, fmt.Errorf("service: 查询策略版本: %w", err)
 	}
 	return v, nil
+}
+
+// PermissionRef 是一个权限点的 key 与显示名。
+type PermissionRef struct {
+	Key  string
+	Name string
+}
+
+// AppPermissions 是某个角色在一个应用里最终允许调用的接口（继承已展开）。
+type AppPermissions struct {
+	AppID   uuid.UUID
+	AppName string
+	Points  []PermissionRef
+}
+
+// RolePermissionsByApp 按应用列出 roleKey 当前能调用的接口，供访问密钥详情页展示。
+// 没有任何允许的应用不出现；roleKey 为空返回空切片。
+func (s *AuthzService) RolePermissionsByApp(ctx context.Context, roleKey string) ([]AppPermissions, error) {
+	out := []AppPermissions{}
+	if roleKey == "" {
+		return out, nil
+	}
+	type app struct {
+		id   uuid.UUID
+		name string
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, name FROM application ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("service: 查询应用列表: %w", err)
+	}
+	var apps []app
+	for rows.Next() {
+		var a app
+		if err := rows.Scan(&a.id, &a.name); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("service: 扫描应用: %w", err)
+		}
+		apps = append(apps, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("service: 遍历应用: %w", err)
+	}
+
+	for _, a := range apps {
+		pol, err := s.CompilePolicy(ctx, a.id)
+		if err != nil {
+			return nil, err
+		}
+		var allow []string
+		for _, rp := range pol {
+			if rp.RoleKey == roleKey {
+				allow = rp.Allow
+			}
+		}
+		if len(allow) == 0 {
+			continue
+		}
+		names := map[string]string{}
+		nrows, err := s.pool.Query(ctx, `SELECT key, name FROM permission WHERE application_id = $1`, a.id)
+		if err != nil {
+			return nil, fmt.Errorf("service: 查询权限点名称: %w", err)
+		}
+		for nrows.Next() {
+			var k, n string
+			if err := nrows.Scan(&k, &n); err != nil {
+				nrows.Close()
+				return nil, fmt.Errorf("service: 扫描权限点名称: %w", err)
+			}
+			names[k] = n
+		}
+		nrows.Close()
+		sort.Strings(allow)
+		ap := AppPermissions{AppID: a.id, AppName: a.name}
+		for _, k := range allow {
+			ap.Points = append(ap.Points, PermissionRef{Key: k, Name: names[k]})
+		}
+		out = append(out, ap)
+	}
+	return out, nil
 }

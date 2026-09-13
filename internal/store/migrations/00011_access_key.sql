@@ -7,8 +7,9 @@ CREATE TABLE access_key (
     access_key_id text NOT NULL UNIQUE,
     secret        text NOT NULL,
     remark        text NOT NULL,
-    -- 可为空。RESTRICT：被绑定的角色必须先改绑才能删，静默摘掉会让合作方突然全部 403。
-    role_key      text REFERENCES role(key) ON DELETE RESTRICT,
+    -- 可为空。默认行为（NO ACTION）：被绑定的角色必须先改绑才能删，静默摘掉会
+    -- 让合作方突然全部 403——不用 SET NULL，也不用 CASCADE。
+    role_key      text REFERENCES role(key),
     allowed_ips   cidr[] NOT NULL DEFAULT '{}',
     status        text NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISABLED')),
     expires_at    timestamptz,

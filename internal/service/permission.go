@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/sdk/authzcore"
 )
 
 // ReportedPoint 是 SDK 上报的一条权限点。
@@ -134,6 +135,7 @@ func (s *AuthzService) UpdatePermission(ctx context.Context, id uuid.UUID, key, 
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新权限点: %w", err)
 	}
+	s.announcePolicy(ctx, p.ApplicationID)
 	return p, nil
 }
 
@@ -142,13 +144,15 @@ func (s *AuthzService) UpdatePermission(ctx context.Context, id uuid.UUID, key, 
 // 调用方（控制台）在删除前应当先用 RolesHolding 提示"当前有 N 个角色持有它"
 // ——这是唯一的安全网，因为设计上没有可逆的"停用"中间态。
 func (s *AuthzService) DeletePermission(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM permission WHERE id = $1`, id)
+	var appID uuid.UUID
+	err := s.pool.QueryRow(ctx, `DELETE FROM permission WHERE id = $1 RETURNING application_id`, id).Scan(&appID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Fail(domain.ErrNotFound, domain.CodePermissionNotFound, "权限点不存在")
+	}
 	if err != nil {
 		return fmt.Errorf("service: 删除权限点: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.Fail(domain.ErrNotFound, domain.CodePermissionNotFound, "权限点不存在")
-	}
+	s.announcePolicy(ctx, appID)
 	return nil
 }
 
@@ -209,12 +213,22 @@ func (s *AuthzService) ListPermissions(ctx context.Context, appID uuid.UUID) ([]
 
 // SetRolePermission 给角色授予或收回一个权限点。effect 为空表示收回。
 func (s *AuthzService) SetRolePermission(ctx context.Context, roleID, permissionID uuid.UUID, effect string) error {
+	if effect == domain.EffectDeny {
+		key, err := s.roleKeyByID(ctx, roleID)
+		if err != nil {
+			return err
+		}
+		if key == authzcore.GuestRoleKey {
+			return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "GUEST 只能配置「允许」")
+		}
+	}
 	if effect == "" {
 		if _, err := s.pool.Exec(ctx,
 			`DELETE FROM role_permission WHERE role_id = $1 AND permission_id = $2`,
 			roleID, permissionID); err != nil {
 			return fmt.Errorf("service: 收回权限: %w", err)
 		}
+		s.announcePolicy(ctx, s.permissionApp(ctx, permissionID))
 		return nil
 	}
 	if effect != domain.EffectAllow && effect != domain.EffectDeny {
@@ -227,7 +241,17 @@ func (s *AuthzService) SetRolePermission(ctx context.Context, roleID, permission
 		roleID, permissionID, effect); err != nil {
 		return fmt.Errorf("service: 授予权限: %w", err)
 	}
+	s.announcePolicy(ctx, s.permissionApp(ctx, permissionID))
 	return nil
+}
+
+// permissionApp 取权限点所属应用；查不到时返回 uuid.Nil，推给所有应用，宁多勿漏。
+func (s *AuthzService) permissionApp(ctx context.Context, permissionID uuid.UUID) uuid.UUID {
+	var appID uuid.UUID
+	if err := s.pool.QueryRow(ctx, `SELECT application_id FROM permission WHERE id = $1`, permissionID).Scan(&appID); err != nil {
+		return uuid.Nil
+	}
+	return appID
 }
 
 const permissionColumns = `id, application_id, key, name, kind, parent_id, source,
