@@ -25,6 +25,8 @@ type Deps struct {
 	Configs  *service.ConfigService
 	// IMCreds 管理 fp-im 网关的凭据。为 nil 时那两条路由不挂载。
 	IMCreds *service.IMCredentialService
+	// AccessKeys 管理控制台的访问密钥增删改查。为 nil 时整组路由不挂载。
+	AccessKeys *service.AccessKeyService
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -60,6 +62,7 @@ func NewRouter(d Deps) http.Handler {
 	authzH := &authzHandler{svc: d.Authz, apps: d.Apps}
 	cfgH := &configHandler{svc: d.Configs}
 	imCredH := &imCredentialHandler{svc: d.IMCreds}
+	akH := &accessKeyHandler{svc: d.AccessKeys, authz: d.Authz}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -124,6 +127,17 @@ func NewRouter(d Deps) http.Handler {
 			if d.IMCreds != nil {
 				r.Get("/im-credential", imCredH.status)
 				r.Post("/im-credential/rotate", imCredH.rotate)
+			}
+
+			// 访问密钥。全局，不带应用 id。AccessKeys 为 nil 时整组不挂载。
+			if d.AccessKeys != nil {
+				r.Get("/access-keys", akH.list)
+				r.Post("/access-keys", akH.create)
+				r.Get("/access-keys/{id}", akH.get)
+				r.Get("/access-keys/{id}/permissions", akH.permissions)
+				r.Patch("/access-keys/{id}", akH.update)
+				r.Patch("/access-keys/{id}/status", akH.setStatus)
+				r.Delete("/access-keys/{id}", akH.remove)
 			}
 
 			r.Get("/users", userH.list)

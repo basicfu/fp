@@ -90,9 +90,10 @@ func run() error {
 	}
 
 	logSvc := service.NewLoginLogService(pool)
-	authzSvc := service.NewAuthzService(pool)
+	authzSvc := service.NewAuthzService(pool, service.WithAuthzPublisher(revokePub))
 
 	imCredSvc := service.NewIMCredentialService(pool)
+	accessKeySvc := service.NewAccessKeyService(pool, revokePub)
 
 	configSvc := service.NewConfigService(pool, configPub)
 
@@ -152,16 +153,17 @@ func run() error {
 	httpSrv := &http.Server{
 		Addr: cfg.HTTP.Addr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
-			Admin:    adminSvc,
-			Apps:     appSvc,
-			Users:    userSvc,
-			Accounts: service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc),
-			Sessions: sessionSvc,
-			Logs:     logSvc,
-			Registry: registry,
-			Authz:    authzSvc,
-			Configs:  configSvc,
-			IMCreds:  imCredSvc,
+			Admin:      adminSvc,
+			Apps:       appSvc,
+			Users:      userSvc,
+			Accounts:   service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc),
+			Sessions:   sessionSvc,
+			Logs:       logSvc,
+			Registry:   registry,
+			Authz:      authzSvc,
+			Configs:    configSvc,
+			IMCreds:    imCredSvc,
+			AccessKeys: accessKeySvc,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
 			Console:       web.Dist(),
@@ -188,13 +190,14 @@ func run() error {
 	}()
 
 	grpcSrv := grpcapi.New(grpcapi.Deps{
-		Auth:      authSvc,
-		Apps:      appSvc,
-		IMCreds:   imCredSvc,
-		Pub:       revokePub,
-		Authz:     authzSvc,
-		Configs:   configSvc,
-		ConfigPub: configPub,
+		Auth:       authSvc,
+		Apps:       appSvc,
+		IMCreds:    imCredSvc,
+		Pub:        revokePub,
+		Authz:      authzSvc,
+		Configs:    configSvc,
+		ConfigPub:  configPub,
+		AccessKeys: accessKeySvc,
 	})
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPC.Addr)
