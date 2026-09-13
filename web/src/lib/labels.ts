@@ -1,6 +1,6 @@
 // 状态文案。放在 lib 而不是某个页面组件里导出，是因为不止一个页面要用——
 // 页面之间互相 import 工具函数是坏味道（谁都不该依赖另一个页面的内部实现）。
-import type { ApplicationStatus, PermissionStatus, UserStatus } from './types'
+import type { AccessKeyState, ApplicationStatus, PermissionStatus, UserStatus } from './types'
 
 /** 用户状态的中文文案。 */
 export const statusLabels: Record<UserStatus, string> = {
@@ -43,4 +43,11 @@ export const permissionStatusLabels: Record<PermissionStatus, string> = {
 export const effectLabels: Record<'allow' | 'deny', string> = {
   allow: '允许',
   deny: '拒绝',
+}
+
+/** 访问密钥展示状态的中文文案。 */
+export const accessKeyStateLabels: Record<AccessKeyState, string> = {
+  active: '正常',
+  disabled: '已停用',
+  expired: '已过期',
 }

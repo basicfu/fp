@@ -193,3 +193,39 @@ export interface ConfigVersion {
 export interface SaveConfigResponse {
   seq: number
 }
+
+// --- 访问密钥 -------------------------------------------------------------
+
+export type AccessKeyStatus = 'ACTIVE' | 'DISABLED'
+/** 算出来的展示状态：停用优先于过期。 */
+export type AccessKeyState = 'active' | 'disabled' | 'expired'
+
+export interface AccessKey {
+  id: string
+  accessKeyId: string
+  remark: string
+  /** 空串表示未绑定角色。 */
+  roleKey: string
+  allowedIps: string[]
+  status: AccessKeyStatus
+  state: AccessKeyState
+  /** 0 表示永不过期。 */
+  expiresAt: number
+  /** 0 表示从未使用，精确到分钟。 */
+  lastUsedAt: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface CreateAccessKeyResponse {
+  accessKey: AccessKey
+  /** SK 明文，只在创建时返回这一次。 */
+  secret: string
+}
+
+/** 某个应用里这把 key 能调用的接口（角色继承已展开）。 */
+export interface AppPermissions {
+  appId: string
+  appName: string
+  points: { key: string; name: string }[]
+}

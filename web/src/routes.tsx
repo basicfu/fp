@@ -6,6 +6,8 @@ import ConfigCenter from '@/pages/ConfigCenter'
 import ConfigVersions from '@/pages/ConfigVersions'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
+import AccessKeys from '@/pages/AccessKeys'
+import AccessKeyDetail from '@/pages/AccessKeyDetail'
 import Roles from '@/pages/Roles'
 import RoleDetail from '@/pages/RoleDetail'
 import Permissions from '@/pages/Permissions'
@@ -47,6 +49,8 @@ export default function AppRoutes() {
         <Route path="/applications" element={<Applications />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
+        <Route path="/access-keys" element={<AccessKeys />} />
+        <Route path="/access-keys/:id" element={<AccessKeyDetail />} />
         <Route path="/roles" element={<Roles />} />
         <Route path="/roles/:id" element={<RoleDetail />} />
         <Route path="/permissions" element={<Permissions />} />

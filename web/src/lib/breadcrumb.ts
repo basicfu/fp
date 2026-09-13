@@ -18,6 +18,11 @@ export function buildBreadcrumb(pathname: string): BreadcrumbSegment[] {
     return [{ label: '用户管理', to: '/users' }, { label: '用户详情' }]
   }
 
+  if (parts[0] === 'access-keys') {
+    if (parts.length === 1) return [{ label: '访问密钥' }]
+    return [{ label: '访问密钥', to: '/access-keys' }, { label: '密钥详情' }]
+  }
+
   if (parts[0] === 'roles') {
     if (parts.length === 1) return [{ label: '角色管理' }]
     return [{ label: '角色管理', to: '/roles' }, { label: '角色详情' }]

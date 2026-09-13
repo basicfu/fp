@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useLocation } from 'react-router'
 import type { LucideIcon } from 'lucide-react'
-import { AppWindow, KeyRound, LogOut, Settings, ShieldCheck, Users as UsersIcon } from 'lucide-react'
+import { AppWindow, Key, KeyRound, LogOut, Settings, ShieldCheck, Users as UsersIcon } from 'lucide-react'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -41,6 +41,7 @@ import { buildBreadcrumb } from '@/lib/breadcrumb'
 const nav: { to: string; label: string; icon: LucideIcon }[] = [
   { to: '/applications', label: '应用列表', icon: AppWindow },
   { to: '/users', label: '用户管理', icon: UsersIcon },
+  { to: '/access-keys', label: '访问密钥', icon: Key },
   { to: '/roles', label: '角色管理', icon: ShieldCheck },
   { to: '/permissions', label: '权限管理', icon: KeyRound },
   { to: '/config', label: '配置中心', icon: Settings },

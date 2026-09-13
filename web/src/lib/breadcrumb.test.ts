@@ -31,3 +31,11 @@ test('未知路径回退成一段「fp」，不抛错', () => {
   expect(buildBreadcrumb('/unknown')).toEqual([{ label: 'fp' }])
   expect(buildBreadcrumb('/')).toEqual([{ label: 'fp' }])
 })
+
+test('访问密钥的面包屑', () => {
+  expect(buildBreadcrumb('/access-keys')).toEqual([{ label: '访问密钥' }])
+  expect(buildBreadcrumb('/access-keys/k1')).toEqual([
+    { label: '访问密钥', to: '/access-keys' },
+    { label: '密钥详情' },
+  ])
+})

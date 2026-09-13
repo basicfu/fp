@@ -35,3 +35,11 @@ export function formatDuration(ms: number): string {
   }
   return parts.join(' ')
 }
+
+/** formatMinute 把毫秒时间戳格式化到分钟；为 0 时显示 fallback。 */
+export function formatMinute(ms: number, fallback = '-'): string {
+  if (!ms) return fallback
+  return new Date(ms).toLocaleString(undefined, {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+}
