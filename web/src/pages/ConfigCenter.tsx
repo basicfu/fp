@@ -1,7 +1,6 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router'
 import { Plus } from 'lucide-react'
-import { load as loadYAML } from 'js-yaml'
 import { useCurrentApp } from '@/lib/current-app'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -13,50 +12,12 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { useConfigTypes } from '@/lib/useConfigTypes'
+import { useYamlEditor, validateYAML } from '@/lib/useYamlEditor'
 import { cn } from '@/lib/utils'
 import { DEFAULT_PARTITION, type ConfigPartition, type ConfigSnapshot, type SaveConfigResponse } from '@/lib/types'
 
 /** 分区名的字符集：字母开头，字母/数字/下划线，不超过 64 个字符——与后端 domain.IsConfigType 逐字一致。 */
 const partitionNamePattern = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
-
-/**
- * normalizeYAML 给"key:value"这种冒号后漏了空格的行补上那个空格（列表
- * 项前缀、缩进都保留，注释行不动）——跟后端 domain.NormalizeConfigYAML
- * 是同一条启发式规则的前端版本，只用来在打字时就让校验通过，真正落库的
- * 补全动作由后端做一遍权威的。
- */
-function normalizeYAML(text: string): string {
-  return text
-    .split('\n')
-    .map((line) => {
-      const trimmed = line.trimStart()
-      if (trimmed === '' || trimmed.startsWith('#')) return line
-      return line.replace(/^(\s*(?:-\s+)?[^:\s][^:]*):(\S)/, '$1: $2')
-    })
-    .join('\n')
-}
-
-/**
- * validateYAML 只做一件事：这段文本（补完冒号空格之后）能不能被解析、且
- * 顶层是不是一个映射。不做任何值级别的校验——YAML 自己的字面量语法就是
- * 类型信息。跟后端 domain.ParseConfigYAML 是同一条校验规则的前端版本，
- * 只是提前到打字时就告诉人，不用等点保存才知道。
- */
-function validateYAML(text: string): string {
-  const normalized = normalizeYAML(text)
-  if (normalized.trim() === '') return ''
-  let parsed: unknown
-  try {
-    parsed = loadYAML(normalized)
-  } catch (e) {
-    return e instanceof Error ? e.message : '不是合法的 YAML'
-  }
-  if (parsed === null || parsed === undefined) return ''
-  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return '顶层必须是一个映射（key: value 的形式），不能是列表或裸标量'
-  }
-  return ''
-}
 
 export default function ConfigCenter() {
   const { currentApp, apps, loading, error } = useCurrentApp()
@@ -71,10 +32,12 @@ export default function ConfigCenter() {
     [id, partition],
   )
 
-  // draft 是编辑框里的原文；服务端数据一到（首次加载、切分区、保存成功后
-  // 的 reload）就用它整体覆盖——不做任何"合并本地改动"的尝试，YAML
-  // 编辑框本来就是"整份替换"的心智模型，不是逐字段增量编辑。
-  const [draft, setDraft] = useState('')
+  // 边框颜色的实时反馈不占布局（只是描边变色，不产生/挪走任何一段
+  // 文本），所以保留；但校验失败的具体原因不再常驻显示成一段 <p>——
+  // 那段文本会随着每次按键增删，把下面的按钮一跳一跳地顶上顶下。原因
+  // 改成点保存时才用 toast 报，是"操作触发的错误用 toast"这条既有原则
+  // 的自然延伸，而不是新开一条例外。
+  const { draft, setDraft, validationError, dirty, handleTextareaKeyDown } = useYamlEditor(snapshot.data)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -82,19 +45,6 @@ export default function ConfigCenter() {
   const [addingType, setAddingType] = useState(false)
   const [newType, setNewType] = useState('')
   const [creatingType, setCreatingType] = useState(false)
-
-  useEffect(() => {
-    if (!snapshot.data) return
-    setDraft(snapshot.data.value)
-  }, [snapshot.data])
-
-  // 边框颜色的实时反馈不占布局（只是描边变色，不产生/挪走任何一段
-  // 文本），所以保留；但校验失败的具体原因不再常驻显示成一段 <p>——
-  // 那段文本会随着每次按键增删，把下面的按钮一跳一跳地顶上顶下。原因
-  // 改成点保存时才用 toast 报，是"操作触发的错误用 toast"这条既有原则
-  // 的自然延伸，而不是新开一条例外。
-  const validationError = validateYAML(draft)
-  const dirty = snapshot.data !== null && draft !== snapshot.data.value
 
   async function handleSave(push: boolean) {
     const err = validateYAML(draft)
@@ -168,19 +118,6 @@ export default function ConfigCenter() {
     } finally {
       setCreatingType(false)
     }
-  }
-
-  /** Tab 在这个编辑框里是缩进，不是切到下一个控件——YAML 靠缩进表达层级，浏览器默认的"移走焦点"在这没用。 */
-  function handleTextareaKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key !== 'Tab') return
-    e.preventDefault()
-    const el = e.currentTarget
-    const start = el.selectionStart
-    const end = el.selectionEnd
-    setDraft(draft.slice(0, start) + '  ' + draft.slice(end))
-    requestAnimationFrame(() => {
-      el.selectionStart = el.selectionEnd = start + 2
-    })
   }
 
   if (error) return <p className="text-sm text-destructive">{error}</p>
