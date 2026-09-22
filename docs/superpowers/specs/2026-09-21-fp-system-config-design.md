@@ -211,14 +211,19 @@ sms:
 | `web/src/lib/api.ts` / `types.ts` | 新增系统配置相关的类型与调用封装 |
 | `web/src/pages/ConfigCenter.tsx` | 改用 `useYamlEditor` |
 | `docs/console.md` | 补系统配置页面的说明 |
+| `cmd/fp-dbclean/main.go` | 连接串改从 `POSTGRES_URL`/`REDIS_URL` 环境变量读取，去掉 `-c` 参数 |
+| `scripts/run.sh` | 不再检查 `config.yaml`，改成检查两个环境变量是否已设置（顺手 source 一下 `.env.local`） |
+| `scripts/db-clean.sh` | 顺手 source 一下 `.env.local`，其余不变 |
 
 **删：**
 
 | 文件 | 理由 |
 |---|---|
-| `config.yaml`（本机文件，未进 git） | 被环境变量 + 系统配置表取代 |
-| `config.example.yaml` | 同上 |
-| `.gitignore` 里 `/config.yaml` 那一行 | 文件不再存在，忽略规则也不需要 |
+| `config.example.yaml` | 被环境变量 + 系统配置表取代 |
+| `.gitignore` 里 `/config.yaml` 那一行 | 文件不再被任何代码读取，忽略规则也不需要 |
+
+**不删**：本机可能已存在、未受版本控制的 `config.yaml`——它此后是个不再被
+任何代码读取的死文件，不主动删除用户本机的文件，交给用户自己按需清理。
 
 **不动：** `internal/store/config.go`（`ConfigPublisher`，业务方配置中心的广播
 机制，与系统配置无关）、`internal/service/config.go`（`ConfigService`，业务方
