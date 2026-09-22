@@ -6,6 +6,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -101,4 +102,28 @@ func Parse(yamlText string, env string) (*Config, error) {
 		return nil, fmt.Errorf("config: 解析系统配置: %w", err)
 	}
 	return c, nil
+}
+
+// ToYAML 把 c 序列化成系统配置表能存的 YAML 原文。用于系统配置表还没有
+// 任何版本时，把首次启动解析出来的默认值（含 cmd/fp/main.go 里
+// resolveBootstrapAdmin 兜底过的 admin/admin）整份写回数据库，让「系统
+// 配置」页面第一次打开就是一份能直接改的真实内容，而不是一个空编辑框
+// 加一段前端 placeholder 提示。
+//
+// Env 不会出现在输出里（yaml:"-"）——它只能来自 FP_ENV，这里如果把它也
+// 写回 YAML，会让人误以为改这个 YAML 里的 env 字段有用。
+//
+// 缩进用 2 格：yaml.v3 的 Marshal 默认是 4 格，跟这个仓库里其余手写
+// YAML（config.example.yaml 时代、前端占位符）的习惯不一致。
+func ToYAML(c *Config) (string, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(c); err != nil {
+		return "", fmt.Errorf("config: 序列化默认配置: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return "", fmt.Errorf("config: 序列化默认配置: %w", err)
+	}
+	return buf.String(), nil
 }

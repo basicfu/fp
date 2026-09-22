@@ -15,6 +15,7 @@ import (
 
 	"github.com/basicfu/fp/internal/config"
 	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/grpcapi"
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/logging"
@@ -42,6 +43,24 @@ func resolveBootstrapAdmin(cfg config.BootstrapAdmin) config.BootstrapAdmin {
 		return config.BootstrapAdmin{User: "admin", Password: "admin"}
 	}
 	return cfg
+}
+
+// seedDefaultsYAML 在系统配置表还没有任何版本（cur.Seq == 0）时，把 cfg
+// 序列化成 YAML 原文，供调用方存成第一版；已经有版本时返回
+// ok=false，调用方不该覆盖管理员可能已经改过的内容。
+//
+// 拆成纯函数是为了不经过真实数据库也能测——真正的写库动作
+//（SystemConfigService.Save）留在 run() 里，那一步本身不值得单独测，
+// service 层已经测过 Save 自己的行为。
+func seedDefaultsYAML(cur domain.SystemConfig, cfg *config.Config) (yamlText string, ok bool, err error) {
+	if cur.Seq != 0 {
+		return "", false, nil
+	}
+	yamlText, err = config.ToYAML(cfg)
+	if err != nil {
+		return "", false, err
+	}
+	return yamlText, true, nil
 }
 
 func run() error {
@@ -90,6 +109,18 @@ func run() error {
 		return err
 	}
 	cfg.BootstrapAdmin = resolveBootstrapAdmin(cfg.BootstrapAdmin)
+
+	// 系统配置表还没有任何版本（全新库）时，把刚解析出来的默认值（含
+	// bootstrap_admin 的 admin/admin 兜底）写成第一版——「系统配置」页面
+	// 第一次打开就有真实内容可以直接改，不是一个空编辑框加一段 placeholder。
+	// 已经有人存过版本时不碰，不能覆盖管理员可能已经改过的内容。
+	if yamlText, ok, err := seedDefaultsYAML(sysCfg, cfg); err != nil {
+		return err
+	} else if ok {
+		if _, err := systemConfigs.Save(ctx, yamlText); err != nil {
+			return err
+		}
+	}
 
 	log := logging.Setup(cfg.Log.Level, cfg.Env)
 	log.Info("数据库迁移完成")

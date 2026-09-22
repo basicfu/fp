@@ -138,6 +138,65 @@ func TestIsProd(t *testing.T) {
 // 阿里云只是短信这一种通知渠道的其中一个供应商，后续会挪进统一的通知
 // 中心配置。真正装配假供应商并打 WARN 的逻辑在 cmd/fp/main.go 里，这里
 // 只钉住 Parse 不替它做这个决定。
+// TestToYAMLRoundTrips 钉住 ToYAML 产出的文本能被 Parse 读回来，值不丢——
+// cmd/fp/main.go 靠这一点把首次启动解析出来的默认值写回系统配置表。
+func TestToYAMLRoundTrips(t *testing.T) {
+	cfg, err := Parse(`
+log:
+  level: debug
+http:
+  addr: ":18080"
+grpc:
+  addr: ":19090"
+bootstrap_admin:
+  user: admin
+  password: admin
+sms:
+  aliyun:
+    access_key_id: ak
+`, "prod")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	yamlText, err := ToYAML(cfg)
+	if err != nil {
+		t.Fatalf("ToYAML() error = %v", err)
+	}
+
+	got, err := Parse(yamlText, "prod")
+	if err != nil {
+		t.Fatalf("Parse(ToYAML()) error = %v, yaml = %s", err, yamlText)
+	}
+	if got.Log.Level != cfg.Log.Level || got.HTTP.Addr != cfg.HTTP.Addr || got.GRPC.Addr != cfg.GRPC.Addr {
+		t.Errorf("往返后 log/http/grpc = %+v/%+v/%+v，原始 = %+v/%+v/%+v",
+			got.Log, got.HTTP, got.GRPC, cfg.Log, cfg.HTTP, cfg.GRPC)
+	}
+	if got.BootstrapAdmin != cfg.BootstrapAdmin {
+		t.Errorf("往返后 BootstrapAdmin = %+v，期望 %+v", got.BootstrapAdmin, cfg.BootstrapAdmin)
+	}
+	if got.SMS.Aliyun.AccessKeyID != cfg.SMS.Aliyun.AccessKeyID {
+		t.Errorf("往返后 SMS.Aliyun.AccessKeyID = %q，期望 %q", got.SMS.Aliyun.AccessKeyID, cfg.SMS.Aliyun.AccessKeyID)
+	}
+}
+
+// TestToYAMLOmitsEnv 钉住 env 不出现在 ToYAML 的输出里——它只能来自
+// FP_ENV，写进系统配置 YAML 会误导人以为改它有用（而且 Parse 现在会把
+// YAML 里的 env: 当未知键拒绝，见 TestParseRejectsEnvInYAML）。
+func TestToYAMLOmitsEnv(t *testing.T) {
+	cfg, err := Parse("", "prod")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	yamlText, err := ToYAML(cfg)
+	if err != nil {
+		t.Fatalf("ToYAML() error = %v", err)
+	}
+	if strings.Contains(yamlText, "env:") {
+		t.Errorf("输出里不该出现 env:，得到 %q", yamlText)
+	}
+}
+
 func TestParseAllowsMissingAliyunInAnyEnv(t *testing.T) {
 	for _, env := range []string{"dev", "prod", "PROD"} {
 		cfg, err := Parse("", env)
