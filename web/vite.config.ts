@@ -11,11 +11,10 @@ export default defineConfig(({ command }) => ({
     alias: { '@': path.resolve(__dirname, './src') },
   },
   // 生产构建时，index.html 里引用的资源地址（<script src>/<link href>）
-  // 都会带上这个前缀。默认 /static/：fp 自己的 internal/httpapi/static.go
-  // 就是把构建产物挂在这个前缀下的，不配 CDN 也能直接跑。要接 CDN 回源
-  // （比如 static.xxzj.com/fp/ 指到源站的 /static/），把
-  // VITE_ASSET_BASE 设成 CDN 那边的完整 URL 再构建，index.html 里的资源
-  // 地址就会直接指向 CDN 域名。
+  // 都会带上这个前缀。scripts/build-web.sh 已经把 VITE_ASSET_BASE 写死成
+  // CDN 地址（static.xxzj.com/fp/，回源映射到源站的 /static/），这里的
+  // /static/ 只是没经过那个脚本、直接跑 npm run build 时的兜底——
+  // fp 自己的 internal/httpapi/static.go 也认这个前缀，不接 CDN 照样能跑。
   //
   // 只在 build 时生效（command === 'build'）：dev server（vite dev）不吃
   // 这个前缀，还是服务在根路径，不然本机开发打开 http://localhost:5173

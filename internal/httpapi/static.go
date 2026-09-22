@@ -19,12 +19,13 @@ const notBuiltMessage = "管理控制台前端尚未构建。请先运行 ./scri
 //
 // 路径解析规则，按顺序：
 //  1. 路径以 /static/ 开头     → 去掉前缀去 dist 里找同名文件，找不到
-//     404。这个前缀是给 CDN 回源用的：Vite 构建时把 base 配成 /static/
-//     （或者一个指向 CDN 域名下 /static/ 的绝对 URL），index.html 里
-//     引用的资源地址因此天然带这个前缀，CDN 只要把自己的路径映射到
-//     源站的 /static/ 就行，不用碰 index.html 本身。
+//     404，找到了原样返回、不加任何 Cache-Control。这个前缀是给 CDN
+//     回源用的（Vite 构建时 base 直接写死成 CDN 域名下的
+//     /static/ 前缀，见 web/vite.config.ts）——缓存策略完全交给 CDN 自己
+//     配置，源站不替它做决定，避免源站头和 CDN 规则两边对不上。
 //  2. 其余路径                 → 回 index.html，交给前端路由；带 ETag，
-//     内容没变时回 304，不用每次都整份重传
+//     内容没变时回 304，不用每次都整份重传——这个是 page 专属的，走不到
+//     /static/ 那条分支
 //
 // 注意这个 handler 不认识 /admin/api——那些路由在 chi 里注册得更具体，
 // 根本走不到这里；API 的 404 由 /admin/api 子路由自己的 NotFound 处理。
@@ -47,13 +48,6 @@ func newStaticHandler(dist fs.FS) http.Handler {
 
 		if name, ok := strings.CutPrefix(upath, "/static/"); ok && name != "" {
 			if info, err := fs.Stat(dist, name); err == nil && !info.IsDir() {
-				// assets/ 下的文件名带 Vite 加的内容哈希，内容一变文件名
-				// 就变，可以放心长缓存；public/ 目录直接拷过来的文件
-				// （比如 favicon.svg）文件名不带哈希，不能这样缓存，
-				// 不然改了图标线上还是老的。
-				if strings.HasPrefix(name, "assets/") {
-					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-				}
 				fileServer.ServeHTTP(w, r)
 				return
 			}

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # 构建管理控制台前端。产物落在 web/dist/，由 web/embed.go 嵌进二进制。
 #
-# 资源引用的地址默认是 /static/（fp 自己的 internal/httpapi/static.go
-# 把构建产物挂在这个前缀下）。要接 CDN 回源，构建前设一下环境变量：
-#   VITE_ASSET_BASE=https://static.example.com/fp/ ./scripts/build-web.sh
+# 资源引用的地址写死指向 CDN：static.xxzj.com/fp/ 在 CDN 那边回源映射到
+# 源站的 /static/（fp 自己的 internal/httpapi/static.go 把构建产物挂在
+# 这个前缀下，不设任何 Cache-Control，缓存策略完全交给 CDN 那边配置）。
+# 已经在调用环境里设了 VITE_ASSET_BASE 的话保留那个值，不强行覆盖。
+export VITE_ASSET_BASE="${VITE_ASSET_BASE:-https://static.xxzj.com/fp/}"
+
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/web"

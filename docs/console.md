@@ -43,24 +43,22 @@
 `.gitkeep`，embed 指令用的是 `all:` 前缀），只是打开控制台会看到一句
 "管理控制台前端尚未构建"。
 
-**静态资源挂在 `/static/` 前缀下，方便接 CDN。** `index.html` 本身（以及
-它自己的 `/admin/api/*`）直接连源站，不建议上 CDN——内容要么每次都会变
-（HTML 靠 ETag 做条件请求，见下面），要么是带会话的动态数据，缓存了要么
-没意义要么有风险。真正适合上 CDN 的是 JS/CSS/字体这些静态产物，它们默认
-就在 `/static/` 这个前缀下（`internal/httpapi/static.go` 认这个前缀，
-`web/vite.config.ts` 的 `base` 生产构建时默认也是 `/static/`），CDN 只要
-把自己的某个路径映射回源到这里就行，不用碰 `index.html`。
+**静态资源挂在 `/static/` 前缀下，走 CDN。** `index.html` 本身（以及它
+自己的 `/admin/api/*`）直接连源站，不上 CDN——内容要么每次都会变（HTML
+靠 ETag 做条件请求，见下面），要么是带会话的动态数据，缓存了要么没意义
+要么有风险。JS/CSS/字体这些静态产物走 CDN：`scripts/build-web.sh` 把
+`VITE_ASSET_BASE` 写死成 `https://static.xxzj.com/fp/`，构建出来的
+`index.html` 里 `<script>`/`<link>` 地址直接指向这个 CDN 域名；CDN 那边
+把这个路径回源映射到源站的 `/static/` 就行（`internal/httpapi/static.go`
+认这个前缀）。
 
-要让构建产物直接引用 CDN 域名（而不是先落到源站的 `/static/` 再指望 CDN
-按路径映射），构建前设一下环境变量：
+`/static/` 下的文件源站**不设任何 `Cache-Control`**——缓存策略完全交给
+CDN 自己配置，源站不替它做决定，避免源站头和 CDN 规则两边对不上、互相
+打架。要在没有 CDN 的环境下直接跑（比如本机验收），构建前把
+`VITE_ASSET_BASE` 显式设成 `/static/`（相对路径，fp 自己也认这个前缀）
+覆盖掉写死的 CDN 地址：
 
-    VITE_ASSET_BASE=https://static.example.com/fp/ ./scripts/build-web.sh
-
-`index.html` 里的 `<script>`/`<link>` 地址就会直接指向这个 CDN 域名。
-`assets/` 下带内容哈希的文件（JS/CSS/字体）会被打上
-`Cache-Control: public, max-age=31536000, immutable`，可以放心长缓存；
-`public/` 目录直接拷过来、文件名不带哈希的文件（比如 `favicon.svg`）不会，
-避免图标换了线上还是老的。
+    VITE_ASSET_BASE=/static/ ./scripts/build-web.sh
 
 **`index.html` 本身用 ETag 做条件请求**，不是简单的"不缓存"：
 `Cache-Control: no-cache` 只是告诉客户端每次都要来验证一下，服务端会比对

@@ -98,8 +98,8 @@ func TestStaticIndexReturnsFullBodyWhenETagDoesNotMatch(t *testing.T) {
 }
 
 // 静态资源现在挂在 /static/ 前缀下——CDN 按 static.xxzj.com/fp/ 回源到源站
-// 的 /static/，Vite 构建时 base 配的就是这个前缀，两边对得上。
-func TestStaticSetsImmutableOnHashedAssetsUnderPrefix(t *testing.T) {
+// 的 /static/，Vite 构建时 base 写死的就是这个前缀，两边对得上。
+func TestStaticServesFileUnderPrefix(t *testing.T) {
 	h := newStaticHandler(builtConsole())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/assets/index-abc123.js", nil))
@@ -110,25 +110,22 @@ func TestStaticSetsImmutableOnHashedAssetsUnderPrefix(t *testing.T) {
 	if rec.Body.String() != "console.log(1)" {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
-	cc := rec.Header().Get("Cache-Control")
-	if !strings.Contains(cc, "immutable") {
-		t.Fatalf("Cache-Control = %q，带哈希的资源应当 immutable", cc)
-	}
 }
 
-// public/ 目录直接拷过来的文件（文件名不带内容哈希，比如 favicon.svg）
-// 不能长缓存——文件名不变，内容却可能变，缓存 immutable 会让改了的图标
-// 线上永远看到旧的。
-func TestStaticDoesNotSetImmutableOnUnhashedAssets(t *testing.T) {
+// 缓存策略完全交给 CDN 自己配置，源站不替它做决定——/static/ 下的文件
+// 不管带不带内容哈希，源站都不设 Cache-Control。跟 index.html（有专属
+// 的 ETag/no-cache 逻辑）刻意不同，见 TestStaticServesIndexAtRoot。
+func TestStaticDoesNotSetCacheControlUnderPrefix(t *testing.T) {
 	h := newStaticHandler(builtConsole())
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/favicon.svg", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code = %d", rec.Code)
-	}
-	if cc := rec.Header().Get("Cache-Control"); strings.Contains(cc, "immutable") {
-		t.Fatalf("favicon.svg 不该是 immutable，实际 Cache-Control = %q", cc)
+	for _, p := range []string{"/static/assets/index-abc123.js", "/static/favicon.svg"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: code = %d", p, rec.Code)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "" {
+			t.Fatalf("%s: Cache-Control = %q，期望源站不设置任何缓存头", p, cc)
+		}
 	}
 }
 
