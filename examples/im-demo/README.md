@@ -30,7 +30,7 @@ ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/admin/api/login \
 
 curl -s -X POST http://localhost:8080/admin/api/applications \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"ImDemo","slug":"imdemo"}'
+  -d '{"name":"ImDemo","code":"imdemo"}'
 # 记下 application.id / application.appId / appSecret
 
 curl -s -o /dev/null -w '%{http_code}\n' \

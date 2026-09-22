@@ -49,7 +49,7 @@ func TestGetAccessKeyRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := e.accessKeys.Create(ctx, service.CreateAccessKeyInput{Remark: "顺丰", RoleKey: role.Key, AllowedIPs: []string{"127.0.0.1"}})
+	k, err := e.accessKeys.Create(ctx, service.CreateAccessKeyInput{Remark: "顺丰", RoleKey: role.Code, AllowedIPs: []string{"127.0.0.1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestGetAccessKeyRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.GetSecret() != k.Secret || res.GetRemark() != "顺丰" ||
-		len(res.GetRoles()) != 1 || res.GetRoles()[0] != role.Key ||
+		len(res.GetRoles()) != 1 || res.GetRoles()[0] != role.Code ||
 		len(res.GetAllowedIps()) != 1 || res.GetAllowedIps()[0] != "127.0.0.1/32" ||
 		res.GetCacheTtlMs() != int64(e.app.Session.TokenCacheTTLSeconds)*1000 {
 		t.Fatalf("响应不对: %+v", res)

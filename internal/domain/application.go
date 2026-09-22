@@ -104,7 +104,7 @@ const (
 type Application struct {
 	ID           uuid.UUID
 	Name         string
-	Slug         string
+	Code         string
 	AppID        string
 	Status       string
 	Session      SessionPolicy

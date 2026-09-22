@@ -50,17 +50,17 @@ func (s *AuthzService) announcePolicy(ctx context.Context, appID uuid.UUID) {
 	})
 }
 
-// roleKeyByID 取角色 key，不存在返回 ROLE_NOT_FOUND。
-func (s *AuthzService) roleKeyByID(ctx context.Context, id uuid.UUID) (string, error) {
-	var key string
-	err := s.pool.QueryRow(ctx, `SELECT key FROM role WHERE id = $1`, id).Scan(&key)
+// roleCodeByID 取角色 code，不存在返回 ROLE_NOT_FOUND。
+func (s *AuthzService) roleCodeByID(ctx context.Context, id uuid.UUID) (string, error) {
+	var code string
+	err := s.pool.QueryRow(ctx, `SELECT code FROM role WHERE id = $1`, id).Scan(&code)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", domain.Fail(domain.ErrNotFound, domain.CodeRoleNotFound, "角色不存在")
 	}
 	if err != nil {
 		return "", fmt.Errorf("service: 查询角色: %w", err)
 	}
-	return key, nil
+	return code, nil
 }
 
 // pgForeignKeyViolation 是 PostgreSQL 外键约束冲突的 SQLSTATE。
@@ -76,16 +76,16 @@ func isForeignKeyViolation(err error) bool {
 // ---------------------------------------------------------------------------
 
 // CreateRole 新建全局角色。
-func (s *AuthzService) CreateRole(ctx context.Context, key, name string, parentID *uuid.UUID) (*domain.Role, error) {
-	if key == "" || name == "" {
-		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "角色 key 与 name 不能为空")
+func (s *AuthzService) CreateRole(ctx context.Context, code, name string, parentID *uuid.UUID) (*domain.Role, error) {
+	if code == "" || name == "" {
+		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "角色 code 与 name 不能为空")
 	}
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO role (key, name, parent_id) VALUES ($1, $2, $3)
-		RETURNING `+roleColumns, key, name, parentID)
+		INSERT INTO role (code, name, parent_id) VALUES ($1, $2, $3)
+		RETURNING `+roleColumns, code, name, parentID)
 	r, err := scanRole(row)
 	if isUniqueViolation(err) {
-		return nil, domain.Failf(domain.ErrConflict, domain.CodeRoleKeyTaken, "角色 %q 已存在", key)
+		return nil, domain.Failf(domain.ErrConflict, domain.CodeRoleCodeTaken, "角色 %q 已存在", code)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 创建角色: %w", err)
@@ -95,9 +95,9 @@ func (s *AuthzService) CreateRole(ctx context.Context, key, name string, parentI
 
 // UpdateRole 改角色的显示名与父角色。
 //
-// **key 不在可改之列**——user_role.roles 按字符串引用它（没有外键），且已签发
+// **code 不在可改之列**——user_role.roles 按字符串引用它（没有外键），且已签发
 // 的会话里刻着它，改了那批用户会在会话刷新前丢掉这个角色。这条约束是选择
-// user_role.roles text[] 的直接后果：哪天它改成按 role_id 的关系表，key 也就
+// user_role.roles text[] 的直接后果：哪天它改成按 role_id 的关系表，code 也就
 // 能改了。
 func (s *AuthzService) UpdateRole(ctx context.Context, id uuid.UUID, name string, parentID *uuid.UUID) (*domain.Role, error) {
 	if name == "" {
@@ -107,11 +107,11 @@ func (s *AuthzService) UpdateRole(ctx context.Context, id uuid.UUID, name string
 		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleCycle, "角色不能以自己为父角色")
 	}
 	if parentID != nil {
-		key, err := s.roleKeyByID(ctx, id)
+		code, err := s.roleCodeByID(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		if key == authzcore.GuestRoleKey {
+		if code == authzcore.GuestRoleKey {
 			return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 GUEST 不能设置父角色")
 		}
 		cyclic, err := s.wouldCycle(ctx, id, *parentID)
@@ -164,7 +164,7 @@ func (s *AuthzService) wouldCycle(ctx context.Context, id, parentID uuid.UUID) (
 // DeleteRole 删除角色，并从所有用户的角色数组里摘掉它。
 //
 // **这条连带清理是必须的，也是 user_role 用 text[] 的代价。** 数组没有外键，
-// 数据库不会替我们做级联；漏了这一步的话，被删角色的 key 会静默残留在
+// 数据库不会替我们做级联；漏了这一步的话，被删角色的 code 会静默残留在
 // user_role.roles 里，没有任何报错——只是那些用户带着一个不存在的角色，
 // 在策略表里查不到、等同于没有，直到有人建了一个同名角色，他们**突然获得
 // 了那个角色的权限**。
@@ -177,18 +177,18 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var key string
-	if err := tx.QueryRow(ctx, `SELECT key FROM role WHERE id = $1 FOR UPDATE`, id).Scan(&key); err != nil {
+	var code string
+	if err := tx.QueryRow(ctx, `SELECT code FROM role WHERE id = $1 FOR UPDATE`, id).Scan(&code); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.Fail(domain.ErrNotFound, domain.CodeRoleNotFound, "角色不存在")
 		}
 		return fmt.Errorf("service: 查询角色: %w", err)
 	}
-	if key == authzcore.GuestRoleKey {
+	if code == authzcore.GuestRoleKey {
 		return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 GUEST 不能删除")
 	}
 	var bound int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM access_key WHERE role_key = $1`, key).Scan(&bound); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM access_key WHERE role_key = $1`, code).Scan(&bound); err != nil {
 		return fmt.Errorf("service: 统计绑定该角色的访问密钥: %w", err)
 	}
 	if bound > 0 {
@@ -196,7 +196,7 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 			"有 %d 把访问密钥绑定了该角色，请先改绑或删除这些密钥", bound).WithField("count", bound)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM role WHERE id = $1`, id); err != nil {
-		// 外键兜底：计数之后、删除之前有人给这个角色绑了新 key。
+		// 外键兜底：计数之后、删除之前有人给这个角色绑了新 code。
 		if isForeignKeyViolation(err) {
 			return domain.Fail(domain.ErrConflict, domain.CodeRoleInUse, "有访问密钥绑定了该角色，请先改绑或删除这些密钥")
 		}
@@ -204,11 +204,11 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE user_role SET roles = array_remove(roles, $1), updated_at = now()
-		WHERE roles @> ARRAY[$1::text]`, key); err != nil {
+		WHERE roles @> ARRAY[$1::text]`, code); err != nil {
 		return fmt.Errorf("service: 清理用户角色: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE application SET default_role_key = '' WHERE default_role_key = $1`, key); err != nil {
+		`UPDATE application SET default_role_key = '' WHERE default_role_key = $1`, code); err != nil {
 		return fmt.Errorf("service: 清理应用默认角色: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -220,7 +220,7 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 
 // ListRoles 返回全部角色。角色是全局的，数量在几十级别，不分页。
 func (s *AuthzService) ListRoles(ctx context.Context) ([]domain.Role, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+roleColumns+` FROM role ORDER BY key`)
+	rows, err := s.pool.Query(ctx, `SELECT `+roleColumns+` FROM role ORDER BY code`)
 	if err != nil {
 		return nil, fmt.Errorf("service: 查询角色列表: %w", err)
 	}
@@ -249,11 +249,11 @@ func (s *AuthzService) SetUserRoles(ctx context.Context, userID uuid.UUID, roles
 		}
 		return nil
 	}
-	// 校验角色都存在：允许写入不存在的角色 key 等于给用户一个永远不生效的
+	// 校验角色都存在：允许写入不存在的角色 code 等于给用户一个永远不生效的
 	// 角色，而它会在有人建同名角色的那天突然生效。
 	var n int
 	if err := s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM role WHERE key = ANY($1)`, roles).Scan(&n); err != nil {
+		`SELECT count(*) FROM role WHERE code = ANY($1)`, roles).Scan(&n); err != nil {
 		return fmt.Errorf("service: 校验角色存在性: %w", err)
 	}
 	if n != len(dedup(roles)) {
@@ -320,13 +320,13 @@ func dedup(in []string) []string {
 	return out
 }
 
-const roleColumns = `id, key, name, parent_id,
+const roleColumns = `id, code, name, parent_id,
 	(extract(epoch from created_at) * 1000)::bigint,
 	(extract(epoch from updated_at) * 1000)::bigint`
 
 func scanRole(row rowScanner) (*domain.Role, error) {
 	var r domain.Role
-	if err := row.Scan(&r.ID, &r.Key, &r.Name, &r.ParentID, &r.CreatedAt, &r.UpdatedAt); err != nil {
+	if err := row.Scan(&r.ID, &r.Code, &r.Name, &r.ParentID, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &r, nil

@@ -64,21 +64,21 @@ func TestCreateApplicationReturnsPlainSecretOnce(t *testing.T) {
 	}
 }
 
-func TestCreateApplicationRejectsDuplicateSlug(t *testing.T) {
+func TestCreateApplicationRejectsDuplicateCode(t *testing.T) {
 	svc := newAppService(t)
 	ctx := context.Background()
 
-	if _, _, err := svc.Create(ctx, "A", "same-slug"); err != nil {
+	if _, _, err := svc.Create(ctx, "A", "same-code"); err != nil {
 		t.Fatalf("首次 Create: %v", err)
 	}
-	if _, _, err := svc.Create(ctx, "B", "same-slug"); !errors.Is(err, domain.ErrConflict) {
+	if _, _, err := svc.Create(ctx, "B", "same-code"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
 	}
 }
 
 func TestCreateApplicationRejectsEmptyFields(t *testing.T) {
 	svc := newAppService(t)
-	if _, _, err := svc.Create(context.Background(), "", "slug"); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, _, err := svc.Create(context.Background(), "", "code"); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
 }
@@ -406,6 +406,71 @@ func TestSetStatusOnMissingApplication(t *testing.T) {
 	}
 }
 
+// 【辨别力】删除前必须先停用，不能对着一个还在服务的应用直接删——appSecret
+// 删掉就再也拿不回来，SDK 接入方会立刻断连，这一步不该一次点击就能触发。
+func TestDeleteRejectsActiveApplication(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := svc.Delete(ctx, app.ID); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	// 没删掉：GetByID 应该还能查到。
+	if _, err := svc.GetByID(ctx, app.ID); err != nil {
+		t.Fatalf("被拒绝的删除不该真的删掉数据: %v", err)
+	}
+}
+
+func TestDeleteOnMissingApplication(t *testing.T) {
+	svc := newAppService(t)
+	if err := svc.Delete(context.Background(), uuid.New()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// 停用后可以删除，且级联清空 application_connector——schema 里这条外键是
+// ON DELETE CASCADE，这里直接验证它真的生效，而不是只信任 schema 注释。
+func TestDeleteRemovesDisabledApplicationAndCascadesConnectors(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	reg := connector.NewRegistry()
+	if err := reg.Register(connector.NewPassword(nil)); err != nil {
+		t.Fatalf("注册 password: %v", err)
+	}
+	svc := service.NewApplicationService(pool, reg)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := svc.SetConnector(ctx, app.ID, "password", true, nil); err != nil {
+		t.Fatalf("SetConnector: %v", err)
+	}
+	if _, err := svc.SetStatus(ctx, app.ID, domain.ApplicationStatusDisabled); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	if err := svc.Delete(ctx, app.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := svc.GetByID(ctx, app.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("删除后 GetByID 应返回 ErrNotFound，got %v", err)
+	}
+	var connectorCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM application_connector WHERE application_id = $1`, app.ID).
+		Scan(&connectorCount); err != nil {
+		t.Fatalf("查询 application_connector: %v", err)
+	}
+	if connectorCount != 0 {
+		t.Fatalf("application_connector 残留 %d 行，级联删除没有生效", connectorCount)
+	}
+}
+
 // strPtr 是取字符串字面量地址的小工具：Go 不允许 &"字面量"，
 // Update 的局部更新语义又必须靠 *string 区分"没传"与"传了空串"，
 // 测试里到处需要它。
@@ -444,9 +509,9 @@ func TestUpdateOnlyTouchesNameAndCookieDomain(t *testing.T) {
 	if got.CookieDomain != "example.com" {
 		t.Fatalf("CookieDomain = %q, want example.com", got.CookieDomain)
 	}
-	// slug 与 appId 是身份，改名不许动
-	if got.Slug != app.Slug || got.AppID != app.AppID {
-		t.Fatalf("slug/appId 被改动: %+v", got)
+	// code 与 appId 是身份，改名不许动
+	if got.Code != app.Code || got.AppID != app.AppID {
+		t.Fatalf("code/appId 被改动: %+v", got)
 	}
 	// 会话策略必须原封不动
 	if got.Session != want {

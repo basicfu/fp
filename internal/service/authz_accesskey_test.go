@@ -41,7 +41,7 @@ func TestDeleteRoleBoundToAccessKey(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		if _, err := e.pool.Exec(ctx,
 			`INSERT INTO access_key (access_key_id, secret, remark, role_key) VALUES ($1, 's', 'r', $2)`,
-			fmt.Sprintf("FPAKTEST%016d", i), partner.Key); err != nil {
+			fmt.Sprintf("FPAKTEST%016d", i), partner.Code); err != nil {
 			t.Fatalf("插入 key: %v", err)
 		}
 	}
@@ -120,7 +120,7 @@ func TestRolePermissionsByApp(t *testing.T) {
 	e.grant(t, base, del, domain.EffectAllow)
 	e.grant(t, child, del, domain.EffectDeny)
 
-	got, err := e.svc.RolePermissionsByApp(ctx, child.Key)
+	got, err := e.svc.RolePermissionsByApp(ctx, child.Code)
 	if err != nil {
 		t.Fatal(err)
 	}

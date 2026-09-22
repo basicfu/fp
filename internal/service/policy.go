@@ -79,9 +79,9 @@ func (s *AuthzService) CompilePolicy(ctx context.Context, appID uuid.UUID) ([]au
 	return out, nil
 }
 
-// roleGraph 读出全部角色的父子关系与 key。
+// roleGraph 读出全部角色的父子关系与 code。
 func (s *AuthzService) roleGraph(ctx context.Context) (parents map[uuid.UUID]*uuid.UUID, keys map[uuid.UUID]string, err error) {
-	rows, qerr := s.pool.Query(ctx, `SELECT id, key, parent_id FROM role`)
+	rows, qerr := s.pool.Query(ctx, `SELECT id, code, parent_id FROM role`)
 	if qerr != nil {
 		return nil, nil, fmt.Errorf("service: 查询角色图: %w", qerr)
 	}

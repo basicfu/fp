@@ -57,8 +57,8 @@ const DefaultStaleAfter = 30 * time.Minute
 // 应用专属的角色靠命名约定区分（商城管理员 / 视频管理员）。
 type Role struct {
 	ID uuid.UUID
-	// Key 是身份，不可修改。理由见 00007 迁移里的注释。
-	Key  string
+	// Code 是身份，不可修改。理由见 00007 迁移里的注释。
+	Code string
 	Name string
 	// ParentID 是继承的父角色。子角色拥有父角色的全部权限，展开在服务端完成。
 	ParentID  *uuid.UUID

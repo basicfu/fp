@@ -35,6 +35,9 @@ const (
 	CodeAppDisabled          = "APP_DISABLED"
 	CodeAppNotFound          = "APP_NOT_FOUND"
 	CodeAppCredentialInvalid = "APP_CREDENTIAL_INVALID"
+	// CodeAppMustBeDisabled 是删除应用前置条件不满足：必须先停用才能删，
+	// 见 ApplicationService.Delete 的注释。
+	CodeAppMustBeDisabled = "APP_MUST_BE_DISABLED"
 	CodeConnectorDisabled    = "CONNECTOR_DISABLED"
 	CodeConnectorUnknown     = "CONNECTOR_UNKNOWN"
 	CodeRateLimited          = "RATE_LIMITED"
@@ -64,15 +67,15 @@ const (
 	CodePhoneInvalid               = "PHONE_INVALID"
 	CodePasswordTooShort           = "PASSWORD_TOO_SHORT"
 	CodePasswordTooLong            = "PASSWORD_TOO_LONG"
-	CodeSlugTaken                  = "SLUG_TAKEN"
+	CodeCodeTaken                  = "CODE_TAKEN"
 	CodeUnionKeyConflict           = "UNION_KEY_CONFLICT"
 	CodeConnectorAlreadyRegistered = "CONNECTOR_ALREADY_REGISTERED"
 	CodeConfigVersionConflict      = "CONFIG_VERSION_CONFLICT"
 
 	// 授权模块。
 
-	CodeRoleNotFound = "ROLE_NOT_FOUND"
-	CodeRoleKeyTaken = "ROLE_KEY_TAKEN"
+	CodeRoleNotFound  = "ROLE_NOT_FOUND"
+	CodeRoleCodeTaken = "ROLE_CODE_TAKEN"
 	// CodeRoleCycle：角色继承成环。拦在写入时，而不是等到编译策略时才炸——
 	// 那时整个应用的鉴权会一起挂掉，且错误现场离操作现场很远。
 	CodeRoleCycle          = "ROLE_CYCLE"
@@ -132,6 +135,7 @@ var codeSentinels = map[string]error{
 	CodeAppDisabled:          ErrForbidden,
 	CodeAppNotFound:          ErrNotFound,
 	CodeAppCredentialInvalid: ErrInvalidCredential,
+	CodeAppMustBeDisabled:    ErrConflict,
 	CodeConnectorDisabled:    ErrForbidden,
 	CodeConnectorUnknown:     ErrNotFound,
 	CodeRateLimited:          ErrRateLimited,
@@ -147,7 +151,7 @@ var codeSentinels = map[string]error{
 	CodePhoneInvalid:               ErrInvalidArgument,
 	CodePasswordTooShort:           ErrInvalidArgument,
 	CodePasswordTooLong:            ErrInvalidArgument,
-	CodeSlugTaken:                  ErrConflict,
+	CodeCodeTaken:                  ErrConflict,
 	CodeUnionKeyConflict:           ErrConflict,
 	CodeConnectorAlreadyRegistered: ErrConflict,
 	CodeConfigVersionConflict:      ErrConflict,
@@ -163,7 +167,7 @@ var codeSentinels = map[string]error{
 	CodeRouteNotFound:          ErrNotFound,
 
 	CodeRoleNotFound:       ErrNotFound,
-	CodeRoleKeyTaken:       ErrConflict,
+	CodeRoleCodeTaken:      ErrConflict,
 	CodeRoleCycle:          ErrInvalidArgument,
 	CodePermissionNotFound: ErrNotFound,
 	CodePermissionKeyTaken: ErrConflict,

@@ -236,7 +236,7 @@ func randomPhone() string {
 }
 
 // newApplication 在同一个 fp 部署下创建另一个应用，用于验证跨应用隔离等场景。
-// name/slug 都带随机后缀，避免与 env 自身的应用或彼此冲突。
+// name/code 都带随机后缀，避免与 env 自身的应用或彼此冲突。
 func (e *grpcEnv) newApplication(t *testing.T) *testApplication {
 	t.Helper()
 	ctx := context.Background()

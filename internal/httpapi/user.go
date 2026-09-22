@@ -3,9 +3,11 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 )
@@ -73,6 +75,60 @@ func (h *userHandler) list(w http.ResponseWriter, r *http.Request) {
 		out.Items = append(out.Items, toUserDTO(it.User, it.Identities))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+type createUserRequest struct {
+	Phone    string `json:"phone"`
+	Nickname string `json:"nickname"`
+	// Password 可留空：只建号不设密码，后续只能靠验证码等其它登录方式登录。
+	Password string `json:"password"`
+}
+
+// create 是管理端手动建号的唯一入口。普通用户永远通过登录流程隐式建号
+// （EnsureUserWithIdentity 的"确保存在"语义），这里必须是**新建**语义：
+// 手机号已经注册过时要报错，不能悄悄把请求接到那个已有账号上——否则
+// 管理员以为在建一个新用户，实际上却在给别人的账号改密码。
+func (h *userHandler) create(w http.ResponseWriter, r *http.Request) {
+	var req createUserRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	if connector.DetectIdentityType(req.Phone) != domain.IdentityTypePhone {
+		writeError(w, domain.Failf(domain.ErrInvalidArgument, domain.CodePhoneInvalid, "手机号格式不正确"))
+		return
+	}
+
+	u, _, created, err := h.users.EnsureUserWithIdentity(r.Context(), service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: req.Phone, Nickname: strings.TrimSpace(req.Nickname),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !created {
+		writeError(w, domain.Failf(domain.ErrConflict, domain.CodeUnionKeyConflict, "手机号 %s 已经注册过了", req.Phone))
+		return
+	}
+
+	if req.Password != "" {
+		if err := h.users.SetPassword(r.Context(), u.ID, req.Password); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+
+	ids, err := h.users.ListIdentities(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := h.users.GetByID(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toUserDTO(*out, ids))
 }
 
 func (h *userHandler) get(w http.ResponseWriter, r *http.Request) {

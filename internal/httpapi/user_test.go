@@ -61,6 +61,99 @@ func TestUserListAndSearchOverHTTP(t *testing.T) {
 	}
 }
 
+// 管理端手动建号：填手机号+昵称+密码，一次性把人建出来、密码也设上，
+// 不用先建号再单独调一次改密接口。
+func TestCreateUserOverHTTP(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/users",
+		`{"phone":"13800138000","nickname":"阿里斯","password":"hunter2hunter2"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var u struct {
+		ID          string `json:"id"`
+		Nickname    string `json:"nickname"`
+		HasPassword bool   `json:"hasPassword"`
+		Identities  []struct {
+			Type    string `json:"type"`
+			Subject string `json:"subject"`
+		} `json:"identities"`
+	}
+	decode(t, rec, &u)
+	if u.ID == "" || u.Nickname != "阿里斯" || !u.HasPassword {
+		t.Fatalf("响应不对: %+v", u)
+	}
+	if len(u.Identities) != 1 || u.Identities[0].Type != "phone" || u.Identities[0].Subject != "13800138000" {
+		t.Fatalf("登录标识不对: %+v", u.Identities)
+	}
+	if strings.Contains(rec.Body.String(), "$2a$") || strings.Contains(rec.Body.String(), "passwordHash") {
+		t.Fatalf("响应泄露了密码哈希: %s", rec.Body.String())
+	}
+
+	// 建出来的账号要能拿这个密码登进去——不能只是数据库里插了一行，
+	// 密码却没真的落到能通过校验的那条路径上。
+	listRec := do(t, h, token, http.MethodGet, "/admin/api/users?keyword=13800138000", "")
+	var list struct {
+		Items []struct{ ID string `json:"id"` } `json:"items"`
+	}
+	decode(t, listRec, &list)
+	if len(list.Items) != 1 || list.Items[0].ID != u.ID {
+		t.Fatalf("新建的用户没有出现在列表里: %s", listRec.Body.String())
+	}
+}
+
+// 密码留空只建号，不设密码——之后只能靠验证码等其它方式登录。
+func TestCreateUserWithoutPasswordOverHTTP(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/users", `{"phone":"13800138000","nickname":"阿里斯"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var u struct {
+		HasPassword bool `json:"hasPassword"`
+	}
+	decode(t, rec, &u)
+	if u.HasPassword {
+		t.Fatal("没传密码却设上了")
+	}
+}
+
+// 【辨别力】手机号已经被别的账号用过时必须报错，绝不能悄悄把这次请求
+// 接到那个已有账号上——否则管理员以为在建一个新用户，实际却在往一个
+// 陌生账号头上改昵称、改密码。
+func TestCreateUserRejectsDuplicatePhone(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	existing := seedUser(t, deps, "13800138000", "原账号")
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/users",
+		`{"phone":"13800138000","nickname":"冒充的","password":"attacker123"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 原账号的昵称、密码状态必须原封不动。
+	getRec := do(t, h, token, http.MethodGet, "/admin/api/users/"+existing.ID.String(), "")
+	var got struct {
+		Nickname    string `json:"nickname"`
+		HasPassword bool   `json:"hasPassword"`
+	}
+	decode(t, getRec, &got)
+	if got.Nickname != "原账号" || got.HasPassword {
+		t.Fatalf("拒绝重复手机号之后，原账号被改动了: %+v", got)
+	}
+}
+
+func TestCreateUserRejectsInvalidPhone(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/users", `{"phone":"not-a-phone","nickname":"x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 // 响应里绝不能出现密码哈希。
 func TestUserResponseNeverLeaksPasswordHash(t *testing.T) {
 	h, token, deps := newAdminEnv(t)

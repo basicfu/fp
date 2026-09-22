@@ -26,7 +26,7 @@ type sessionPolicyDTO struct {
 type applicationDTO struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
-	Slug         string `json:"slug"`
+	Code         string `json:"code"`
 	AppID        string `json:"appId"`
 	Status       string `json:"status"`
 	CookieDomain string `json:"cookieDomain"`
@@ -71,7 +71,7 @@ func toIMConfigDTO(c domain.IMConfig) imConfigDTO {
 
 func toApplicationDTO(a domain.Application) applicationDTO {
 	return applicationDTO{
-		ID: a.ID.String(), Name: a.Name, Slug: a.Slug, AppID: a.AppID,
+		ID: a.ID.String(), Name: a.Name, Code: a.Code, AppID: a.AppID,
 		Status: a.Status, CookieDomain: a.CookieDomain, DefaultRoleKey: a.DefaultRoleKey,
 		Session: sessionPolicyDTO{
 			IdleTimeoutSeconds:       a.Session.IdleTimeoutSeconds,
@@ -132,7 +132,7 @@ func (h *applicationHandler) list(w http.ResponseWriter, r *http.Request) {
 
 type createApplicationRequest struct {
 	Name string `json:"name"`
-	Slug string `json:"slug"`
+	Code string `json:"code"`
 }
 
 type createApplicationResponse struct {
@@ -147,7 +147,7 @@ func (h *applicationHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	app, secret, err := h.svc.Create(r.Context(), req.Name, req.Slug)
+	app, secret, err := h.svc.Create(r.Context(), req.Name, req.Code)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -251,6 +251,19 @@ func (h *applicationHandler) setStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
+}
+
+func (h *applicationHandler) delete(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := h.svc.Delete(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 type connectorDTO struct {

@@ -45,7 +45,7 @@ func TestApplicationCRUDOverHTTP(t *testing.T) {
 	}
 
 	rec = do(t, h, token, http.MethodPost, "/admin/api/applications",
-		`{"name":"新项目前台","slug":"newproj-web"}`)
+		`{"name":"新项目前台","code":"newproj-web"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -77,7 +77,7 @@ func TestApplicationCRUDOverHTTP(t *testing.T) {
 func TestUpdateSessionPolicyValidation(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 
-	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","code":"a"}`)
 	var created struct {
 		Application struct {
 			ID string `json:"id"`
@@ -106,7 +106,7 @@ func TestUpdateSessionPolicyValidation(t *testing.T) {
 func TestApplicationConnectorOverHTTP(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 
-	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","code":"a"}`)
 	var created struct {
 		Application struct {
 			ID string `json:"id"`
@@ -133,7 +133,7 @@ func TestApplicationConnectorOverHTTP(t *testing.T) {
 func TestPatchApplicationUpdatesName(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 
-	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"旧名","slug":"a"}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"旧名","code":"a"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -166,7 +166,7 @@ func TestPatchApplicationUpdatesName(t *testing.T) {
 func TestPatchApplicationNameOnlyKeepsCookieDomain(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 
-	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"旧名","slug":"a"}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"旧名","code":"a"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -204,7 +204,7 @@ func TestPatchApplicationNameOnlyKeepsCookieDomain(t *testing.T) {
 func TestPatchApplicationStatusDisables(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 
-	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","code":"a"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -232,7 +232,7 @@ func TestPatchApplicationStatusDisables(t *testing.T) {
 func TestPatchApplicationStatusRejectsUnknown(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 
-	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","code":"a"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -250,11 +250,62 @@ func TestPatchApplicationStatusRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestDeleteApplicationRejectsActive(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","code":"a"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+
+	rec = do(t, h, token, http.MethodDelete, "/admin/api/applications/"+created.Application.ID, "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteApplicationRequiresDisabledFirst(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","code":"a"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Application struct {
+			ID string `json:"id"`
+		} `json:"application"`
+	}
+	decode(t, rec, &created)
+
+	rec = do(t, h, token, http.MethodPatch, "/admin/api/applications/"+created.Application.ID+"/status",
+		`{"status":"DISABLED"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodDelete, "/admin/api/applications/"+created.Application.ID, "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodGet, "/admin/api/applications/"+created.Application.ID, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("删除后 GET status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 // 未登录必须 401——这两个新接口和其他管理接口一样受 requireAdmin 保护。
 func TestPatchApplicationRequiresAdmin(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 
-	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","slug":"a"}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/applications", `{"name":"A","code":"a"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -289,6 +340,7 @@ func TestAdminAPIRequiresAuth(t *testing.T) {
 		{http.MethodGet, "/admin/api/applications/" + someUUID},
 		{http.MethodPatch, "/admin/api/applications/" + someUUID},
 		{http.MethodPatch, "/admin/api/applications/" + someUUID + "/status"},
+		{http.MethodDelete, "/admin/api/applications/" + someUUID},
 		{http.MethodPut, "/admin/api/applications/" + someUUID + "/session"},
 		{http.MethodGet, "/admin/api/applications/" + someUUID + "/connectors"},
 		{http.MethodPut, "/admin/api/applications/" + someUUID + "/connectors/password"},
@@ -383,7 +435,7 @@ func TestPutIMConfigRoundTrip(t *testing.T) {
 func createAppID(t *testing.T, h http.Handler, token string) string {
 	t.Helper()
 	rec := do(t, h, token, http.MethodPost, "/admin/api/applications",
-		`{"name":"im-`+t.Name()+`","slug":"im-`+strings.ToLower(t.Name())+`"}`)
+		`{"name":"im-`+t.Name()+`","code":"im-`+strings.ToLower(t.Name())+`"}`)
 	var created struct {
 		Application struct {
 			ID string `json:"id"`

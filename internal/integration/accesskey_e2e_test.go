@@ -70,7 +70,7 @@ func partnerKey(t *testing.T, e *phase2Env) (*domain.Role, *domain.Permission, *
 	if err := e.authz.SetRolePermission(ctx, role.ID, perm.ID, domain.EffectAllow); err != nil {
 		t.Fatal(err)
 	}
-	k, err := e.accessKeys.Create(ctx, service.CreateAccessKeyInput{Remark: "顺丰", RoleKey: role.Key, AllowedIPs: []string{"127.0.0.1"}})
+	k, err := e.accessKeys.Create(ctx, service.CreateAccessKeyInput{Remark: "顺丰", RoleKey: role.Code, AllowedIPs: []string{"127.0.0.1"}})
 	if err != nil {
 		t.Fatal(err)
 	}

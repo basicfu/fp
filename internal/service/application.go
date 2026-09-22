@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +29,7 @@ type rowScanner interface {
 // applicationColumns 是所有读取 application 的查询共用的列清单，保证 scanApplication 能复用。
 // 时间统一转成毫秒，与 Go 侧的 int64 约定一致。
 const applicationColumns = `
-	id, name, slug, app_id, status,
+	id, name, code, app_id, status,
 	idle_timeout_seconds, idle_timeout_mobile_seconds, max_lifetime_seconds,
 	rotate_interval_seconds, extend_interval_seconds, token_cache_ttl_seconds,
 	cookie_domain, redirect_uris, grant_types, default_role_key,
@@ -88,12 +89,12 @@ func NewApplicationService(pool *pgxpool.Pool, schemas ConnectorSchemas, opts ..
 
 // Create 新建应用，返回应用与仅此一次可见的明文 appSecret。
 // 明文 secret 不落库，只存 bcrypt 哈希。
-func (s *ApplicationService) Create(ctx context.Context, name, slug string) (*domain.Application, string, error) {
-	if name == "" || slug == "" {
-		return nil, "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "name 与 slug 不能为空")
+func (s *ApplicationService) Create(ctx context.Context, name, code string) (*domain.Application, string, error) {
+	if name == "" || code == "" {
+		return nil, "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "name 与 code 不能为空")
 	}
 
-	appID, err := randomToken()
+	appID, err := randomAppID()
 	if err != nil {
 		return nil, "", err
 	}
@@ -107,19 +108,55 @@ func (s *ApplicationService) Create(ctx context.Context, name, slug string) (*do
 	}
 
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO application (name, slug, app_id, app_secret_hash)
+		INSERT INTO application (name, code, app_id, app_secret_hash)
 		VALUES ($1, $2, $3, $4)
-		RETURNING `+applicationColumns, name, slug, appID, string(hash))
+		RETURNING `+applicationColumns, name, code, appID, string(hash))
 
 	app, err := scanApplication(row)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			return nil, "", domain.Failf(domain.ErrConflict, domain.CodeSlugTaken, "slug %q 已被占用", slug)
+			return nil, "", domain.Failf(domain.ErrConflict, domain.CodeCodeTaken, "code %q 已被占用", code)
 		}
 		return nil, "", fmt.Errorf("service: 创建应用: %w", err)
 	}
 	return app, secret, nil
+}
+
+// appIDAlphabet 是 randomAppID 的字符集：大小写字母 + 数字，62 个字符，
+// 没有容易读错/打错的符号（不含 -、_、易混淆的 0/O、1/l 之类的问题这里不特意
+// 剔除——appId 从来不需要人手抄，跟阿里云 AccessKeyId 一样是复制粘贴用的）。
+const appIDAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+// randomAppID 生成形如 FPID5t7wK7KsroScQDGek9hw 的应用 ID：固定前缀
+// "FPID" + 20 位随机字符，模仿阿里云 AccessKeyId（如 LTAI5t7wK7KsroScQDGek9hw）
+// 的长度和观感。
+//
+// appId 是公开标识符，不是密钥——真正的凭据是 appSecret（走 randomToken()，
+// 32 字节高强度随机）。所以这里不追求 randomToken() 那种加密强度，只求
+// 短、好认、贴 URL/日志不臃肿；旧版直接拿 randomToken() 当 appId 用，
+// 生成出来是 43 字符的 base64url 串，比这里长一倍还多。
+//
+// 逐字节拒绝采样而不是直接取模：256 不能被 62 整除，直接 %62 会让字母表
+// 前几个字符出现的概率略高于后面的，对于要展示给人看的 ID 没必要留这个
+// 可以轻松避免的偏差。
+func randomAppID() (string, error) {
+	const length = 20
+	const maxByte = 256 - (256 % len(appIDAlphabet))
+
+	out := make([]byte, length)
+	raw := make([]byte, 1)
+	for i := 0; i < length; {
+		if _, err := rand.Read(raw); err != nil {
+			return "", fmt.Errorf("service: 生成 appId: %w", err)
+		}
+		if int(raw[0]) >= maxByte {
+			continue
+		}
+		out[i] = appIDAlphabet[int(raw[0])%len(appIDAlphabet)]
+		i++
+	}
+	return "FPID" + string(out), nil
 }
 
 // List 返回全部应用，按创建时间倒序。永不返回 nil 切片。
@@ -250,7 +287,7 @@ func (s *ApplicationService) UpdateSessionPolicy(ctx context.Context, id uuid.UU
 // 清空，跟 Step 2 那条"改名连带清零会话策略"是同一类事故，只是换成了
 // Update 自己的两个字段互相踩。
 //
-// 只碰这两列。slug 与 app_id 是应用的身份，已经被 SDK 配置、被其他系统
+// 只碰这两列。code 与 app_id 是应用的身份，已经被 SDK 配置、被其他系统
 // 引用，改掉等于换了一个应用；status 走 SetStatus；会话策略走
 // UpdateSessionPolicy。每样东西一个入口，避免一次"改名"顺手把别的字段
 // 覆盖成零值。
@@ -309,6 +346,36 @@ func (s *ApplicationService) SetStatus(ctx context.Context, id uuid.UUID, status
 		return nil, fmt.Errorf("service: 更新应用状态: %w", err)
 	}
 	return app, nil
+}
+
+// Delete 永久删除一个已停用的应用。
+//
+// 只允许删除已停用的应用：这是不可逆操作，appSecret 一旦删掉就再也拿不
+// 回来，SDK 接入方会立刻断连——先停用能让管理员在真正删除前有一个反悔
+// 窗口，也避免手滑直接删掉一个还在服务的应用。
+//
+// 级联删除由 schema 里的外键负责，这里不用手写一堆 DELETE：
+// application_connector（登录方式配置）、user_extra（用户在这个应用下的
+// 默认角色/首次登录记录）、permission（权限点，连带角色对它的授权也会
+// 跟着没）、config（配置中心的版本历史）都是 ON DELETE CASCADE；
+// login_log.application_id 是 ON DELETE SET NULL，登录日志本身保留，只是
+// 不再关联到一个已经不存在的应用。
+func (s *ApplicationService) Delete(ctx context.Context, id uuid.UUID) error {
+	var status string
+	err := s.pool.QueryRow(ctx, `SELECT status FROM application WHERE id = $1`, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
+	}
+	if err != nil {
+		return fmt.Errorf("service: 查询应用状态: %w", err)
+	}
+	if status != domain.ApplicationStatusDisabled {
+		return domain.Failf(domain.ErrConflict, domain.CodeAppMustBeDisabled, "必须先停用应用才能删除")
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM application WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("service: 删除应用: %w", err)
+	}
+	return nil
 }
 
 // SetConnector 写入或覆盖某个应用的某种登录方式配置。
@@ -473,7 +540,7 @@ func scanApplication(r rowScanner) (*domain.Application, error) {
 	var app domain.Application
 	var bizAuth []byte
 	err := r.Scan(
-		&app.ID, &app.Name, &app.Slug, &app.AppID, &app.Status,
+		&app.ID, &app.Name, &app.Code, &app.AppID, &app.Status,
 		&app.Session.IdleTimeoutSeconds, &app.Session.IdleTimeoutMobileSeconds, &app.Session.MaxLifetimeSeconds,
 		&app.Session.RotateIntervalSeconds, &app.Session.ExtendIntervalSeconds, &app.Session.TokenCacheTTLSeconds,
 		&app.CookieDomain, &app.RedirectURIs, &app.GrantTypes, &app.DefaultRoleKey,
@@ -501,7 +568,7 @@ func scanApplication(r rowScanner) (*domain.Application, error) {
 func (s *ApplicationService) SetDefaultRole(ctx context.Context, id uuid.UUID, roleKey string) (*domain.Application, error) {
 	if roleKey != "" {
 		var n int
-		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM role WHERE key = $1`, roleKey).Scan(&n); err != nil {
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM role WHERE code = $1`, roleKey).Scan(&n); err != nil {
 			return nil, fmt.Errorf("service: 校验默认角色: %w", err)
 		}
 		if n == 0 {

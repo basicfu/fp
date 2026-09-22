@@ -180,7 +180,7 @@ func (e *env) smsLogin(appID, phone string) *service.LoginResult {
 }
 
 // createApp 通过管理 API 建应用并启用两种登录方式，返回 appId 与明文 secret。
-func (e *env) createApp(name, slug string) (internalID, appID, secret string) {
+func (e *env) createApp(name, code string) (internalID, appID, secret string) {
 	e.t.Helper()
 
 	var created struct {
@@ -191,7 +191,7 @@ func (e *env) createApp(name, slug string) (internalID, appID, secret string) {
 		AppSecret string `json:"appSecret"`
 	}
 	e.request(http.MethodPost, "/admin/api/applications",
-		`{"name":"`+name+`","slug":"`+slug+`"}`, http.StatusCreated, &created)
+		`{"name":"`+name+`","code":"`+code+`"}`, http.StatusCreated, &created)
 
 	base := "/admin/api/applications/" + created.Application.ID + "/connectors"
 	e.request(http.MethodPut, base+"/password", `{"enabled":true,"config":{}}`, http.StatusNoContent, nil)

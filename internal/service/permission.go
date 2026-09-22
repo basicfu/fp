@@ -156,12 +156,12 @@ func (s *AuthzService) DeletePermission(ctx context.Context, id uuid.UUID) error
 	return nil
 }
 
-// RolesHolding 返回持有某个权限点的角色 key，供删除前的提示使用。
+// RolesHolding 返回持有某个权限点的角色 code，供删除前的提示使用。
 func (s *AuthzService) RolesHolding(ctx context.Context, permissionID uuid.UUID) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT r.key FROM role_permission rp
+		SELECT r.code FROM role_permission rp
 		JOIN role r ON r.id = rp.role_id
-		WHERE rp.permission_id = $1 ORDER BY r.key`, permissionID)
+		WHERE rp.permission_id = $1 ORDER BY r.code`, permissionID)
 	if err != nil {
 		return nil, fmt.Errorf("service: 查询持有该权限点的角色: %w", err)
 	}
@@ -214,11 +214,11 @@ func (s *AuthzService) ListPermissions(ctx context.Context, appID uuid.UUID) ([]
 // SetRolePermission 给角色授予或收回一个权限点。effect 为空表示收回。
 func (s *AuthzService) SetRolePermission(ctx context.Context, roleID, permissionID uuid.UUID, effect string) error {
 	if effect == domain.EffectDeny {
-		key, err := s.roleKeyByID(ctx, roleID)
+		code, err := s.roleCodeByID(ctx, roleID)
 		if err != nil {
 			return err
 		}
-		if key == authzcore.GuestRoleKey {
+		if code == authzcore.GuestRoleKey {
 			return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "GUEST 只能配置「允许」")
 		}
 	}

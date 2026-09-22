@@ -106,7 +106,7 @@ func TestWriteErrorHidesUnrecognizedError(t *testing.T) {
 // errors.As，包装后就取不到 *domain.Error，全部降级成 500——那正是
 // 本次要修的缺陷的翻版，而且只有包装过的调用点才会暴露。
 func TestWriteErrorUnwrapsWrappedDomainError(t *testing.T) {
-	base := domain.Fail(domain.ErrConflict, domain.CodeSlugTaken, "slug 已被占用")
+	base := domain.Fail(domain.ErrConflict, domain.CodeCodeTaken, "code 已被占用")
 	wrapped := errors.Join(errors.New("service: 创建应用"), base)
 
 	status, body := writeErrorAndDecode(t, wrapped)
@@ -114,8 +114,8 @@ func TestWriteErrorUnwrapsWrappedDomainError(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("状态码 = %d, want 409", status)
 	}
-	if body.Code != domain.CodeSlugTaken {
-		t.Fatalf("code = %q, want %q", body.Code, domain.CodeSlugTaken)
+	if body.Code != domain.CodeCodeTaken {
+		t.Fatalf("code = %q, want %q", body.Code, domain.CodeCodeTaken)
 	}
 }
 

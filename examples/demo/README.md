@@ -91,7 +91,7 @@ ADMIN_TOKEN=<上面拿到的 token>
 curl -s -X POST http://localhost:8080/admin/api/applications \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Demo","slug":"demo"}'
+  -d '{"name":"Demo","code":"demo"}'
 ```
 
 **该看到**：`201`，响应体形如：

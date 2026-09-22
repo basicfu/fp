@@ -71,7 +71,7 @@ func TestAccessKeyCRUDOverHTTP(t *testing.T) {
 
 func TestDeleteRoleBoundToAccessKeyReturns409(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
-	rec := do(t, h, token, http.MethodPost, "/admin/api/roles", `{"key":"合作方","name":"合作方","parentId":""}`)
+	rec := do(t, h, token, http.MethodPost, "/admin/api/roles", `{"code":"合作方","name":"合作方","parentId":""}`)
 	var role struct {
 		ID string `json:"id"`
 	}
@@ -101,7 +101,7 @@ func TestAccessKeyPermissionsGroupedByApp(t *testing.T) {
 	if err := deps.Authz.SetRolePermission(ctx, role.ID, perm.ID, domain.EffectAllow); err != nil {
 		t.Fatal(err)
 	}
-	k, err := deps.AccessKeys.Create(ctx, service.CreateAccessKeyInput{Remark: "r", RoleKey: role.Key})
+	k, err := deps.AccessKeys.Create(ctx, service.CreateAccessKeyInput{Remark: "r", RoleKey: role.Code})
 	if err != nil {
 		t.Fatal(err)
 	}

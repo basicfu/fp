@@ -44,7 +44,7 @@ func TestCreateAccessKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	k, err := e.svc.Create(ctx, service.CreateAccessKeyInput{
-		Remark: " 顺丰 ", RoleKey: role.Key, ValidDays: 7,
+		Remark: " 顺丰 ", RoleKey: role.Code, ValidDays: 7,
 		AllowedIPs: []string{"10.0.0.5/24", "1.2.3.4", "", "::1"},
 	})
 	if err != nil {
@@ -53,7 +53,7 @@ func TestCreateAccessKey(t *testing.T) {
 	if !regexp.MustCompile(`^FPAK[A-Z0-9]{20}$`).MatchString(k.AccessKeyID) || len(k.Secret) != 43 {
 		t.Fatalf("凭据格式不对: %q / %q", k.AccessKeyID, k.Secret)
 	}
-	if k.Remark != "顺丰" || k.RoleKey != role.Key {
+	if k.Remark != "顺丰" || k.RoleKey != role.Code {
 		t.Fatalf("字段不对: %+v", k)
 	}
 	want := []string{"10.0.0.0/24", "1.2.3.4/32", "::1/128"}

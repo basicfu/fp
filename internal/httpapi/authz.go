@@ -21,7 +21,7 @@ type authzHandler struct {
 
 type roleDTO struct {
 	ID   string `json:"id"`
-	Key  string `json:"key"`
+	Code string `json:"code"`
 	Name string `json:"name"`
 	// ParentID 为空串表示没有父角色。
 	ParentID  string `json:"parentId"`
@@ -29,7 +29,7 @@ type roleDTO struct {
 }
 
 func toRoleDTO(r domain.Role) roleDTO {
-	out := roleDTO{ID: r.ID.String(), Key: r.Key, Name: r.Name, CreatedAt: r.CreatedAt}
+	out := roleDTO{ID: r.ID.String(), Code: r.Code, Name: r.Name, CreatedAt: r.CreatedAt}
 	if r.ParentID != nil {
 		out.ParentID = r.ParentID.String()
 	}
@@ -50,7 +50,7 @@ func (h *authzHandler) listRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 type roleRequest struct {
-	Key      string `json:"key"`
+	Code     string `json:"code"`
 	Name     string `json:"name"`
 	ParentID string `json:"parentId"`
 }
@@ -66,7 +66,7 @@ func (h *authzHandler) createRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	role, err := h.svc.CreateRole(r.Context(), req.Key, req.Name, parent)
+	role, err := h.svc.CreateRole(r.Context(), req.Code, req.Name, parent)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -76,8 +76,8 @@ func (h *authzHandler) createRole(w http.ResponseWriter, r *http.Request) {
 
 // updateRole 只改显示名与父角色。
 //
-// **key 不在可改之列**——user_role.roles 按字符串引用它，且已签发的会话里
-// 刻着它。请求体里即使带了 key 也会被 DisallowUnknownFields 拒掉。
+// **code 不在可改之列**——user_role.roles 按字符串引用它，且已签发的会话里
+// 刻着它。请求体里即使带了 code 也会被 DisallowUnknownFields 拒掉。
 func (h *authzHandler) updateRole(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
