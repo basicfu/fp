@@ -4,11 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/web"
 
-# 不只是"node_modules 不存在才装"——package-lock.json 比 node_modules 新
-# 也得重装：比如刚拉完一个改了依赖（加了 cmdk/radix-ui 这种）的提交，
-# node_modules 还是拉代码前装的那份，缺新包，构建会在 tsc 那步才报
+# 直接检查 tsc 这个二进制在不在，而不是只看 node_modules 目录存不存在——
+# 目录存在不代表装对了：上一次如果是在 NODE_ENV=production（或
+# .npmrc 的 production=true）下装的，node_modules 会"看起来装完了"，
+# 实际上 devDependencies（tsc/vite/vitest 都在里面）一个都没装，
+# 光看目录存不存在、mtime 新不新都测不出这种情况。
+# package-lock.json 比 node_modules 新这一条另外保留：拉到一个改了
+# 依赖（加了 cmdk/radix-ui 这种）的提交后，即使 tsc 还在，也可能缺了
+# 新加的包，构建会在 vite build 或 tsc 类型检查那步才报
 # "Cannot find module"，离真正原因（该重装依赖了）很远。
-if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+if [ ! -x node_modules/.bin/tsc ] || [ package-lock.json -nt node_modules ]; then
   echo "==> 安装前端依赖"
   # --include=dev 显式覆盖调用方 shell 里可能设置的 NODE_ENV=production
   # （或 .npmrc 里的 production=true）——那两者会让 npm ci 跳过全部
