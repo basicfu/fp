@@ -16,7 +16,7 @@ CMD_DIR=./cmd/fp
 
 echo "==> 编译 $CMD_DIR"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o bootstrap-upx "$CMD_DIR"
-upx -1 -o bootstrap bootstrap-upx
+upx -1 -f -o bootstrap bootstrap-upx
 
 echo "==> 构建并推送 $IMAGE:latest"
 docker build -f Dockerfile -t "$IMAGE" .
