@@ -26,6 +26,20 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+// TestHealth 钉住 /health 是纯文本 "ok"，不是 JSON——给探活探针用的，
+// 与面向人/脚本的 /healthz 并存，不是它的替代品。
+func TestHealth(t *testing.T) {
+	h, _ := newAdminServer(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Fatalf("body = %q, want %q", rec.Body.String(), "ok")
+	}
+}
+
 func TestAdminLoginThenMe(t *testing.T) {
 	h, _ := newAdminServer(t)
 

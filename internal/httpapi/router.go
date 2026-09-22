@@ -71,6 +71,14 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	// /health 是给探活探针（LB、k8s 之类）用的：body 就是纯文本 "ok"，
+	// 不是 JSON——探针一般只认状态码和字面量，不解析 JSON。/healthz
+	// 是给人/脚本看的既有接口，两者并存，谁也不替代谁。
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 
 	r.Route("/admin/api", func(r chi.Router) {
 		// API 的 404 必须是 JSON。少了这行，chi 会用它默认的纯文本 404，
