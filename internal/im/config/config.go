@@ -1,110 +1,78 @@
-// Package config 从 YAML 文件加载 fp-im 的启动配置。风格与 internal/config
-// 一致：字段树与 config-im.yaml 1:1 同构，每个字段显式写 yaml tag，解码开
-// KnownFields(true)，必填项缺失直接报错。
+// Package config 装配 fp-im 的启动配置。没有配置文件：FP_IM_REDIS_URL、
+// FP_IM_FPSDK_ADDR、FP_IM_FPSDK_SECRET 三个环境变量必填，其余全部是写死
+// 在 defaultConfig 里的默认值——不打算配置化的东西就不留一个"以后可能会
+// 改"的口子。想改默认值，改代码、发新版本。
 package config
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
-// DefaultPath 是 -c 未指定时读的配置文件。
-const DefaultPath = "config-im.yaml"
-
-// Duration 是配置里写成 "3s" 这种人类可读时长的配置项。
-//
-// 不直接用 time.Duration：yaml.v3 会把它当成一个 int64 纳秒数，配置文件里
-// 写 3000000000 既难读又容易错一个数量级。与 internal/im/model.Duration 是
-// 同一件事的 YAML 版本；两者不合并，因为那个服务的是 apps 文件（JSON），
-// 而 internal/im/config 不该为了复用一个十行的类型去 import internal/im/model。
+// Duration 是内部使用的时长类型，纯粹为了让默认值声明处（defaultConfig）
+// 读起来是"3 秒"而不是一串纳秒数。不再有 UnmarshalYAML：没有配置文件了，
+// 这个类型不需要再知道怎么从 YAML 节点解出自己。
 type Duration time.Duration
 
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 func (d Duration) String() string     { return time.Duration(d).String() }
 
-func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
-	var s string
-	// 明确拒绝裸数字：写 2 是 2 秒还是 2 纳秒，没人说得清，与其猜一个
-	// 不如让配置加载直接失败。yaml.v3 解一个 !!int 节点进 string 会报错，
-	// 这里正是要那个错误。
-	if err := n.Decode(&s); err != nil {
-		return fmt.Errorf("config: 时长必须是带单位的字符串，例如 \"3s\"：%w", err)
-	}
-	v, err := time.ParseDuration(s)
-	if err != nil {
-		return fmt.Errorf("config: 无法解析时长 %q: %w", s, err)
-	}
-	*d = Duration(v)
-	return nil
-}
-
 type Config struct {
-	Env      string   `yaml:"env"` // dev / prod，大小写不敏感
-	Log      Log      `yaml:"log"`
-	HTTP     HTTP     `yaml:"http"` // client 的 WebSocket 接入
-	GRPC     Listen   `yaml:"grpc"` // 业务 server 接入
-	Redis    Endpoint `yaml:"redis"`
-	FPSDK    FPSDK    `yaml:"fpsdk"`
-	Node     Node     `yaml:"node"`
-	Conn     Conn     `yaml:"conn"`
-	Pipeline Pipeline `yaml:"pipeline"`
+	Env      string
+	Log      Log
+	HTTP     HTTP // client 的 WebSocket 接入
+	GRPC     Listen
+	Redis    Endpoint
+	FPSDK    FPSDK
+	Node     Node
+	Conn     Conn
+	Pipeline Pipeline
 }
 
 type Log struct {
-	Level string `yaml:"level"`
+	Level string
 }
 
 type Listen struct {
-	Addr string `yaml:"addr"`
+	Addr string
 }
 
 type HTTP struct {
-	Addr string `yaml:"addr"`
+	Addr string
 	// TrustProxy 决定访客限流的 IP 取不取 X-Forwarded-For 的最右一跳。
-	// 前面确实有可信反代时才开——开在裸奔的服务上等于让客户端自己声明 IP。
-	TrustProxy bool `yaml:"trust_proxy"`
+	// 前面确实有可信反代时才该是 true——开在裸奔的服务上等于让客户端自己
+	// 声明 IP。没有环境变量能改它，需要打开时改 defaultConfig 里的值。
+	TrustProxy bool
 }
 
 type Endpoint struct {
-	URL string `yaml:"url"`
+	URL string
 }
 
 // FPSDK 是 fp SDK 的连接参数。Addr 是 fp 的 **gRPC** 地址，不是 HTTP。
-//
-// Addr 为空**不由本包校验**——config 不知道谁会用这个地址，"谁用谁校验"。
-// 空值仍然会在启动装配阶段炸掉，那是 fpauth.New 的职责（见那里的
-// TestNewRequiresFPAddr）。
 type FPSDK struct {
-	Addr string `yaml:"addr"`
+	Addr string
 	// Secret 是 IM 凭据，在 fp 控制台生成，全部 fp-im 实例共用同一份。
-	//
-	// 与 Addr 一样**不由本包校验**——config 不知道谁会用它，"谁用谁校验"。
-	// 两项为空都会在装配阶段被 fpauth.New 挡住，报错时机仍是启动时。
-	Secret string `yaml:"secret"`
+	Secret string
 }
 
 type Node struct {
-	Heartbeat Duration `yaml:"heartbeat"`
-	DeadAfter Duration `yaml:"dead_after"`
+	Heartbeat Duration
+	DeadAfter Duration
 }
 
 type Conn struct {
-	FieldTTL    Duration `yaml:"field_ttl"`
-	FieldRenew  Duration `yaml:"field_renew"`
-	IdleTimeout Duration `yaml:"idle_timeout"`
-	AuthTimeout Duration `yaml:"auth_timeout"`
-	SendQueue   int      `yaml:"send_queue"`
+	FieldTTL    Duration
+	FieldRenew  Duration
+	IdleTimeout Duration
+	AuthTimeout Duration
+	SendQueue   int
 }
 
 type Pipeline struct {
-	FlushInterval Duration `yaml:"flush_interval"`
-	FlushSize     int      `yaml:"flush_size"`
+	FlushInterval Duration
+	FlushSize     int
 }
 
 // MinIdleTimeout 是 conn.idle_timeout 的下界：client SDK 心跳间隔的两倍。
@@ -126,10 +94,11 @@ type Pipeline struct {
 // internal/integration/im_parity_test.go 拿它直接跟 fpim.PingInterval 比。
 const MinIdleTimeout = 2 * 25 * time.Second
 
-// Load 读 path 指向的 YAML 文件，填默认值并校验。
-func Load(path string) (*Config, error) {
-	// 先填默认值再解码：yaml.v3 只写文档里出现过的字段，没出现的原样保留。
-	c := &Config{
+// defaultConfig 返回全部写死的默认值，FromEnv 只在这份默认值之上填三个
+// 必填的环境变量。这三个数字（node/conn/pipeline 那一堆）就是以前
+// config-im.example.yaml 里的默认值——直接抄过来，行为不变。
+func defaultConfig() *Config {
+	return &Config{
 		Env:  "dev",
 		Log:  Log{Level: "info"},
 		HTTP: HTTP{Addr: ":8081"},
@@ -147,53 +116,74 @@ func Load(path string) (*Config, error) {
 		},
 		Pipeline: Pipeline{FlushSize: 1},
 	}
-	f, err := os.Open(path)
+}
+
+// requireEnv 读取 name 指向的环境变量，为空时返回一个点明是哪个变量
+// 缺失的错误。不复用 internal/config.RequireEnv：那个包是 fp 自己的启动
+// 配置，两个二进制的配置刻意互不引用、互不依赖，见本文件顶部的包注释。
+func requireEnv(name string) (string, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return "", fmt.Errorf("config: 环境变量 %s 未设置", name)
+	}
+	return v, nil
+}
+
+// FromEnv 读三个必填的环境变量，叠加在 defaultConfig 之上，校验通过后
+// 返回。redis.url 之外的必填项已经没有了——fpsdk 的两项曾经"谁用谁校验"
+// （由 fpauth.New 挡），现在提前到这里，因为它们本来就是这份配置仅有的
+// 三个外部输入之一，不该有的缺了却要等装配到 fpauth 那一步才报错。
+func FromEnv() (*Config, error) {
+	redisURL, err := requireEnv("FP_IM_REDIS_URL")
 	if err != nil {
-		return nil, fmt.Errorf("config: 打开配置文件 %s: %w", path, err)
+		return nil, err
 	}
-	defer f.Close()
-
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true)
-	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("config: 解析 %s: %w", path, err)
+	fpsdkAddr, err := requireEnv("FP_IM_FPSDK_ADDR")
+	if err != nil {
+		return nil, err
 	}
-
-	var missing []string
-	// fpsdk.addr 刻意不在这个清单里，理由见 FPSDK 的注释。
-	for _, kv := range []struct{ path, v string }{
-		{"redis.url", c.Redis.URL},
-	} {
-		if kv.v == "" {
-			missing = append(missing, kv.path)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("config: %s 缺少必填项 %s", path, strings.Join(missing, ", "))
+	fpsdkSecret, err := requireEnv("FP_IM_FPSDK_SECRET")
+	if err != nil {
+		return nil, err
 	}
 
-	// 计数类的下界：旧版靠 num() 助手统一挡，换成 YAML 之后 yaml.v3 只管把
-	// 整数解出来，下界得自己判——send_queue: 0 会一路走到 hub 里变成一个
-	// 零容量发送队列。
+	c := defaultConfig()
+	c.Redis.URL = redisURL
+	c.FPSDK.Addr = fpsdkAddr
+	c.FPSDK.Secret = fpsdkSecret
+
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// validate 钉住几条跨字段的不变式。这些值现在全部来自写死的默认值，
+// 正常情况下永远通过；留着不是防运行时输入出错，而是防以后有人改
+// defaultConfig 时手滑改出一个自相矛盾的组合——测试直接构造 Config
+// 调用它，不需要真的经过环境变量。
+func (c *Config) validate() error {
+	// 计数类的下界：send_queue: 0 会一路走到 hub 里变成一个零容量发送
+	// 队列。
 	if c.Conn.SendQueue < 1 {
-		return nil, fmt.Errorf("config: %s 里 conn.send_queue 必须是正整数，当前为 %d", path, c.Conn.SendQueue)
+		return fmt.Errorf("config: conn.send_queue 必须是正整数，当前为 %d", c.Conn.SendQueue)
 	}
 	if c.Pipeline.FlushSize < 1 {
-		return nil, fmt.Errorf("config: %s 里 pipeline.flush_size 必须是正整数，当前为 %d", path, c.Pipeline.FlushSize)
+		return fmt.Errorf("config: pipeline.flush_size 必须是正整数，当前为 %d", c.Pipeline.FlushSize)
 	}
 	if c.Pipeline.FlushSize > 1 && c.Pipeline.FlushInterval <= 0 {
-		return nil, fmt.Errorf("config: %s 里 pipeline.flush_size > 1 时必须设置 pipeline.flush_interval", path)
+		return fmt.Errorf("config: pipeline.flush_size > 1 时必须设置 pipeline.flush_interval")
 	}
 	if c.Node.DeadAfter <= c.Node.Heartbeat {
-		return nil, fmt.Errorf("config: %s 里 node.dead_after 必须大于 node.heartbeat", path)
+		return fmt.Errorf("config: node.dead_after 必须大于 node.heartbeat")
 	}
 	if c.Conn.FieldRenew*2 >= c.Conn.FieldTTL {
-		return nil, fmt.Errorf("config: %s 里 conn.field_renew 必须小于 conn.field_ttl 的一半", path)
+		return fmt.Errorf("config: conn.field_renew 必须小于 conn.field_ttl 的一半")
 	}
 	if c.Conn.IdleTimeout.Std() < MinIdleTimeout {
-		return nil, fmt.Errorf("config: %s 里 conn.idle_timeout 必须 >= %s（client SDK 每 25 秒发一次心跳，"+
+		return fmt.Errorf("config: conn.idle_timeout 必须 >= %s（client SDK 每 25 秒发一次心跳，"+
 			"空闲超时低于这个量级会让全网 client 被周期性踢下线，而 4005 的契约是立即重连不退避，形成重连风暴），当前为 %s",
-			path, MinIdleTimeout, c.Conn.IdleTimeout)
+			MinIdleTimeout, c.Conn.IdleTimeout)
 	}
 	// registry.Conns.Handshake 把 field_ttl 换算成 int64(seconds) 传给 Redis
 	// 的 HEXPIRE。小于一秒的值转换成整秒会被截断为 0，而 HEXPIRE 的字段 TTL
@@ -201,9 +191,9 @@ func Load(path string) (*Config, error) {
 	// 刚握手登记就被 Redis 删除，client 查不到自己是谁在线，现象极难定位到
 	// 是这里的配置问题。所以这里直接拒绝，而不是留给运行期悄悄截断。
 	if c.Conn.FieldTTL.Std() < time.Second {
-		return nil, fmt.Errorf("config: %s 里 conn.field_ttl 必须 >= 1s"+
+		return fmt.Errorf("config: conn.field_ttl 必须 >= 1s"+
 			"（会被换算成整秒传给 Redis HEXPIRE，小于一秒会截断为 0，语义是立刻删除），当前为 %s",
-			path, c.Conn.FieldTTL)
+			c.Conn.FieldTTL)
 	}
-	return c, nil
+	return nil
 }

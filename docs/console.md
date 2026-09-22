@@ -133,12 +133,11 @@ fp-im 是配套的 WebSocket 连接网关。**一个应用在有人明确打开�
 
 全库只有一份，所有 fp-im 实例共用——fp-im 是一个服务，不是一群应用。明文
 **只在生成后的那个对话框里显示一次**，库里只存 bcrypt 哈希，关掉就再也读不
-回来。把它填进每个 fp-im 实例的 `config-im.yaml`：
+回来。把它填进每个 fp-im 实例的环境变量：
 
-```yaml
-fpsdk:
-  addr: fp.internal:9090
-  secret: <这里>
+```bash
+export FP_IM_FPSDK_ADDR=fp.internal:9090
+export FP_IM_FPSDK_SECRET=<这里>
 ```
 
 **轮换有一个 10 秒窗口。** 旧凭据在库里立刻失效，但 fp 的凭据缓存会让它最多

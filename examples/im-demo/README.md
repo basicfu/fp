@@ -8,8 +8,11 @@
 
 - fp 与 fp-im 都是本仓库自带的二进制，全部用 `go run` / bash 脚本起，
   不需要 Docker。
-- 仓库根目录有 `config.yaml` 与 `config-im.yaml`（各从对应的
-  `*.example.yaml` 复制、填好 PG/Redis 连接串）。
+- 环境变量已经配好：fp 要 `FP_POSTGRES_URL`/`FP_REDIS_URL`，fp-im 要
+  `FP_IM_REDIS_URL`/`FP_IM_FPSDK_ADDR`/`FP_IM_FPSDK_SECRET`（`FPSDK_SECRET`
+  是第 1 步建完应用、在控制台「IM 接入」页签生成的 IM 网关凭据，第 2 步
+  起 fp-im 之前才填得上）。写进仓库根目录的 `.env.local`，`run.sh`/
+  `run-im.sh` 会自动 source。
 - 本机没有 `wscat`/`websocat` 这类 ws 命令行工具，第 5、7、8 步改用本
   README 附带的一个几十行的小 Go 程序 `wsclient` 当验收工具，用的就是
   仓库自带的 `sdk/im` client（`fpim.Dial`）。

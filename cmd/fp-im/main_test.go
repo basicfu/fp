@@ -76,8 +76,9 @@ func guestApps() staticApps {
 }
 
 // testConfig 构造一份指向测试 Redis、端口全交给操作系统分配的配置。
-// 不走 config.Load：那条路径读一个 YAML 文件，测试要在同一个进程里起两个
-// 配置不同的节点，为此各写一个临时文件只是把结构体字面量绕了一圈。
+// 不走 config.FromEnv：那条路径读进程环境变量，测试要在同一个进程里起
+// 两个配置不同的节点，环境变量是进程级全局状态，改一次两个节点都会看到，
+// 直接写结构体字面量才能让两个节点真的各自配置不同。
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
 	url := os.Getenv("FP_TEST_REDIS_URL")

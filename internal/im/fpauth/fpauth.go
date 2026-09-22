@@ -25,7 +25,7 @@ import (
 type Config struct {
 	// FPAddr 是 fp 的 gRPC 地址。
 	FPAddr string
-	// Secret 是 IM 凭据，来自 config-im.yaml 的 fpsdk.secret，在 fp 控制台
+	// Secret 是 IM 凭据，来自 FP_IM_FPSDK_SECRET 环境变量，在 fp 控制台
 	// 生成。全部 fp-im 实例共用同一份。
 	Secret string
 	// OnRevoke 在 token 被撤销时调用，fp-im 用它关 ws。

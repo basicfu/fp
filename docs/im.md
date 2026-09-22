@@ -8,24 +8,22 @@ fp-im 是无队列的 WebSocket 连接网关：只管"谁在线、递一条消�
 ## 启动
 
 ```bash
-cp config-im.example.yaml config-im.yaml   # 首次：填入 Redis 连接串与 fp 地址
+export FP_IM_REDIS_URL=redis://:password@127.0.0.1:6379/0
+export FP_IM_FPSDK_ADDR=fp.internal:9090   # fp 的 gRPC 地址，不是 HTTP
+export FP_IM_FPSDK_SECRET=<在 fp 控制台生成，见下面>
 ./scripts/run-im.sh
 ```
 
-`fp-im` 读 `./config-im.yaml`（`-c` 可指定别的路径），与 fp 自己的启动配置
+`fp-im` 没有配置文件——只要求这三个环境变量，缺一不启动；其余启动参数
+（监听地址、心跳/超时这些）全部是写死在 `internal/im/config` 里的默认值，
+想改就改代码、发新版本，不支持运行时配置。与 fp 自己的启动配置
 （`FP_POSTGRES_URL`/`FP_REDIS_URL`/`FP_ENV` 三个环境变量 + 数据库里的系统
 配置表）**完全独立**：不引用、不继承它的任何默认值。想跟 fp 共用一个
-Redis，就把同一条 URL 抄进 `config-im.yaml` 的 `redis.url`——旧版那条
-"`FP_IM_REDIS_URL` 未设时复用 `FP_REDIS_URL`"的 shell 回退没有了，隐式
-继承比多抄一行难懂得多。
+Redis，就把同一条 URL 抄进 `FP_IM_REDIS_URL`。
 
-`redis.url` 是唯一的必填项。`fpsdk.addr`（fp 的 **gRPC** 地址，不是 HTTP）与
-`fpsdk.secret` 不由 `internal/im/config` 校验——"谁用谁校验"，它们由
-`fpauth.New` 在装配阶段挡住，报错时机一样是启动时。
-
-`fpsdk.secret` 是 **IM 网关凭据**，在 fp 控制台生成（应用管理页 →「IM 接入」
-页签），明文只显示一次。全部 fp-im 实例共用同一份。轮换后旧凭据最多再活
-10 秒——那是 fp 侧凭据缓存的 TTL，因泄露而轮换时要知道。
+`FP_IM_FPSDK_SECRET` 是 **IM 网关凭据**，在 fp 控制台生成（应用管理页 →
+「IM 接入」页签），明文只显示一次。全部 fp-im 实例共用同一份。轮换后旧
+凭据最多再活 10 秒——那是 fp 侧凭据缓存的 TTL，因泄露而轮换时要知道。
 
 fp-im 连 fp 的 gRPC 走明文，与 fp 自身的 gRPC/HTTP 一致——部署时统一由前面的
 nginx 终结 TLS（对外 443），业务层不处理证书。

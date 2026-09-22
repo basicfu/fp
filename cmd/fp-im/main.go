@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -49,10 +48,7 @@ func main() {
 // 分配到的端口、能用一个自己可以取消的 ctx 触发优雅关闭——这三件事正是
 // run 与 serve 的分界线。
 func run() error {
-	cfgPath := flag.String("c", config.DefaultPath, "配置文件路径")
-	flag.Parse()
-
-	cfg, err := config.Load(*cfgPath)
+	cfg, err := config.FromEnv()
 	if err != nil {
 		return err
 	}

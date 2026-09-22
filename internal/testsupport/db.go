@@ -20,8 +20,9 @@ const missingPGHint = `
   ./scripts/test.sh
 
 首次使用需要自己建一个 .env.local，写上 FP_TEST_POSTGRES_URL 与
-FP_TEST_REDIS_URL 两条测试库连接串（fp 与 fp-im 自己的启动配置在
-config.yaml / config-im.yaml 里，与这个文件无关）。
+FP_TEST_REDIS_URL 两条测试库连接串（fp 自己的启动配置是 FP_POSTGRES_URL/
+FP_REDIS_URL/FP_ENV，fp-im 是 FP_IM_REDIS_URL/FP_IM_FPSDK_ADDR/
+FP_IM_FPSDK_SECRET，都是各自独立的环境变量，与这个文件无关）。
 `
 
 var (

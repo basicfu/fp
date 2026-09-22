@@ -38,8 +38,9 @@ var allowedDirectDependencies = []string{
 	"google.golang.org/protobuf", // 第二阶段新增：Watch/ValidateToken 等 RPC 的消息类型（sdk/gen）
 	"gopkg.in/yaml.v3",           // 两个使用方：(1) 配置中心改成整份 YAML 存储，domain.ParseConfigYAML
 	// 用它把管理端提交的 YAML 原文解析成 map[string]any，交给 GetConfig 序列化成 JSON 吐给 SDK；
-	// (2) 启动配置本身也是 YAML，internal/config 与 internal/im/config 用它读 config.yaml /
-	// config-im.yaml，并开 KnownFields(true) 让拼错的键当场报错。
+	// (2) fp 自身的系统配置也是 YAML，internal/config 用它解析 system_config 表里的原文，开
+	// KnownFields(true) 让拼错的键当场报错。internal/im/config 已经不用它了——fp-im 不再有
+	// 配置文件，只剩三个必填环境变量加写死的默认值。
 }
 
 // TestGoModDirectDependenciesAreWhitelisted 守住依赖白名单。
