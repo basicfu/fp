@@ -1,0 +1,10 @@
+# docker build 的上下文只用得到仓库根目录下的 bootstrap 二进制（build.sh /
+# build-im.sh 编译好之后才跑 docker build），这里排除的是那些会让 build
+# context 传输变慢、但 Dockerfile 完全用不到的大目录。
+.git
+.claude
+node_modules
+web/node_modules
+web/dist
+tmp
+docs
