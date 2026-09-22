@@ -36,19 +36,21 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs)
 	logs := service.NewLoginLogService(pool)
 	configs := service.NewConfigService(pool, store.NewConfigPublisher(rdb))
+	systemConfigs := service.NewSystemConfigService(pool)
 	authz := service.NewAuthzService(pool)
 	deps := httpapi.Deps{
-		Admin:      service.NewAdminService(pool, rdb),
-		Apps:       service.NewApplicationService(pool, reg),
-		Users:      users,
-		Accounts:   service.NewAccountService(users, sessions, epochs, logs),
-		Sessions:   sessions,
-		Logs:       logs,
-		Registry:   reg,
-		Configs:    configs,
-		IMCreds:    service.NewIMCredentialService(pool),
-		Authz:      authz,
-		AccessKeys: service.NewAccessKeyService(pool, nil),
+		Admin:         service.NewAdminService(pool, rdb),
+		Apps:          service.NewApplicationService(pool, reg),
+		Users:         users,
+		Accounts:      service.NewAccountService(users, sessions, epochs, logs),
+		Sessions:      sessions,
+		Logs:          logs,
+		Registry:      reg,
+		Configs:       configs,
+		SystemConfigs: systemConfigs,
+		IMCreds:       service.NewIMCredentialService(pool),
+		Authz:         authz,
+		AccessKeys:    service.NewAccessKeyService(pool, nil),
 	}
 
 	ctx := context.Background()

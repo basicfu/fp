@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -32,20 +31,33 @@ func main() {
 	}
 }
 
-func run() error {
-	cfgPath := flag.String("c", config.DefaultPath, "配置文件路径")
-	flag.Parse()
+// resolveBootstrapAdmin 两项都为空时落到内置默认值 admin/admin。系统
+// 配置表首次启动必然是空的，不给默认值会导致数据库里一个管理员都没有、
+// 谁都登不进控制台去创建这张表的第一条记录——见
+// docs/superpowers/specs/2026-09-21-fp-system-config-design.md 第六节。
+// EnsureBootstrap 本身是 ON CONFLICT DO NOTHING，这个默认值只在"库里
+// 还没有任何管理员"时才真正生效。
+func resolveBootstrapAdmin(cfg config.BootstrapAdmin) config.BootstrapAdmin {
+	if cfg.User == "" && cfg.Password == "" {
+		return config.BootstrapAdmin{User: "admin", Password: "admin"}
+	}
+	return cfg
+}
 
-	cfg, err := config.Load(*cfgPath)
+func run() error {
+	pgURL, err := config.RequireEnv("POSTGRES_URL")
 	if err != nil {
 		return err
 	}
-	log := logging.Setup(cfg.Log.Level)
+	redisURL, err := config.RequireEnv("REDIS_URL")
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := store.OpenPostgres(ctx, cfg.Postgres.URL)
+	pool, err := store.OpenPostgres(ctx, pgURL)
 	if err != nil {
 		return err
 	}
@@ -54,13 +66,28 @@ func run() error {
 	if err := store.Migrate(ctx, pool); err != nil {
 		return err
 	}
-	log.Info("数据库迁移完成")
 
-	rdb, err := store.OpenRedis(ctx, cfg.Redis.URL)
+	rdb, err := store.OpenRedis(ctx, redisURL)
 	if err != nil {
 		return err
 	}
 	defer rdb.Close()
+
+	// 系统配置必须在 Postgres 连上之后才能读——它本身就存在数据库里。
+	// 见 docs/superpowers/specs/2026-09-21-fp-system-config-design.md 第三节。
+	systemConfigs := service.NewSystemConfigService(pool)
+	sysCfg, err := systemConfigs.Current(ctx)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Parse(sysCfg.Value)
+	if err != nil {
+		return err
+	}
+	cfg.BootstrapAdmin = resolveBootstrapAdmin(cfg.BootstrapAdmin)
+
+	log := logging.Setup(cfg.Log.Level)
+	log.Info("数据库迁移完成")
 
 	sessionStore := store.NewSessionStore(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
@@ -99,18 +126,11 @@ func run() error {
 
 	// 短信供应商：四项阿里云凭据齐全就用真实供应商——不管是不是生产环境，
 	// 有人就是想在本机联调真实短信通道。凭据不全时：
-	//   - 生产环境：config.Load 已经把这四项收进必填校验，走不到这里；
-	//     留着下面这个分支纯属防御性代码，防的是"以后有人绕开 Load 直接
-	//     构造 Config"这种理论情况。
+	//   - 生产环境：config.Parse 已经把这四项收进必填校验，走不到这里；
+	//     留着下面这个分支纯属防御性代码。
 	//   - 非生产环境：退化成 notify.NewLoggingFakeProvider（验证码只进内存，
 	//     不会真的发短信，但发送成功后会以 WARN 级别把整条消息——含验证码
-	//     ——打进日志）并打一条 WARN——不能悄悄降级，那正是这条约束最初
-	//     要防的事，只是"未配置就不允许启动"这个更严格的要求只该套在
-	//     生产环境头上，逼所有本机开发和 CI 都先备齐（哪怕是假的）阿里云
-	//     凭据才能起服务是过度的。验证码打日志的门控条件同样是"用的是假
-	//     供应商"而非"非生产环境"：真实供应商在用时（哪怕是非生产环境）
-	//     走的是上面 aliyunConfigured 分支，代码路径上根本不会碰到
-	//     LoggingFakeProvider，日志里也就不会出现真实验证码。
+	//     ——打进日志）并打一条 WARN。
 	smsSender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
 	aliyunConfigured := cfg.SMS.Aliyun.AccessKeyID != "" && cfg.SMS.Aliyun.AccessKeySecret != "" &&
 		cfg.SMS.Aliyun.SignName != "" && cfg.SMS.Aliyun.TemplateLoginCode != ""
@@ -130,8 +150,8 @@ func run() error {
 		}
 		smsSender.AddProvider(aliyunSMS)
 	case cfg.IsProd():
-		// 理论上到不了这里：config.Load 已经保证生产环境下 aliyunConfigured
-		// 必为 true。留作防御性兜底，见上面的注释。
+		// 理论上到不了这里：config.Parse 已经保证生产环境下 aliyunConfigured
+		// 必为 true。留作防御性兜底。
 		return errors.New("生产环境缺少阿里云短信凭据")
 	default:
 		log.Warn("阿里云短信未配置，短信通道使用内存假供应商——验证码不会真的发送，" +
@@ -153,17 +173,18 @@ func run() error {
 	httpSrv := &http.Server{
 		Addr: cfg.HTTP.Addr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
-			Admin:      adminSvc,
-			Apps:       appSvc,
-			Users:      userSvc,
-			Accounts:   service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc),
-			Sessions:   sessionSvc,
-			Logs:       logSvc,
-			Registry:   registry,
-			Authz:      authzSvc,
-			Configs:    configSvc,
-			IMCreds:    imCredSvc,
-			AccessKeys: accessKeySvc,
+			Admin:         adminSvc,
+			Apps:          appSvc,
+			Users:         userSvc,
+			Accounts:      service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc),
+			Sessions:      sessionSvc,
+			Logs:          logSvc,
+			Registry:      registry,
+			Authz:         authzSvc,
+			Configs:       configSvc,
+			SystemConfigs: systemConfigs,
+			IMCreds:       imCredSvc,
+			AccessKeys:    accessKeySvc,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
 			Console:       web.Dist(),

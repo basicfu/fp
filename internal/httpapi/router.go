@@ -23,6 +23,9 @@ type Deps struct {
 	Registry *connector.Registry
 	Authz    *service.AuthzService
 	Configs  *service.ConfigService
+	// SystemConfigs 管理 fp 自身启动配置的版本化存取，供控制台「系统配置」
+	// 页面使用。
+	SystemConfigs *service.SystemConfigService
 	// IMCreds 管理 fp-im 网关的凭据。为 nil 时那两条路由不挂载。
 	IMCreds *service.IMCredentialService
 	// AccessKeys 管理控制台的访问密钥增删改查。为 nil 时整组路由不挂载。
@@ -61,6 +64,7 @@ func NewRouter(d Deps) http.Handler {
 	connH := &connectorHandler{registry: d.Registry}
 	authzH := &authzHandler{svc: d.Authz, apps: d.Apps}
 	cfgH := &configHandler{svc: d.Configs}
+	sysCfgH := &systemConfigHandler{svc: d.SystemConfigs}
 	imCredH := &imCredentialHandler{svc: d.IMCreds}
 	akH := &accessKeyHandler{svc: d.AccessKeys, authz: d.Authz}
 
@@ -97,6 +101,8 @@ func NewRouter(d Deps) http.Handler {
 			// 的全量替换语义刻意不同。
 			r.Patch("/applications/{id}", appH.update)
 			r.Patch("/applications/{id}/status", appH.setStatus)
+			// 只允许删除已停用的应用，见 ApplicationService.Delete 的注释。
+			r.Delete("/applications/{id}", appH.delete)
 			// PUT 而不是 PATCH：这个接口是整份会话策略的**全量替换**。
 			// decodeJSON 开了 DisallowUnknownFields、sessionPolicyDTO 六个字段
 			// 都是非指针、SessionPolicy.Validate 又要求六项全部有值——只发其中
@@ -122,6 +128,14 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/applications/{id}/config/versions/{seq}", cfgH.getVersion)
 			r.Post("/applications/{id}/config/rollback", cfgH.rollback)
 
+			r.Get("/system-config", sysCfgH.get)
+			// PUT 而不是 PATCH：整份系统配置的全量替换，与
+			// /applications/{id}/config 同一语义。
+			r.Put("/system-config", sysCfgH.save)
+			r.Get("/system-config/versions", sysCfgH.listVersions)
+			r.Get("/system-config/versions/{seq}", sysCfgH.getVersion)
+			r.Post("/system-config/rollback", sysCfgH.rollback)
+
 			// IM 网关凭据。全库只有一份，所以不带 id。IMCreds 为 nil 时
 			// （只测别的东西的装配）整组不挂载，而不是挂上去再空指针。
 			if d.IMCreds != nil {
@@ -144,6 +158,7 @@ func NewRouter(d Deps) http.Handler {
 			}
 
 			r.Get("/users", userH.list)
+			r.Post("/users", userH.create)
 			r.Get("/users/{id}", userH.get)
 			r.Patch("/users/{id}/status", userH.setStatus)
 			r.Put("/users/{id}/password", userH.setPassword)
