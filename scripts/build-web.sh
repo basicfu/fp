@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # 构建管理控制台前端。产物落在 web/dist/，由 web/embed.go 嵌进二进制。
+#
+# 资源引用的地址默认是 /static/（fp 自己的 internal/httpapi/static.go
+# 把构建产物挂在这个前缀下）。要接 CDN 回源，构建前设一下环境变量：
+#   VITE_ASSET_BASE=https://static.example.com/fp/ ./scripts/build-web.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/web"

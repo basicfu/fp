@@ -43,6 +43,30 @@
 `.gitkeep`，embed 指令用的是 `all:` 前缀），只是打开控制台会看到一句
 "管理控制台前端尚未构建"。
 
+**静态资源挂在 `/static/` 前缀下，方便接 CDN。** `index.html` 本身（以及
+它自己的 `/admin/api/*`）直接连源站，不建议上 CDN——内容要么每次都会变
+（HTML 靠 ETag 做条件请求，见下面），要么是带会话的动态数据，缓存了要么
+没意义要么有风险。真正适合上 CDN 的是 JS/CSS/字体这些静态产物，它们默认
+就在 `/static/` 这个前缀下（`internal/httpapi/static.go` 认这个前缀，
+`web/vite.config.ts` 的 `base` 生产构建时默认也是 `/static/`），CDN 只要
+把自己的某个路径映射回源到这里就行，不用碰 `index.html`。
+
+要让构建产物直接引用 CDN 域名（而不是先落到源站的 `/static/` 再指望 CDN
+按路径映射），构建前设一下环境变量：
+
+    VITE_ASSET_BASE=https://static.example.com/fp/ ./scripts/build-web.sh
+
+`index.html` 里的 `<script>`/`<link>` 地址就会直接指向这个 CDN 域名。
+`assets/` 下带内容哈希的文件（JS/CSS/字体）会被打上
+`Cache-Control: public, max-age=31536000, immutable`，可以放心长缓存；
+`public/` 目录直接拷过来、文件名不带哈希的文件（比如 `favicon.svg`）不会，
+避免图标换了线上还是老的。
+
+**`index.html` 本身用 ETag 做条件请求**，不是简单的"不缓存"：
+`Cache-Control: no-cache` 只是告诉客户端每次都要来验证一下，服务端会比对
+请求带的 `If-None-Match`，内容没变时回 `304 Not Modified`（不带 body），
+省下整份 HTML 的传输——这块逻辑在 fp 自己的 Go 代码里，不依赖 CDN。
+
 ## 开发
 
 两个终端：

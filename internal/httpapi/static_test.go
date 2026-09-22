@@ -37,6 +37,9 @@ func TestStaticServesIndexAtRoot(t *testing.T) {
 	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
 		t.Fatalf("index.html 的 Cache-Control = %q，必须含 no-cache", cc)
 	}
+	if rec.Header().Get("ETag") == "" {
+		t.Fatal("index.html 应当带 ETag，供条件请求比对")
+	}
 }
 
 // SPA 回退：前端路由（/users/xxx）在服务端不存在对应文件，必须回 index.html，
@@ -52,14 +55,60 @@ func TestStaticFallsBackToIndexForClientRoutes(t *testing.T) {
 	}
 }
 
-// 带内容哈希的资源可以长缓存。
-func TestStaticSetsImmutableOnHashedAssets(t *testing.T) {
+// 带 If-None-Match 且跟当前 ETag 相同时，回 304、不带 body——这是"内容没变
+// 不用整份重传"这条优化的核心断言。
+func TestStaticIndexReturnsNotModifiedWhenETagMatches(t *testing.T) {
+	h := newStaticHandler(builtConsole())
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/", nil))
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("第一次请求应当带 ETag")
+	}
+
+	second := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("If-None-Match", etag)
+	h.ServeHTTP(second, req)
+
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("code = %d, want 304", second.Code)
+	}
+	if second.Body.Len() != 0 {
+		t.Fatalf("304 不该带 body，实际 %q", second.Body.String())
+	}
+}
+
+// If-None-Match 跟当前 ETag 不一致（比如上一次部署留下的旧值）时，必须
+// 正常返回整份 index.html，不能被误判成"没变"。
+func TestStaticIndexReturnsFullBodyWhenETagDoesNotMatch(t *testing.T) {
+	h := newStaticHandler(builtConsole())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("If-None-Match", `"stale-etag-from-previous-deploy"`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "id=root") {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
+// 静态资源现在挂在 /static/ 前缀下——CDN 按 static.xxzj.com/fp/ 回源到源站
+// 的 /static/，Vite 构建时 base 配的就是这个前缀，两边对得上。
+func TestStaticSetsImmutableOnHashedAssetsUnderPrefix(t *testing.T) {
 	h := newStaticHandler(builtConsole())
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/assets/index-abc123.js", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d", rec.Code)
+	}
+	if rec.Body.String() != "console.log(1)" {
+		t.Fatalf("body = %q", rec.Body.String())
 	}
 	cc := rec.Header().Get("Cache-Control")
 	if !strings.Contains(cc, "immutable") {
@@ -67,7 +116,23 @@ func TestStaticSetsImmutableOnHashedAssets(t *testing.T) {
 	}
 }
 
-// 【辨别力】assets 下**不存在**的文件必须 404，不能回退到 index.html。
+// public/ 目录直接拷过来的文件（文件名不带内容哈希，比如 favicon.svg）
+// 不能长缓存——文件名不变，内容却可能变，缓存 immutable 会让改了的图标
+// 线上永远看到旧的。
+func TestStaticDoesNotSetImmutableOnUnhashedAssets(t *testing.T) {
+	h := newStaticHandler(builtConsole())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/favicon.svg", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); strings.Contains(cc, "immutable") {
+		t.Fatalf("favicon.svg 不该是 immutable，实际 Cache-Control = %q", cc)
+	}
+}
+
+// 【辨别力】/static/ 下**不存在**的文件必须 404，不能回退到 index.html。
 //
 // 没有这条的话，一个"任何找不到的路径都回 index.html"的实现会通过上面
 // 所有测试，而线上表现是：某个 JS 文件名写错时，浏览器拿到一份 HTML 并
@@ -75,10 +140,22 @@ func TestStaticSetsImmutableOnHashedAssets(t *testing.T) {
 func TestStaticDoesNotFallBackForMissingAssets(t *testing.T) {
 	h := newStaticHandler(builtConsole())
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/does-not-exist.js", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/assets/does-not-exist.js", nil))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("code = %d, want 404; body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+// 没有 /static/ 前缀的旧式资源路径（迁移前的写法）现在应当落到 SPA 回退，
+// 而不是意外还能访问到——确认前缀是真的生效了，不是摆设。
+func TestStaticUnprefixedAssetPathFallsBackToIndex(t *testing.T) {
+	h := newStaticHandler(builtConsole())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "id=root") {
+		t.Fatalf("code = %d body = %q，期望落到 SPA 回退（index.html）", rec.Code, rec.Body.String())
 	}
 }
 
