@@ -56,7 +56,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	log := logging.Setup(cfg.Log.Level)
+	log := logging.Setup(cfg.Log.Level, cfg.Env)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serve(ctx, cfg, log, serveOptions{})

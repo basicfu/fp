@@ -12,10 +12,12 @@ cp config-im.example.yaml config-im.yaml   # 首次：填入 Redis 连接串与 
 ./scripts/run-im.sh
 ```
 
-`fp-im` 读 `./config-im.yaml`（`-c` 可指定别的路径），与 fp 的 `config.yaml`
-**完全独立**：不引用、不继承它的任何默认值。想跟 fp 共用一个 Redis，就把同一条
-URL 抄进 `config-im.yaml` 的 `redis.url`——旧版那条"`FP_IM_REDIS_URL` 未设时复用
-`FP_REDIS_URL`"的 shell 回退没有了，隐式继承比多抄一行难懂得多。
+`fp-im` 读 `./config-im.yaml`（`-c` 可指定别的路径），与 fp 自己的启动配置
+（`FP_POSTGRES_URL`/`FP_REDIS_URL`/`FP_ENV` 三个环境变量 + 数据库里的系统
+配置表）**完全独立**：不引用、不继承它的任何默认值。想跟 fp 共用一个
+Redis，就把同一条 URL 抄进 `config-im.yaml` 的 `redis.url`——旧版那条
+"`FP_IM_REDIS_URL` 未设时复用 `FP_REDIS_URL`"的 shell 回退没有了，隐式
+继承比多抄一行难懂得多。
 
 `redis.url` 是唯一的必填项。`fpsdk.addr`（fp 的 **gRPC** 地址，不是 HTTP）与
 `fpsdk.secret` 不由 `internal/im/config` 校验——"谁用谁校验"，它们由

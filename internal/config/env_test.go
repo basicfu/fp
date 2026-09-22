@@ -26,3 +26,17 @@ func TestRequireEnvErrorsWhenMissing(t *testing.T) {
 		t.Errorf("错误信息 %q 里应当出现变量名", err)
 	}
 }
+
+func TestEnvOrReturnsValueWhenSet(t *testing.T) {
+	t.Setenv("FP_TEST_ENV_OR", "PROD")
+	if v := EnvOr("FP_TEST_ENV_OR", "DEV"); v != "PROD" {
+		t.Errorf("v = %q, want PROD", v)
+	}
+}
+
+func TestEnvOrReturnsDefaultWhenMissing(t *testing.T) {
+	t.Setenv("FP_TEST_ENV_OR_MISSING", "")
+	if v := EnvOr("FP_TEST_ENV_OR_MISSING", "DEV"); v != "DEV" {
+		t.Errorf("v = %q, want DEV", v)
+	}
+}

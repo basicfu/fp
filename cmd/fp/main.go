@@ -45,14 +45,19 @@ func resolveBootstrapAdmin(cfg config.BootstrapAdmin) config.BootstrapAdmin {
 }
 
 func run() error {
-	pgURL, err := config.RequireEnv("POSTGRES_URL")
+	pgURL, err := config.RequireEnv("FP_POSTGRES_URL")
 	if err != nil {
 		return err
 	}
-	redisURL, err := config.RequireEnv("REDIS_URL")
+	redisURL, err := config.RequireEnv("FP_REDIS_URL")
 	if err != nil {
 		return err
 	}
+	// FP_ENV 有默认值（不像上面两个连接串那样缺了就不能启动）：一是决定
+	// SecureCookies/阿里云短信必填这类 prod 专属校验，二是决定日志要不要
+	// 同时落盘（见 logging.Setup），两者都在 Postgres 连上、系统配置读到
+	// 之前就要知道，所以跟连接串一样在最前面读，不等系统配置。
+	env := config.EnvOr("FP_ENV", "DEV")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -80,13 +85,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Parse(sysCfg.Value)
+	cfg, err := config.Parse(sysCfg.Value, env)
 	if err != nil {
 		return err
 	}
 	cfg.BootstrapAdmin = resolveBootstrapAdmin(cfg.BootstrapAdmin)
 
-	log := logging.Setup(cfg.Log.Level)
+	log := logging.Setup(cfg.Log.Level, cfg.Env)
 	log.Info("数据库迁移完成")
 
 	sessionStore := store.NewSessionStore(rdb)

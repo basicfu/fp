@@ -14,11 +14,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config 是 fp 进程的系统配置（不含 postgres/redis——那两项必须来自
-// 环境变量，读系统配置本身就要先连上数据库，见
-// docs/superpowers/specs/2026-09-21-fp-system-config-design.md 第三节）。
+// Config 是 fp 进程的系统配置（不含 postgres/redis/env——这三项必须来自
+// 环境变量 FP_POSTGRES_URL/FP_REDIS_URL/FP_ENV，读系统配置本身就要先连上
+// 数据库，见 docs/superpowers/specs/2026-09-21-fp-system-config-design.md
+// 第三节）。
 type Config struct {
-	Env            string         `yaml:"env"` // dev / prod，大小写不敏感
+	// Env 不从 YAML 读（yaml:"-"）：由 Parse 的 env 参数直接赋值，来源是
+	// FP_ENV 环境变量。这里如果还留一个 yaml:"env" 的口子，会出现两个
+	// 都能改 env 的入口、谁说了算说不清楚；系统配置 YAML 里如果还写着
+	// env:，KnownFields(true) 会把它当未知键报错，逼着改成 FP_ENV。
+	Env            string         `yaml:"-"`
 	Log            Log            `yaml:"log"`
 	HTTP           Listen         `yaml:"http"` // 管理控制台
 	GRPC           Listen         `yaml:"grpc"` // SDK 接入
@@ -70,11 +75,18 @@ func (c *Config) IsProd() bool { return strings.EqualFold(c.Env, "prod") }
 // 为空（系统配置表还没有任何版本、或者存过一份空文本）按"什么都没覆盖"
 // 处理，返回全部默认值——不是错误：首次启动系统配置表必然是空的，这是
 // 正常状态。
-func Parse(yamlText string) (*Config, error) {
+//
+// env 来自 FP_ENV 环境变量（调用方用 config.EnvOr("FP_ENV", "DEV") 取，
+// 空串时那个函数已经落到 "DEV"），这里再兜一层空串保护纯粹是防御性的，
+// 不指望真的用到。
+func Parse(yamlText string, env string) (*Config, error) {
+	if env == "" {
+		env = "DEV"
+	}
 	// 先填默认值再解码：yaml.v3 只写文档里出现过的字段，没出现的原样
 	// 保留，于是"默认值"这件事不需要任何额外的 applyDefaults 逻辑。
 	c := &Config{
-		Env:  "dev",
+		Env:  env,
 		Log:  Log{Level: "info"},
 		HTTP: Listen{Addr: ":8080"},
 		GRPC: Listen{Addr: ":9090"},

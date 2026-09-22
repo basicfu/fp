@@ -6,23 +6,30 @@
 ## 构建与运行
 
     ./scripts/build-web.sh                # 构建前端，产物落在 web/dist/
-    export POSTGRES_URL=postgres://postgres:password@127.0.0.1:5432/fp?sslmode=disable
-    export REDIS_URL=redis://:password@127.0.0.1:6379/0
+    export FP_POSTGRES_URL=postgres://postgres:password@127.0.0.1:5432/fp?sslmode=disable
+    export FP_REDIS_URL=redis://:password@127.0.0.1:6379/0
     ./scripts/run.sh                      # 起 fp，浏览器打开 http://localhost:8080/
 
 `fp` 只要求这两个环境变量，缺一不启动：
 
-    ERROR fp 启动失败 err="config: 环境变量 POSTGRES_URL 未设置"
+    ERROR fp 启动失败 err="config: 环境变量 FP_POSTGRES_URL 未设置"
 
-其余启动配置（`env`、监听地址、首次管理员、阿里云短信）不在环境变量或
-文件里，存在数据库的「系统配置」表中，通过控制台「系统配置」页面维护——
-改完需要重启 fp 才会生效。系统配置表还没有任何版本时（全新库）全部用
-零值默认启动，`env` 默认 `dev`、监听地址默认 `:8080`/`:9090`。
+`FP_ENV` 是第三个、可选的环境变量，缺省 `DEV`（大小写不敏感）。它决定两件
+事：一是生产专属校验（管理端 cookie 带不带 `Secure`、阿里云短信凭据是否
+强制必填），二是日志要不要同时落盘——`FP_ENV` 不是 `dev` 时，日志除了打
+stdout，还会**同时**写一份到 `/logs` 目录，按天滚动成 `2026-06-11.log`
+这种文件名，默认保留 30 天，超期自动删除；`dev`（缺省值）下只打 stdout，
+不碰 `/logs`。
+
+其余启动配置（监听地址、首次管理员、阿里云短信）不在环境变量或文件里，
+存在数据库的「系统配置」表中，通过控制台「系统配置」页面维护——改完需要
+重启 fp 才会生效。系统配置表还没有任何版本时（全新库）全部用零值默认
+启动，监听地址默认 `:8080`/`:9090`。
 
 `scripts/run.sh` 会顺手 source 一下仓库根目录的 `.env.local`（如果存在），
 本机开发可以把这两条连接串写在那里，不用每次手动 `export`。
 
-    go build -o fp ./cmd/fp && POSTGRES_URL=... REDIS_URL=... ./fp
+    go build -o fp ./cmd/fp && FP_POSTGRES_URL=... FP_REDIS_URL=... ./fp
 
 **控制台的登录账号**：系统配置里的 `bootstrap_admin.user` /
 `bootstrap_admin.password`，两项都为空时（包括全新库、从未配置过）落到

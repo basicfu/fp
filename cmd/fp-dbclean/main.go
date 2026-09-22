@@ -82,15 +82,15 @@ func run() error {
 		return errors.New("请指定模式：truncate 或 reset")
 	}
 
-	// 清的是 POSTGRES_URL/REDIS_URL 指向的那套库，与 fp 本身读的是同一对
-	// 环境变量，也就是**开发库**。
-	pgURL, err := config.RequireEnv("POSTGRES_URL")
+	// 清的是 FP_POSTGRES_URL/FP_REDIS_URL 指向的那套库，与 fp 本身读的是
+	// 同一对环境变量，也就是**开发库**。
+	pgURL, err := config.RequireEnv("FP_POSTGRES_URL")
 	if err != nil {
 		return err
 	}
 	pgCfg, err := pgxpool.ParseConfig(pgURL)
 	if err != nil {
-		return fmt.Errorf("解析 POSTGRES_URL: %w", err)
+		return fmt.Errorf("解析 FP_POSTGRES_URL: %w", err)
 	}
 	conn := pgCfg.ConnConfig
 	dbName := conn.Database
@@ -100,11 +100,11 @@ func run() error {
 	if !*skipRedis {
 		// 不静默跳过：只清 Postgres 会留下指向已删数据的会话、撤销
 		// epoch 与配置推送信号，是个很难查的中间态。
-		if redisURL, err = config.RequireEnv("REDIS_URL"); err != nil {
+		if redisURL, err = config.RequireEnv("FP_REDIS_URL"); err != nil {
 			return err
 		}
 		if redisOpt, err = redis.ParseURL(redisURL); err != nil {
-			return fmt.Errorf("解析 REDIS_URL: %w", err)
+			return fmt.Errorf("解析 FP_REDIS_URL: %w", err)
 		}
 	}
 
@@ -194,7 +194,7 @@ func usage() {
   reset     删除 public 下全部表（含 goose_db_version）。
             fp 下次启动会从 00001 完整重跑迁移。适合库结构被改坏了。
 
-连接串取自环境变量 POSTGRES_URL / REDIS_URL，与 fp 本身读的是同一对，
+连接串取自环境变量 FP_POSTGRES_URL / FP_REDIS_URL，与 fp 本身读的是同一对，
 清的是**开发库**，不是测试库（测试库由 testsupport 在每次跑测试时自己清）。
 
 `)

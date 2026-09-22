@@ -16,3 +16,14 @@ func RequireEnv(name string) (string, error) {
 	}
 	return v, nil
 }
+
+// EnvOr 读取 name 指向的环境变量，为空时返回 def。用于像 FP_ENV 这种
+// 有合理默认值、缺失不该拦住启动的环境变量——与必须显式设置的
+// RequireEnv 是两种不同的严格程度。
+func EnvOr(name, def string) string {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	return v
+}
