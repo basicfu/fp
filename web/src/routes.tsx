@@ -4,6 +4,8 @@ import Login from '@/pages/Login'
 import Applications from '@/pages/Applications'
 import ConfigCenter from '@/pages/ConfigCenter'
 import ConfigVersions from '@/pages/ConfigVersions'
+import SystemConfig from '@/pages/SystemConfig'
+import SystemConfigVersions from '@/pages/SystemConfigVersions'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import AccessKeys from '@/pages/AccessKeys'
@@ -56,6 +58,8 @@ export default function AppRoutes() {
         <Route path="/permissions" element={<Permissions />} />
         <Route path="/config" element={<ConfigCenter />} />
         <Route path="/config/versions" element={<ConfigVersions />} />
+        <Route path="/system-config" element={<SystemConfig />} />
+        <Route path="/system-config/versions" element={<SystemConfigVersions />} />
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>
