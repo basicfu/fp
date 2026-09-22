@@ -70,7 +70,6 @@ func main() {
 
 func run() error {
 	var (
-		cfgPath   = flag.String("c", config.DefaultPath, "配置文件路径")
 		assumeYes = flag.Bool("y", false, "跳过确认（供 CI 使用）")
 		skipRedis = flag.Bool("no-redis", false, "只清 Postgres，不动 Redis")
 	)
@@ -83,26 +82,29 @@ func run() error {
 		return errors.New("请指定模式：truncate 或 reset")
 	}
 
-	// 清的是 config.yaml 指向的那套库，也就是**开发库**——语义与改成读配置
-	// 文件之前完全一致，只是来源从环境变量换成了 config.yaml。config.Load
-	// 已经保证 postgres.url 与 redis.url 非空，所以这里不用再判空。
-	cfg, err := config.Load(*cfgPath)
+	// 清的是 POSTGRES_URL/REDIS_URL 指向的那套库，与 fp 本身读的是同一对
+	// 环境变量，也就是**开发库**。
+	pgURL, err := config.RequireEnv("POSTGRES_URL")
 	if err != nil {
 		return err
 	}
-	pgCfg, err := pgxpool.ParseConfig(cfg.Postgres.URL)
+	pgCfg, err := pgxpool.ParseConfig(pgURL)
 	if err != nil {
-		return fmt.Errorf("解析 %s 的 postgres.url: %w", *cfgPath, err)
+		return fmt.Errorf("解析 POSTGRES_URL: %w", err)
 	}
 	conn := pgCfg.ConnConfig
 	dbName := conn.Database
 
+	var redisURL string
 	var redisOpt *redis.Options
 	if !*skipRedis {
 		// 不静默跳过：只清 Postgres 会留下指向已删数据的会话、撤销
 		// epoch 与配置推送信号，是个很难查的中间态。
-		if redisOpt, err = redis.ParseURL(cfg.Redis.URL); err != nil {
-			return fmt.Errorf("解析 %s 的 redis.url: %w", *cfgPath, err)
+		if redisURL, err = config.RequireEnv("REDIS_URL"); err != nil {
+			return err
+		}
+		if redisOpt, err = redis.ParseURL(redisURL); err != nil {
+			return fmt.Errorf("解析 REDIS_URL: %w", err)
 		}
 	}
 
@@ -132,7 +134,7 @@ func run() error {
 	}
 
 	ctx := context.Background()
-	pool, err := store.OpenPostgres(ctx, cfg.Postgres.URL)
+	pool, err := store.OpenPostgres(ctx, pgURL)
 	if err != nil {
 		return err
 	}
@@ -153,7 +155,7 @@ func run() error {
 	fmt.Printf("Postgres 已清理，public 下现有 %d 张表。\n", tables)
 
 	if redisOpt != nil {
-		rdb, err := store.OpenRedis(ctx, cfg.Redis.URL)
+		rdb, err := store.OpenRedis(ctx, redisURL)
 		if err != nil {
 			return err
 		}
@@ -168,7 +170,7 @@ func run() error {
 	if mode == "reset" {
 		fmt.Println("下次启动 fp 会重跑全部迁移重建表结构。")
 	}
-	fmt.Println("引导管理员已被清除，重启 fp 时会按 config.yaml 的 bootstrap_admin 重新创建。")
+	fmt.Println("引导管理员已被清除，重启 fp 时若系统配置里没有 bootstrap_admin，会用内置默认账号 admin/admin 重新创建。")
 	return nil
 }
 
@@ -185,16 +187,15 @@ func confirm(dbName string) (bool, error) {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `用法: fp-dbclean [-c 配置文件] [-y] [-no-redis] <truncate|reset>
+	fmt.Fprint(os.Stderr, `用法: fp-dbclean [-y] [-no-redis] <truncate|reset>
 
   truncate  清空全部业务表，保留表结构与 goose 迁移版本。
             适合"把环境的数据倒干净重来一遍"。
   reset     删除 public 下全部表（含 goose_db_version）。
             fp 下次启动会从 00001 完整重跑迁移。适合库结构被改坏了。
 
-连接串取自配置文件的 postgres.url / redis.url，与 fp 本身读的是同一份，
-默认 ./config.yaml——也就是说清的是**开发库**，不是测试库（测试库由
-testsupport 在每次跑测试时自己清）。
+连接串取自环境变量 POSTGRES_URL / REDIS_URL，与 fp 本身读的是同一对，
+清的是**开发库**，不是测试库（测试库由 testsupport 在每次跑测试时自己清）。
 
 `)
 	flag.PrintDefaults()

@@ -6,31 +6,29 @@
 ## 构建与运行
 
     ./scripts/build-web.sh                # 构建前端，产物落在 web/dist/
-    cp config.example.yaml config.yaml    # 首次：填入 PG / Redis 连接串
+    export POSTGRES_URL=postgres://postgres:password@127.0.0.1:5432/fp?sslmode=disable
+    export REDIS_URL=redis://:password@127.0.0.1:6379/0
     ./scripts/run.sh                      # 起 fp，浏览器打开 http://localhost:8080/
 
-`fp` 读 `./config.yaml`（`-c` 可以指定别的路径），文件不存在直接启动失败：
+`fp` 只要求这两个环境变量，缺一不启动：
 
-    ERROR fp 启动失败 err="config: 打开配置文件 config.yaml: ..."
+    ERROR fp 启动失败 err="config: 环境变量 POSTGRES_URL 未设置"
 
-拼错的键也会当场报错，不会静默回落到默认值——`log: {lvel: debug}` 起不来：
+其余启动配置（`env`、监听地址、首次管理员、阿里云短信）不在环境变量或
+文件里，存在数据库的「系统配置」表中，通过控制台「系统配置」页面维护——
+改完需要重启 fp 才会生效。系统配置表还没有任何版本时（全新库）全部用
+零值默认启动，`env` 默认 `dev`、监听地址默认 `:8080`/`:9090`。
 
-    ERROR fp 启动失败 err="config: 解析 config.yaml: yaml: unmarshal errors:
-      line 6: field lvel not found in type config.Log"
+`scripts/run.sh` 会顺手 source 一下仓库根目录的 `.env.local`（如果存在），
+本机开发可以把这两条连接串写在那里，不用每次手动 `export`。
 
-这是从环境变量迁到配置文件换来的：环境变量那个介质压根没有"这个键我不认识"
-的概念，`FP_LOG_LVEL` 拼错只会静默用默认值。
+    go build -o fp ./cmd/fp && POSTGRES_URL=... REDIS_URL=... ./fp
 
-`scripts/run.sh` 现在只是个"检查 `config.yaml` 在不在，然后 `go run ./cmd/fp`"
-的包装，所以**直接跑构建出来的二进制也完全可以**（例如验证 `go:embed` 的产物）：
-
-    go build -o fp ./cmd/fp && ./fp
-
-**控制台的登录账号**：`config.yaml` 里的 `bootstrap_admin.user` /
-`bootstrap_admin.password`，`config.example.yaml` 给的是 `admin` / `admin`。
-两项都填才生效——`EnsureBootstrap` 在任一为空时直接跳过，不报错也不提示，
-结果是库里没有任何管理员、控制台登不进去。注意它是 `ON CONFLICT DO NOTHING`
-——账号一旦建过，改这两项不会改密码，得直接改库。
+**控制台的登录账号**：系统配置里的 `bootstrap_admin.user` /
+`bootstrap_admin.password`，两项都为空时（包括全新库、从未配置过）落到
+内置默认值 `admin` / `admin`。注意 `EnsureBootstrap` 是
+`ON CONFLICT DO NOTHING`——账号一旦建过，改系统配置里的这两项不会改
+密码，得直接改库或在控制台里改密码。
 
 **没跑过 `build-web.sh` 也能 `go build`**（`web/dist/` 里提交了一个
 `.gitkeep`，embed 指令用的是 `all:` 前缀），只是打开控制台会看到一句
@@ -81,6 +79,8 @@ Vite 把 `/admin/api` 代理到 `localhost:8080`，浏览器看到的仍是同�
 | `/access-keys/:id` | 访问密钥详情：基本信息、按应用分组的可调用接口、编辑 |
 | `/config` | 当前应用的配置中心：按 DEFAULT / WEB 分区查看与编辑配置项 |
 | `/config/versions` | 当前应用的配置版本历史：逐版 diff、回滚到某一版 |
+| `/system-config` | fp 自身的系统配置：env、监听地址、首次管理员、阿里云短信，保存后重启生效 |
+| `/system-config/versions` | 系统配置版本历史：查看某一版内容、回滚到某一版 |
 
 授权相关的三处刻意分开放，因为它们的归属不同：
 

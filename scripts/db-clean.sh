@@ -7,9 +7,16 @@
 # 两种模式共用同一套目标打印与确认逻辑，所以合成一个脚本带模式参数，
 # 而不是两个各自复制一遍确认代码的脚本——确认这一步正是最不该有分叉的地方。
 #
-# 清的是 ./config.yaml 里的 postgres.url / redis.url，也就是**开发库**，
-# 不是测试库。测试库由 testsupport 在每次跑测试时自己清，不需要这个脚本。
+# 清的是 POSTGRES_URL / REDIS_URL 指向的库，与 fp 本身读的是同一对环境
+# 变量，也就是**开发库**，不是测试库。测试库由 testsupport 在每次跑测试时
+# 自己清，不需要这个脚本。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+if [ -f .env.local ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . .env.local
+  set +a
+fi
 exec go run ./cmd/fp-dbclean "$@"
