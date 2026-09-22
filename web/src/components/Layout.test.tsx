@@ -69,7 +69,7 @@ test('点击折叠按钮后侧边栏进入 collapsed 状态', () => {
 const appA: Application = {
   id: 'app-a',
   name: 'A应用',
-  slug: 'a',
+  code: 'a',
   appId: 'appid-a',
   status: 'ACTIVE',
   cookieDomain: '',
@@ -86,7 +86,7 @@ const appA: Application = {
   createdAt: 1,
   updatedAt: 1,
 }
-const appB: Application = { ...appA, id: 'app-b', name: 'B应用', slug: 'b' }
+const appB: Application = { ...appA, id: 'app-b', name: 'B应用', code: 'b' }
 
 test('在切换器里选另一个应用后，路由子页面跟着显示新的当前应用', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([appA, appB]), { status: 200 })))

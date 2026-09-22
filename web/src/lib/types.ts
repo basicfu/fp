@@ -15,7 +15,7 @@ export type ApplicationStatus = 'ACTIVE' | 'DISABLED'
 export interface Application {
   id: string
   name: string
-  slug: string
+  code: string
   appId: string
   status: ApplicationStatus
   cookieDomain: string
@@ -130,8 +130,8 @@ export interface LoginLog {
 /** 角色是**全局**的，不属于某个应用。应用归属靠它挂了哪些应用的权限点。 */
 export interface Role {
   id: string
-  /** key 是身份，创建后不可修改（user_role.roles[] 与已签发会话都按它引用）。 */
-  key: string
+  /** code 是身份，创建后不可修改（user_role.roles[] 与已签发会话都按它引用）。 */
+  code: string
   name: string
   /** 空串表示没有父角色。 */
   parentId: string

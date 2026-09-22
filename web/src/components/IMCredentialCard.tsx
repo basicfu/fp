@@ -47,7 +47,9 @@ export default function IMCredentialCard() {
         </p>
         <p className="text-sm">
           当前状态：
-          {status.loading ? '加载中…' : status.data?.exists ? ' 已生成' : ' 尚未生成'}
+          {/* 重新生成之后的 status.reload() 也会把 loading 短暂置回 true——
+              只在还没拿到过数据时才显示"加载中…"，避免文字闪一下又跳回来。 */}
+          {status.loading && !status.data ? '加载中…' : status.data?.exists ? ' 已生成' : ' 尚未生成'}
         </p>
         <Button variant={status.data?.exists ? 'destructive' : 'default'} onClick={() => setConfirming(true)}>
           {status.data?.exists ? '重新生成' : '生成'}

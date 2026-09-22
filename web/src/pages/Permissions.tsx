@@ -2,7 +2,7 @@ import { useCurrentApp } from '@/lib/current-app'
 import PermissionsPanel from '@/components/PermissionsPanel'
 
 export default function Permissions() {
-  const { currentApp, apps, loading, reload } = useCurrentApp()
+  const { currentApp, apps, loading } = useCurrentApp()
 
   if (loading) return <p className="text-sm text-muted-foreground">加载中…</p>
   if (apps.length === 0) {
@@ -12,7 +12,7 @@ export default function Permissions() {
 
   return (
     <div className="space-y-4">
-      <PermissionsPanel app={currentApp} onAppChanged={reload} />
+      <PermissionsPanel app={currentApp} />
     </div>
   )
 }

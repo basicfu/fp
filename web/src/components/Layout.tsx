@@ -40,6 +40,7 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarTrigger,
+  useSidebar,
 } from '@/components/ui/sidebar'
 import ThemeColorSwitcher from '@/components/ThemeColorSwitcher'
 import ThemeModeToggle from '@/components/ThemeModeToggle'
@@ -89,7 +90,7 @@ export default function Layout() {
           </SidebarGroup>
         </SidebarContent>
       </Sidebar>
-      <SidebarInset>
+      <SidebarInset className="min-w-0 overflow-auto">
         <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
           <div className="flex items-center gap-2">
             <SidebarTrigger />
@@ -131,10 +132,24 @@ export default function Layout() {
             </DropdownMenu>
           </div>
         </header>
-        <div className="min-w-0 flex-1 p-6">
-          <Outlet />
-        </div>
+        <Content />
       </SidebarInset>
     </SidebarProvider>
+  )
+}
+
+/**
+ * 内容区自己滚动，不再跟侧边栏一起被塞进同一个横向滚动条——侧边栏始终
+ * 固定可见。1200px 是"侧边栏 + 内容"整体要保住的最小宽度，侧边栏本身
+ * 会在展开/收起图标态之间变宽变窄，所以内容区的最小宽度要跟着
+ * useSidebar() 的 state 动态减去当前侧边栏宽度，而不是写死一个数。
+ */
+function Content() {
+  const { state } = useSidebar()
+  const sidebarWidthVar = state === 'collapsed' ? 'var(--sidebar-width-icon)' : 'var(--sidebar-width)'
+  return (
+    <div className="flex-1 p-6" style={{ minWidth: `calc(1200px - ${sidebarWidthVar})` }}>
+      <Outlet />
+    </div>
   )
 }

@@ -11,17 +11,17 @@ export interface BreadcrumbSegment {
 export function buildBreadcrumb(pathname: string): BreadcrumbSegment[] {
   const parts = pathname.split('/').filter(Boolean)
 
-  if (parts[0] === 'applications') return [{ label: '应用列表' }]
+  if (parts[0] === 'applications') {
+    if (parts.length === 1) return [{ label: '应用列表' }]
+    return [{ label: '应用列表', to: '/applications' }, { label: '应用详情' }]
+  }
 
   if (parts[0] === 'users') {
     if (parts.length === 1) return [{ label: '用户管理' }]
     return [{ label: '用户管理', to: '/users' }, { label: '用户详情' }]
   }
 
-  if (parts[0] === 'access-keys') {
-    if (parts.length === 1) return [{ label: '访问密钥' }]
-    return [{ label: '访问密钥', to: '/access-keys' }, { label: '密钥详情' }]
-  }
+  if (parts[0] === 'access-keys') return [{ label: '访问密钥' }]
 
   if (parts[0] === 'roles') {
     if (parts.length === 1) return [{ label: '角色管理' }]

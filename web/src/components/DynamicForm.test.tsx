@@ -22,12 +22,19 @@ test('按 schema 渲染出每个字段', () => {
   expect(screen.getByRole('switch', { name: '开启' })).toBeDefined()
 })
 
-test('展示字段的 help 文案', () => {
+test('字段的 help 文案挂在 Label 旁的提示图标上，悬浮/聚焦才展示', async () => {
   const fields: Field[] = [
     { key: 'autoRegister', label: '自动注册', type: 'bool', required: false, help: '关闭后未注册手机号无法登录' },
   ]
-  render(<DynamicForm fields={fields} values={{}} onSubmit={vi.fn()} />)
-  expect(screen.getByText('关闭后未注册手机号无法登录')).toBeDefined()
+  const { container } = render(<DynamicForm fields={fields} values={{}} onSubmit={vi.fn()} />)
+
+  expect(screen.queryByText('关闭后未注册手机号无法登录')).toBeNull()
+
+  const hint = container.querySelector('[data-slot="tooltip-trigger"]')
+  if (!hint) throw new Error('未找到提示图标')
+  fireEvent.focus(hint)
+
+  expect(await screen.findByText('关闭后未注册手机号无法登录')).toBeDefined()
 })
 
 // 校验失败不再常驻显示成一段 <p>（那会让表单跟着按键增删的错误文案一跳

@@ -1,19 +1,27 @@
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
+import { toast } from 'sonner'
 import { Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { LabelHint } from '@/components/ui/label-hint'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import Pagination from '@/components/Pagination'
 import { api } from '@/lib/api'
-import { useResource } from '@/lib/useResource'
+import { useResource, errorMessage } from '@/lib/useResource'
 import { buildUserQuery, normalizePage, PAGE_SIZE } from '@/lib/query'
+import { toastFormErrors } from '@/lib/formErrors'
 import { formatTime } from '@/lib/format'
 import { statusLabels } from '@/lib/labels'
 import { userStatusBadgeClassName, GRAY } from '@/lib/status-badge'
-import type { UserListResponse, UserStatus } from '@/lib/types'
+import type { User, UserListResponse, UserStatus } from '@/lib/types'
 
 const ALL = '__all__'
 
@@ -33,6 +41,7 @@ export default function Users() {
     () => api.get<UserListResponse>(`/users?${buildUserQuery({ page, keyword, status })}`),
     [page, keyword, status],
   )
+  const [creating, setCreating] = useState(false)
 
   // 搜索框是受控组件，本地状态是"真身"，keyword（来自 URL）只在它变化时
   // 单向同步进来——见下面 Input 旁边的注释，这是为了不让提交搜索时的
@@ -53,8 +62,6 @@ export default function Users() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">用户</h1>
-
       <form
         className="flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
@@ -64,6 +71,7 @@ export default function Users() {
           update({ keyword: keywordInput, page: '' })
         }}
       >
+        <Button type="button" onClick={() => setCreating(true)}>新建用户</Button>
         {/*
           这个输入框曾经是非受控的（key={keyword} + defaultValue），靠
           key 随 keyword 变化去强制卸载重挂来让后退/前进时的回填生效——
@@ -110,48 +118,60 @@ export default function Users() {
         </Select>
       </form>
 
-      {list.loading && <p className="text-sm text-muted-foreground">加载中…</p>}
+      {/* 只在真正首次加载（还没有任何数据）时显示这行文字——翻页/搜索之后的
+          reload() 也会把 loading 短暂置回 true，这时候表格已经有上一次的
+          数据在显示，再插一行"加载中…"只会造成一次没必要的跳动。 */}
+      {list.loading && !list.data && <p className="text-sm text-muted-foreground">加载中…</p>}
       {list.error && <p className="text-sm text-destructive">{list.error}</p>}
 
       {list.data && (
         <>
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
+          <Table className="table-fixed">
+            <colgroup>
+              <col className="w-[6%]" />
+              <col className="w-[20%]" />
+              <col className="w-[39%]" />
+              <col className="w-[15%]" />
+              <col className="w-[20%]" />
+            </colgroup>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="p-0 px-2">序号</TableHead>
+                <TableHead className="p-0 px-2">昵称</TableHead>
+                <TableHead className="p-0 px-2">登录标识</TableHead>
+                <TableHead className="p-0 px-2">状态</TableHead>
+                <TableHead className="p-0 px-2">注册时间</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {list.data.items.length === 0 && (
                 <TableRow>
-                  <TableHead>昵称</TableHead>
-                  <TableHead>登录标识</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>注册时间</TableHead>
+                  <TableCell colSpan={5} className="text-center text-muted-foreground">没有匹配的用户</TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {list.data.items.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={4} className="text-center text-muted-foreground">没有匹配的用户</TableCell>
-                  </TableRow>
-                )}
-                {list.data.items.map((u) => (
-                  <TableRow key={u.id}>
-                    <TableCell>
-                      <Link to={`/users/${u.id}`} className="font-medium underline-offset-4 hover:underline">
-                        {u.nickname || '（未设置）'}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {u.identities.map((i) => `${i.type}:${i.subject}`).join('  ') || '-'}
-                    </TableCell>
-                    <TableCell>
-                      <Badge className={userStatusBadgeClassName[u.status] ?? GRAY}>
-                        {statusLabels[u.status] ?? u.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{formatTime(u.createdAt)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+              )}
+              {list.data.items.map((u, i) => (
+                <TableRow key={u.id} className="h-12">
+                  <TableCell className="p-0 px-2 text-muted-foreground">{i + 1}</TableCell>
+                  <TableCell className="whitespace-normal p-0 px-2">
+                    <Link to={`/users/${u.id}`} className="font-medium underline-offset-4 hover:underline">
+                      {u.nickname || '（未设置）'}
+                    </Link>
+                  </TableCell>
+                  <TableCell className="whitespace-normal break-all p-0 px-2 font-mono text-xs">
+                    {u.identities.map((i) => `${i.type}:${i.subject}`).join('  ') || '-'}
+                  </TableCell>
+                  <TableCell className="p-0 px-2">
+                    <Badge className={userStatusBadgeClassName[u.status] ?? GRAY}>
+                      {statusLabels[u.status] ?? u.status}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
+                    {formatTime(u.createdAt)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
 
           <Pagination
             page={page}
@@ -161,6 +181,91 @@ export default function Users() {
           />
         </>
       )}
+
+      <CreateDialog
+        open={creating}
+        onOpenChange={setCreating}
+        onCreated={() => {
+          setCreating(false)
+          list.reload()
+        }}
+      />
     </div>
+  )
+}
+
+const createSchema = z.object({
+  phone: z.string().regex(/^1\d{10}$/, '请输入 11 位手机号'),
+  nickname: z.string(),
+  password: z.string().refine((v) => v === '' || v.length >= 8, '密码至少 8 位，留空表示不设密码'),
+})
+type CreateValues = z.infer<typeof createSchema>
+
+/**
+ * CreateDialog 是管理端手动建号的唯一入口。普通用户永远通过登录流程
+ * 隐式建号，这里是给线下开户、导入这类场景用的——手机号是唯一支持的
+ * 登录标识，密码可留空（留空只能靠验证码等其它方式登录）。
+ */
+function CreateDialog({
+  open,
+  onOpenChange,
+  onCreated,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onCreated: () => void
+}) {
+  const { register, handleSubmit, formState, reset } = useForm<CreateValues>({
+    resolver: zodResolver(createSchema),
+    defaultValues: { phone: '', nickname: '', password: '' },
+  })
+
+  async function onSubmit(v: CreateValues) {
+    try {
+      await api.post<User>('/users', { phone: v.phone, nickname: v.nickname, password: v.password })
+      toast.success('已创建')
+      reset()
+      onCreated()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>新建用户</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="user-phone">手机号</Label>
+              <LabelHint>作为这个用户的登录标识，创建后不能再改。</LabelHint>
+            </div>
+            <Input id="user-phone" className="font-mono" {...register('phone')} />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="user-nickname">昵称</Label>
+            <Input id="user-nickname" {...register('nickname')} />
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="user-password">密码</Label>
+              <LabelHint>可留空。留空的话这个用户只能靠验证码等其它登录方式登录。</LabelHint>
+            </div>
+            <Input id="user-password" type="password" {...register('password')} />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              取消
+            </Button>
+            <Button type="submit" disabled={formState.isSubmitting}>
+              创建
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }

@@ -21,7 +21,12 @@ export default function ConnectorsPanel({ appId }: { appId: string }) {
   const schemas = useResource(() => api.get<ConnectorSchema[]>('/connectors'), [])
   const configs = useResource(() => api.get<ConnectorConfig[]>(`/applications/${appId}/connectors`), [appId])
 
-  if (schemas.loading || configs.loading) return <p className="text-sm text-muted-foreground">加载中…</p>
+  // 只在真正首次加载（两份数据都还没到）时整体显示"加载中…"——保存配置后
+  // 的 configs.reload() 也会把 loading 短暂置回 true，这时候两份数据都已
+  // 经有上一次的结果，不该把整个面板卸载重挂一遍。
+  if ((schemas.loading && !schemas.data) || (configs.loading && !configs.data)) {
+    return <p className="text-sm text-muted-foreground">加载中…</p>
+  }
   const err = schemas.error || configs.error
   if (err) return <p className="text-sm text-destructive">{err}</p>
   if (!schemas.data || !configs.data) return null

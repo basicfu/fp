@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router'
 import Layout from '@/components/Layout'
 import Login from '@/pages/Login'
 import Applications from '@/pages/Applications'
+import ApplicationDetail from '@/pages/ApplicationDetail'
 import ConfigCenter from '@/pages/ConfigCenter'
 import ConfigVersions from '@/pages/ConfigVersions'
 import SystemConfig from '@/pages/SystemConfig'
@@ -9,7 +10,6 @@ import SystemConfigVersions from '@/pages/SystemConfigVersions'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import AccessKeys from '@/pages/AccessKeys'
-import AccessKeyDetail from '@/pages/AccessKeyDetail'
 import Roles from '@/pages/Roles'
 import RoleDetail from '@/pages/RoleDetail'
 import Permissions from '@/pages/Permissions'
@@ -49,10 +49,10 @@ export default function AppRoutes() {
       >
         <Route path="/" element={<Navigate to="/applications" replace />} />
         <Route path="/applications" element={<Applications />} />
+        <Route path="/applications/:id" element={<ApplicationDetail />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/access-keys" element={<AccessKeys />} />
-        <Route path="/access-keys/:id" element={<AccessKeyDetail />} />
         <Route path="/roles" element={<Roles />} />
         <Route path="/roles/:id" element={<RoleDetail />} />
         <Route path="/permissions" element={<Permissions />} />

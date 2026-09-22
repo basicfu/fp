@@ -9,7 +9,7 @@ afterEach(() => vi.unstubAllGlobals())
 const baseApp: Application = {
   id: 'app-1',
   name: '测试应用',
-  slug: 'test-app',
+  code: 'test-app',
   appId: 'appid-123',
   status: 'ACTIVE',
   cookieDomain: '',

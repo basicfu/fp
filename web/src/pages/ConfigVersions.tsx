@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { useNavigate } from 'react-router'
 import { useCurrentApp } from '@/lib/current-app'
 import { toast } from 'sonner'
 import { load as loadYAML } from 'js-yaml'
@@ -280,10 +280,6 @@ export default function ConfigVersions() {
 
   return (
     <div className="space-y-6">
-      <Link to="/config" className="text-sm text-muted-foreground underline-offset-4 hover:underline">
-        ← 返回配置中心
-      </Link>
-
       <Tabs value={partition} onValueChange={(v) => setPartition(v as ConfigPartition)}>
         <TabsList>
           {types.types.map((p) => (
@@ -294,10 +290,14 @@ export default function ConfigVersions() {
         </TabsList>
       </Tabs>
 
-      {versions.loading && <p className="text-sm text-muted-foreground">加载中…</p>}
+      {/* 只在真正首次加载（还没有任何数据）时显示这行文字、并隐藏下面的列表——
+          切分区、回滚之后的 reload() 也会把 loading 短暂置回 true，这时候
+          列表已经有上一次的数据在显示，用 !loading 整段隐藏会让它闪一下
+          （卸载再重新挂载），改成按有没有数据来决定显示，就不会跳动。 */}
+      {versions.loading && !versions.data && <p className="text-sm text-muted-foreground">加载中…</p>}
       {versions.error && <p className="text-sm text-destructive">{versions.error}</p>}
 
-      {!versions.loading && !versions.error && (
+      {versions.data && !versions.error && (
         <div className="space-y-3">
           {versions.data?.length === 0 && <p className="text-sm text-muted-foreground">这个分区还没有任何版本。</p>}
           {versions.data?.map((v, idx) => {

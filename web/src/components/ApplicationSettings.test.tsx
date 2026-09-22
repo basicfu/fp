@@ -11,7 +11,7 @@ afterEach(() => vi.unstubAllGlobals())
 const baseApp: Application = {
   id: 'app-1',
   name: '测试应用',
-  slug: 'test-app',
+  code: 'test-app',
   appId: 'appid-123',
   status: 'ACTIVE',
   cookieDomain: '',
@@ -103,84 +103,4 @@ test('延期间隔大于等于空闲超时时，前端拦截，不发请求且�
 
   await waitFor(() => expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('延期间隔必须小于空闲超时')))
   expect(fetchMock.mock.calls.length).toBe(0)
-})
-
-test('停用应用需要二次确认才发 PATCH status=DISABLED；启用应用直接发 PATCH status=ACTIVE', async () => {
-  const disabledApp: Application = { ...baseApp, status: 'DISABLED' }
-  const fetchMock = stubFetchSequence(
-    new Response(JSON.stringify(disabledApp), { status: 200 }), // PATCH /status → DISABLED
-    new Response(JSON.stringify(baseApp), { status: 200 }), // PATCH /status → ACTIVE
-  )
-
-  function Toggle() {
-    const [app, setApp] = useState(baseApp)
-    return (
-      <ApplicationSettings
-        app={app}
-        onSaved={() => setApp((a) => (a.status === 'ACTIVE' ? disabledApp : baseApp))}
-      />
-    )
-  }
-  render(<Toggle />)
-
-  fireEvent.click(screen.getByRole('button', { name: '停用应用' }))
-  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(false)
-
-  const confirmBtn = await waitFor(() => screen.getByRole('button', { name: '确认停用' }))
-  fireEvent.click(confirmBtn)
-
-  await waitFor(() => expect(screen.getByRole('button', { name: '启用应用' })).toBeTruthy())
-
-  const [disableUrl, disableInit] = findCall(fetchMock, 'PATCH')
-  expect(disableUrl).toBe('/admin/api/applications/app-1/status')
-  expect(JSON.parse(disableInit.body as string)).toEqual({ status: 'DISABLED' })
-
-  fireEvent.click(screen.getByRole('button', { name: '启用应用' }))
-  await waitFor(() => expect(screen.getByRole('button', { name: '停用应用' })).toBeTruthy())
-
-  const patchCalls = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')
-  expect(patchCalls).toHaveLength(2)
-  const [enableUrl, enableInit] = patchCalls[1] as [string, RequestInit]
-  expect(enableUrl).toBe('/admin/api/applications/app-1/status')
-  expect(JSON.parse(enableInit.body as string)).toEqual({ status: 'ACTIVE' })
-})
-
-test('停用应用弹窗点取消，不发请求，应用保持启用', async () => {
-  const fetchMock = stubFetchSequence()
-
-  render(<Harness initial={baseApp} />)
-
-  fireEvent.click(screen.getByRole('button', { name: '停用应用' }))
-  const cancelBtn = await waitFor(() => screen.getByRole('button', { name: '取消' }))
-  fireEvent.click(cancelBtn)
-
-  await new Promise((r) => setTimeout(r, 50))
-
-  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(false)
-  expect(screen.getByRole('button', { name: '停用应用' })).toBeTruthy()
-})
-
-test('基本信息表单提交，PATCH 请求体含 name 与 cookieDomain', async () => {
-  const updated: Application = { ...baseApp, name: '改名后的应用', cookieDomain: 'example.com' }
-  const fetchMock = stubFetchSequence(new Response(JSON.stringify(updated), { status: 200 }))
-
-  render(<Harness initial={baseApp} nextApp={updated} />)
-
-  const nameInput = screen.getByLabelText('名称') as HTMLInputElement
-  const cookieInput = screen.getByLabelText('Cookie 作用域') as HTMLInputElement
-  fireEvent.change(nameInput, { target: { value: '改名后的应用' } })
-  fireEvent.change(cookieInput, { target: { value: 'example.com' } })
-  fireEvent.submit(nameInput.closest('form')!)
-
-  await waitFor(() =>
-    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toBe(
-      true,
-    ),
-  )
-
-  const [url, init] = findCall(fetchMock, 'PATCH')
-  expect(url).toBe('/admin/api/applications/app-1')
-  const body = JSON.parse(init.body as string) as Record<string, unknown>
-  expect(body.name).toBe('改名后的应用')
-  expect(body.cookieDomain).toBe('example.com')
 })

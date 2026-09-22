@@ -15,7 +15,7 @@ afterEach(() => {
 const app: Application = {
   id: 'app-1',
   name: '商城',
-  slug: 'mall',
+  code: 'mall',
   appId: 'appid-1',
   status: 'ACTIVE',
   cookieDomain: '',
@@ -33,7 +33,7 @@ const app: Application = {
   updatedAt: 1,
 }
 
-const roles: Role[] = [{ id: 'r1', key: '普通用户', name: '普通用户', parentId: '', createdAt: 1 }]
+const roles: Role[] = [{ id: 'r1', code: '普通用户', name: '普通用户', parentId: '', createdAt: 1 }]
 
 function point(): PermissionPoint {
   return {
@@ -86,9 +86,8 @@ test('渲染当前应用的权限点管理', async () => {
   )
 
   // 页面级"权限管理 · 应用名"标题已经去掉（应用名已经在侧边栏的应用切换
-  // 器里显示，这里再重复一遍是冗余）——用 PermissionsPanel 一定会渲染的
-  // "默认角色"确认这是当前应用的权限点管理，而不是断言一个已经不存在的标题。
-  expect(screen.getByText('默认角色')).toBeTruthy()
+  // 器里显示，这里再重复一遍是冗余）——默认角色的设置也挪到了应用列表的
+  // 新建/编辑弹窗里，这个页面只剩权限点表格，直接断言表格内容渲染出来。
   await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
 })
 

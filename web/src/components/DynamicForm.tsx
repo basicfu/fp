@@ -3,6 +3,7 @@ import { Controller, useForm } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { LabelHint } from '@/components/ui/label-hint'
 import { Switch } from '@/components/ui/switch'
 import { toastFormErrors } from '@/lib/formErrors'
 import type { Field } from '@/lib/types'
@@ -119,13 +120,17 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
                 )}
               />
               <Label htmlFor={domId(f.key)}>{f.label}</Label>
+              {f.help && <LabelHint>{f.help}</LabelHint>}
             </div>
           ) : (
             <>
-              <Label htmlFor={domId(f.key)}>
-                {f.label}
-                {f.required && <span className="ml-1 text-destructive">*</span>}
-              </Label>
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor={domId(f.key)}>
+                  {f.label}
+                  {f.required && <span className="ml-1 text-destructive">*</span>}
+                </Label>
+                {f.help && <LabelHint>{f.help}</LabelHint>}
+              </div>
               <Input
                 id={domId(f.key)}
                 type={inputType(f.type)}
@@ -135,7 +140,6 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
               />
             </>
           )}
-          {f.help && <p className="text-xs text-muted-foreground">{f.help}</p>}
         </div>
       ))}
       <Button type="submit" disabled={formState.isSubmitting}>

@@ -11,16 +11,16 @@ afterEach(() => {
 })
 
 const roles: Role[] = [
-  { id: 'r1', key: '商城管理员', name: '商城管理员', parentId: '', createdAt: 1 },
-  { id: 'r2', key: '客服', name: '客服', parentId: '', createdAt: 1 },
-  { id: 'r3', key: '普通用户', name: '普通用户', parentId: '', createdAt: 1 },
+  { id: 'r1', code: '商城管理员', name: '商城管理员', parentId: '', createdAt: 1 },
+  { id: 'r2', code: '客服', name: '客服', parentId: '', createdAt: 1 },
+  { id: 'r3', code: '普通用户', name: '普通用户', parentId: '', createdAt: 1 },
 ]
 
 function appWith(defaultRoleKey: string, over: Partial<Application> = {}): Application {
   return {
     id: 'app-1',
     name: '商城',
-    slug: 'mall',
+    code: 'mall',
     appId: 'appid-1',
     status: 'ACTIVE',
     cookieDomain: '',
@@ -99,7 +99,7 @@ test('移除角色时发出剩余角色的全量列表', async () => {
 // 一个"没有显式分配的角色"的用户，管理员会以为他什么都干不了——而他在
 // 每个配了默认角色的应用里都有基础能力。
 test('列出各应用的默认角色，并说明是叠加', async () => {
-  stubFetch([], [appWith('普通用户'), appWith('观众', { id: 'app-2', name: '视频', slug: 'video' })])
+  stubFetch([], [appWith('普通用户'), appWith('观众', { id: 'app-2', name: '视频', code: 'video' })])
   renderCard()
 
   await waitFor(() => expect(screen.getByText('没有显式分配的角色')).toBeTruthy())

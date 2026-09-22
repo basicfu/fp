@@ -1,8 +1,12 @@
 import { test, expect } from 'vitest'
 import { buildBreadcrumb } from './breadcrumb'
 
-test('应用列表页只有一段面包屑', () => {
+test('应用列表页只有一段面包屑，应用详情页带回列表的链接', () => {
   expect(buildBreadcrumb('/applications')).toEqual([{ label: '应用列表' }])
+  expect(buildBreadcrumb('/applications/a1')).toEqual([
+    { label: '应用列表', to: '/applications' },
+    { label: '应用详情' },
+  ])
 })
 
 test('用户和角色相关路径', () => {
@@ -34,8 +38,4 @@ test('未知路径回退成一段「fp」，不抛错', () => {
 
 test('访问密钥的面包屑', () => {
   expect(buildBreadcrumb('/access-keys')).toEqual([{ label: '访问密钥' }])
-  expect(buildBreadcrumb('/access-keys/k1')).toEqual([
-    { label: '访问密钥', to: '/access-keys' },
-    { label: '密钥详情' },
-  ])
 })

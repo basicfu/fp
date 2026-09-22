@@ -1,13 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { LabelHint } from '@/components/ui/label-hint'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -16,29 +17,63 @@ import { useResource, errorMessage } from '@/lib/useResource'
 import { toastFormErrors } from '@/lib/formErrors'
 import { formatDuration, formatTime } from '@/lib/format'
 import { permissionStatusLabels } from '@/lib/labels'
-import type { Application, PermissionPoint, Role } from '@/lib/types'
-
-const NO_DEFAULT = '__none__'
+import type { Application, PermissionPoint } from '@/lib/types'
 
 /**
  * PermissionsPanel 是应用详情下的「权限点」页。
  *
  * 权限点属于应用（角色是全局的），所以它挂在应用详情而不是单独一个顶级
- * 菜单。同一页还管应用的默认角色——那也是 per-app 的设置，且与权限点是
- * 同一件事的两面：默认角色决定"新用户零配置能干什么"。
+ * 菜单。默认角色的设置挪到了应用列表的新建/编辑弹窗里，这里不再管。
  */
-export default function PermissionsPanel({ app, onAppChanged }: { app: Application; onAppChanged: () => void }) {
+export default function PermissionsPanel({ app }: { app: Application }) {
   const perms = useResource(() => api.get<PermissionPoint[]>(`/applications/${app.id}/permissions`), [app.id])
-  const roles = useResource(() => api.get<Role[]>('/roles'), [])
   const [adding, setAdding] = useState(false)
   const [editing, setEditing] = useState<PermissionPoint | null>(null)
   const [deleting, setDeleting] = useState<{ p: PermissionPoint; holders: string[] } | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [batchDeleting, setBatchDeleting] = useState<{ ids: string[]; keys: string[]; holders: string[] } | null>(
+    null,
+  )
   const [keyword, setKeyword] = useState('')
 
   const all = perms.data ?? []
   const kw = keyword.trim().toLowerCase()
   const shown = kw ? all.filter((p) => p.key.toLowerCase().includes(kw) || p.name.toLowerCase().includes(kw)) : all
   const staleCount = all.filter((p) => p.status === 'stale').length
+  const shownIds = shown.map((p) => p.id)
+  const shownSelectedCount = shownIds.filter((id) => selected.has(id)).length
+  const allShownSelected = shownIds.length > 0 && shownSelectedCount === shownIds.length
+
+  // 权限点被删掉（不管是这里批量删的，还是单条删的）之后，选中集合里
+  // 残留的那个 id 不会自己消失——下次重新拉到的列表里已经没有这一项，
+  // 但 Set 是独立状态，不会跟着同步。不清理的话"已选 N 项"会一直算上
+  // 这个不存在的 id，多选几次、删几次，这个数字就跟界面上实际打钩的
+  // 数量对不上。
+  useEffect(() => {
+    if (!perms.data) return
+    const validIds = new Set(perms.data.map((p) => p.id))
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => validIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [perms.data])
+
+  function toggleAll(checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      shownIds.forEach((id) => (checked ? next.add(id) : next.delete(id)))
+      return next
+    })
+  }
+
+  function toggleOne(id: string, checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
 
   /**
    * 删除前先问后端"谁在用它"。
@@ -66,57 +101,62 @@ export default function PermissionsPanel({ app, onAppChanged }: { app: Applicati
     }
   }
 
-  async function setDefaultRole(key: string) {
+  /** 批量删除同样先查一遍持有者——只是要把选中的每一项都问一遍，再把角色名去重合并。 */
+  async function askBatchDelete() {
+    const ids = [...selected]
     try {
-      await api.patch(`/applications/${app.id}/default-role`, { roleKey: key })
-      toast.success(key ? `新用户默认拥有「${key}」` : '已取消默认角色')
-      onAppChanged()
+      const results = await Promise.all(ids.map((id) => api.get<{ roles: string[] }>(`/permissions/${id}/holders`)))
+      const holders = [...new Set(results.flatMap((r) => r.roles))]
+      const keys = all.filter((p) => selected.has(p.id)).map((p) => p.key)
+      setBatchDeleting({ ids, keys, holders })
     } catch (e) {
       toast.error(errorMessage(e))
     }
   }
 
+  /**
+   * 逐条发 DELETE 而不是并发一把梭：批量里某一条失败（比如网络抖了一下）
+   * 不该连累其它条的判断——已经删成功的要从选中里摘掉，不用再选一遍；
+   * 失败的留着选中状态，方便直接再点一次重试。
+   */
+  async function removeBatch(ids: string[]) {
+    const succeededIds: string[] = []
+    const failures: string[] = []
+    for (const id of ids) {
+      try {
+        await api.del(`/permissions/${id}`)
+        succeededIds.push(id)
+      } catch (e) {
+        failures.push(errorMessage(e))
+      }
+    }
+    if (succeededIds.length > 0) {
+      toast.success(`已删除 ${succeededIds.length} 个权限点`)
+      perms.reload()
+    }
+    if (failures.length > 0) {
+      toast.error(`有 ${failures.length} 个删除失败：${failures.join('；')}`)
+    }
+    setSelected((prev) => {
+      const next = new Set(prev)
+      succeededIds.forEach((id) => next.delete(id))
+      return next
+    })
+  }
+
   return (
     <div className="space-y-6">
-      <div className="space-y-2 rounded-md border p-4">
-        <Label htmlFor="default-role">默认角色</Label>
-        <Select
-          value={app.defaultRoleKey || NO_DEFAULT}
-          onValueChange={(v) => void setDefaultRole(v === NO_DEFAULT || v === null ? '' : v)}
-          // items 让 Select.Value 能把受控 value 映射回标签；缺了它，收起
-          // 状态在 items 未就绪前会直接显示 value 本身。
-          items={[{ value: NO_DEFAULT, label: '不设默认角色' }, ...(roles.data ?? []).map((r) => ({ value: r.key, label: r.key }))]}
-        >
-          <SelectTrigger id="default-role" className="w-56">
-            <SelectValue placeholder="不设默认角色" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={NO_DEFAULT}>不设默认角色</SelectItem>
-            {(roles.data ?? []).map((r) => (
-              <SelectItem key={r.id} value={r.key}>
-                {r.key}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          在这个应用里，每个人都自动拥有这个角色，<strong>不写任何数据</strong>——新用户注册时不需要建一条授权记录。
-          显式分配的角色是在它之上<strong>叠加</strong>，不是替换：给某人加了「商城管理员」，他仍然保有默认角色的能力。
-        </p>
-      </div>
-
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={() => setAdding(true)}>
+            添加权限
+          </Button>
           <Input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
             placeholder="按路径或名称筛选"
             className="w-72"
           />
-          <div className="flex-1" />
-          <Button variant="outline" onClick={() => setAdding(true)}>
-            手动添加
-          </Button>
         </div>
 
         {staleCount > 0 && (
@@ -127,42 +167,81 @@ export default function PermissionsPanel({ app, onAppChanged }: { app: Applicati
           </p>
         )}
 
-        {perms.loading && <p className="text-sm text-muted-foreground">加载中…</p>}
+        {/* 只在真正首次加载（还没有任何数据）时显示这行文字——增删改之后的
+            reload() 也会把 loading 短暂置回 true，这时候表格已经有上一次的
+            数据在显示，再插一行"加载中…"只会造成一次没必要的跳动。 */}
+        {perms.loading && !perms.data && <p className="text-sm text-muted-foreground">加载中…</p>}
         {perms.error && <p className="text-sm text-destructive">{perms.error}</p>}
 
         {perms.data && (
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
+          <>
+            <Table className="table-fixed">
+              {/* 操作列固定 136px（120px 按钮预留区 + 单元格左右各 8px padding），
+                  勾选列固定 40px，其余 6 列按百分比分配——跟 Applications 表格
+                  是同一套做法。 */}
+              <colgroup>
+                <col className="w-[40px]" />
+                <col className="w-[6%]" />
+                <col className="w-[22%]" />
+                <col className="w-[16%]" />
+                <col className="w-[10%]" />
+                <col className="w-[12%]" />
+                <col className="w-[14%]" />
+                <col className="w-[136px]" />
+              </colgroup>
               <TableHeader>
                 <TableRow>
-                  <TableHead>权限点</TableHead>
-                  <TableHead>名称</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>已过渡</TableHead>
-                  <TableHead>最近上报</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead className="p-0 px-2">
+                    <Checkbox
+                      checked={allShownSelected}
+                      indeterminate={!allShownSelected && shownSelectedCount > 0}
+                      onCheckedChange={(v) => toggleAll(v === true)}
+                      aria-label="全选"
+                    />
+                  </TableHead>
+                  <TableHead className="p-0 px-2">序号</TableHead>
+                  <TableHead className="p-0 px-2">权限点</TableHead>
+                  <TableHead className="p-0 px-2">名称</TableHead>
+                  <TableHead className="p-0 px-2">状态</TableHead>
+                  <TableHead className="p-0 px-2">已过渡</TableHead>
+                  <TableHead className="p-0 px-2">最近上报</TableHead>
+                  <TableHead className="p-0 px-2">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {all.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground">
-                      还没有权限点。接入方用 fpsdk 启动时会自动上报全部路由，不需要写任何注解。
+                    <TableCell colSpan={8} className="text-center text-muted-foreground">
+                      没有数据
                     </TableCell>
                   </TableRow>
                 )}
                 {all.length > 0 && shown.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground">
+                    <TableCell colSpan={8} className="text-center text-muted-foreground">
                       没有匹配的权限点
                     </TableCell>
                   </TableRow>
                 )}
-                {shown.map((p) => (
-                  <TableRow key={p.id}>
-                    <TableCell className="font-mono text-xs">{p.key}</TableCell>
-                    <TableCell className="text-muted-foreground">{p.name || '-'}</TableCell>
-                    <TableCell>
+                {shown.map((p, i) => (
+                  <TableRow
+                    key={p.id}
+                    className="h-12 cursor-pointer"
+                    onClick={() => toggleOne(p.id, !selected.has(p.id))}
+                  >
+                    <TableCell className="p-0 px-2" onClick={(e) => e.stopPropagation()}>
+                      <Checkbox
+                        checked={selected.has(p.id)}
+                        onCheckedChange={(v) => toggleOne(p.id, v === true)}
+                        aria-label={`选中 ${p.key}`}
+                      />
+                    </TableCell>
+                    <TableCell className="p-0 px-2 text-muted-foreground">{i + 1}</TableCell>
+                    <TableCell className="whitespace-normal break-all p-0 px-2 font-mono text-xs">{p.key}</TableCell>
+                    <TableCell className="whitespace-normal break-words p-0 px-2 text-muted-foreground">
+                      {p.name || '-'}
+                    </TableCell>
+                    <TableCell className="p-0 px-2">
                       <Badge
                         variant={
                           p.status === 'normal' ? 'default' : p.status === 'stale' ? 'destructive' : 'secondary'
@@ -171,37 +250,56 @@ export default function PermissionsPanel({ app, onAppChanged }: { app: Applicati
                         {permissionStatusLabels[p.status] ?? p.status}
                       </Badge>
                     </TableCell>
-                    <TableCell className="text-muted-foreground">
+                    <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
                       {p.status === 'stale' ? formatDuration(p.staleForMs) : '-'}
                     </TableCell>
-                    <TableCell className="text-muted-foreground">
+                    <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
                       {p.source === 'manual' ? '（手动添加）' : formatTime(p.lastSeenAt)}
                     </TableCell>
-                    <TableCell className="space-x-2 text-right">
-                      <Button variant="outline" size="sm" onClick={() => setEditing(p)}>
-                        编辑
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => void askDelete(p)}>
-                        删除
-                      </Button>
+                    <TableCell className="p-0 px-2">
+                      <div className="flex w-[120px] gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setEditing(p)
+                          }}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void askDelete(p)
+                          }}
+                        >
+                          删除
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
-          </div>
+
+            {selected.size > 0 && (
+              <div className="flex items-center gap-2">
+                <Button variant="destructive" onClick={() => void askBatchDelete()}>
+                  批量删除
+                </Button>
+                <span className="text-sm text-muted-foreground">已选 {selected.size} 项</span>
+              </div>
+            )}
+          </>
         )}
       </div>
 
-      <AddDialog
-        open={adding}
-        onOpenChange={setAdding}
-        appId={app.id}
-        onAdded={() => {
-          setAdding(false)
-          perms.reload()
-        }}
-      />
+      {/* AddDialog 自己决定什么时候关（全部成功才关，部分失败要留着让人改），
+          这里的 onAdded 只管重新拉取列表，不管开关。 */}
+      <AddDialog open={adding} onOpenChange={setAdding} appId={app.id} onAdded={() => perms.reload()} />
 
       {editing && (
         <EditDialog
@@ -236,6 +334,30 @@ export default function PermissionsPanel({ app, onAppChanged }: { app: Applicati
           if (d) void remove(d.p)
         }}
       />
+
+      <ConfirmDialog
+        open={batchDeleting !== null}
+        onOpenChange={(v) => !v && setBatchDeleting(null)}
+        title="批量删除权限点"
+        description={
+          batchDeleting
+            ? batchDeleting.holders.length === 0
+              ? `删除这 ${batchDeleting.ids.length} 个权限点：${batchDeleting.keys.join('、')}。` +
+                `当前没有角色持有它们，删除不会让任何人掉权限。如果接入方的代码里还有这些接口，` +
+                `下次上报会把它们重新建出来（那时是没有任何授权的新条目）。`
+              : `删除这 ${batchDeleting.ids.length} 个权限点：${batchDeleting.keys.join('、')}。` +
+                `会同时解除 ${batchDeleting.holders.length} 个角色对它们的授权：${batchDeleting.holders.join('、')}。` +
+                `这些角色下的用户会立刻失去调用这些接口的能力。` +
+                `没有可撤销的"停用"中间态，删掉就是删掉；重新建出来的是没有任何授权的新条目。`
+            : ''
+        }
+        confirmLabel="确认删除"
+        onConfirm={() => {
+          const d = batchDeleting
+          setBatchDeleting(null)
+          if (d) void removeBatch(d.ids)
+        }}
+      />
     </div>
   )
 }
@@ -245,6 +367,20 @@ const addSchema = z.object({
   name: z.string(),
 })
 type AddValues = z.infer<typeof addSchema>
+
+/** 把批量文本框的一行拆成 key/name——以第一个空格分割，名称可选。 */
+function parseBulkLine(line: string): { key: string; name: string } {
+  const idx = line.indexOf(' ')
+  if (idx === -1) return { key: line, name: '' }
+  return { key: line.slice(0, idx), name: line.slice(idx + 1).trim() }
+}
+
+function splitBulkLines(text: string): string[] {
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+}
 
 function AddDialog({
   open,
@@ -257,19 +393,39 @@ function AddDialog({
   appId: string
   onAdded: () => void
 }) {
-  const { register, handleSubmit, formState, reset } = useForm<AddValues>({
-    resolver: zodResolver(addSchema),
-    defaultValues: { key: '', name: '' },
-  })
+  const [text, setText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
-  async function onSubmit(v: AddValues) {
-    try {
-      await api.post(`/applications/${appId}/permissions`, { ...v, kind: 'api' })
-      toast.success('已添加')
-      reset()
-      onAdded()
-    } catch (e) {
-      toast.error(errorMessage(e))
+  async function onSubmit() {
+    const lines = splitBulkLines(text)
+    if (lines.length === 0) {
+      toast.error('请至少输入一行')
+      return
+    }
+    setSubmitting(true)
+    const failedLines: string[] = []
+    let succeeded = 0
+    // 逐条提交而不是 Promise.all：批量里某一行失败（比如标识重复）不该
+    // 影响其它行的结果判断——并发提交的话没法把失败原因跟具体哪一行对上号。
+    for (const line of lines) {
+      const { key, name } = parseBulkLine(line)
+      try {
+        await api.post(`/applications/${appId}/permissions`, { key, name, kind: 'api' })
+        succeeded++
+      } catch (e) {
+        failedLines.push(line)
+        toast.error(`${key}：${errorMessage(e)}`)
+      }
+    }
+    setSubmitting(false)
+    if (succeeded > 0) onAdded()
+    if (failedLines.length === 0) {
+      toast.success(`已添加 ${succeeded} 个权限点`)
+      setText('')
+      onOpenChange(false)
+    } else {
+      // 只把失败的行留在框里，成功的不用再填一遍。
+      setText(failedLines.join('\n'))
     }
   }
 
@@ -277,31 +433,39 @@ function AddDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>手动添加权限点</DialogTitle>
+          <DialogTitle>添加权限</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            void onSubmit()
+          }}
+          className="space-y-4"
+          noValidate
+        >
           <div className="space-y-2">
-            <Label htmlFor="perm-key">标识</Label>
-            <Input id="perm-key" placeholder="GET:/orders/{id}" className="font-mono" {...register('key')} />
-            <p className="text-xs text-muted-foreground">
-              格式是 <span className="font-mono">方法:路由模式</span>，用<strong>路由模式</strong>不是具体 URL——
-              写 <span className="font-mono">/orders/{'{id}'}</span> 而不是 <span className="font-mono">/orders/123</span>，
-              否则每个 id 都会变成一个独立的权限点。
-            </p>
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="perm-bulk">权限点</Label>
+              <LabelHint>
+                每行一个：方法:路由模式，后面可选跟一个名称，用空格分隔，例如
+                GET:/orders/{'{id}'} 查看订单详情。路由要用路由模式，不是具体 URL——
+                写 /orders/{'{id}'} 而不是 /orders/123，否则每个 id 都会变成一个独立的权限点。
+              </LabelHint>
+            </div>
+            <textarea
+              id="perm-bulk"
+              rows={8}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={'GET:/user/login 登录\nGET:/user/register'}
+              className="w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="perm-name">名称</Label>
-            <Input id="perm-name" placeholder="查看订单详情" {...register('name')} />
-            <p className="text-xs text-muted-foreground">可留空。填了之后接入方的上报不会覆盖它。</p>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            手动添加的权限点标为「手动」，<strong>不参与</strong>「过渡中」的判定——接入方没上报它是正常的。
-          </p>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               取消
             </Button>
-            <Button type="submit" disabled={formState.isSubmitting}>
+            <Button type="submit" disabled={submitting}>
               添加
             </Button>
           </DialogFooter>
@@ -343,12 +507,14 @@ function EditDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
-            <Label htmlFor="edit-perm-key">标识</Label>
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="edit-perm-key">标识</Label>
+              <LabelHint>
+                标识可以改（比如打错了一个字母）：已有的授权按内部 id 关联，会自动跟过来，
+                改完立刻推送给接入方。但如果接入方代码里的路由还是旧值，下次上报会把旧的重新建出来。
+              </LabelHint>
+            </div>
             <Input id="edit-perm-key" className="font-mono" {...register('key')} />
-            <p className="text-xs text-muted-foreground">
-              标识<strong>可以改</strong>（比如打错了一个字母）：已有的授权按内部 id 关联，会自动跟过来，
-              改完立刻推送给接入方。但如果接入方代码里的路由还是旧值，下次上报会把旧的重新建出来。
-            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="edit-perm-name">名称</Label>

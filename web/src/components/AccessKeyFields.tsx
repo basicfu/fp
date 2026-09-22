@@ -5,9 +5,15 @@ import type { Role } from '@/lib/types'
 /** 「不绑定角色」在 Select 里的占位值。base-ui 的 SelectItem 不接受空串。 */
 const NO_ROLE = '__none__'
 
+/** 供调用方在「角色」Label 旁挂 LabelHint。 */
+export const ROLE_SELECT_HINT = '不绑定角色的 key 调任何接口都是 403；访问密钥不拥有 GUEST。'
+
+/** 供调用方在「IP 白名单」Label 旁挂 LabelHint。 */
+export const IP_ALLOWLIST_HINT = '留空表示不校验 IP；最多 50 条。依赖最外层代理正确配置来源 IP，配置不当会导致白名单静默失效。'
+
 /** selectableRoles 去掉 GUEST：访问密钥不能绑定它（后端同样拒绝）。 */
 export function selectableRoles(roles: Role[]): Role[] {
-  return roles.filter((r) => r.key !== GUEST_ROLE_KEY)
+  return roles.filter((r) => r.code !== GUEST_ROLE_KEY)
 }
 
 /** parseIps 把多行文本拆成 IP 列表，空行忽略。 */
@@ -39,13 +45,12 @@ export function RoleSelect({
         <SelectContent>
           <SelectItem value={NO_ROLE}>不绑定</SelectItem>
           {selectableRoles(roles).map((r) => (
-            <SelectItem key={r.id} value={r.key}>
-              {r.key}
+            <SelectItem key={r.id} value={r.code}>
+              {r.code}
             </SelectItem>
           ))}
         </SelectContent>
       </Select>
-      <p className="text-xs text-muted-foreground">不绑定角色的 key 调任何接口都是 403；访问密钥不拥有 GUEST。</p>
     </>
   )
 }
@@ -61,7 +66,6 @@ export function IpTextarea({ id, value, onChange }: { id: string; value: string;
         placeholder={'每行一个 IP 或网段，例如\n203.0.113.7\n10.0.0.0/8'}
         className="w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
-      <p className="text-xs text-muted-foreground">留空表示不校验 IP；最多 50 条。依赖最外层代理正确配置来源 IP，配置不当会导致白名单静默失效。</p>
     </>
   )
 }

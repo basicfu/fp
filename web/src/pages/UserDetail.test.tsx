@@ -5,7 +5,7 @@
 // 会话）必须在界面上如实反映，界面测试比一次性的人工点击更可靠，以后谁改坏
 // 了 sessions.reload() 这条线，这里会立刻变红。
 import { test, expect, vi, afterEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { toast } from 'sonner'
 import UserDetail from './UserDetail'
@@ -276,7 +276,11 @@ test('踢单个设备成功后，设备列表被重新拉取', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: '下线' }))
 
-  await waitFor(() => expect(screen.getByText('没有在线设备')).toBeTruthy())
+  // "没有数据"是全站统一的空表格文案，这个页面一次挂三张表，登录日志
+  // 那张一开始就是空的——不能拿这句話来定位，得先找到"在线设备"卡片
+  // 再在它内部找，不然会提前在登录日志表上命中，测不出设备表有没有刷新。
+  const devicesCard = screen.getByText('在线设备').closest('[data-slot="card"]') as HTMLElement
+  await waitFor(() => expect(within(devicesCard).getByText('没有数据')).toBeTruthy())
   expect(sessionsListCallCount(fetchMock)).toBe(2)
 })
 

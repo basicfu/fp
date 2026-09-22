@@ -28,7 +28,10 @@ export default function UserDetail() {
   const [confirmingFreeze, setConfirmingFreeze] = useState(false)
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false)
 
-  if (user.loading) return <p className="text-sm text-muted-foreground">加载中…</p>
+  // 只在真正首次加载（还没有任何数据）时整页显示"加载中…"——冻结/解冻、
+  // 重置密码之后的 user.reload() 也会把 loading 短暂置回 true，这时候
+  // 页面已经有上一次的数据在显示，不该把整页卸载重挂一遍。
+  if (user.loading && !user.data) return <p className="text-sm text-muted-foreground">加载中…</p>
   if (user.error) return <p className="text-sm text-destructive">{user.error}</p>
   if (!user.data) return null
   const u = user.data
@@ -109,25 +112,24 @@ export default function UserDetail() {
           <div className="text-muted-foreground">用户 ID：<span className="font-mono">{u.id}</span></div>
           <div className="text-muted-foreground">注册时间：{formatTime(u.createdAt)}</div>
           <div className="text-muted-foreground">是否设过密码：{u.hasPassword ? '是' : '否'}</div>
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow><TableHead>类型</TableHead><TableHead>标识</TableHead><TableHead>最近登录</TableHead></TableRow>
-              </TableHeader>
-              <TableBody>
-                {u.identities.length === 0 && (
-                  <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">没有已绑定的身份</TableCell></TableRow>
-                )}
-                {u.identities.map((i) => (
-                  <TableRow key={`${i.type}:${i.subject}`}>
-                    <TableCell className="font-mono text-xs">{i.type}</TableCell>
-                    <TableCell className="font-mono text-xs">{i.subject}</TableCell>
-                    <TableCell className="text-muted-foreground">{formatTime(i.lastLoginAt)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+          <Table>
+            <TableHeader>
+              <TableRow><TableHead>序号</TableHead><TableHead>类型</TableHead><TableHead>标识</TableHead><TableHead>最近登录</TableHead></TableRow>
+            </TableHeader>
+            <TableBody>
+              {u.identities.length === 0 && (
+                <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground">没有数据</TableCell></TableRow>
+              )}
+              {u.identities.map((i, idx) => (
+                <TableRow key={`${i.type}:${i.subject}`}>
+                  <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
+                  <TableCell className="font-mono text-xs">{i.type}</TableCell>
+                  <TableCell className="font-mono text-xs">{i.subject}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatTime(i.lastLoginAt)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
 
@@ -148,33 +150,32 @@ export default function UserDetail() {
         </CardHeader>
         <CardContent>
           {sessions.error && <p className="text-sm text-destructive">{sessions.error}</p>}
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>端</TableHead><TableHead>IP</TableHead><TableHead>User-Agent</TableHead>
-                  <TableHead>首次认证</TableHead><TableHead>空闲到期</TableHead><TableHead />
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>序号</TableHead><TableHead>端</TableHead><TableHead>IP</TableHead><TableHead>User-Agent</TableHead>
+                <TableHead>首次认证</TableHead><TableHead>空闲到期</TableHead><TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sessions.data?.length === 0 && (
+                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">没有数据</TableCell></TableRow>
+              )}
+              {sessions.data?.map((s, i) => (
+                <TableRow key={s.id}>
+                  <TableCell className="text-muted-foreground">{i + 1}</TableCell>
+                  <TableCell>{s.mobile ? '移动端' : '桌面端'}</TableCell>
+                  <TableCell className="font-mono text-xs">{s.ip || '-'}</TableCell>
+                  <TableCell className="max-w-xs truncate text-xs text-muted-foreground" title={s.ua}>{s.ua || '-'}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatTime(s.firstAuthAt)}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatTime(s.idleExpiresAt)}</TableCell>
+                  <TableCell>
+                    <Button variant="ghost" size="sm" onClick={() => void revokeOne(s.id)}>下线</Button>
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sessions.data?.length === 0 && (
-                  <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">没有在线设备</TableCell></TableRow>
-                )}
-                {sessions.data?.map((s) => (
-                  <TableRow key={s.id}>
-                    <TableCell>{s.mobile ? '移动端' : '桌面端'}</TableCell>
-                    <TableCell className="font-mono text-xs">{s.ip || '-'}</TableCell>
-                    <TableCell className="max-w-xs truncate text-xs text-muted-foreground" title={s.ua}>{s.ua || '-'}</TableCell>
-                    <TableCell className="text-muted-foreground">{formatTime(s.firstAuthAt)}</TableCell>
-                    <TableCell className="text-muted-foreground">{formatTime(s.idleExpiresAt)}</TableCell>
-                    <TableCell>
-                      <Button variant="ghost" size="sm" onClick={() => void revokeOne(s.id)}>下线</Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+              ))}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
 
@@ -182,37 +183,36 @@ export default function UserDetail() {
         <CardHeader><CardTitle className="text-base">登录日志（最近 50 条）</CardTitle></CardHeader>
         <CardContent>
           {logs.error && <p className="text-sm text-destructive">{logs.error}</p>}
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>时间</TableHead><TableHead>事件</TableHead><TableHead>标识</TableHead>
-                  <TableHead>结果</TableHead><TableHead>IP</TableHead>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>序号</TableHead><TableHead>时间</TableHead><TableHead>事件</TableHead><TableHead>标识</TableHead>
+                <TableHead>结果</TableHead><TableHead>IP</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {logs.data?.length === 0 && (
+                <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">没有数据</TableCell></TableRow>
+              )}
+              {logs.data?.map((l, i) => (
+                <TableRow key={l.id}>
+                  <TableCell className="text-muted-foreground">{i + 1}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatTime(l.createdAt)}</TableCell>
+                  <TableCell className="font-mono text-xs">{l.event}</TableCell>
+                  {/* subject 是后端脱敏过的（service.MaskSubject），这里原样显示 */}
+                  <TableCell className="font-mono text-xs">{l.identityType}:{l.subject}</TableCell>
+                  <TableCell>
+                    {l.success ? (
+                      <Badge variant="default">成功</Badge>
+                    ) : (
+                      <Badge variant="destructive" title={l.reason}>失败</Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{l.ip || '-'}</TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {logs.data?.length === 0 && (
-                  <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">没有登录记录</TableCell></TableRow>
-                )}
-                {logs.data?.map((l) => (
-                  <TableRow key={l.id}>
-                    <TableCell className="text-muted-foreground">{formatTime(l.createdAt)}</TableCell>
-                    <TableCell className="font-mono text-xs">{l.event}</TableCell>
-                    {/* subject 是后端脱敏过的（service.MaskSubject），这里原样显示 */}
-                    <TableCell className="font-mono text-xs">{l.identityType}:{l.subject}</TableCell>
-                    <TableCell>
-                      {l.success ? (
-                        <Badge variant="default">成功</Badge>
-                      ) : (
-                        <Badge variant="destructive" title={l.reason}>失败</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">{l.ip || '-'}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+              ))}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
 

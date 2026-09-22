@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router'
+import { useNavigate } from 'react-router'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -8,12 +8,14 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { LabelHint } from '@/components/ui/label-hint'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
+import { useCurrentApp } from '@/lib/current-app'
 import { formatTime } from '@/lib/format'
 import { toastFormErrors } from '@/lib/formErrors'
 import { GUEST_ROLE_KEY } from '@/lib/roles'
@@ -27,26 +29,33 @@ const NO_PARENT = '__none__'
 // Compiler 判定整个组件不可 memo（oxlint 的 react(incompatible-library)）。
 // 用本地 state 更直白。
 const createSchema = z.object({
-  key: z.string().min(1, '请输入角色标识'),
-  name: z.string().min(1, '请输入显示名'),
+  code: z.string().min(1, '请输入角色 code'),
+  name: z.string().min(1, '请输入角色名'),
 })
 type CreateValues = z.infer<typeof createSchema>
 
 export default function Roles() {
+  const navigate = useNavigate()
   const roles = useResource(() => api.get<Role[]>('/roles'), [])
+  const { reload: reloadApps } = useCurrentApp()
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<Role | null>(null)
   const [deleting, setDeleting] = useState<Role | null>(null)
 
   const list = roles.data ?? []
   // 角色数量是几十级，客户端建映射够用，不值得为它加一个后端接口。
-  const nameOf = new Map(list.map((r) => [r.id, r.key]))
+  const nameOf = new Map(list.map((r) => [r.id, r.code]))
 
   async function remove(role: Role) {
     try {
       await api.del(`/roles/${role.id}`)
-      toast.success(`已删除「${role.key}」`)
+      toast.success(`已删除「${role.code}」`)
       roles.reload()
+      // 删角色时后端会顺带清空把它设成默认角色的应用（见删除确认文案）。
+      // 应用列表用的是 CurrentAppProvider 里全局缓存的一份数据，不会因为
+      // 这里的 roles.reload() 自动更新，不单独 reload 的话，应用列表页会
+      // 继续显示已经被删掉的角色，直到用户刷新整个页面。
+      reloadApps()
     } catch (e) {
       toast.error(errorMessage(e))
     }
@@ -54,75 +63,99 @@ export default function Roles() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">角色</h1>
+      <div>
         <Button onClick={() => setCreating(true)}>新建角色</Button>
       </div>
 
-      <p className="text-sm text-muted-foreground">
-        角色是<strong>全局</strong>的，不属于某个应用——「普通用户」这类角色天然跨应用，
-        在商城能下单、在视频能观看，是同一个身份的两面。应用专属的角色靠命名区分
-        （商城管理员 / 视频管理员）。一个角色属于哪个应用，由它挂了哪些应用的权限点决定。
-      </p>
-
-      {roles.loading && <p className="text-sm text-muted-foreground">加载中…</p>}
+      {/* 只在真正首次加载（还没有任何数据）时显示这行文字——增删改之后的
+          reload() 也会把 loading 短暂置回 true，这时候表格已经有上一次的
+          数据在显示，再插一行"加载中…"只会造成一次没必要的跳动。 */}
+      {roles.loading && !roles.data && <p className="text-sm text-muted-foreground">加载中…</p>}
       {roles.error && <p className="text-sm text-destructive">{roles.error}</p>}
 
       {roles.data && (
-        <div className="overflow-x-auto rounded-md border">
-          <Table>
-            <TableHeader>
+        <Table className="table-fixed">
+          {/* 操作列固定 136px（120px 按钮预留区 + 单元格左右各 8px padding），
+              其余 5 列按百分比分配——跟 Applications 表格是同一套做法。 */}
+          <colgroup>
+            <col className="w-[6%]" />
+            <col className="w-[24%]" />
+            <col className="w-[20%]" />
+            <col className="w-[16%]" />
+            <col className="w-[16%]" />
+            <col className="w-[136px]" />
+          </colgroup>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="p-0 px-2">序号</TableHead>
+              <TableHead className="p-0 px-2">code</TableHead>
+              <TableHead className="p-0 px-2">角色名</TableHead>
+              <TableHead className="p-0 px-2">继承自</TableHead>
+              <TableHead className="p-0 px-2">创建时间</TableHead>
+              <TableHead className="p-0 px-2">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {list.length === 0 && (
               <TableRow>
-                <TableHead>标识</TableHead>
-                <TableHead>显示名</TableHead>
-                <TableHead>继承自</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableCell colSpan={6} className="text-center text-muted-foreground">
+                  没有数据
+                </TableCell>
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {list.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={5} className="text-center text-muted-foreground">
-                    还没有角色
-                  </TableCell>
-                </TableRow>
-              )}
-              {list.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell>
-                    <Link to={`/roles/${r.id}`} className="font-medium underline-offset-4 hover:underline">
-                      {r.key}
-                    </Link>
-                    {r.key === GUEST_ROLE_KEY && (
-                      <Badge variant="secondary" className="ml-2">
-                        内置
-                      </Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">{r.name}</TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {r.parentId ? (nameOf.get(r.parentId) ?? r.parentId) : '-'}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">{formatTime(r.createdAt)}</TableCell>
-                  <TableCell className="space-x-2 text-right">
-                    <Button variant="outline" size="sm" onClick={() => setEditing(r)}>
-                      编辑
-                    </Button>
+            )}
+            {list.map((r, i) => (
+              <TableRow
+                key={r.id}
+                className="h-12 cursor-pointer"
+                onClick={() => navigate(`/roles/${r.id}`)}
+              >
+                <TableCell className="p-0 px-2 text-muted-foreground">{i + 1}</TableCell>
+                <TableCell className="whitespace-normal break-all p-0 px-2">
+                  <span className="font-medium">{r.code}</span>
+                  {r.code === GUEST_ROLE_KEY && (
+                    <Badge variant="secondary" className="ml-2">
+                      内置
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell className="whitespace-normal break-words p-0 px-2 text-muted-foreground">
+                  {r.name}
+                </TableCell>
+                <TableCell className="whitespace-normal break-all p-0 px-2 text-muted-foreground">
+                  {r.parentId ? (nameOf.get(r.parentId) ?? r.parentId) : '-'}
+                </TableCell>
+                <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
+                  {formatTime(r.createdAt)}
+                </TableCell>
+                <TableCell className="p-0 px-2">
+                  <div className="flex w-[120px] gap-2">
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={r.key === GUEST_ROLE_KEY}
-                      onClick={() => setDeleting(r)}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setEditing(r)
+                      }}
+                    >
+                      编辑
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      disabled={r.code === GUEST_ROLE_KEY}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setDeleting(r)
+                      }}
                     >
                       删除
                     </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       )}
 
       <CreateDialog
@@ -154,7 +187,7 @@ export default function Roles() {
         title="删除角色"
         description={
           deleting
-            ? `删除「${deleting.key}」会同时把它从所有持有它的用户身上摘掉，并解除它的全部授权；` +
+            ? `删除「${deleting.code}」会同时把它从所有持有它的用户身上摘掉，并解除它的全部授权；` +
               `如果有应用把它设成了默认角色，那个设置也会被清空。已登录的用户要等会话刷新后才会失去这个角色。此操作不可撤销。` +
               `有访问密钥绑定时无法删除，需要先改绑或删除这些密钥。`
             : ''
@@ -183,7 +216,7 @@ function CreateDialog({
 }) {
   const { register, handleSubmit, formState, reset } = useForm<CreateValues>({
     resolver: zodResolver(createSchema),
-    defaultValues: { key: '', name: '' },
+    defaultValues: { code: '', name: '' },
   })
   const [parentId, setParentId] = useState('')
 
@@ -207,38 +240,38 @@ function CreateDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
-            <Label htmlFor="key">标识</Label>
-            <Input id="key" placeholder="商城管理员" {...register('key')} />
-            <p className="text-xs text-muted-foreground">
-              创建后<strong>不可修改</strong>：用户身上和已签发的会话里都按这个字符串引用它。
-            </p>
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="code">code</Label>
+              <LabelHint>创建后不可修改：用户身上和已签发的会话里都按这个字符串引用它。</LabelHint>
+            </div>
+            <Input id="code" {...register('code')} />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="name">显示名</Label>
-            <Input id="name" placeholder="商城管理员" {...register('name')} />
+            <Label htmlFor="name">角色名</Label>
+            <Input id="name" {...register('name')} />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="parent">继承自</Label>
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="parent">继承自</Label>
+              <LabelHint>子角色自动拥有父角色的全部权限；子角色自己的授权优先于继承来的。</LabelHint>
+            </div>
             <Select
               value={parentId || NO_PARENT}
               onValueChange={(v) => setParentId(v === NO_PARENT || v === null ? '' : v)}
             >
               <SelectTrigger id="parent">
                 {/* 同 RoleDetail：value 是 UUID，拿不到标签时会把它直接显示出来。 */}
-                <SelectValue placeholder="不继承">{roles.find((x) => x.id === parentId)?.key}</SelectValue>
+                <SelectValue placeholder="不继承">{roles.find((x) => x.id === parentId)?.code}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_PARENT}>不继承</SelectItem>
                 {roles.map((r) => (
                   <SelectItem key={r.id} value={r.id}>
-                    {r.key}
+                    {r.code}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            <p className="text-xs text-muted-foreground">
-              子角色自动拥有父角色的全部权限；子角色自己的授权优先于继承来的。
-            </p>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
@@ -290,22 +323,22 @@ function EditDialog({
     <Dialog open onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>编辑「{role.key}」</DialogTitle>
+          <DialogTitle>编辑「{role.code}」</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="space-y-4" noValidate>
           <div className="space-y-2">
-            <Label htmlFor="edit-name">显示名</Label>
+            <Label htmlFor="edit-name">角色名</Label>
             <Input id="edit-name" {...register('name')} />
           </div>
           <div className="space-y-2">
             <Label htmlFor="edit-parent">继承自</Label>
             <Select
               value={parentId || NO_PARENT}
-              disabled={role.key === GUEST_ROLE_KEY}
+              disabled={role.code === GUEST_ROLE_KEY}
               onValueChange={(v) => setParentId(v === NO_PARENT || v === null ? '' : v)}
             >
               <SelectTrigger id="edit-parent">
-                <SelectValue placeholder="不继承">{roles.find((x) => x.id === parentId)?.key}</SelectValue>
+                <SelectValue placeholder="不继承">{roles.find((x) => x.id === parentId)?.code}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_PARENT}>不继承</SelectItem>
@@ -314,18 +347,15 @@ function EditDialog({
                   .filter((r) => r.id !== role.id)
                   .map((r) => (
                     <SelectItem key={r.id} value={r.id}>
-                      {r.key}
+                      {r.code}
                     </SelectItem>
                   ))}
               </SelectContent>
             </Select>
-            {role.key === GUEST_ROLE_KEY && (
+            {role.code === GUEST_ROLE_KEY && (
               <p className="text-xs text-muted-foreground">内置角色 GUEST 不能设置父角色。</p>
             )}
           </div>
-          <p className="text-xs text-muted-foreground">
-            标识 <span className="font-mono">{role.key}</span> 不可修改。
-          </p>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               取消

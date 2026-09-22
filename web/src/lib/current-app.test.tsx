@@ -12,7 +12,7 @@ afterEach(() => {
 const appA: Application = {
   id: 'app-a',
   name: 'A应用',
-  slug: 'a',
+  code: 'a',
   appId: 'appid-a',
   status: 'ACTIVE',
   cookieDomain: '',
@@ -29,7 +29,7 @@ const appA: Application = {
   createdAt: 1,
   updatedAt: 1,
 }
-const appB: Application = { ...appA, id: 'app-b', name: 'B应用', slug: 'b' }
+const appB: Application = { ...appA, id: 'app-b', name: 'B应用', code: 'b' }
 
 function stubFetchSequence(...responses: Response[]) {
   const fn = vi.fn()

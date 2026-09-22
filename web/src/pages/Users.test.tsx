@@ -22,6 +22,28 @@ function stubFetchSequence(...responses: Response[]) {
 }
 
 /**
+ * 专给"新建用户"用的假后端：按 URL/方法分派，不排队——提交建号请求
+ * 之外，列表本身也会因为 URL 带查询串而不好用固定字符串匹配，用
+ * startsWith 兜住。
+ */
+function stubFetch(list: UserListResponse, onWrite?: (url: string, method: string, body: unknown) => unknown) {
+  const fn = vi.fn((url: string, init?: RequestInit) => {
+    const method = init?.method ?? 'GET'
+    if (method === 'GET' && url.startsWith('/admin/api/users')) {
+      return Promise.resolve(new Response(JSON.stringify(list), { status: 200 }))
+    }
+    if (method === 'POST' && url === '/admin/api/users') {
+      const body = JSON.parse(String(init?.body)) as unknown
+      const out = onWrite?.(url, method, body)
+      return Promise.resolve(new Response(JSON.stringify(out ?? {}), { status: 201 }))
+    }
+    return Promise.reject(new Error(`没准备 ${method} ${url}`))
+  })
+  vi.stubGlobal('fetch', fn)
+  return fn
+}
+
+/**
  * 测试专用的"后退"按钮：navigate(-1) 走的是 history.go(-1) 的真实语义。
  *
  * 不能靠重新渲染 <MemoryRouter initialEntries={...}> 来模拟浏览器后退——
@@ -131,4 +153,58 @@ test('提交搜索后输入框仍然持有焦点，不会因为组件重挂而�
   // 而是这个输入框自己没有被换掉。
   expect(document.activeElement).toBe(input)
   expect(document.body.contains(input)).toBe(true)
+})
+
+// 手动建号是管理端唯一的建号入口，字段要跟后端一一对上：手机号、昵称、
+// 可留空的密码。
+test('新建用户：填手机号/昵称/密码，提交后请求体正确、弹窗关闭', async () => {
+  const writes: unknown[] = []
+  stubFetch(emptyList(), (_u, _m, body) => {
+    writes.push(body)
+    return { id: 'u1', nickname: '阿里斯', avatarUrl: '', status: 'ACTIVE', hasPassword: true, identities: [], createdAt: 1 }
+  })
+  renderUsers(['/users'])
+
+  fireEvent.click(await screen.findByRole('button', { name: '新建用户' }))
+  fireEvent.change(await screen.findByLabelText('手机号'), { target: { value: '13800138000' } })
+  fireEvent.change(screen.getByLabelText('昵称'), { target: { value: '阿里斯' } })
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'hunter2hunter2' } })
+  fireEvent.click(screen.getByRole('button', { name: '创建' }))
+
+  await waitFor(() => expect(writes.length).toBe(1))
+  expect(writes[0]).toEqual({ phone: '13800138000', nickname: '阿里斯', password: 'hunter2hunter2' })
+  await waitFor(() => expect(screen.queryByLabelText('手机号')).toBeNull())
+})
+
+// 密码字段可选：留空只建号，不是逼着管理员随手填一个密码。
+test('新建用户：密码留空时请求体里的 password 是空串', async () => {
+  const writes: unknown[] = []
+  stubFetch(emptyList(), (_u, _m, body) => {
+    writes.push(body)
+    return { id: 'u1' }
+  })
+  renderUsers(['/users'])
+
+  fireEvent.click(await screen.findByRole('button', { name: '新建用户' }))
+  fireEvent.change(await screen.findByLabelText('手机号'), { target: { value: '13800138000' } })
+  fireEvent.click(screen.getByRole('button', { name: '创建' }))
+
+  await waitFor(() => expect(writes.length).toBe(1))
+  expect(writes[0]).toEqual({ phone: '13800138000', nickname: '', password: '' })
+})
+
+// 【辨别力】手机号格式不对时前端要先拦下来，不能等后端来拒绝——
+// 一个只做了 required、没做格式校验的实现照样能通过"填了就能提交"，
+// 但会带着一个后端注定拒绝的请求跑一趟网络，还得用户看后端的英文/
+// 代码化错误反推是哪个字段错了。
+test('新建用户：手机号格式不对时前端拦截，不发请求', async () => {
+  const fn = stubFetch(emptyList())
+  renderUsers(['/users'])
+
+  fireEvent.click(await screen.findByRole('button', { name: '新建用户' }))
+  fireEvent.change(await screen.findByLabelText('手机号'), { target: { value: '123' } })
+  fireEvent.click(screen.getByRole('button', { name: '创建' }))
+
+  await waitFor(() => expect(screen.getByLabelText('手机号')).toBeTruthy())
+  expect(fn.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(false)
 })

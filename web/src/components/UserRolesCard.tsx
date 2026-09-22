@@ -23,7 +23,7 @@ export default function UserRolesCard({ userId }: { userId: string }) {
   const [saving, setSaving] = useState(false)
 
   const current = assigned.data?.roles ?? []
-  const available = (all.data ?? []).filter((r) => !current.includes(r.key) && r.key !== GUEST_ROLE_KEY)
+  const available = (all.data ?? []).filter((r) => !current.includes(r.code) && r.code !== GUEST_ROLE_KEY)
   const defaults = (apps.data ?? []).filter((a) => a.defaultRoleKey !== '')
 
   async function save(next: string[]) {
@@ -83,8 +83,8 @@ export default function UserRolesCard({ userId }: { userId: string }) {
             </SelectTrigger>
             <SelectContent>
               {available.map((r) => (
-                <SelectItem key={r.id} value={r.key}>
-                  {r.key}
+                <SelectItem key={r.id} value={r.code}>
+                  {r.code}
                 </SelectItem>
               ))}
             </SelectContent>

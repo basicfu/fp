@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Card, CardContent } from '@/components/ui/card'
+import { LabelHint } from '@/components/ui/label-hint'
 import { api } from '@/lib/api'
 import { errorMessage } from '@/lib/useResource'
 import { toastFormErrors } from '@/lib/formErrors'
@@ -92,12 +93,12 @@ export default function ApplicationIMSettings({ app, onSaved }: { app: Applicati
       <CardContent className="pt-6">
         <form onSubmit={handleSubmit(onSubmit, toastFormErrors)} className="max-w-md space-y-5" noValidate>
           <div className="flex items-center justify-between gap-4">
-            <div className="space-y-1">
+            <div className="flex items-center gap-1.5">
               <Label htmlFor="im-enabled">启用 IM 接入</Label>
-              <p className="text-xs text-muted-foreground">
+              <LabelHint>
                 关着时这个应用连不上 fp-im：业务 server 接不进来，client 握手也会被拒。
-                关闭**不会**断开已在线的连接，只挡新连接。
-              </p>
+                关闭不会断开已在线的连接，只挡新连接。
+              </LabelHint>
             </div>
             <Switch
               id="im-enabled"
@@ -129,9 +130,9 @@ export default function ApplicationIMSettings({ app, onSaved }: { app: Applicati
               )}
 
               <div className="flex items-center justify-between gap-4">
-                <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
                   <Label htmlFor="im-allowGuest">允许访客</Label>
-                  <p className="text-xs text-muted-foreground">访客握手不带 token，只按 IP 限流。</p>
+                  <LabelHint>访客握手不带 token，只按 IP 限流。</LabelHint>
                 </div>
                 <Switch
                   id="im-allowGuest"
@@ -148,11 +149,9 @@ export default function ApplicationIMSettings({ app, onSaved }: { app: Applicati
               )}
 
               <div className="flex items-center justify-between gap-4 border-t pt-4">
-                <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
                   <Label htmlFor="im-bizAuth">业务方令牌</Label>
-                  <p className="text-xs text-muted-foreground">
-                    开启后，client 用 kind:biz 握手时网关会回调你的接口验证。
-                  </p>
+                  <LabelHint>开启后，client 用 kind:biz 握手时网关会回调你的接口验证。</LabelHint>
                 </div>
                 <Switch
                   id="im-bizAuth"
@@ -168,12 +167,14 @@ export default function ApplicationIMSettings({ app, onSaved }: { app: Applicati
                     <Input id="im-verifyUrl" placeholder="http://biz.example.com/verify" {...register('verifyUrl')} />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="im-timeoutMs">回调超时（毫秒）</Label>
+                    <div className="flex items-center gap-1.5">
+                      <Label htmlFor="im-timeoutMs">回调超时（毫秒）</Label>
+                      <LabelHint>
+                        必须明显小于握手的 5 秒上限：配大了 client 会先被握手超时踢掉，
+                        拿到的关闭码方向完全反了。
+                      </LabelHint>
+                    </div>
                     <Input id="im-timeoutMs" type="number" {...register('timeoutMs')} />
-                    <p className="text-xs text-muted-foreground">
-                      必须明显小于握手的 5 秒上限：配大了 client 会先被握手超时踢掉，
-                      拿到的关闭码方向完全反了。
-                    </p>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="im-cacheSize">验证结果缓存容量</Label>

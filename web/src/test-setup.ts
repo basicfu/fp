@@ -37,3 +37,22 @@ if (!window.matchMedia) {
     dispatchEvent: () => false,
   })) as unknown as typeof window.matchMedia
 }
+
+// jsdom 没有实现 ResizeObserver：cmdk（multi-select 组件下拉列表用的搜索
+// 命令面板）挂载时会 new 一个来测量列表高度做滚动/动画。不 mock 的话，
+// 任何渲染到 MultiSelect 下拉的测试一展开就抛
+// "ResizeObserver is not defined"，报错和真正的业务逻辑毫无关系。
+if (!window.ResizeObserver) {
+  window.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
+}
+
+// jsdom 没有实现 Element.scrollIntoView：cmdk 高亮某个选项时会调用它把
+// 那一项滚进可视区域。同样地不 mock 会抛 "scrollIntoView is not a
+// function"，跟业务逻辑无关。
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {}
+}

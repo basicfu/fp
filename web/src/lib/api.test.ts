@@ -74,11 +74,11 @@ test('401 触发未授权回调并且照样抛错', async () => {
 
 test('POST 带 JSON 请求体与 Content-Type', async () => {
   const spy = stubFetch(new Response('{}', { status: 200 }))
-  await api.post('/applications', { name: 'A', slug: 'a' })
+  await api.post('/applications', { name: 'A', code: 'a' })
 
   const init = spy.mock.calls[0][1] as RequestInit
   expect(init.method).toBe('POST')
-  expect(init.body).toBe(JSON.stringify({ name: 'A', slug: 'a' }))
+  expect(init.body).toBe(JSON.stringify({ name: 'A', code: 'a' }))
   expect(new Headers(init.headers).get('Content-Type')).toContain('application/json')
 })
 

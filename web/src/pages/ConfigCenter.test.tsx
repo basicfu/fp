@@ -61,7 +61,7 @@ function stubConfig(initial: Record<string, ConfigSnapshot>, calls: Array<{ meth
 const fixedApp: Application = {
   id: 'app-1',
   name: '固定应用',
-  slug: 'fixed',
+  code: 'fixed',
   appId: 'appid-1',
   status: 'ACTIVE',
   cookieDomain: '',
