@@ -52,14 +52,14 @@ type SMS struct {
 	Aliyun Aliyun `yaml:"aliyun"`
 }
 
-// Aliyun 是阿里云短信供应商的配置（见 cmd/fp/main.go）。
-//
-// 只在生产环境（IsProd）强制要求前四项非空——非生产环境缺任一项时，
-// cmd/fp/main.go 会退化成 notify.NewLoggingFakeProvider 并打一条醒目的
-// WARN——不静默，只是不强制。
+// Aliyun 是阿里云短信供应商的配置（见 cmd/fp/main.go）。不强制必填——
+// 任何环境缺任一项时，cmd/fp/main.go 都会退化成
+// notify.NewLoggingFakeProvider 并打一条醒目的 WARN，不静默、但也不拦住
+// 启动。阿里云短信只是短信这一种通知渠道的其中一个供应商，后续会挪进
+// 统一的通知中心配置，不该由 fp 自己的系统配置在启动时强制卡它。
 //
 // Endpoint 任何环境下都可以留空，notify.NewAliyunSMS 会套用它自己的默认
-// 接入点，不参与必填校验。
+// 接入点。
 type Aliyun struct {
 	AccessKeyID       string `yaml:"access_key_id"`
 	AccessKeySecret   string `yaml:"access_key_secret"`
@@ -99,24 +99,6 @@ func Parse(yamlText string, env string) (*Config, error) {
 	// 空文本解码返回 io.EOF，不是错误——它只是"什么都没覆盖"。
 	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("config: 解析系统配置: %w", err)
-	}
-
-	var missing []string
-	// 阿里云短信凭据只在生产环境强制必填，理由见 Aliyun 上方的注释。
-	if c.IsProd() {
-		for _, kv := range []struct{ path, v string }{
-			{"sms.aliyun.access_key_id", c.SMS.Aliyun.AccessKeyID},
-			{"sms.aliyun.access_key_secret", c.SMS.Aliyun.AccessKeySecret},
-			{"sms.aliyun.sign_name", c.SMS.Aliyun.SignName},
-			{"sms.aliyun.template_login_code", c.SMS.Aliyun.TemplateLoginCode},
-		} {
-			if kv.v == "" {
-				missing = append(missing, kv.path)
-			}
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("config: 系统配置缺少必填项 %s", strings.Join(missing, ", "))
 	}
 	return c, nil
 }

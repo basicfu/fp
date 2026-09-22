@@ -54,9 +54,9 @@ func run() error {
 		return err
 	}
 	// FP_ENV 有默认值（不像上面两个连接串那样缺了就不能启动）：一是决定
-	// SecureCookies/阿里云短信必填这类 prod 专属校验，二是决定日志要不要
-	// 同时落盘（见 logging.Setup），两者都在 Postgres 连上、系统配置读到
-	// 之前就要知道，所以跟连接串一样在最前面读，不等系统配置。
+	// SecureCookies 这类 prod 专属校验，二是决定日志要不要同时落盘（见
+	// logging.Setup），两者都在 Postgres 连上、系统配置读到之前就要知道，
+	// 所以跟连接串一样在最前面读，不等系统配置。
 	env := config.EnvOr("FP_ENV", "DEV")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -129,18 +129,16 @@ func run() error {
 
 	configSvc := service.NewConfigService(pool, configPub)
 
-	// 短信供应商：四项阿里云凭据齐全就用真实供应商——不管是不是生产环境，
-	// 有人就是想在本机联调真实短信通道。凭据不全时：
-	//   - 生产环境：config.Parse 已经把这四项收进必填校验，走不到这里；
-	//     留着下面这个分支纯属防御性代码。
-	//   - 非生产环境：退化成 notify.NewLoggingFakeProvider（验证码只进内存，
-	//     不会真的发短信，但发送成功后会以 WARN 级别把整条消息——含验证码
-	//     ——打进日志）并打一条 WARN。
+	// 短信供应商：四项阿里云凭据齐全就用真实供应商，不管是不是生产环境。
+	// 凭据不全时一律（含生产环境）退化成 notify.NewLoggingFakeProvider
+	// （验证码只进内存，不会真的发短信，但发送成功后会以 WARN 级别把
+	// 整条消息——含验证码——打进日志）并打一条 WARN，不拦住启动——阿里云
+	// 只是短信这一种通知渠道的其中一个供应商，不该由 fp 自己在启动时
+	// 强制卡它，后续会挪进统一的通知中心配置。
 	smsSender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
 	aliyunConfigured := cfg.SMS.Aliyun.AccessKeyID != "" && cfg.SMS.Aliyun.AccessKeySecret != "" &&
 		cfg.SMS.Aliyun.SignName != "" && cfg.SMS.Aliyun.TemplateLoginCode != ""
-	switch {
-	case aliyunConfigured:
+	if aliyunConfigured {
 		aliyunSMS, err := notify.NewAliyunSMS(notify.AliyunConfig{
 			AccessKeyID:     cfg.SMS.Aliyun.AccessKeyID,
 			AccessKeySecret: cfg.SMS.Aliyun.AccessKeySecret,
@@ -154,11 +152,7 @@ func run() error {
 			return err
 		}
 		smsSender.AddProvider(aliyunSMS)
-	case cfg.IsProd():
-		// 理论上到不了这里：config.Parse 已经保证生产环境下 aliyunConfigured
-		// 必为 true。留作防御性兜底。
-		return errors.New("生产环境缺少阿里云短信凭据")
-	default:
+	} else {
 		log.Warn("阿里云短信未配置，短信通道使用内存假供应商——验证码不会真的发送，" +
 			"仅限本地开发/测试使用；发送成功的验证码会以 WARN 级别打进本进程日志")
 		smsSender.AddProvider(notify.NewLoggingFakeProvider(notify.ChannelSMS, "fake"))

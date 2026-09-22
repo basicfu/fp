@@ -133,28 +133,19 @@ func TestIsProd(t *testing.T) {
 	}
 }
 
-func TestParseMissingAliyunRequiredInProd(t *testing.T) {
-	_, err := Parse(`
-sms:
-  aliyun:
-    access_key_secret: sk
-    sign_name: 签名
-    template_login_code: SMS_0001
-`, "prod")
-	if err == nil {
-		t.Fatal("生产环境缺 sms.aliyun.access_key_id 必须报错")
-	}
-	if !strings.Contains(err.Error(), "sms.aliyun.access_key_id") {
-		t.Errorf("错误信息 %q 里应当出现 sms.aliyun.access_key_id", err)
-	}
-}
-
-func TestParseAllowsMissingAliyunOutsideProd(t *testing.T) {
-	cfg, err := Parse("", "dev")
-	if err != nil {
-		t.Fatalf("Parse() error = %v，非生产环境阿里云凭据允许留空", err)
-	}
-	if cfg.SMS.Aliyun.AccessKeyID != "" {
-		t.Errorf("SMS.Aliyun.AccessKeyID = %q, want empty", cfg.SMS.Aliyun.AccessKeyID)
+// TestParseAllowsMissingAliyunInAnyEnv 钉住阿里云短信凭据在任何环境
+// （包括 prod）都允许留空——不该由 fp 自己的系统配置在启动时强制卡它，
+// 阿里云只是短信这一种通知渠道的其中一个供应商，后续会挪进统一的通知
+// 中心配置。真正装配假供应商并打 WARN 的逻辑在 cmd/fp/main.go 里，这里
+// 只钉住 Parse 不替它做这个决定。
+func TestParseAllowsMissingAliyunInAnyEnv(t *testing.T) {
+	for _, env := range []string{"dev", "prod", "PROD"} {
+		cfg, err := Parse("", env)
+		if err != nil {
+			t.Fatalf("Parse(env=%q) error = %v，任何环境阿里云凭据都允许留空", env, err)
+		}
+		if cfg.SMS.Aliyun.AccessKeyID != "" {
+			t.Errorf("env=%q: SMS.Aliyun.AccessKeyID = %q, want empty", env, cfg.SMS.Aliyun.AccessKeyID)
+		}
 	}
 }
