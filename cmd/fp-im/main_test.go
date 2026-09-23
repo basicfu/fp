@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -170,6 +172,29 @@ func startTestNode(t *testing.T, cfg *config.Config, apps staticApps) (nodeID, w
 	}
 	t.Cleanup(stop)
 	return nodeID, "ws://" + a.http + "/ws", "grpc://" + a.grpc, stop
+}
+
+// TestHealth 钉住 /health 是纯文本 "ok"，不是 JSON——给探活探针用的，
+// 语义与 internal/httpapi 里 fp 的同名接口完全一致，见那边的 TestHealth。
+func TestHealth(t *testing.T) {
+	_, wsURL, _, _ := startTestNode(t, testConfig(t), guestApps())
+	httpAddr := strings.TrimSuffix(strings.TrimPrefix(wsURL, "ws://"), "/ws")
+
+	resp, err := http.Get("http://" + httpAddr + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want %q", body, "ok")
+	}
 }
 
 // TestServeDeliversFirstConnectEventAfterStartup 是甲一的验收测试：

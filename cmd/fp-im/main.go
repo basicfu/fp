@@ -225,6 +225,14 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 		Cfg: wsapi.Config{AuthTimeout: cfg.Conn.AuthTimeout.Std(), IdleTimeout: cfg.Conn.IdleTimeout.Std(), SendQueue: cfg.Conn.SendQueue, TrustProxy: cfg.HTTP.TrustProxy},
 	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	// /health 与 internal/httpapi 里 fp 的同名接口语义一致：给探活探针
+	// （LB、k8s 之类）用的纯文本 "ok"，不是 JSON——探针一般只认状态码和
+	// 字面量，不解析 JSON。/healthz 是已有的接口，两者并存，谁也不替代谁。
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	httpSrv := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
 	grpcSrv := imgrpc.New(imgrpc.Deps{Hub: h, Creds: credSrc})
 	// HTTP 与 gRPC 都先显式 net.Listen 再 Serve，而不是用
