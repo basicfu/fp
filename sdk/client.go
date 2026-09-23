@@ -10,7 +10,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
@@ -228,8 +227,14 @@ func New(opts Options) (*Client, error) {
 	}
 	opts.applyDefaults()
 
+	addr, tlsConfig, err := resolveAddr(opts.Addr, opts.TLS)
+	if err != nil {
+		return nil, err
+	}
+	opts.Addr, opts.TLS = addr, tlsConfig
+
 	conn, err := grpc.NewClient(opts.Addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(transportCredentials(opts.TLS)),
 		grpc.WithPerRPCCredentials(newAppCredentials(opts)),
 
 		// keepalive 是"连接永不空闲"的第二道保险（第一道是 Watch 长流本身）。

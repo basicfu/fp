@@ -2,6 +2,7 @@ package fpim
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"sync"
@@ -549,5 +550,73 @@ func TestServerDropsUnknownEventKind(t *testing.T) {
 	defer mu.Unlock()
 	if len(events) != 1 || events[0].Kind != EventConnected || events[0].ConnID != "c-ok" {
 		t.Fatalf("未知类型的事件必须被丢弃而不是当成断开回调出去（网关侧同款决定见 hub.toResponse），实际收到 %+v", events)
+	}
+}
+
+// TestTransportCredentialsNilMeansPlaintext 钉住 ServerConfig.TLS 零值
+// （nil）时走明文——兼容既有调用方，加了新字段不能让老代码的连接方式
+// 变了。语义与 fpsdk 包里的同名测试一致。
+func TestTransportCredentialsNilMeansPlaintext(t *testing.T) {
+	creds := transportCredentials(nil)
+	if creds.Info().SecurityProtocol != "insecure" {
+		t.Fatalf("SecurityProtocol = %q, want %q", creds.Info().SecurityProtocol, "insecure")
+	}
+}
+
+// TestTransportCredentialsNonNilMeansTLS 钉住 ServerConfig.TLS 非 nil 时
+// 走 TLS——不校验、不改写调用方给的 *tls.Config，原样交给
+// credentials.NewTLS。
+func TestTransportCredentialsNonNilMeansTLS(t *testing.T) {
+	creds := transportCredentials(&tls.Config{ServerName: "fp-im.example.com"})
+	if creds.Info().SecurityProtocol != "tls" {
+		t.Fatalf("SecurityProtocol = %q, want %q", creds.Info().SecurityProtocol, "tls")
+	}
+}
+
+// TestResolveAddrBareHostPortUnchanged 钉住兼容性核心：没有 "://" 的裸
+// 地址原样透传，tlsConfig 也原样透传。语义与 fpsdk 包里的同名测试一致。
+func TestResolveAddrBareHostPortUnchanged(t *testing.T) {
+	addr, tlsConfig, err := resolveAddr("fp-im.internal:9090", nil)
+	if err != nil {
+		t.Fatalf("resolveAddr() error = %v", err)
+	}
+	if addr != "fp-im.internal:9090" {
+		t.Errorf("addr = %q，期望原样透传", addr)
+	}
+	if tlsConfig != nil {
+		t.Errorf("tlsConfig = %v，期望仍是 nil", tlsConfig)
+	}
+}
+
+// TestResolveAddrHTTPSDefaultsTLSConfig 钉住 https:// 且没显式给
+// tlsConfig 时，自动补一个默认的 &tls.Config{}。
+func TestResolveAddrHTTPSDefaultsTLSConfig(t *testing.T) {
+	addr, tlsConfig, err := resolveAddr("https://fp-im.xxzj.com:443", nil)
+	if err != nil {
+		t.Fatalf("resolveAddr() error = %v", err)
+	}
+	if addr != "fp-im.xxzj.com:443" {
+		t.Errorf("addr = %q，期望 scheme 被剥掉只剩 host:port", addr)
+	}
+	if tlsConfig == nil {
+		t.Fatal("tlsConfig 不该是 nil——https:// 必须走 TLS")
+	}
+}
+
+// TestResolveAddrHTTPWithTLSConfigIsContradiction 钉住 http:// 却又显式
+// 给了 tlsConfig 这种自相矛盾的输入必须报错。
+func TestResolveAddrHTTPWithTLSConfigIsContradiction(t *testing.T) {
+	_, _, err := resolveAddr("http://fp-im.internal:9090", &tls.Config{})
+	if err == nil {
+		t.Fatal("http:// 又带 tlsConfig 是自相矛盾的输入，必须报错")
+	}
+}
+
+// TestResolveAddrRejectsUnknownScheme 钉住除了 http/https 之外的 scheme
+// 一律报错，不静默当成明文处理。
+func TestResolveAddrRejectsUnknownScheme(t *testing.T) {
+	_, _, err := resolveAddr("dns:///fp-im.internal:9090", nil)
+	if err == nil {
+		t.Fatal("不认识的 scheme 必须报错")
 	}
 }

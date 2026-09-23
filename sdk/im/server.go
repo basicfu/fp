@@ -2,9 +2,13 @@ package fpim
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +16,7 @@ import (
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
@@ -43,8 +48,16 @@ var (
 // ServerConfig 是 Server 的全部配置。用普通结构体按值传入，不用函数式
 // 选项——与 sdk/options.go 的 Options 是同样的先例。
 type ServerConfig struct {
-	// Addr 是 fp-im 的 gRPC 地址，形如 "fp-im.internal:9090"。
+	// Addr 是 fp-im 的 gRPC 地址，支持裸 "host:port"（明文/TLS 由下面的
+	// TLS 字段决定）和带 scheme 的 "https://host:port" / "http://host:port"
+	// 两种写法，语义与 sdk/options.go 的 Options.Addr 完全一致，见那边的
+	// 注释——两个包不互相 import，这段转换逻辑各自维护一份
+	// （resolveAddr）。
 	Addr string
+	// TLS 为 nil 时明文连接（零值，兼容原有调用方，行为不变）；非 nil 时
+	// 用这份配置建 TLS 连接，原样交给 grpc-go，不做任何校验或改写——
+	// 语义与 sdk/options.go 的 Options.TLS 完全一致，见那边的注释。
+	TLS *tls.Config
 	// AppID / AppSecret 是应用凭据，与身份平台（fpsdk）用同一对——业务方
 	// 配一份凭据就能同时连身份平台和 fp-im 网关，metadata 键也完全相同
 	// （fp-app-id / fp-app-secret）。
@@ -153,9 +166,53 @@ func (c appCreds) GetRequestMetadata(context.Context, ...string) (map[string]str
 	return map[string]string{"fp-app-id": c.id, "fp-app-secret": c.secret}, nil
 }
 
-// RequireTransportSecurity 实现 credentials.PerRPCCredentials。业务层连接
-// 一律明文，TLS 终结交给部署时的反代（如 nginx）。
+// RequireTransportSecurity 实现 credentials.PerRPCCredentials。恒为
+// false——明文和 TLS 两种传输都允许带这份凭据，由调用方通过
+// ServerConfig.TLS 决定实际走哪种，语义与 fpsdk.appCredentials 的同名
+// 方法一致，见那边的注释。
 func (c appCreds) RequireTransportSecurity() bool { return false }
+
+// transportCredentials 按 tlsConfig 是否为 nil 选传输层：nil 用明文，
+// 非 nil 用 TLS，原样把 tlsConfig 交给 credentials.NewTLS，不做任何
+// 校验或改写——调用方给什么就用什么。与 fpsdk 包里的同名函数逻辑相同，
+// 没有共用实现：两个包不互相 import，三行代码各写一份比引入依赖划算。
+func transportCredentials(tlsConfig *tls.Config) credentials.TransportCredentials {
+	if tlsConfig == nil {
+		return insecure.NewCredentials()
+	}
+	return credentials.NewTLS(tlsConfig)
+}
+
+// resolveAddr 语义与 fpsdk.resolveAddr 完全一致（裸 host:port 原样透传；
+// https:// 走 TLS、TLS 为 nil 时补默认 &tls.Config{}；http:// 时 TLS 非
+// nil 视为矛盾，报错），详细理由见那边的注释——两个包不互相 import，
+// 这段转换逻辑各自维护一份。
+func resolveAddr(addr string, tlsConfig *tls.Config) (string, *tls.Config, error) {
+	if !strings.Contains(addr, "://") {
+		return addr, tlsConfig, nil
+	}
+	u, err := url.Parse(addr)
+	if err != nil {
+		return "", nil, fmt.Errorf("fpim: 解析 ServerConfig.Addr %q: %w", addr, err)
+	}
+	switch u.Scheme {
+	case "https":
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{}
+		}
+		return u.Host, tlsConfig, nil
+	case "http":
+		if tlsConfig != nil {
+			return "", nil, fmt.Errorf(
+				"fpim: ServerConfig.Addr 是 http:// 但同时设置了 ServerConfig.TLS，两者矛盾——去掉其中一个")
+		}
+		return u.Host, nil, nil
+	default:
+		return "", nil, fmt.Errorf(
+			"fpim: ServerConfig.Addr 的 scheme %q 不认识，只支持 http:// 或 https://（也可以不写 scheme，直接用 host:port）",
+			u.Scheme)
+	}
+}
 
 // Server 是业务 server 接入 fp-im 网关的入口：发推送、踢人、查会话，
 // 并通过 OnMessage/OnEvent 接收 client 发上来的消息与连接事件。
@@ -240,8 +297,14 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	cfg.applyDefaults()
 
+	addr, tlsConfig, err := resolveAddr(cfg.Addr, cfg.TLS)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Addr, cfg.TLS = addr, tlsConfig
+
 	conn, err := grpc.NewClient(cfg.Addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(transportCredentials(cfg.TLS)),
 		grpc.WithPerRPCCredentials(appCreds{id: cfg.AppID, secret: cfg.AppSecret}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                KeepaliveTime,
