@@ -272,7 +272,7 @@ func (e *phase2Env) restartFp(t *testing.T) {
 func (e *phase2Env) dial(t *testing.T, opts ...func(*fpsdk.Options)) *fpsdk.Client {
 	t.Helper()
 	o := fpsdk.Options{
-		Addr:      e.addr,
+		Addr:      "grpc://" + e.addr,
 		AppID:     e.appID,
 		AppSecret: e.appSecret,
 	}

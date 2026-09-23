@@ -20,7 +20,7 @@ import (
 
 func main() {
 	srv, err := fpim.NewServer(fpim.ServerConfig{
-		Addr:      envOr("FP_IM_ADDR", "localhost:9091"),
+		Addr:      envOr("FP_IM_ADDR", "grpc://localhost:9091"),
 		AppID:     os.Getenv("FP_APP_ID"),
 		AppSecret: os.Getenv("FP_APP_SECRET"),
 	})

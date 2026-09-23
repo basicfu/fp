@@ -27,7 +27,7 @@ import fpsdk "github.com/basicfu/fp/sdk"
 
 ```go
 client, err := fpsdk.New(fpsdk.Options{
-    Addr:      "fp.internal:9090",
+    Addr:      "grpc://fp.internal:9090", // 走 TLS 用 grpcs://，默认端口 443
     AppID:     os.Getenv("FP_APP_ID"),
     AppSecret: os.Getenv("FP_APP_SECRET"),
 })
@@ -77,7 +77,7 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 
 | 字段 | 说明 | 默认值 |
 |---|---|---|
-| `Addr` | fp 的 gRPC 地址，如 `"fp.internal:9090"` | 必填 |
+| `Addr` | fp 的 gRPC 地址，必须带 scheme：`"grpc://host[:port]"`（明文，默认 80 端口）或 `"grpcs://host[:port]"`（TLS，默认 443 端口） | 必填 |
 | `AppID` / `AppSecret` | 应用凭据，来自 fp 控制台创建应用 | 必填 |
 | `CallerType` | **业务方不要用**，见下方说明 | `""` |
 | `ValidateTimeout` | 单次校验回源的超时 | 2 秒 |
@@ -376,7 +376,7 @@ fp。所以接入前必须先在 fp 控制台的「应用 → IM 设置」里打
 
 ```go
 srv, err := fpim.NewServer(fpim.ServerConfig{
-    Addr: "fp-im.internal:9090", AppID: appID, AppSecret: appSecret,
+    Addr: "grpc://fp-im.internal:9090", AppID: appID, AppSecret: appSecret,
 })
 defer srv.Close()
 

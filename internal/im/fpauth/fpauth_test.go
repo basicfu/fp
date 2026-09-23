@@ -18,7 +18,7 @@ import (
 func newTestAuthenticator(t *testing.T, cfg Config) *Authenticator {
 	t.Helper()
 	if cfg.FPAddr == "" {
-		cfg.FPAddr = "127.0.0.1:1"
+		cfg.FPAddr = "grpc://127.0.0.1:1"
 	}
 	if cfg.Secret == "" {
 		cfg.Secret = "im-secret"

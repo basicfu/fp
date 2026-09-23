@@ -197,7 +197,7 @@ func newStubEnv(t *testing.T, validate func(*fpv1.ValidateTokenRequest) (*fpv1.V
 	addr, stop := startStub(t, "", stub)
 
 	opts := Options{
-		Addr:      addr,
+		Addr:      "grpc://" + addr,
 		AppID:     "t",
 		AppSecret: "t",
 	}
@@ -323,7 +323,7 @@ func TestStreamHealthyOnlyAfterReady(t *testing.T) {
 	addr, stop := startStub(t, "", gated)
 	t.Cleanup(stop)
 
-	client, err := New(Options{Addr: addr, AppID: "t", AppSecret: "t"})
+	client, err := New(Options{Addr: "grpc://" + addr, AppID: "t", AppSecret: "t"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestWatchBackoffResetsAfterReady(t *testing.T) {
 	addr, stopRejecter := startStub(t, "", rejecter)
 	t.Cleanup(func() { stopRejecter() })
 
-	client, err := New(Options{Addr: addr, AppID: "t", AppSecret: "t"})
+	client, err := New(Options{Addr: "grpc://" + addr, AppID: "t", AppSecret: "t"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestWatchBackoffDoesNotResetForShortLivedConnection(t *testing.T) {
 	addr, stopRejecter := startStub(t, "", rejecter)
 	t.Cleanup(func() { stopRejecter() })
 
-	client, err := New(Options{Addr: addr, AppID: "t", AppSecret: "t"})
+	client, err := New(Options{Addr: "grpc://" + addr, AppID: "t", AppSecret: "t"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

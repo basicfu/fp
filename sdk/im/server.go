@@ -48,11 +48,10 @@ var (
 // ServerConfig 是 Server 的全部配置。用普通结构体按值传入，不用函数式
 // 选项——与 sdk/options.go 的 Options 是同样的先例。
 type ServerConfig struct {
-	// Addr 是 fp-im 的 gRPC 地址，支持裸 "host:port"（明文/TLS 由下面的
-	// TLS 字段决定）和带 scheme 的 "https://host:port" / "http://host:port"
-	// 两种写法，语义与 sdk/options.go 的 Options.Addr 完全一致，见那边的
-	// 注释——两个包不互相 import，这段转换逻辑各自维护一份
-	// （resolveAddr）。
+	// Addr 是 fp-im 的 gRPC 地址，必须带 scheme，只认 "grpc://"（明文，
+	// 默认 80 端口）和 "grpcs://"（TLS，默认 443 端口），语义与
+	// sdk/options.go 的 Options.Addr 完全一致，见那边的注释——两个包
+	// 不互相 import，这段转换逻辑各自维护一份（resolveAddr）。
 	Addr string
 	// TLS 为 nil 时明文连接（零值，兼容原有调用方，行为不变）；非 nil 时
 	// 用这份配置建 TLS 连接，原样交给 grpc-go，不做任何校验或改写——
@@ -183,35 +182,41 @@ func transportCredentials(tlsConfig *tls.Config) credentials.TransportCredential
 	return credentials.NewTLS(tlsConfig)
 }
 
-// resolveAddr 语义与 fpsdk.resolveAddr 完全一致（裸 host:port 原样透传；
-// https:// 走 TLS、TLS 为 nil 时补默认 &tls.Config{}；http:// 时 TLS 非
-// nil 视为矛盾，报错），详细理由见那边的注释——两个包不互相 import，
-// 这段转换逻辑各自维护一份。
+// resolveAddr 语义与 fpsdk.resolveAddr 完全一致（必须带 scheme，只认
+// grpc://=明文/默认 80 端口、grpcs://=TLS/默认 443 端口），详细理由见
+// 那边的注释——两个包不互相 import，这段转换逻辑各自维护一份。
 func resolveAddr(addr string, tlsConfig *tls.Config) (string, *tls.Config, error) {
-	if !strings.Contains(addr, "://") {
-		return addr, tlsConfig, nil
-	}
 	u, err := url.Parse(addr)
-	if err != nil {
-		return "", nil, fmt.Errorf("fpim: 解析 ServerConfig.Addr %q: %w", addr, err)
+	if err != nil || !strings.Contains(addr, "://") {
+		return "", nil, fmt.Errorf(
+			"fpim: ServerConfig.Addr %q 必须带 scheme，只支持 grpc://host[:port]（明文）或 grpcs://host[:port]（TLS）",
+			addr)
 	}
 	switch u.Scheme {
-	case "https":
+	case "grpcs":
 		if tlsConfig == nil {
 			tlsConfig = &tls.Config{}
 		}
-		return u.Host, tlsConfig, nil
-	case "http":
+		return hostWithDefaultPort(u, "443"), tlsConfig, nil
+	case "grpc":
 		if tlsConfig != nil {
 			return "", nil, fmt.Errorf(
-				"fpim: ServerConfig.Addr 是 http:// 但同时设置了 ServerConfig.TLS，两者矛盾——去掉其中一个")
+				"fpim: ServerConfig.Addr 是 grpc:// 但同时设置了 ServerConfig.TLS，两者矛盾——去掉其中一个")
 		}
-		return u.Host, nil, nil
+		return hostWithDefaultPort(u, "80"), nil, nil
 	default:
 		return "", nil, fmt.Errorf(
-			"fpim: ServerConfig.Addr 的 scheme %q 不认识，只支持 http:// 或 https://（也可以不写 scheme，直接用 host:port）",
+			"fpim: ServerConfig.Addr 的 scheme %q 不认识，只支持 grpc://（明文）或 grpcs://（TLS）",
 			u.Scheme)
 	}
+}
+
+// hostWithDefaultPort 返回 u 的 "host:port"，u 没写端口时补 defaultPort。
+func hostWithDefaultPort(u *url.URL, defaultPort string) string {
+	if u.Port() != "" {
+		return u.Host
+	}
+	return u.Hostname() + ":" + defaultPort
 }
 
 // Server 是业务 server 接入 fp-im 网关的入口：发推送、踢人、查会话，

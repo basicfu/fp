@@ -37,17 +37,18 @@
 
 | 变量 | 说明 |
 |---|---|
-| `FP_ADDR` | fp 的 gRPC 地址，如 `127.0.0.1:9090` |
+| `FP_ADDR` | fp 的 gRPC 地址，必须带 scheme，如 `grpc://127.0.0.1:9090`（明文）或 `grpcs://fp.xxzj.com`（TLS，默认端口 443） |
 | `FP_APP_ID` / `FP_APP_SECRET` | 应用凭据，来自下面手工验收第 1 步 |
 
 `FP_APP_ID` / `FP_APP_SECRET` 是凭据，和 PG/Redis 密码一样只能进
 git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
 `. scripts/env.sh` 从 `.env.local` 载入这两个变量再起 demo（`scripts/run.sh`
 不再走这条路——fp 自己的配置已经全在 `config.yaml` 里）；`FP_ADDR` 在
-`scripts/demo.sh` 里给了本地开发的默认值（`127.0.0.1:9090`），不用额外配置。
+`scripts/demo.sh` 里给了本地开发的默认值（`grpc://127.0.0.1:9090`），不用
+额外配置。
 
-SDK 与 fp 之间一律走明文 gRPC，生产环境的 TLS 终结交给部署时前面的反代
-（如 nginx），业务层不处理证书。
+SDK 走明文还是 TLS 由 `FP_ADDR` 的 scheme 决定：`grpc://` 明文、`grpcs://`
+TLS，两者都是 fpsdk 原生支持，不需要额外配置项。
 
 ## 手工验收四步
 
@@ -130,7 +131,7 @@ FP_APP_SECRET=<appSecret>
 ./scripts/demo.sh
 ```
 
-**该看到**：`demo 监听 :8090，fp 地址 127.0.0.1:9090`。
+**该看到**：`demo 监听 :8090，fp 地址 grpc://127.0.0.1:9090`。
 
 发验证码：
 

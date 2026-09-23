@@ -94,7 +94,7 @@ func testConfig(t *testing.T) *config.Config {
 		// 访客握手不会走到 Authenticator，这个地址永远不会被真的拨号；
 		// 但 fpauth.New 要求两项都非空，所以给一个必然不通的地址，万一哪天
 		// 真的被拨了，失败会立刻暴露而不是悄悄连上别的东西。
-		FPSDK: config.FPSDK{Addr: "127.0.0.1:1", Secret: "im-secret"},
+		FPSDK: config.FPSDK{Addr: "grpc://127.0.0.1:1", Secret: "im-secret"},
 		// 心跳 200ms（而不是生产的 3 秒）：测试里要等的传播延迟就是心跳周期
 		// 本身，取生产值只会把每条测试拖慢十几倍。
 		Node: config.Node{
@@ -169,7 +169,7 @@ func startTestNode(t *testing.T, cfg *config.Config, apps staticApps) (nodeID, w
 		})
 	}
 	t.Cleanup(stop)
-	return nodeID, "ws://" + a.http + "/ws", a.grpc, stop
+	return nodeID, "ws://" + a.http + "/ws", "grpc://" + a.grpc, stop
 }
 
 // TestServeDeliversFirstConnectEventAfterStartup 是甲一的验收测试：

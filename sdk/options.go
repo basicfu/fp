@@ -19,20 +19,20 @@ import (
 // 本任务只定义连接层与缓存层用得到的字段；降级相关的选项由 Task 10
 // 随其读取方一起加入，避免出现"字段存在但没人读"的悬空配置。
 type Options struct {
-	// Addr 是 fp 的 gRPC 地址，支持两种写法：
-	//   - 裸 "host:port"（比如 "fp.internal:9090"）：明文还是 TLS 完全由
-	//     下面的 TLS 字段决定，这是兼容原有全部调用方的形态，一个字节都
-	//     不用变（fp-im 连 fp、examples 下的示例都是这么写的）。
-	//   - 带 scheme 的 "https://host:port" / "http://host:port"：图省事
-	//     用一条地址同时表达"连哪儿"和"要不要加密"，不用维护两个独立
-	//     配置项。scheme 只在这里被解析、剥掉，最终传给 grpc-go 拨号的
-	//     还是纯粹的 "host:port"——gRPC 自己的 target 语法里没有
-	//     http/https 这两个 scheme，这层转换是 fpsdk 替调用方做的，不是
-	//     grpc-go 原生认识的写法。
+	// Addr 是 fp 的 gRPC 地址，必须带 scheme，只认 "grpc://"（明文）和
+	// "grpcs://"（TLS）两种——不接受裸 "host:port"，也不接受 http/https，
+	// 强制写清楚"连哪儿"和"要不要加密"，不留"看代码才知道走没走 TLS"的
+	// 模糊地带。
 	//
-	// 两种写法与 TLS 字段的优先级见 New() 内部 resolveAddr 的注释：
-	// https:// 时 TLS 为 nil 会自动补一个默认的 &tls.Config{}；http:// 时
-	// 若 TLS 非 nil 视为自相矛盾，直接报错，不猜哪个是真实意图。
+	//   - "grpc://host"、"grpc://host:port"：明文。不写端口时默认 80；
+	//     若同时设置了 TLS 字段，视为自相矛盾，直接报错。
+	//   - "grpcs://host"、"grpcs://host:port"：TLS。不写端口时默认 443；
+	//     TLS 字段为 nil 时补一个默认的 &tls.Config{}（走系统根证书池），
+	//     非 nil 时原样用调用方给的那份（比如自定义 RootCAs/ServerName）。
+	//
+	// scheme 只在这里被解析、剥掉，最终传给 grpc-go 拨号的是纯粹的
+	// "host:port"——grpc/grpcs 是 fpsdk 自己定义的一层封装，不是 grpc-go
+	// 原生认识的 target scheme。
 	Addr string
 	// TLS 为 nil 时明文连接（零值，兼容原有的全部调用方，行为不变）；
 	// 非 nil 时用这份配置建 TLS 连接（credentials.NewTLS(o.TLS)），原样
@@ -229,43 +229,46 @@ func transportCredentials(tlsConfig *tls.Config) credentials.TransportCredential
 // TLS 配置，返回值分别是"传给 grpc.NewClient 的纯 host:port"和"最终
 // 生效的 *tls.Config"。
 //
-// addr 没有 "://" 时原样返回、tlsConfig 也原样返回——这是兼容既有调用方
-// 的关键，New() 对这一支的行为必须跟加这个函数之前逐字节一致。
-//
-// 带 scheme 时：
-//   - "https://host:port"：一定走 TLS。tlsConfig 为 nil 时补一个默认的
-//     &tls.Config{}（用系统根证书池验证）；tlsConfig 非 nil 时原样用它
-//     （比如调用方要自定义 RootCAs/ServerName），两者不矛盾，非 nil 的
-//     那份配置说了算。
-//   - "http://host:port"：一定走明文。这时 tlsConfig 非 nil 说明调用方
-//     一边用 http:// 表达"要明文"、一边又传了 TLS 配置表达"要加密"，
-//     自相矛盾——直接报错，不猜哪个是真实意图，参见本文件其余地方
-//     "不静默、错误要在最早能发现的地方暴露"这条一贯的原则。
-//   - 其余 scheme（grpc://、dns:// 这些 gRPC 自己的 target scheme，
-//     含义跟这里完全不同）一律报错，不静默当成明文处理。
+// Addr 必须带 scheme，只认 "grpc://"（明文）和 "grpcs://"（TLS）：
+//   - "grpc://host[:port]"：一定走明文，不写端口时默认 80。tlsConfig
+//     非 nil 说明调用方一边用 grpc:// 表达"要明文"、一边又传了 TLS 配置
+//     表达"要加密"，自相矛盾——直接报错，不猜哪个是真实意图。
+//   - "grpcs://host[:port]"：一定走 TLS，不写端口时默认 443。tlsConfig
+//     为 nil 时补一个默认的 &tls.Config{}（用系统根证书池验证）；非 nil
+//     时原样用它（比如调用方要自定义 RootCAs/ServerName）。
+//   - 没有 scheme、或 scheme 不是这两个之一（包括 http://、https://、
+//     裸 host:port）一律报错，不猜、不兼容旧写法——地址到底走不走 TLS
+//     必须一眼看出来，不能靠翻代码里的 TLS 字段才知道。
 func resolveAddr(addr string, tlsConfig *tls.Config) (string, *tls.Config, error) {
-	if !strings.Contains(addr, "://") {
-		return addr, tlsConfig, nil
-	}
 	u, err := url.Parse(addr)
-	if err != nil {
-		return "", nil, fmt.Errorf("fpsdk: 解析 Options.Addr %q: %w", addr, err)
+	if err != nil || !strings.Contains(addr, "://") {
+		return "", nil, fmt.Errorf(
+			"fpsdk: Options.Addr %q 必须带 scheme，只支持 grpc://host[:port]（明文）或 grpcs://host[:port]（TLS）",
+			addr)
 	}
 	switch u.Scheme {
-	case "https":
+	case "grpcs":
 		if tlsConfig == nil {
 			tlsConfig = &tls.Config{}
 		}
-		return u.Host, tlsConfig, nil
-	case "http":
+		return hostWithDefaultPort(u, "443"), tlsConfig, nil
+	case "grpc":
 		if tlsConfig != nil {
 			return "", nil, fmt.Errorf(
-				"fpsdk: Options.Addr 是 http:// 但同时设置了 Options.TLS，两者矛盾——去掉其中一个")
+				"fpsdk: Options.Addr 是 grpc:// 但同时设置了 Options.TLS，两者矛盾——去掉其中一个")
 		}
-		return u.Host, nil, nil
+		return hostWithDefaultPort(u, "80"), nil, nil
 	default:
 		return "", nil, fmt.Errorf(
-			"fpsdk: Options.Addr 的 scheme %q 不认识，只支持 http:// 或 https://（也可以不写 scheme，直接用 host:port）",
+			"fpsdk: Options.Addr 的 scheme %q 不认识，只支持 grpc://（明文）或 grpcs://（TLS）",
 			u.Scheme)
 	}
+}
+
+// hostWithDefaultPort 返回 u 的 "host:port"，u 没写端口时补 defaultPort。
+func hostWithDefaultPort(u *url.URL, defaultPort string) string {
+	if u.Port() != "" {
+		return u.Host
+	}
+	return u.Hostname() + ":" + defaultPort
 }

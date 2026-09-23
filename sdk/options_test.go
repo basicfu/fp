@@ -66,27 +66,30 @@ func TestTransportCredentialsNonNilMeansTLS(t *testing.T) {
 	}
 }
 
-// TestResolveAddrBareHostPortUnchanged 钉住兼容性的核心：没有 "://" 的
-// 裸地址原样透传，tlsConfig 也原样透传——这是加了 scheme 解析之后，既有
-// 调用方（不带 scheme）行为一个字节都不能变的保证。
-func TestResolveAddrBareHostPortUnchanged(t *testing.T) {
-	addr, tlsConfig, err := resolveAddr("fp.internal:9090", nil)
-	if err != nil {
-		t.Fatalf("resolveAddr() error = %v", err)
-	}
-	if addr != "fp.internal:9090" {
-		t.Errorf("addr = %q，期望原样透传", addr)
-	}
-	if tlsConfig != nil {
-		t.Errorf("tlsConfig = %v，期望仍是 nil", tlsConfig)
+// TestResolveAddrRejectsBareHostPort 钉住裸 "host:port"（不带 scheme）
+// 必须报错——地址到底走不走 TLS 必须一眼看出来，不允许靠 TLS 字段悄悄
+// 决定，也就不再兼容旧的裸地址写法。
+func TestResolveAddrRejectsBareHostPort(t *testing.T) {
+	_, _, err := resolveAddr("fp.internal:9090", nil)
+	if err == nil {
+		t.Fatal("裸 host:port（不带 scheme）必须报错")
 	}
 }
 
-// TestResolveAddrHTTPSDefaultsTLSConfig 钉住 https:// 且没显式给
+// TestResolveAddrRejectsHTTPScheme 钉住 http/https 不再是合法 scheme——
+// 只认 grpc/grpcs。
+func TestResolveAddrRejectsHTTPScheme(t *testing.T) {
+	_, _, err := resolveAddr("https://fp.xxzj.com:443", nil)
+	if err == nil {
+		t.Fatal("https:// 不是合法 scheme，必须报错")
+	}
+}
+
+// TestResolveAddrGRPCSDefaultsTLSConfig 钉住 grpcs:// 且没显式给
 // tlsConfig 时，自动补一个默认的 &tls.Config{}，而不是继续 nil（那样会
 // 变回明文，跟 scheme 说的自相矛盾）。
-func TestResolveAddrHTTPSDefaultsTLSConfig(t *testing.T) {
-	addr, tlsConfig, err := resolveAddr("https://fp.xxzj.com:443", nil)
+func TestResolveAddrGRPCSDefaultsTLSConfig(t *testing.T) {
+	addr, tlsConfig, err := resolveAddr("grpcs://fp.xxzj.com:443", nil)
 	if err != nil {
 		t.Fatalf("resolveAddr() error = %v", err)
 	}
@@ -94,15 +97,15 @@ func TestResolveAddrHTTPSDefaultsTLSConfig(t *testing.T) {
 		t.Errorf("addr = %q，期望 scheme 被剥掉只剩 host:port", addr)
 	}
 	if tlsConfig == nil {
-		t.Fatal("tlsConfig 不该是 nil——https:// 必须走 TLS")
+		t.Fatal("tlsConfig 不该是 nil——grpcs:// 必须走 TLS")
 	}
 }
 
-// TestResolveAddrHTTPSKeepsExplicitTLSConfig 钉住 https:// 且调用方已经
+// TestResolveAddrGRPCSKeepsExplicitTLSConfig 钉住 grpcs:// 且调用方已经
 // 显式给了 tlsConfig 时，用调用方给的那份，不被默认值覆盖掉。
-func TestResolveAddrHTTPSKeepsExplicitTLSConfig(t *testing.T) {
+func TestResolveAddrGRPCSKeepsExplicitTLSConfig(t *testing.T) {
 	given := &tls.Config{ServerName: "custom.example.com"}
-	_, tlsConfig, err := resolveAddr("https://fp.xxzj.com:443", given)
+	_, tlsConfig, err := resolveAddr("grpcs://fp.xxzj.com:443", given)
 	if err != nil {
 		t.Fatalf("resolveAddr() error = %v", err)
 	}
@@ -111,10 +114,21 @@ func TestResolveAddrHTTPSKeepsExplicitTLSConfig(t *testing.T) {
 	}
 }
 
-// TestResolveAddrHTTPStripsScheme 钉住 http:// 且没有 tlsConfig 时走明文，
+// TestResolveAddrGRPCSDefaultPort443 钉住 grpcs:// 不写端口时默认 443。
+func TestResolveAddrGRPCSDefaultPort443(t *testing.T) {
+	addr, _, err := resolveAddr("grpcs://fp.xxzj.com", nil)
+	if err != nil {
+		t.Fatalf("resolveAddr() error = %v", err)
+	}
+	if addr != "fp.xxzj.com:443" {
+		t.Errorf("addr = %q，期望默认补 443 端口", addr)
+	}
+}
+
+// TestResolveAddrGRPCStripsScheme 钉住 grpc:// 且没有 tlsConfig 时走明文，
 // 且 scheme 被剥掉。
-func TestResolveAddrHTTPStripsScheme(t *testing.T) {
-	addr, tlsConfig, err := resolveAddr("http://fp.internal:9090", nil)
+func TestResolveAddrGRPCStripsScheme(t *testing.T) {
+	addr, tlsConfig, err := resolveAddr("grpc://fp.internal:9090", nil)
 	if err != nil {
 		t.Fatalf("resolveAddr() error = %v", err)
 	}
@@ -126,16 +140,27 @@ func TestResolveAddrHTTPStripsScheme(t *testing.T) {
 	}
 }
 
-// TestResolveAddrHTTPWithTLSConfigIsContradiction 钉住 http:// 却又显式
-// 给了 tlsConfig 这种自相矛盾的输入必须报错，不能悄悄选其中一个。
-func TestResolveAddrHTTPWithTLSConfigIsContradiction(t *testing.T) {
-	_, _, err := resolveAddr("http://fp.internal:9090", &tls.Config{})
-	if err == nil {
-		t.Fatal("http:// 又带 tlsConfig 是自相矛盾的输入，必须报错")
+// TestResolveAddrGRPCDefaultPort80 钉住 grpc:// 不写端口时默认 80。
+func TestResolveAddrGRPCDefaultPort80(t *testing.T) {
+	addr, _, err := resolveAddr("grpc://fp.internal", nil)
+	if err != nil {
+		t.Fatalf("resolveAddr() error = %v", err)
+	}
+	if addr != "fp.internal:80" {
+		t.Errorf("addr = %q，期望默认补 80 端口", addr)
 	}
 }
 
-// TestResolveAddrRejectsUnknownScheme 钉住除了 http/https 之外的 scheme
+// TestResolveAddrGRPCWithTLSConfigIsContradiction 钉住 grpc:// 却又显式
+// 给了 tlsConfig 这种自相矛盾的输入必须报错，不能悄悄选其中一个。
+func TestResolveAddrGRPCWithTLSConfigIsContradiction(t *testing.T) {
+	_, _, err := resolveAddr("grpc://fp.internal:9090", &tls.Config{})
+	if err == nil {
+		t.Fatal("grpc:// 又带 tlsConfig 是自相矛盾的输入，必须报错")
+	}
+}
+
+// TestResolveAddrRejectsUnknownScheme 钉住除了 grpc/grpcs 之外的 scheme
 // （比如 gRPC 自己的 dns://、unix:// 这些 target scheme，含义完全不同）
 // 一律报错，不静默当成明文处理。
 func TestResolveAddrRejectsUnknownScheme(t *testing.T) {

@@ -3,7 +3,7 @@
 // 最小用法：
 //
 //	client, err := fpsdk.New(fpsdk.Options{
-//	    Addr:      "fp.internal:9090",
+//	    Addr:      "grpc://fp.internal:9090", // 走 TLS 用 grpcs://，默认端口 443
 //	    AppID:     os.Getenv("FP_APP_ID"),
 //	    AppSecret: os.Getenv("FP_APP_SECRET"),
 //	})

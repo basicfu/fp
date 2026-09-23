@@ -69,10 +69,11 @@ FP_IM_HTTP_ADDR=:8082 FP_IM_GRPC_ADDR=:9092 ./scripts/run-im.sh   # 终端 B
 
 ## 第 4 步：起 im-demo，连第二个节点
 
-SDK 与 fp-im 之间一律走明文 gRPC，不需要额外配置证书。
+SDK 走明文还是 TLS 由 `FP_IM_ADDR` 的 scheme 决定：`grpc://` 明文、
+`grpcs://` TLS，不写 scheme 会直接报错。
 
 ```bash
-FP_APP_ID=<application.appId> FP_APP_SECRET=<appSecret> FP_IM_ADDR=localhost:9092 \
+FP_APP_ID=<application.appId> FP_APP_SECRET=<appSecret> FP_IM_ADDR=grpc://localhost:9092 \
   go run ./examples/im-demo
 ```
 

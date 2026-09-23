@@ -145,7 +145,7 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 		live:     live,
 		hub:      h,
 		wsURL:    "ws://" + wsLis.Addr().String() + "/",
-		grpcAddr: grpcLis.Addr().String(),
+		grpcAddr: "grpc://" + grpcLis.Addr().String(),
 	}
 }
 

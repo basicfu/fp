@@ -158,7 +158,7 @@ fp-im 是配套的 WebSocket 连接网关。**一个应用在有人明确打开�
 回来。把它填进每个 fp-im 实例的环境变量：
 
 ```bash
-export FP_IM_FPSDK_ADDR=fp.internal:9090
+export FP_IM_FPSDK_ADDR=grpc://fp.internal:9090   # 走 TLS 用 grpcs://，默认端口 443
 export FP_IM_FPSDK_SECRET=<这里>
 ```
 

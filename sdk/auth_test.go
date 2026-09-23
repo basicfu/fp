@@ -464,7 +464,7 @@ func newStubEnvFull(t *testing.T, stub *stubServer, opt ...func(*Options)) *stub
 	addr, stop := startStub(t, "", stub)
 
 	opts := Options{
-		Addr:      addr,
+		Addr:      "grpc://" + addr,
 		AppID:     "t",
 		AppSecret: "t",
 	}

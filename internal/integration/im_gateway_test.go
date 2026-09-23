@@ -20,7 +20,7 @@ func newIMClient(t *testing.T, e *phase2Env) *fpsdk.Client {
 		t.Fatalf("生成 IM 凭据: %v", err)
 	}
 	c, err := fpsdk.New(fpsdk.Options{
-		Addr:       e.addr,
+		Addr:       "grpc://" + e.addr,
 		AppSecret:  secret,
 		CallerType: fpsdk.CallerTypeIM,
 	})

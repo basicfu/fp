@@ -29,7 +29,7 @@ func startIMAgainstFP(t *testing.T, e *phase2Env) *imNode {
 	var node *imNode
 	var apps *fpappcfg.Source
 	authn, err := fpauth.New(fpauth.Config{
-		FPAddr: e.addr, Secret: secret,
+		FPAddr: "grpc://" + e.addr, Secret: secret,
 		OnRevoke: func(app string, tokens []string) {
 			node.hub.OnRevoked(context.Background(), app, tokens)
 		},

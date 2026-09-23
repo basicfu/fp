@@ -13,5 +13,5 @@ cd "$ROOT"
 
 # FP_APP_ID / FP_APP_SECRET 没有默认值——它们是凭据，只能来自 .env.local，
 # 缺了就该让 fpsdk.New 报出清楚的错误，而不是在这里悄悄放行。
-export FP_ADDR="${FP_ADDR:-127.0.0.1:9090}"
+export FP_ADDR="${FP_ADDR:-grpc://127.0.0.1:9090}"
 go run ./examples/demo

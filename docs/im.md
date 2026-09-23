@@ -9,7 +9,7 @@ fp-im 是无队列的 WebSocket 连接网关：只管"谁在线、递一条消�
 
 ```bash
 export FP_IM_REDIS_URL=redis://:password@127.0.0.1:6379/0
-export FP_IM_FPSDK_ADDR=fp.internal:9090   # fp 的 gRPC 地址，不是 HTTP
+export FP_IM_FPSDK_ADDR=grpc://fp.internal:9090   # fp 的 gRPC 地址，不是 HTTP；走 TLS 用 grpcs://（默认端口 443）
 export FP_IM_FPSDK_SECRET=<在 fp 控制台生成，见下面>
 ./scripts/run-im.sh
 ```
