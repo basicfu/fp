@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-IMAGE=registry.cn-shanghai.aliyuncs.com/shwlkj/fp-im
-CMD_DIR=./cmd/fp-im
+IMAGE=registry.cn-shanghai.aliyuncs.com/shwlkj/fpim
+CMD_DIR=./cmd/fpim
 
 echo "==> 编译 $CMD_DIR"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o bootstrap-upx "$CMD_DIR"
