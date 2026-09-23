@@ -8,7 +8,7 @@ import (
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/model"
 	"github.com/basicfu/fp/internal/im/rendezvous"
-	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
+	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 )
 
 // Deliver 把 client 的消息或连接事件送到 server。

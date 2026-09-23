@@ -17,7 +17,7 @@ import (
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/model"
 	"github.com/basicfu/fp/internal/im/registry"
-	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
+	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 )
 
 // Conn 是 hub.Conn 的假实现。

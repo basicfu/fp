@@ -3,14 +3,14 @@ package fpsdk
 import (
 	"testing"
 
-	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
+	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // TestImServiceSurface 钉住 ImService 的形状：只有一条双向流。
 // 有人加一元 RPC 时这里会红，逼他先想清楚为什么不走这条流。
 func TestImServiceSurface(t *testing.T) {
-	svc := fpimv1.File_fp_im_v1_im_proto.Services().ByName("ImService")
+	svc := fpimv1.File_fpim_v1_im_proto.Services().ByName("ImService")
 	if svc == nil {
 		t.Fatal("proto 里找不到 ImService")
 	}

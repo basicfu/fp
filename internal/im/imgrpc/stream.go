@@ -6,7 +6,7 @@ import (
 
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/model"
-	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
+	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 )
 
 // sender 给 gRPC 流加锁：gRPC 不允许并发 Send，而 hub 会从多个协程往同一条流写

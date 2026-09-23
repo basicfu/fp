@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/basicfu/fp/internal/im/hub"
-	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
+	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )

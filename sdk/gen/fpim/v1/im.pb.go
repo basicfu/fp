@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        (unknown)
-// source: fp/im/v1/im.proto
+// source: fpim/v1/im.proto
 
 package fpimv1
 
@@ -59,11 +59,11 @@ func (x PushStatus) String() string {
 }
 
 func (PushStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_fp_im_v1_im_proto_enumTypes[0].Descriptor()
+	return file_fpim_v1_im_proto_enumTypes[0].Descriptor()
 }
 
 func (PushStatus) Type() protoreflect.EnumType {
-	return &file_fp_im_v1_im_proto_enumTypes[0]
+	return &file_fpim_v1_im_proto_enumTypes[0]
 }
 
 func (x PushStatus) Number() protoreflect.EnumNumber {
@@ -72,7 +72,7 @@ func (x PushStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PushStatus.Descriptor instead.
 func (PushStatus) EnumDescriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{0}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{0}
 }
 
 type EventKind int32
@@ -108,11 +108,11 @@ func (x EventKind) String() string {
 }
 
 func (EventKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_fp_im_v1_im_proto_enumTypes[1].Descriptor()
+	return file_fpim_v1_im_proto_enumTypes[1].Descriptor()
 }
 
 func (EventKind) Type() protoreflect.EnumType {
-	return &file_fp_im_v1_im_proto_enumTypes[1]
+	return &file_fpim_v1_im_proto_enumTypes[1]
 }
 
 func (x EventKind) Number() protoreflect.EnumNumber {
@@ -121,7 +121,7 @@ func (x EventKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EventKind.Descriptor instead.
 func (EventKind) EnumDescriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{1}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{1}
 }
 
 // ConnectRequest 是 server 发给 im 的一帧。req_id 由 SDK 生成，
@@ -142,7 +142,7 @@ type ConnectRequest struct {
 
 func (x *ConnectRequest) Reset() {
 	*x = ConnectRequest{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[0]
+	mi := &file_fpim_v1_im_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -154,7 +154,7 @@ func (x *ConnectRequest) String() string {
 func (*ConnectRequest) ProtoMessage() {}
 
 func (x *ConnectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[0]
+	mi := &file_fpim_v1_im_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -167,7 +167,7 @@ func (x *ConnectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectRequest.ProtoReflect.Descriptor instead.
 func (*ConnectRequest) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{0}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *ConnectRequest) GetReqId() string {
@@ -265,7 +265,7 @@ type ConnectResponse struct {
 
 func (x *ConnectResponse) Reset() {
 	*x = ConnectResponse{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[1]
+	mi := &file_fpim_v1_im_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -277,7 +277,7 @@ func (x *ConnectResponse) String() string {
 func (*ConnectResponse) ProtoMessage() {}
 
 func (x *ConnectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[1]
+	mi := &file_fpim_v1_im_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -290,7 +290,7 @@ func (x *ConnectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectResponse.ProtoReflect.Descriptor instead.
 func (*ConnectResponse) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{1}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ConnectResponse) GetBody() isConnectResponse_Body {
@@ -374,7 +374,7 @@ type Ready struct {
 
 func (x *Ready) Reset() {
 	*x = Ready{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[2]
+	mi := &file_fpim_v1_im_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -386,7 +386,7 @@ func (x *Ready) String() string {
 func (*Ready) ProtoMessage() {}
 
 func (x *Ready) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[2]
+	mi := &file_fpim_v1_im_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -399,7 +399,7 @@ func (x *Ready) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ready.ProtoReflect.Descriptor instead.
 func (*Ready) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{2}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Ready) GetNodeId() string {
@@ -419,7 +419,7 @@ type PushRequest struct {
 
 func (x *PushRequest) Reset() {
 	*x = PushRequest{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[3]
+	mi := &file_fpim_v1_im_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -431,7 +431,7 @@ func (x *PushRequest) String() string {
 func (*PushRequest) ProtoMessage() {}
 
 func (x *PushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[3]
+	mi := &file_fpim_v1_im_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -444,7 +444,7 @@ func (x *PushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushRequest.ProtoReflect.Descriptor instead.
 func (*PushRequest) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{3}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *PushRequest) GetSubject() string {
@@ -471,7 +471,7 @@ type PushManyRequest struct {
 
 func (x *PushManyRequest) Reset() {
 	*x = PushManyRequest{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[4]
+	mi := &file_fpim_v1_im_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -483,7 +483,7 @@ func (x *PushManyRequest) String() string {
 func (*PushManyRequest) ProtoMessage() {}
 
 func (x *PushManyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[4]
+	mi := &file_fpim_v1_im_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -496,7 +496,7 @@ func (x *PushManyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushManyRequest.ProtoReflect.Descriptor instead.
 func (*PushManyRequest) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{4}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PushManyRequest) GetSubjects() []string {
@@ -524,7 +524,7 @@ type KickRequest struct {
 
 func (x *KickRequest) Reset() {
 	*x = KickRequest{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[5]
+	mi := &file_fpim_v1_im_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -536,7 +536,7 @@ func (x *KickRequest) String() string {
 func (*KickRequest) ProtoMessage() {}
 
 func (x *KickRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[5]
+	mi := &file_fpim_v1_im_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -549,7 +549,7 @@ func (x *KickRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KickRequest.ProtoReflect.Descriptor instead.
 func (*KickRequest) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{5}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *KickRequest) GetSubject() string {
@@ -575,7 +575,7 @@ type SessionsRequest struct {
 
 func (x *SessionsRequest) Reset() {
 	*x = SessionsRequest{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[6]
+	mi := &file_fpim_v1_im_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -587,7 +587,7 @@ func (x *SessionsRequest) String() string {
 func (*SessionsRequest) ProtoMessage() {}
 
 func (x *SessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[6]
+	mi := &file_fpim_v1_im_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -600,7 +600,7 @@ func (x *SessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionsRequest.ProtoReflect.Descriptor instead.
 func (*SessionsRequest) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{6}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SessionsRequest) GetSubject() string {
@@ -613,7 +613,7 @@ func (x *SessionsRequest) GetSubject() string {
 type PushResult struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Subject string                 `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
-	Status  PushStatus             `protobuf:"varint,2,opt,name=status,proto3,enum=fp.im.v1.PushStatus" json:"status,omitempty"`
+	Status  PushStatus             `protobuf:"varint,2,opt,name=status,proto3,enum=fpim.v1.PushStatus" json:"status,omitempty"`
 	// 收到这条消息的节点数，Sent 时 >= 1。
 	Nodes         int32 `protobuf:"varint,3,opt,name=nodes,proto3" json:"nodes,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -622,7 +622,7 @@ type PushResult struct {
 
 func (x *PushResult) Reset() {
 	*x = PushResult{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[7]
+	mi := &file_fpim_v1_im_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -634,7 +634,7 @@ func (x *PushResult) String() string {
 func (*PushResult) ProtoMessage() {}
 
 func (x *PushResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[7]
+	mi := &file_fpim_v1_im_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -647,7 +647,7 @@ func (x *PushResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushResult.ProtoReflect.Descriptor instead.
 func (*PushResult) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{7}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PushResult) GetSubject() string {
@@ -684,7 +684,7 @@ type Session struct {
 
 func (x *Session) Reset() {
 	*x = Session{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[8]
+	mi := &file_fpim_v1_im_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -696,7 +696,7 @@ func (x *Session) String() string {
 func (*Session) ProtoMessage() {}
 
 func (x *Session) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[8]
+	mi := &file_fpim_v1_im_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -709,7 +709,7 @@ func (x *Session) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Session.ProtoReflect.Descriptor instead.
 func (*Session) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{8}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Session) GetConnId() string {
@@ -761,7 +761,7 @@ type Result struct {
 
 func (x *Result) Reset() {
 	*x = Result{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[9]
+	mi := &file_fpim_v1_im_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -773,7 +773,7 @@ func (x *Result) String() string {
 func (*Result) ProtoMessage() {}
 
 func (x *Result) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[9]
+	mi := &file_fpim_v1_im_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -786,7 +786,7 @@ func (x *Result) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Result.ProtoReflect.Descriptor instead.
 func (*Result) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{9}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Result) GetReqId() string {
@@ -829,7 +829,7 @@ type Inbound struct {
 
 func (x *Inbound) Reset() {
 	*x = Inbound{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[10]
+	mi := &file_fpim_v1_im_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -841,7 +841,7 @@ func (x *Inbound) String() string {
 func (*Inbound) ProtoMessage() {}
 
 func (x *Inbound) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[10]
+	mi := &file_fpim_v1_im_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -854,7 +854,7 @@ func (x *Inbound) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inbound.ProtoReflect.Descriptor instead.
 func (*Inbound) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{10}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Inbound) GetSubject() string {
@@ -882,7 +882,7 @@ func (x *Inbound) GetPayload() []byte {
 // reason 只在 Disconnected 里有值：client / timeout / kicked / replaced / revoked / backpressure。
 type Event struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          EventKind              `protobuf:"varint,1,opt,name=kind,proto3,enum=fp.im.v1.EventKind" json:"kind,omitempty"`
+	Kind          EventKind              `protobuf:"varint,1,opt,name=kind,proto3,enum=fpim.v1.EventKind" json:"kind,omitempty"`
 	Subject       string                 `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
 	ConnId        string                 `protobuf:"bytes,3,opt,name=conn_id,json=connId,proto3" json:"conn_id,omitempty"`
 	Os            string                 `protobuf:"bytes,4,opt,name=os,proto3" json:"os,omitempty"`
@@ -896,7 +896,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_fp_im_v1_im_proto_msgTypes[11]
+	mi := &file_fpim_v1_im_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -908,7 +908,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_im_v1_im_proto_msgTypes[11]
+	mi := &file_fpim_v1_im_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -921,7 +921,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_fp_im_v1_im_proto_rawDescGZIP(), []int{11}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Event) GetKind() EventKind {
@@ -980,23 +980,23 @@ func (x *Event) GetAtMs() int64 {
 	return 0
 }
 
-var File_fp_im_v1_im_proto protoreflect.FileDescriptor
+var File_fpim_v1_im_proto protoreflect.FileDescriptor
 
-const file_fp_im_v1_im_proto_rawDesc = "" +
+const file_fpim_v1_im_proto_rawDesc = "" +
 	"\n" +
-	"\x11fp/im/v1/im.proto\x12\bfp.im.v1\"\xfc\x01\n" +
+	"\x10fpim/v1/im.proto\x12\afpim.v1\"\xf8\x01\n" +
 	"\x0eConnectRequest\x12\x15\n" +
-	"\x06req_id\x18\x01 \x01(\tR\x05reqId\x12+\n" +
-	"\x04push\x18\x02 \x01(\v2\x15.fp.im.v1.PushRequestH\x00R\x04push\x128\n" +
-	"\tpush_many\x18\x03 \x01(\v2\x19.fp.im.v1.PushManyRequestH\x00R\bpushMany\x12+\n" +
-	"\x04kick\x18\x04 \x01(\v2\x15.fp.im.v1.KickRequestH\x00R\x04kick\x127\n" +
-	"\bsessions\x18\x05 \x01(\v2\x19.fp.im.v1.SessionsRequestH\x00R\bsessionsB\x06\n" +
-	"\x04body\"\xc6\x01\n" +
-	"\x0fConnectResponse\x12'\n" +
-	"\x05ready\x18\x01 \x01(\v2\x0f.fp.im.v1.ReadyH\x00R\x05ready\x12*\n" +
-	"\x06result\x18\x02 \x01(\v2\x10.fp.im.v1.ResultH\x00R\x06result\x12-\n" +
-	"\ainbound\x18\x03 \x01(\v2\x11.fp.im.v1.InboundH\x00R\ainbound\x12'\n" +
-	"\x05event\x18\x04 \x01(\v2\x0f.fp.im.v1.EventH\x00R\x05eventB\x06\n" +
+	"\x06req_id\x18\x01 \x01(\tR\x05reqId\x12*\n" +
+	"\x04push\x18\x02 \x01(\v2\x14.fpim.v1.PushRequestH\x00R\x04push\x127\n" +
+	"\tpush_many\x18\x03 \x01(\v2\x18.fpim.v1.PushManyRequestH\x00R\bpushMany\x12*\n" +
+	"\x04kick\x18\x04 \x01(\v2\x14.fpim.v1.KickRequestH\x00R\x04kick\x126\n" +
+	"\bsessions\x18\x05 \x01(\v2\x18.fpim.v1.SessionsRequestH\x00R\bsessionsB\x06\n" +
+	"\x04body\"\xc2\x01\n" +
+	"\x0fConnectResponse\x12&\n" +
+	"\x05ready\x18\x01 \x01(\v2\x0e.fpim.v1.ReadyH\x00R\x05ready\x12)\n" +
+	"\x06result\x18\x02 \x01(\v2\x0f.fpim.v1.ResultH\x00R\x06result\x12,\n" +
+	"\ainbound\x18\x03 \x01(\v2\x10.fpim.v1.InboundH\x00R\ainbound\x12&\n" +
+	"\x05event\x18\x04 \x01(\v2\x0e.fpim.v1.EventH\x00R\x05eventB\x06\n" +
 	"\x04body\" \n" +
 	"\x05Ready\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"A\n" +
@@ -1010,29 +1010,29 @@ const file_fp_im_v1_im_proto_rawDesc = "" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x19\n" +
 	"\bconn_ids\x18\x02 \x03(\tR\aconnIds\"+\n" +
 	"\x0fSessionsRequest\x12\x18\n" +
-	"\asubject\x18\x01 \x01(\tR\asubject\"j\n" +
+	"\asubject\x18\x01 \x01(\tR\asubject\"i\n" +
 	"\n" +
 	"PushResult\x12\x18\n" +
-	"\asubject\x18\x01 \x01(\tR\asubject\x12,\n" +
-	"\x06status\x18\x02 \x01(\x0e2\x14.fp.im.v1.PushStatusR\x06status\x12\x14\n" +
+	"\asubject\x18\x01 \x01(\tR\asubject\x12+\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x13.fpim.v1.PushStatusR\x06status\x12\x14\n" +
 	"\x05nodes\x18\x03 \x01(\x05R\x05nodes\"\x8b\x01\n" +
 	"\aSession\x12\x17\n" +
 	"\aconn_id\x18\x01 \x01(\tR\x06connId\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12\x0e\n" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x16\n" +
 	"\x06mobile\x18\x04 \x01(\bR\x06mobile\x12&\n" +
-	"\x0fconnected_at_ms\x18\x05 \x01(\x03R\rconnectedAtMs\"\x92\x01\n" +
+	"\x0fconnected_at_ms\x18\x05 \x01(\x03R\rconnectedAtMs\"\x90\x01\n" +
 	"\x06Result\x12\x15\n" +
 	"\x06req_id\x18\x01 \x01(\tR\x05reqId\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\x12,\n" +
-	"\x06pushes\x18\x03 \x03(\v2\x14.fp.im.v1.PushResultR\x06pushes\x12-\n" +
-	"\bsessions\x18\x04 \x03(\v2\x11.fp.im.v1.SessionR\bsessions\"V\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12+\n" +
+	"\x06pushes\x18\x03 \x03(\v2\x13.fpim.v1.PushResultR\x06pushes\x12,\n" +
+	"\bsessions\x18\x04 \x03(\v2\x10.fpim.v1.SessionR\bsessions\"V\n" +
 	"\aInbound\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x17\n" +
 	"\aconn_id\x18\x02 \x01(\tR\x06connId\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayload\"\xc8\x01\n" +
-	"\x05Event\x12'\n" +
-	"\x04kind\x18\x01 \x01(\x0e2\x13.fp.im.v1.EventKindR\x04kind\x12\x18\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\"\xc7\x01\n" +
+	"\x05Event\x12&\n" +
+	"\x04kind\x18\x01 \x01(\x0e2\x12.fpim.v1.EventKindR\x04kind\x12\x18\n" +
 	"\asubject\x18\x02 \x01(\tR\asubject\x12\x17\n" +
 	"\aconn_id\x18\x03 \x01(\tR\x06connId\x12\x0e\n" +
 	"\x02os\x18\x04 \x01(\tR\x02os\x12\x16\n" +
@@ -1049,55 +1049,55 @@ const file_fp_im_v1_im_proto_rawDesc = "" +
 	"\tEventKind\x12\x1a\n" +
 	"\x16EVENT_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14EVENT_KIND_CONNECTED\x10\x01\x12\x1b\n" +
-	"\x17EVENT_KIND_DISCONNECTED\x10\x022O\n" +
-	"\tImService\x12B\n" +
-	"\aConnect\x12\x18.fp.im.v1.ConnectRequest\x1a\x19.fp.im.v1.ConnectResponse(\x010\x01B/Z-github.com/basicfu/fp/sdk/gen/fp/im/v1;fpimv1b\x06proto3"
+	"\x17EVENT_KIND_DISCONNECTED\x10\x022M\n" +
+	"\tImService\x12@\n" +
+	"\aConnect\x12\x17.fpim.v1.ConnectRequest\x1a\x18.fpim.v1.ConnectResponse(\x010\x01B.Z,github.com/basicfu/fp/sdk/gen/fpim/v1;fpimv1b\x06proto3"
 
 var (
-	file_fp_im_v1_im_proto_rawDescOnce sync.Once
-	file_fp_im_v1_im_proto_rawDescData []byte
+	file_fpim_v1_im_proto_rawDescOnce sync.Once
+	file_fpim_v1_im_proto_rawDescData []byte
 )
 
-func file_fp_im_v1_im_proto_rawDescGZIP() []byte {
-	file_fp_im_v1_im_proto_rawDescOnce.Do(func() {
-		file_fp_im_v1_im_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_fp_im_v1_im_proto_rawDesc), len(file_fp_im_v1_im_proto_rawDesc)))
+func file_fpim_v1_im_proto_rawDescGZIP() []byte {
+	file_fpim_v1_im_proto_rawDescOnce.Do(func() {
+		file_fpim_v1_im_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_fpim_v1_im_proto_rawDesc), len(file_fpim_v1_im_proto_rawDesc)))
 	})
-	return file_fp_im_v1_im_proto_rawDescData
+	return file_fpim_v1_im_proto_rawDescData
 }
 
-var file_fp_im_v1_im_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_fp_im_v1_im_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
-var file_fp_im_v1_im_proto_goTypes = []any{
-	(PushStatus)(0),         // 0: fp.im.v1.PushStatus
-	(EventKind)(0),          // 1: fp.im.v1.EventKind
-	(*ConnectRequest)(nil),  // 2: fp.im.v1.ConnectRequest
-	(*ConnectResponse)(nil), // 3: fp.im.v1.ConnectResponse
-	(*Ready)(nil),           // 4: fp.im.v1.Ready
-	(*PushRequest)(nil),     // 5: fp.im.v1.PushRequest
-	(*PushManyRequest)(nil), // 6: fp.im.v1.PushManyRequest
-	(*KickRequest)(nil),     // 7: fp.im.v1.KickRequest
-	(*SessionsRequest)(nil), // 8: fp.im.v1.SessionsRequest
-	(*PushResult)(nil),      // 9: fp.im.v1.PushResult
-	(*Session)(nil),         // 10: fp.im.v1.Session
-	(*Result)(nil),          // 11: fp.im.v1.Result
-	(*Inbound)(nil),         // 12: fp.im.v1.Inbound
-	(*Event)(nil),           // 13: fp.im.v1.Event
+var file_fpim_v1_im_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_fpim_v1_im_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_fpim_v1_im_proto_goTypes = []any{
+	(PushStatus)(0),         // 0: fpim.v1.PushStatus
+	(EventKind)(0),          // 1: fpim.v1.EventKind
+	(*ConnectRequest)(nil),  // 2: fpim.v1.ConnectRequest
+	(*ConnectResponse)(nil), // 3: fpim.v1.ConnectResponse
+	(*Ready)(nil),           // 4: fpim.v1.Ready
+	(*PushRequest)(nil),     // 5: fpim.v1.PushRequest
+	(*PushManyRequest)(nil), // 6: fpim.v1.PushManyRequest
+	(*KickRequest)(nil),     // 7: fpim.v1.KickRequest
+	(*SessionsRequest)(nil), // 8: fpim.v1.SessionsRequest
+	(*PushResult)(nil),      // 9: fpim.v1.PushResult
+	(*Session)(nil),         // 10: fpim.v1.Session
+	(*Result)(nil),          // 11: fpim.v1.Result
+	(*Inbound)(nil),         // 12: fpim.v1.Inbound
+	(*Event)(nil),           // 13: fpim.v1.Event
 }
-var file_fp_im_v1_im_proto_depIdxs = []int32{
-	5,  // 0: fp.im.v1.ConnectRequest.push:type_name -> fp.im.v1.PushRequest
-	6,  // 1: fp.im.v1.ConnectRequest.push_many:type_name -> fp.im.v1.PushManyRequest
-	7,  // 2: fp.im.v1.ConnectRequest.kick:type_name -> fp.im.v1.KickRequest
-	8,  // 3: fp.im.v1.ConnectRequest.sessions:type_name -> fp.im.v1.SessionsRequest
-	4,  // 4: fp.im.v1.ConnectResponse.ready:type_name -> fp.im.v1.Ready
-	11, // 5: fp.im.v1.ConnectResponse.result:type_name -> fp.im.v1.Result
-	12, // 6: fp.im.v1.ConnectResponse.inbound:type_name -> fp.im.v1.Inbound
-	13, // 7: fp.im.v1.ConnectResponse.event:type_name -> fp.im.v1.Event
-	0,  // 8: fp.im.v1.PushResult.status:type_name -> fp.im.v1.PushStatus
-	9,  // 9: fp.im.v1.Result.pushes:type_name -> fp.im.v1.PushResult
-	10, // 10: fp.im.v1.Result.sessions:type_name -> fp.im.v1.Session
-	1,  // 11: fp.im.v1.Event.kind:type_name -> fp.im.v1.EventKind
-	2,  // 12: fp.im.v1.ImService.Connect:input_type -> fp.im.v1.ConnectRequest
-	3,  // 13: fp.im.v1.ImService.Connect:output_type -> fp.im.v1.ConnectResponse
+var file_fpim_v1_im_proto_depIdxs = []int32{
+	5,  // 0: fpim.v1.ConnectRequest.push:type_name -> fpim.v1.PushRequest
+	6,  // 1: fpim.v1.ConnectRequest.push_many:type_name -> fpim.v1.PushManyRequest
+	7,  // 2: fpim.v1.ConnectRequest.kick:type_name -> fpim.v1.KickRequest
+	8,  // 3: fpim.v1.ConnectRequest.sessions:type_name -> fpim.v1.SessionsRequest
+	4,  // 4: fpim.v1.ConnectResponse.ready:type_name -> fpim.v1.Ready
+	11, // 5: fpim.v1.ConnectResponse.result:type_name -> fpim.v1.Result
+	12, // 6: fpim.v1.ConnectResponse.inbound:type_name -> fpim.v1.Inbound
+	13, // 7: fpim.v1.ConnectResponse.event:type_name -> fpim.v1.Event
+	0,  // 8: fpim.v1.PushResult.status:type_name -> fpim.v1.PushStatus
+	9,  // 9: fpim.v1.Result.pushes:type_name -> fpim.v1.PushResult
+	10, // 10: fpim.v1.Result.sessions:type_name -> fpim.v1.Session
+	1,  // 11: fpim.v1.Event.kind:type_name -> fpim.v1.EventKind
+	2,  // 12: fpim.v1.ImService.Connect:input_type -> fpim.v1.ConnectRequest
+	3,  // 13: fpim.v1.ImService.Connect:output_type -> fpim.v1.ConnectResponse
 	13, // [13:14] is the sub-list for method output_type
 	12, // [12:13] is the sub-list for method input_type
 	12, // [12:12] is the sub-list for extension type_name
@@ -1105,18 +1105,18 @@ var file_fp_im_v1_im_proto_depIdxs = []int32{
 	0,  // [0:12] is the sub-list for field type_name
 }
 
-func init() { file_fp_im_v1_im_proto_init() }
-func file_fp_im_v1_im_proto_init() {
-	if File_fp_im_v1_im_proto != nil {
+func init() { file_fpim_v1_im_proto_init() }
+func file_fpim_v1_im_proto_init() {
+	if File_fpim_v1_im_proto != nil {
 		return
 	}
-	file_fp_im_v1_im_proto_msgTypes[0].OneofWrappers = []any{
+	file_fpim_v1_im_proto_msgTypes[0].OneofWrappers = []any{
 		(*ConnectRequest_Push)(nil),
 		(*ConnectRequest_PushMany)(nil),
 		(*ConnectRequest_Kick)(nil),
 		(*ConnectRequest_Sessions)(nil),
 	}
-	file_fp_im_v1_im_proto_msgTypes[1].OneofWrappers = []any{
+	file_fpim_v1_im_proto_msgTypes[1].OneofWrappers = []any{
 		(*ConnectResponse_Ready)(nil),
 		(*ConnectResponse_Result)(nil),
 		(*ConnectResponse_Inbound)(nil),
@@ -1126,18 +1126,18 @@ func file_fp_im_v1_im_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_im_v1_im_proto_rawDesc), len(file_fp_im_v1_im_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fpim_v1_im_proto_rawDesc), len(file_fpim_v1_im_proto_rawDesc)),
 			NumEnums:      2,
 			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_fp_im_v1_im_proto_goTypes,
-		DependencyIndexes: file_fp_im_v1_im_proto_depIdxs,
-		EnumInfos:         file_fp_im_v1_im_proto_enumTypes,
-		MessageInfos:      file_fp_im_v1_im_proto_msgTypes,
+		GoTypes:           file_fpim_v1_im_proto_goTypes,
+		DependencyIndexes: file_fpim_v1_im_proto_depIdxs,
+		EnumInfos:         file_fpim_v1_im_proto_enumTypes,
+		MessageInfos:      file_fpim_v1_im_proto_msgTypes,
 	}.Build()
-	File_fp_im_v1_im_proto = out.File
-	file_fp_im_v1_im_proto_goTypes = nil
-	file_fp_im_v1_im_proto_depIdxs = nil
+	File_fpim_v1_im_proto = out.File
+	file_fpim_v1_im_proto_goTypes = nil
+	file_fpim_v1_im_proto_depIdxs = nil
 }

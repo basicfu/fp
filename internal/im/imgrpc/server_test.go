@@ -11,7 +11,7 @@ import (
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/hub/hubtest"
 	"github.com/basicfu/fp/internal/im/model"
-	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
+	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

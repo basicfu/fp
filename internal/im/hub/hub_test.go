@@ -9,7 +9,7 @@ import (
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/hub/hubtest"
 	"github.com/basicfu/fp/internal/im/model"
-	fpimv1 "github.com/basicfu/fp/sdk/gen/fp/im/v1"
+	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 )
 
 // orderedStream 让测试精确控制"每一次 Send 调用被尝试的时刻"与"这次调用

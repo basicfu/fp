@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: fp/im/v1/im.proto
+// source: fpim/v1/im.proto
 
 package fpimv1
 
@@ -19,7 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ImService_Connect_FullMethodName = "/fp.im.v1.ImService/Connect"
+	ImService_Connect_FullMethodName = "/fpim.v1.ImService/Connect"
 )
 
 // ImServiceClient is the client API for ImService service.
@@ -114,7 +114,7 @@ type ImService_ConnectServer = grpc.BidiStreamingServer[ConnectRequest, ConnectR
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var ImService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "fp.im.v1.ImService",
+	ServiceName: "fpim.v1.ImService",
 	HandlerType: (*ImServiceServer)(nil),
 	Methods:     []grpc.MethodDesc{},
 	Streams: []grpc.StreamDesc{
@@ -125,5 +125,5 @@ var ImService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "fp/im/v1/im.proto",
+	Metadata: "fpim/v1/im.proto",
 }
