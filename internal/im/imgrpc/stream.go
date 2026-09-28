@@ -70,6 +70,8 @@ func handle(ctx context.Context, h *hub.Hub, app string, req *fpimv1.ConnectRequ
 		for _, s := range list {
 			res.Sessions = append(res.Sessions, &fpimv1.Session{ConnId: s.ConnID, NodeId: s.Node, Os: s.OS, Mobile: s.Mobile, ConnectedAtMs: s.ConnectedAt})
 		}
+	case *fpimv1.ConnectRequest_Ping:
+		// 心跳只要一帧真正穿过代理的应答,空 Result 就够了。
 	default:
 		return fail("未知请求类型")
 	}

@@ -439,12 +439,22 @@ func (s *Server) runLoop(ctx context.Context) {
 // Result，而 Result 又只能靠这同一个循环读到，就会自己把自己锁死——这
 // 正是本文件曾经的实现方式，也是这批修复要消灭的死锁。
 func (s *Server) runOnce(ctx context.Context) (gotReady bool) {
-	stream, err := s.rpc.Connect(ctx)
+	// 每条流一个 ctx:心跳判定流卡死时只掐这一条,重连仍归 runLoop。
+	sctx, cancel := context.WithCancel(ctx)
+	stream, err := s.rpc.Connect(sctx)
 	if err != nil {
+		cancel()
 		s.log.Warn("fpim: 建流失败", "err", err)
 		return false
 	}
-	defer s.dropStream()
+	var hb sync.WaitGroup
+	defer func() {
+		// 先停心跳再清在途请求:反过来的话,它那一问会先被 dropStream 唤醒失败,
+		// 被误判成"没有应答"。
+		cancel()
+		s.dropStream()
+		hb.Wait()
+	}()
 
 	for {
 		resp, err := stream.Recv()
@@ -460,6 +470,13 @@ func (s *Server) runOnce(ctx context.Context) (gotReady bool) {
 			s.stream = stream
 			s.mu.Unlock()
 			s.up.Store(true)
+			if !gotReady {
+				hb.Add(1)
+				go func() {
+					defer hb.Done()
+					s.heartbeat(sctx, cancel)
+				}()
+			}
 			gotReady = true
 			s.log.Info("fpim: 流就绪", "node", b.Ready.GetNodeId())
 		case *fpimv1.ConnectResponse_Result:
@@ -475,6 +492,48 @@ func (s *Server) runOnce(ctx context.Context) (gotReady bool) {
 		case *fpimv1.ConnectResponse_Event:
 			s.enqueue(queuedFrame{ctx: ctx, ev: b.Event})
 		}
+	}
+}
+
+// heartbeatInterval 是流上应用层心跳(PingRequest)的间隔,要明显小于常见 L7 代理的空闲
+// 超时(nginx/APISIX 默认 60s)。是变量只为测试能调短。
+var heartbeatInterval = 25 * time.Second
+
+// heartbeatMisses 是连续多少次心跳没有应答才判定流卡死。一次超时可能只是 fp-im 一时忙,
+// 为它掐流会让在途的 Push 全部失败,得不偿失。
+const heartbeatMisses = 2
+
+// heartbeat 在一条流就绪后定时发 PingRequest,让流上真的有一来一回的数据:gRPC 自带的
+// HTTP/2 PING 由中间代理自己应答,挡不住代理按空闲超时掐流(见 PingRequest 的注释)。
+// 连续 heartbeatMisses 次没有应答,说明这条流在某一跳上已经卡死——到代理的 TCP 还活着,
+// 传输层 keepalive 看不出来——主动掐掉,由 runLoop 重连。
+func (s *Server) heartbeat(ctx context.Context, kill context.CancelFunc) {
+	t := time.NewTicker(heartbeatInterval)
+	defer t.Stop()
+	misses := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		_, err := s.call(ctx, func(id string) *fpimv1.ConnectRequest {
+			return &fpimv1.ConnectRequest{ReqId: id, Body: &fpimv1.ConnectRequest_Ping{Ping: &fpimv1.PingRequest{}}}
+		})
+		// 旧版 fp-im 不认识 Ping,回"未知请求类型"的错误结果:那同样是一次穿过代理的往返,算活着。
+		if err == nil || !errors.Is(err, ErrUnavailable) {
+			misses = 0
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if misses++; misses < heartbeatMisses {
+			continue
+		}
+		s.log.Warn("fpim: 流上心跳连续没有应答,重建流", "misses", misses, "err", err)
+		kill()
+		return
 	}
 }
 

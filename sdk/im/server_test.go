@@ -27,6 +27,15 @@ type stubIm struct {
 	seenMD   metadata.MD
 	swallow  atomic.Bool
 	received atomic.Int64
+	pings    atomic.Int64
+	// oldIm 模拟不认识 PingRequest 的旧版 fp-im:回"未知请求类型"的错误结果。
+	oldIm atomic.Bool
+}
+
+func (s *stubIm) streamCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.streams)
 }
 
 func (s *stubIm) Connect(st fpimv1.ImService_ConnectServer) error {
@@ -44,11 +53,18 @@ func (s *stubIm) Connect(st fpimv1.ImService_ConnectServer) error {
 			return nil
 		}
 		s.received.Add(1)
+		if req.GetPing() != nil {
+			s.pings.Add(1)
+		}
 		if s.swallow.Load() {
 			continue // 故意不回 Result，让这个请求停在"在途"状态
 		}
 		res := &fpimv1.Result{ReqId: req.ReqId}
 		switch b := req.Body.(type) {
+		case *fpimv1.ConnectRequest_Ping:
+			if s.oldIm.Load() {
+				res.Error = "未知请求类型"
+			}
 		case *fpimv1.ConnectRequest_Push:
 			res.Pushes = []*fpimv1.PushResult{{Subject: b.Push.Subject, Status: fpimv1.PushStatus_PUSH_STATUS_SENT, Nodes: 1}}
 		case *fpimv1.ConnectRequest_PushMany:
@@ -646,5 +662,73 @@ func TestResolveAddrRejectsUnknownScheme(t *testing.T) {
 	_, _, err := resolveAddr("dns:///fp-im.internal:9090", nil)
 	if err == nil {
 		t.Fatal("不认识的 scheme 必须报错")
+	}
+}
+
+// shortHeartbeat 把心跳间隔调短到测试可等的量级,测完恢复。
+func shortHeartbeat(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := heartbeatInterval
+	heartbeatInterval = d
+	t.Cleanup(func() { heartbeatInterval = old })
+}
+
+// TestServerHeartbeatSendsPings 钉住流上的应用层心跳:没有业务请求的空闲流上也要按间隔
+// 发 PingRequest。只靠 gRPC 自带的 HTTP/2 PING 时,中间的 nginx/APISIX 自己应答它,流上
+// 没有数据,代理按空闲超时每 60 秒掐一次流(线上 RST_STREAM PROTOCOL_ERROR)。
+func TestServerHeartbeatSendsPings(t *testing.T) {
+	shortHeartbeat(t, 30*time.Millisecond)
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+	waitUntil(t, func() bool { return stub.pings.Load() >= 3 }, "空闲流上应按间隔发心跳")
+	if n := stub.streamCount(); n != 1 {
+		t.Fatalf("心跳有应答时不该重建流,实际建了 %d 条", n)
+	}
+}
+
+// TestServerHeartbeatToleratesOldIm: 旧版 fp-im 不认识 PingRequest,回"未知请求类型"的错误
+// 结果。那同样是一次穿过代理的往返,流是活的,不能据此重建——否则先升 SDK、后升 fp-im 的
+// 部署顺序下,业务 server 会每两个心跳周期断一次流。
+func TestServerHeartbeatToleratesOldIm(t *testing.T) {
+	shortHeartbeat(t, 30*time.Millisecond)
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.oldIm.Store(true)
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+	waitUntil(t, func() bool { return stub.pings.Load() >= 2*heartbeatMisses+1 }, "应持续发心跳")
+	if n := stub.streamCount(); n != 1 {
+		t.Fatalf("旧版 fp-im 回错误结果也算活着,不该重建流,实际建了 %d 条", n)
+	}
+}
+
+// TestServerHeartbeatRebuildsStuckStream: 流上连续几次心跳都石沉大海(到代理的 TCP 还活着,
+// 传输层 keepalive 看不出来),要主动掐掉重建,而不是抱着一条死流让之后的 Push 全部超时。
+func TestServerHeartbeatRebuildsStuckStream(t *testing.T) {
+	shortHeartbeat(t, 30*time.Millisecond)
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", RequestTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+	stub.swallow.Store(true)
+	waitUntil(t, func() bool { return stub.streamCount() >= 2 }, "心跳连续没有应答应重建流")
+	stub.swallow.Store(false)
+	waitUntil(t, s.StreamHealthy, "重建后的流应就绪")
+	if _, err := s.Push(context.Background(), User("1"), []byte(`{"a":1}`)); err != nil {
+		t.Fatalf("重建后的流应能正常推送: %v", err)
 	}
 }

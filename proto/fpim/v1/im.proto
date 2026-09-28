@@ -6,7 +6,7 @@ option go_package = "github.com/basicfu/fp/sdk/gen/fpim/v1;fpimv1";
 
 // ImService 是业务 server 接入 fp-im 的唯一入口。
 //
-// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions），
+// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions / Ping），
 // im→server 发结果、client 上来的消息和连接事件。
 // 不拆成一元 RPC 的原因与 fp.v1.AuthService.Watch 相同：一条永不空闲的流
 // 让所有调用都走热连接，而且 Inbound/Event 本来就只能推。
@@ -23,8 +23,16 @@ message ConnectRequest {
     PushManyRequest push_many = 3;
     KickRequest     kick      = 4;
     SessionsRequest sessions  = 5;
+    PingRequest     ping      = 6;
   }
 }
+
+// PingRequest 是 SDK 在流上的应用层心跳，im 回一个空 Result。
+// gRPC 自带的 keepalive（HTTP/2 PING）只在相邻两跳之间往返，中间隔着 nginx/APISIX
+// 这类 L7 代理时由代理自己应答、不算流上的数据，代理照样按空闲超时把流掐掉
+// （APISIX 默认 client_body_timeout 60s，线上每 60 秒一次 RST_STREAM）；这一帧是
+// 真正穿过代理的请求与应答，与 ws 的 ping/pong 同理。
+message PingRequest {}
 
 // ConnectResponse 是 im 发给 server 的一帧。
 // 用 oneof 是为了将来加新事件时旧 SDK 落到 default 忽略即可。

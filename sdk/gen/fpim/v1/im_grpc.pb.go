@@ -28,7 +28,7 @@ const (
 //
 // ImService 是业务 server 接入 fp-im 的唯一入口。
 //
-// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions），
+// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions / Ping），
 // im→server 发结果、client 上来的消息和连接事件。
 // 不拆成一元 RPC 的原因与 fp.v1.AuthService.Watch 相同：一条永不空闲的流
 // 让所有调用都走热连接，而且 Inbound/Event 本来就只能推。
@@ -63,7 +63,7 @@ type ImService_ConnectClient = grpc.BidiStreamingClient[ConnectRequest, ConnectR
 //
 // ImService 是业务 server 接入 fp-im 的唯一入口。
 //
-// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions），
+// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions / Ping），
 // im→server 发结果、client 上来的消息和连接事件。
 // 不拆成一元 RPC 的原因与 fp.v1.AuthService.Watch 相同：一条永不空闲的流
 // 让所有调用都走热连接，而且 Inbound/Event 本来就只能推。

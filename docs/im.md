@@ -154,6 +154,12 @@ Event 共用同一条容量 256 的队列（单消费者保证同一 subject 的
 再返回，之后不会再有回调被调用。最小接入示例、可以直接照抄的同步写法见
 `examples/im-demo/main.go`。
 
+server SDK 在 `Connect` 流上每 25 秒发一次应用层心跳（`PingRequest`），fp-im 回一个空
+Result。gRPC 自带的 keepalive 是 HTTP/2 PING，中间隔着 nginx/APISIX 时由代理自己应答、
+不算流上的数据，代理照样按空闲超时掐流（APISIX 默认 `client_body_timeout` 60s，表现为业务
+server 每 60 秒一次 `RST_STREAM ... PROTOCOL_ERROR` 断流重连）。连续两次心跳没有应答，SDK
+判定这条流卡死并主动重建。旧版 fp-im 对心跳回"未知请求类型"，SDK 照样当作活着，升级顺序不限。
+
 client：`fpim.Dial` 后 `OnMessage`/`OnClose`/`Send`，握手、心跳（每 25 秒，
 `fpim.PingInterval`）、按上表退避重连全部内部处理。收到 4001/4002/4003 时 SDK 按契约永久停止
 重连——**包括在重连尝试中撞上这三个码**（比如 `reject`/`limit` 策略的应用在节点崩溃窗口里重连

@@ -95,6 +95,31 @@ func TestConnectReadyThenPushAndSessions(t *testing.T) {
 	}
 }
 
+// TestConnectAnswersPing: 心跳要回一帧不带错误的 Result——SDK 靠这一来一回让流上真的有数据,
+// 中间的 L7 代理才不会按空闲超时掐流。
+func TestConnectAnswersPing(t *testing.T) {
+	c, _, _ := newClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := c.Connect(authed(ctx, "a1", "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err := stream.Recv(); err != nil || first.GetReady() == nil {
+		t.Fatalf("第一帧应是 Ready，实际 %+v %v", first, err)
+	}
+	if err := stream.Send(&fpimv1.ConnectRequest{ReqId: "p1", Body: &fpimv1.ConnectRequest_Ping{Ping: &fpimv1.PingRequest{}}}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := resp.GetResult(); r == nil || r.ReqId != "p1" || r.Error != "" {
+		t.Fatalf("ping 应回一个不带错误的 Result{p1}，实际 %+v", resp)
+	}
+}
+
 // TestConnectConcurrentWritesDoNotPanic 验证的是功能正确性和"不崩溃"：路由器
 // 从别的协程（h.AddConn 触发的 Deliver）往流里写 Event 的同时，服务端为每条
 // 收到的请求各自起协程回 Result，响应必须都能按 reqId 配对上，进程不能 panic。
