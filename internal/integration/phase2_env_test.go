@@ -22,7 +22,6 @@ import (
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/grpcapi"
-	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -40,7 +39,6 @@ type phase2Services struct {
 	sessions  *service.SessionService
 	accounts  *service.AccountService
 	auth      *service.AuthService
-	sms       *notify.FakeProvider
 	revokePub *store.RevokePublisher
 	authz     *service.AuthzService
 	// configPub 与 revokePub 同一装配方式：喂给 startServer 里的
@@ -64,7 +62,6 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 
 	users := service.NewUserService(pool)
 	logs := service.NewLoginLogService(pool)
-	codes := notify.NewCodeService(rdb)
 
 	epochs := store.NewEpochStore(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
@@ -75,31 +72,22 @@ func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Ser
 	if err := registry.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
 	}
-	if err := registry.Register(connector.NewSMSCode(codes)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
-	}
 	apps := service.NewApplicationService(pool, registry, service.WithIMConfigPublisher(configPub))
 	imCreds := service.NewIMCredentialService(pool)
-
-	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	// []RateRule{} 是显式关闭频率限制，仅用于测试——生产装配千万别照抄，
-	// 理由与 env_test.go（phase1）newEnv 里的同一行注释一致。
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), []notify.RateRule{})
-	sender.AddProvider(sms)
 
 	accounts := service.NewAccountService(users, sessions, epochs, logs)
 	authz := service.NewAuthzService(pool, service.WithAuthzPublisher(revokePub))
 	accessKeys := service.NewAccessKeyService(pool, revokePub)
 	auth := service.NewAuthService(service.AuthDeps{
 		Apps: apps, Users: users, Sessions: sessions, Logs: logs,
-		Registry: registry, Notifier: sender, Codes: codes, Authz: authz,
+		Registry: registry, Authz: authz,
 	})
 
 	configs := service.NewConfigService(pool, configPub)
 
 	return phase2Services{
 		apps: apps, users: users, sessions: sessions,
-		accounts: accounts, auth: auth, sms: sms, revokePub: revokePub, authz: authz,
+		accounts: accounts, auth: auth, revokePub: revokePub, authz: authz,
 		configPub: configPub, configs: configs, imCreds: imCreds, accessKeys: accessKeys,
 	}
 }
@@ -123,7 +111,7 @@ type phase2Env struct {
 	appID, appSecret string
 }
 
-// newPhase2Env 装配一套完整的 fp：真实 Postgres/Redis、一个启用了短信登录的
+// newPhase2Env 装配一套完整的 fp：真实 Postgres/Redis、一个启用了密码登录的
 // 应用、一个真实监听端口上的 grpcapi.Server，以及一个已连上它的 SDK 客户端。
 //
 // opts 用于在连接建立前调整 SDK 的 Options（例如打开 AllowStaleOnOutage、
@@ -145,10 +133,8 @@ func newPhase2Env(t *testing.T, opts ...func(*fpsdk.Options)) *phase2Env {
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}
-	for _, typ := range []string{connector.TypePassword, connector.TypeSMSCode} {
-		if err := e.apps.SetConnector(ctx, app.ID, typ, true, nil); err != nil {
-			t.Fatalf("启用 %s: %v", typ, err)
-		}
+	if err := e.apps.SetConnector(ctx, app.ID, connector.TypePassword, true, nil); err != nil {
+		t.Fatalf("启用 password: %v", err)
 	}
 	e.app, e.appID, e.appSecret = app, app.AppID, secret
 
@@ -318,9 +304,9 @@ func (e *phase2Env) saveConfig(t *testing.T, typ, yamlText string, push bool) in
 	return seq
 }
 
-// login 走一次完整的短信验证码登录（发码 → 取码 → 登录），全部经由 e.sdk
-// 这个已经连上本实例的客户端——这样断言的是 SDK 到 service 层的完整链路，
-// 不是绕开 SDK 直接调用 service。
+// login 走一次完整的密码登录，登录本身经由 e.sdk 这个已经连上本实例的
+// 客户端——这样断言的是 SDK 到 service 层的完整链路，不是绕开 SDK 直接
+// 调用 service。
 func (e *phase2Env) login(t *testing.T) (token string, userID uuid.UUID, sessionID string) {
 	t.Helper()
 	return e.loginWithPhone(t, randomPhase2Phone())
@@ -328,20 +314,25 @@ func (e *phase2Env) login(t *testing.T) (token string, userID uuid.UUID, session
 
 // loginWithPhone 用指定手机号登录。同一个手机号多次登录得到的是**同一个
 // 用户**，供需要"改完角色再登一次"的测试使用。
+//
+// 密码登录不会自动建号，所以先用 service 层建号并设固定密码（两步都是幂等的）；
+// 登录本身仍经由 e.sdk，断言的是 SDK 到 service 层的完整链路。
 func (e *phase2Env) loginWithPhone(t *testing.T, phone string) (token string, userID uuid.UUID, sessionID string) {
 	t.Helper()
 	ctx := context.Background()
 
-	if err := e.sdk.Auth().SendLoginCode(ctx, phone); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
+	user, _, _, err := e.users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: phone,
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
 	}
-	code := e.sms.LastParam("code")
-	if code == "" {
-		t.Fatal("假短信供应商没有收到验证码")
+	if err := e.users.SetPassword(ctx, user.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
 	}
 	res, err := e.sdk.Auth().Login(ctx, fpsdk.LoginInput{
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   map[string]string{"phone": phone, "code": code},
+		ConnectorType: connector.TypePassword,
+		Credentials:   map[string]string{"account": phone, "password": "hunter2hunter2"},
 	})
 	if err != nil {
 		t.Fatalf("Login: %v", err)

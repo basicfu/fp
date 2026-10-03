@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/httpapi"
-	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -34,13 +34,12 @@ type env struct {
 	users    *service.UserService
 	sessions *service.SessionService
 	logs     *service.LoginLogService
-	sms      *notify.FakeProvider
 	revoke   *store.RevokePublisher
 
 	adminToken string
 }
 
-// newEnv 按 cmd/fp/main.go 的方式装配全部依赖，只把短信通道换成假供应商。
+// newEnv 按 cmd/fp/main.go 的方式装配全部依赖。
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	pool := testsupport.NewTestDB(t)
@@ -49,7 +48,6 @@ func newEnv(t *testing.T) *env {
 
 	users := service.NewUserService(pool)
 	logs := service.NewLoginLogService(pool)
-	codes := notify.NewCodeService(rdb)
 
 	sessionStore := store.NewSessionStore(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
@@ -60,19 +58,7 @@ func newEnv(t *testing.T) *env {
 	if err := registry.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
 	}
-	if err := registry.Register(connector.NewSMSCode(codes)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
-	}
 	apps := service.NewApplicationService(pool, registry)
-
-	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	// 这里传 []RateRule{} 是**显式关闭**频率限制，不是"没配"：
-	// 多个用例会对同一个手机号连发验证码，默认的"30 秒 1 条"会把它们卡死。
-	//
-	// 生产装配千万别照抄这一行。NewSender 的 rules 传 nil 才是安全默认
-	// （自动套用 DefaultSMSRateRules），只有测试才该把它关掉。
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), []notify.RateRule{})
-	sender.AddProvider(sms)
 
 	admin := service.NewAdminService(pool, rdb)
 	if err := admin.EnsureBootstrap(ctx, adminUser, adminPass); err != nil {
@@ -89,11 +75,10 @@ func newEnv(t *testing.T) *env {
 	return &env{
 		t: t, server: srv,
 		auth: service.NewAuthService(service.AuthDeps{
-			Apps: apps, Users: users, Sessions: sessions, Logs: logs,
-			Registry: registry, Notifier: sender, Codes: codes,
+			Apps: apps, Users: users, Sessions: sessions, Logs: logs, Registry: registry,
 		}),
 		apps: apps, users: users, sessions: sessions, logs: logs,
-		sms: sms, revoke: revokePub,
+		revoke: revokePub,
 	}
 }
 
@@ -155,31 +140,38 @@ func (e *env) request(method, path, body string, wantStatus int, out any) {
 	}
 }
 
-// smsLogin 走完整的「发码 → 取码 → 登录」流程。
-func (e *env) smsLogin(appID, phone string) *service.LoginResult {
+// passwordInput 保证手机号对应的用户存在并带固定密码，返回一份 password 登录的入参。
+// 密码登录不会自动建号，所以先建；同一个手机号多次调用拿到的是同一个用户。
+func (e *env) passwordInput(appID, phone string) service.LoginInput {
 	e.t.Helper()
 	ctx := context.Background()
-
-	if err := e.auth.SendLoginCode(ctx, appID, phone); err != nil {
-		e.t.Fatalf("SendLoginCode: %v", err)
-	}
-	code := e.sms.LastParam("code")
-	if code == "" {
-		e.t.Fatal("未从假供应商取到验证码")
-	}
-	res, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         appID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": phone, "code": code},
-		IP:            "203.0.113.7", UA: "integration-test",
+	user, _, _, err := e.users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: phone,
 	})
 	if err != nil {
-		e.t.Fatalf("Login(sms_code): %v", err)
+		e.t.Fatalf("EnsureUserWithIdentity: %v", err)
+	}
+	if err := e.users.SetPassword(ctx, user.ID, "hunter2hunter2"); err != nil {
+		e.t.Fatalf("SetPassword: %v", err)
+	}
+	return service.LoginInput{
+		AppID:         appID,
+		ConnectorType: connector.TypePassword,
+		Credentials:   connector.Credentials{"account": phone, "password": "hunter2hunter2"},
+		IP:            "203.0.113.7", UA: "integration-test",
+	}
+}
+
+func (e *env) passwordLogin(appID, phone string) *service.LoginResult {
+	e.t.Helper()
+	res, err := e.auth.Login(context.Background(), e.passwordInput(appID, phone))
+	if err != nil {
+		e.t.Fatalf("Login(password): %v", err)
 	}
 	return res
 }
 
-// createApp 通过管理 API 建应用并启用两种登录方式，返回 appId 与明文 secret。
+// createApp 通过管理 API 建应用并启用 password，返回 appId 与明文 secret。
 func (e *env) createApp(name, code string) (internalID, appID, secret string) {
 	e.t.Helper()
 
@@ -195,7 +187,6 @@ func (e *env) createApp(name, code string) (internalID, appID, secret string) {
 
 	base := "/admin/api/applications/" + created.Application.ID + "/connectors"
 	e.request(http.MethodPut, base+"/password", `{"enabled":true,"config":{}}`, http.StatusNoContent, nil)
-	e.request(http.MethodPut, base+"/sms_code", `{"enabled":true,"config":{}}`, http.StatusNoContent, nil)
 
 	return created.Application.ID, created.Application.AppID, created.AppSecret
 }

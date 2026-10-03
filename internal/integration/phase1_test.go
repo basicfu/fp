@@ -36,7 +36,7 @@ func TestPhase1EndToEnd(t *testing.T) {
 		t.Fatal("appId 或 appSecret 为空")
 	}
 
-	// ③ 两种登录方式已启用，且配置元数据可供 UI 渲染表单
+	// ③ 登录方式已启用，且配置元数据可供 UI 渲染表单
 	var schemas []struct {
 		Type   string `json:"type"`
 		Fields []struct {
@@ -44,8 +44,8 @@ func TestPhase1EndToEnd(t *testing.T) {
 		} `json:"fields"`
 	}
 	e.request(http.MethodGet, "/admin/api/connectors", "", http.StatusOK, &schemas)
-	if len(schemas) != 2 {
-		t.Fatalf("登录方式数 = %d, want 2", len(schemas))
+	if len(schemas) != 1 {
+		t.Fatalf("登录方式数 = %d, want 1", len(schemas))
 	}
 	for _, s := range schemas {
 		if len(s.Fields) == 0 {
@@ -58,8 +58,8 @@ func TestPhase1EndToEnd(t *testing.T) {
 		t.Fatalf("VerifySecret: %v", err)
 	}
 
-	// ⑤ 短信验证码首次登录即注册
-	first := e.smsLogin(appID, "13800138000")
+	// ⑤ 首次登录
+	first := e.passwordLogin(appID, "13800138000")
 	if first.User.Status != domain.UserStatusActive {
 		t.Fatalf("新用户状态 = %q", first.User.Status)
 	}
@@ -76,20 +76,13 @@ func TestPhase1EndToEnd(t *testing.T) {
 		t.Fatal("token 指向的用户不对")
 	}
 
-	// ⑦ 设密码后用手机号+密码登录，必须是同一个人
-	if err := e.users.SetPassword(ctx, first.User.ID, "hunter2hunter2"); err != nil {
-		t.Fatalf("SetPassword: %v", err)
-	}
-	second, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         appID,
-		ConnectorType: connector.TypePassword,
-		Credentials:   connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
-	})
-	if err != nil {
-		t.Fatalf("Login(password): %v", err)
-	}
+	// ⑦ 同一个手机号再登录一次，必须是同一个人，且签发新会话
+	second := e.passwordLogin(appID, "13800138000")
 	if second.User.ID != first.User.ID {
-		t.Fatalf("账号归并失败: %v vs %v", second.User.ID, first.User.ID)
+		t.Fatalf("同一手机号登录到了不同用户: %v vs %v", second.User.ID, first.User.ID)
+	}
+	if second.Session.Token == first.Session.Token {
+		t.Fatal("两次登录应签发不同的 token")
 	}
 
 	// ⑧ 管理端能看到这个用户与他的两个在线会话
@@ -139,7 +132,7 @@ func TestPhase1EndToEnd(t *testing.T) {
 	if revoked.Revoked != 2 {
 		t.Fatalf("撤销数 = %d, want 2", revoked.Revoked)
 	}
-	for name, tok := range map[string]string{"短信登录": first.Session.Token, "密码登录": second.Session.Token} {
+	for name, tok := range map[string]string{"第一次登录": first.Session.Token, "第二次登录": second.Session.Token} {
 		if _, err := e.auth.ValidateToken(ctx, appID, tok); !errors.Is(err, domain.ErrUnauthorized) {
 			t.Fatalf("%s 的 token 仍有效, err = %v", name, err)
 		}
@@ -148,52 +141,13 @@ func TestPhase1EndToEnd(t *testing.T) {
 	_ = internalID
 }
 
-func TestBothLoginMethodsResolveToSameUser(t *testing.T) {
-	e := newEnv(t)
-	e.adminLogin()
-	_, appID, _ := e.createApp("A", "a")
-	ctx := context.Background()
-
-	first := e.smsLogin(appID, "13800138000")
-	if err := e.users.SetPassword(ctx, first.User.ID, "hunter2hunter2"); err != nil {
-		t.Fatalf("SetPassword: %v", err)
-	}
-
-	// 手机号 + 密码
-	byPhone, err := e.auth.Login(ctx, service.LoginInput{
-		AppID: appID, ConnectorType: connector.TypePassword,
-		Credentials: connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
-	})
-	if err != nil {
-		t.Fatalf("手机号密码登录: %v", err)
-	}
-
-	// 再给他加一个用户名，用用户名 + 同一个密码登录
-	if _, err := e.users.AttachIdentity(ctx, first.User.ID, service.EnsureIdentityInput{
-		Type: domain.IdentityTypeUsername, Subject: "alice",
-	}); err != nil {
-		t.Fatalf("AttachIdentity: %v", err)
-	}
-	byUsername, err := e.auth.Login(ctx, service.LoginInput{
-		AppID: appID, ConnectorType: connector.TypePassword,
-		Credentials: connector.Credentials{"account": "alice", "password": "hunter2hunter2"},
-	})
-	if err != nil {
-		t.Fatalf("用户名密码登录: %v", err)
-	}
-
-	if byPhone.User.ID != first.User.ID || byUsername.User.ID != first.User.ID {
-		t.Fatal("三种登录路径没有落到同一个用户")
-	}
-}
-
 func TestTokenValidationAndRejection(t *testing.T) {
 	e := newEnv(t)
 	e.adminLogin()
 	_, appID, _ := e.createApp("A", "a")
 	ctx := context.Background()
 
-	res := e.smsLogin(appID, "13800138000")
+	res := e.passwordLogin(appID, "13800138000")
 
 	if _, err := e.auth.ValidateToken(ctx, appID, res.Session.Token); err != nil {
 		t.Fatalf("有效 token 应通过: %v", err)
@@ -239,7 +193,7 @@ func TestKickFromAdminInvalidatesToken(t *testing.T) {
 	_, appID, _ := e.createApp("A", "a")
 	ctx := context.Background()
 
-	res := e.smsLogin(appID, "13800138000")
+	res := e.passwordLogin(appID, "13800138000")
 	userPath := "/admin/api/users/" + res.User.ID.String()
 
 	var sessions []struct {
@@ -276,7 +230,7 @@ func TestRevocationIsBroadcast(t *testing.T) {
 	}
 	defer closeFn()
 
-	res := e.smsLogin(appID, "13800138000")
+	res := e.passwordLogin(appID, "13800138000")
 	userPath := "/admin/api/users/" + res.User.ID.String()
 	e.request(http.MethodDelete, userPath+"/sessions", "", http.StatusOK, nil)
 
@@ -303,7 +257,7 @@ func TestFrozenUserCannotLogin(t *testing.T) {
 	_, appID, _ := e.createApp("A", "a")
 	ctx := context.Background()
 
-	res := e.smsLogin(appID, "13800138000")
+	res := e.passwordLogin(appID, "13800138000")
 	userPath := "/admin/api/users/" + res.User.ID.String()
 
 	e.request(http.MethodPatch, userPath+"/status", `{"status":"FROZEN"}`, http.StatusOK, nil)
@@ -313,19 +267,13 @@ func TestFrozenUserCannotLogin(t *testing.T) {
 		t.Fatalf("冻结后旧 token 仍有效, err = %v", err)
 	}
 	// 也无法重新登录
-	if err := e.auth.SendLoginCode(ctx, appID, "13800138000"); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
-	}
-	if _, err := e.auth.Login(ctx, service.LoginInput{
-		AppID: appID, ConnectorType: connector.TypeSMSCode,
-		Credentials: connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
-	}); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := e.auth.Login(ctx, e.passwordInput(appID, "13800138000")); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("冻结用户登录 err = %v, want ErrForbidden", err)
 	}
 
 	// 解冻后恢复
 	e.request(http.MethodPatch, userPath+"/status", `{"status":"ACTIVE"}`, http.StatusOK, nil)
-	if again := e.smsLogin(appID, "13800138000"); again.User.ID != res.User.ID {
+	if again := e.passwordLogin(appID, "13800138000"); again.User.ID != res.User.ID {
 		t.Fatal("解冻后登录不是同一用户")
 	}
 }
@@ -344,7 +292,7 @@ func TestCacheTTLGuidesSDKBehaviour(t *testing.T) {
 			`"rotateIntervalSeconds":3600,"extendIntervalSeconds":30,"tokenCacheTtlSeconds":60}`,
 		http.StatusOK, nil)
 
-	res := e.smsLogin(appID, "13800138000")
+	res := e.passwordLogin(appID, "13800138000")
 	vr, err := e.auth.ValidateToken(ctx, appID, res.Session.Token)
 	if err != nil {
 		t.Fatalf("ValidateToken: %v", err)
@@ -369,7 +317,7 @@ func TestDisabledConnectorIsRejected(t *testing.T) {
 	internalID, appID, _ := e.createApp("A", "a")
 	ctx := context.Background()
 
-	res := e.smsLogin(appID, "13800138000")
+	res := e.passwordLogin(appID, "13800138000")
 	if err := e.users.SetPassword(ctx, res.User.ID, "hunter2hunter2"); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
@@ -392,8 +340,8 @@ func TestApplicationsShareUserPool(t *testing.T) {
 	_, appA, _ := e.createApp("平台A", "plat-a")
 	_, appB, _ := e.createApp("平台B", "plat-b")
 
-	inA := e.smsLogin(appA, "13800138000")
-	inB := e.smsLogin(appB, "13800138000")
+	inA := e.passwordLogin(appA, "13800138000")
+	inB := e.passwordLogin(appB, "13800138000")
 
 	if inA.User.ID != inB.User.ID {
 		t.Fatalf("同一手机号在两个应用下应是同一个用户: %v vs %v", inA.User.ID, inB.User.ID)
