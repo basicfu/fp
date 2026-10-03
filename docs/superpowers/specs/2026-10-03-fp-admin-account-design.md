@@ -1,7 +1,7 @@
 # fp 管理端账号设计
 
 **日期**：2026-10-03
-**状态**：设计已定，待细化为实施计划
+**状态**：设计已定；实施计划：`docs/superpowers/plans/2026-10-03-fp-admin-account.md`
 **上游**：`2026-09-21-fp-system-config-design.md`（`bootstrap_admin` 兜底 `admin/admin`）
 
 ---
@@ -48,7 +48,7 @@ ON CONFLICT (username) DO NOTHING
 - 同一条 `UPDATE` 写 `username`、`password_hash`、`display_name`（跟随 `username`）、`updated_at`。
 - 成功后 `INCR` epoch，并为**当前请求**重新签发 token（写 cookie）——其他会话全部失效，当前浏览器保持登录。
 - 旧密码错误返回新增的 `ADMIN_OLD_PASSWORD_WRONG`，映射 `ErrInvalidArgument`（400）。**不能复用** `ADMIN_CREDENTIAL_INVALID`：它映射 401，前端 `api.ts` 对任何 401 都会清登录态并跳登录页，输错旧密码会被踢出去。
-- 新错误码要同时进 HTTP 与 gRPC 两张映射表（`TestTransportsAgreeOnEveryCode` 会校验）。
+- 新错误码登记在 `internal/domain/codes.go` 的常量与 `codeSentinels` 里，HTTP 与 gRPC 的状态都从哨兵推导，不用另写映射；`TestTransportsAgreeOnEveryCode` 校验两个传输层对每个码一致。
 
 ## 六、`reset-password` 子命令
 

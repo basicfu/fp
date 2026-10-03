@@ -1,7 +1,7 @@
 # fp 通知模块设计
 
 **日期**：2026-10-03
-**状态**：设计已定，待细化为实施计划
+**状态**：设计已定；实施计划：`docs/superpowers/plans/2026-10-03-fp-notify.md`（前置 `2026-10-03-fp-remove-sms-login.md`）
 **上游**：`2026-08-24-fp-foundation-platform-design.md` 第七章"通知中心"
 
 ---
@@ -48,7 +48,7 @@
 
 ## 四、数据模型
 
-迁移 `00015_notify_templates.sql`：
+迁移 `00016_notify_templates.sql`（`00015` 是 §八 清理 `sms_code` 启用记录的那一份）：
 
 ```sql
 -- 供应商实例。type 对应代码里注册的实现；config 字段结构由该 type 的 ConfigSchema 定义。
@@ -123,13 +123,13 @@ CREATE INDEX notify_log_code_idx ON notify_log (code, created_at DESC);
 
 **secret 字段**（`ConfigSchema` 里 `FieldTypeSecret`）：
 
-- 控制台读取时脱敏为 `********`；`PUT` 时值为 `********` 表示保持原值。脱敏放在公共层，不绑死 notify。
+- 控制台读取时脱敏为 `********`；更新（`PATCH`）时值为 `********` 表示保持原值。脱敏放在公共层，不绑死 notify。
 - **落库不加密**：secret 明文存在 `config` 里，与访问密钥 SK 同一先例（见 `docs/access-key.md`"已接受的限制"），不引入 `FP_SECRET_KEY` 这类新的必填环境变量。
 - `domain/field.go` 终审注释里"脱敏与落库加密尚未实现"的债务：脱敏由本模块还清（此前没有任何 connector 声明 secret 字段，本模块要声明一大批，不脱敏就会在列表接口里明文返回）；落库加密按上一条不做，注释同步改成"已接受的限制"。
 
 ## 五、发送流程
 
-`Send(ctx, caller, code, to, params, idempotencyKey)`：
+`Send(ctx, NotifySendInput{AppID, Code, To, Params, IdempotencyKey})`：
 
 1. **取模板**：不存在 → `NOTIFY_TEMPLATE_NOT_FOUND`；`enabled=false` → `NOTIFY_TEMPLATE_DISABLED`。
 2. **校验**：params 键集合与 `variables` 完全一致，否则 `NOTIFY_PARAMS_INVALID`（detail 列出缺失与多余的键）；`sms` / `email` 必须有 `to`，IM / webhook 必须没有，否则 `NOTIFY_RECIPIENT_INVALID`。
@@ -145,7 +145,7 @@ CREATE INDEX notify_log_code_idx ON notify_log (code, created_at DESC);
 
 已构造的 `Provider` 按 `id@updated_at` 缓存：改配置后 `updated_at` 变化，天然换新，不需要跨实例的失效广播。
 
-`Provider` 接口：`Type()`、`Channel()`、`ConfigSchema()`、`Send(ctx, Delivery)`；`Name()` 由实例 id 取代（多实例后写死类型名没法区分账号）。请求构造抽成纯函数单测，沿用 `BuildAliyunRequest` 的做法。
+一种类型由 `TypeSpec` 描述（`Type`、`Channel`、`ConfigSchema`、`DevOnly`、构造函数 `New`），登记在 `Registry`；`Provider` 接口只有 `Send(ctx, Delivery)`，实例由 id 区分（多实例后写死类型名没法区分账号）。请求构造抽成纯函数单测，沿用旧 `BuildAliyunRequest` 的做法。
 
 ## 六、对外接口
 
@@ -165,7 +165,7 @@ message SendResponse {}
 ```
 
 - **鉴权**：与 `Login` 同一条拦截器链——调用方是用 app_id / secret 认证的**应用**；沿用 `requireNotIM`，fp-im 网关凭据不能调用。`notify_log.app_id` 记录调用方。
-- **SDK**：`client.Notify().Send(ctx, code, to, params, opts...)`，`WithIdempotencyKey(k)` 覆盖默认。默认每次调用生成 UUID 当幂等 key；对 `Unavailable` / `DeadlineExceeded` / `NOTIFY_IN_PROGRESS` 最多重试 2 次（指数退避，200ms 起），**整个调用复用同一个 key**。现有 SDK 的 unary RPC 没有重试，这是 Notify 独有的。
+- **SDK**：`client.Notify().Send(ctx, code, to, params, opts...)`，`WithIdempotencyKey(k)` 覆盖默认。默认每次调用生成随机幂等 key；对 `Unavailable` / `DeadlineExceeded` / `NOTIFY_IN_PROGRESS` 最多重试 2 次（指数退避，200ms 起），**整个调用复用同一个 key**。现有 SDK 的 unary RPC 没有重试，这是 Notify 独有的。
 
 ## 七、控制台
 
@@ -173,23 +173,25 @@ message SendResponse {}
 
 - **模板** `/notify/templates`：列表；新建流程"选 channel → 填 code → 选模式 → 写模板"；详情页上半是模板内容，下半是关联供应商子列表（每行：供应商备注、`provider_template_id`、优先级、启停开关），另有「测试发送」。
 - **供应商** `/notify/providers`：列表（类型 / 备注 / 启停 / 被引用数）；新建先选 type 再按 `ConfigSchema` 渲染表单；详情页反向列出被哪些模板引用。
-- **发送记录** `/notify/logs`：按 code、时间、成败过滤。
+- **发送记录** `/notify/logs`：按 code、成败过滤，分页。
 
 Admin API（`/admin/api/notify`）：
 
 ```
 GET  /provider-types                           注册表：type、channel、configSchema
 GET/POST /providers
-GET/PUT/DELETE /providers/{id}                 被模板引用时 DELETE 返回 409
+GET/PATCH/DELETE /providers/{id}               PATCH 局部更新；被模板引用时 DELETE 返回 409
 GET  /providers/{id}/templates                 被哪些模板引用
 GET/POST /templates
-GET/PUT/DELETE /templates/{code}               code 不可改
-PUT/DELETE /templates/{code}/providers/{providerId}   关联的增改 / 删
+GET/PATCH/DELETE /templates/{code}             PATCH 局部更新；code、channel、mode 不可改
+PUT/DELETE /templates/{code}/providers/{providerId}   关联的增改（全量替换）/ 删
 POST /templates/{code}/test                    测试发送 {to, params}，走同一条 Send 路径，app_id 为空
 GET  /logs
 ```
 
-外键冲突识别要同时认 SQLSTATE `23503` 与 `23001`（PG18 里显式 `ON DELETE RESTRICT` 报 `23001`）。
+局部更新用 `PATCH`，与仓库里其他资源一致；关联是全量替换，所以用 `PUT`。
+
+`notify_template_provider.provider_id` 的外键不写显式 `ON DELETE RESTRICT`：PG18 下它报 SQLSTATE `23001`，而 service 层的 `isForeignKeyViolation` 只认 `23503`；默认的 NO ACTION 报的就是 `23503`。
 
 ## 八、移除验证码体系
 
@@ -198,7 +200,7 @@ GET  /logs
 - **`cmd/fp/main.go`**：删 `codeSvc`、`sms_code` 注册、阿里云装配块，换成通知服务的装配。
 - **迁移**：`DELETE FROM application_connector WHERE connector_type = 'sms_code'`；用户记录不动。
 - **示例与文档**：`examples/demo`、`examples/im-demo` 的登录方式从 `sms_code` 改为 `password`；`docs/console.md` 等引用同步。
-- **保留**：`notify_log` 表、阿里云供应商实现（改造成 `aliyun` type）、`store.RateLimiter`。
+- **保留**：`notify_log` 表、`store.RateLimiter`。阿里云的调用方式在新框架下重建为 `aliyun` type（旧的发送器随 `internal/notify` 整个删除）。
 
 ## 九、测试
 
