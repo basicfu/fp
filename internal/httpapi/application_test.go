@@ -21,12 +21,11 @@ func TestConnectorSchemasExposed(t *testing.T) {
 		} `json:"fields"`
 	}
 	decode(t, rec, &schemas)
-	if len(schemas) != 2 {
-		t.Fatalf("登录方式数 = %d, want 2", len(schemas))
+	if len(schemas) != 1 {
+		t.Fatalf("登录方式数 = %d, want 1", len(schemas))
 	}
-	// Registry.Types() 按字典序，password 在 sms_code 之前
-	if schemas[0].Type != "password" || schemas[1].Type != "sms_code" {
-		t.Fatalf("顺序不对: %+v", schemas)
+	if schemas[0].Type != "password" {
+		t.Fatalf("登录方式 = %+v, want password", schemas)
 	}
 	if len(schemas[0].Fields) == 0 {
 		t.Fatal("password 的 fields 为空，动态表单将渲染不出任何控件")

@@ -17,7 +17,6 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
-	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -43,8 +42,6 @@ type grpcEnv struct {
 	sessions *service.SessionService
 	accounts *service.AccountService
 	users    *service.UserService
-	sms      *notify.FakeProvider
-	codes    *notify.CodeService
 
 	// apps 用于创建/操纵应用（newApplication、setRotateInterval）；pool 用于绕过
 	// service 层直接改库（disableApplication——第一阶段没有停用应用的管理接口，
@@ -102,14 +99,10 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	sessions := service.NewSessionServiceWithClock(
 		store.NewSessionStore(rdb), revokePub, epochs, clk.Now)
 	logs := service.NewLoginLogService(pool)
-	codes := notify.NewCodeService(rdb)
 
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
-	}
-	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
 	}
 	// configPub 提前到这里构造：apps 也要用它广播 IM 接入配置变更。
 	configPub := store.NewConfigPublisher(rdb)
@@ -120,15 +113,8 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	configs := service.NewConfigService(pool, configPub)
 	imCreds := service.NewIMCredentialService(pool)
 
-	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的
-	// "30 秒 1 条"）：多个用例需要对同一个手机号连发验证码。
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), []notify.RateRule{})
-	sender.AddProvider(sms)
-
 	authSvc := service.NewAuthService(service.AuthDeps{
-		Apps: apps, Users: users, Sessions: sessions, Logs: logs,
-		Registry: reg, Notifier: sender, Codes: codes,
+		Apps: apps, Users: users, Sessions: sessions, Logs: logs, Registry: reg,
 	})
 
 	env := &grpcEnv{
@@ -136,8 +122,6 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		sessions: sessions,
 		accounts: service.NewAccountService(users, sessions, epochs, logs),
 		users:    users,
-		sms:      sms,
-		codes:    codes,
 		apps:     apps,
 		pool:     pool,
 		clock:    clk,
@@ -154,7 +138,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		env.imSecret = secret
 	}
 
-	// 创建一个启用了 password 与 sms_code 两种登录方式的应用，
+	// 创建一个启用了 password 登录方式的应用，
 	// 记下它的 appID 与明文 secret（ApplicationService.Create 的第二个返回值）。
 	primary := env.newApplication(t)
 	env.app, env.appID, env.secret = primary.app, primary.appID, primary.secret
@@ -218,7 +202,7 @@ func (e *grpcEnv) imAuthed(ctx context.Context, appID string) context.Context {
 		mdAppID, appID, mdAppSecret, e.imSecret, MDCallerType, CallerTypeIM)
 }
 
-// testApplication 是一个已创建、已启用 password 与 sms_code 登录方式的应用，
+// testApplication 是一个已创建、已启用 password 登录方式的应用，
 // 及其仅创建时可见一次的明文 secret。
 type testApplication struct {
 	app    *domain.Application
@@ -246,10 +230,8 @@ func (e *grpcEnv) newApplication(t *testing.T) *testApplication {
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}
-	for _, typ := range []string{connector.TypePassword, connector.TypeSMSCode} {
-		if err := e.apps.SetConnector(ctx, app.ID, typ, true, nil); err != nil {
-			t.Fatalf("启用 %s: %v", typ, err)
-		}
+	if err := e.apps.SetConnector(ctx, app.ID, connector.TypePassword, true, nil); err != nil {
+		t.Fatalf("启用 password: %v", err)
 	}
 	return &testApplication{app: app, appID: app.AppID, secret: secret}
 }
@@ -281,38 +263,23 @@ func (e *grpcEnv) disableApplication(t *testing.T) {
 	}
 }
 
-// loginWithPassword 走 gRPC 的完整流程：短信验证码注册一个新用户、为其设置
-// 密码、再用密码登录，返回签发的 token。
+// loginWithPassword 走 gRPC 的完整流程：先用 service 层建一个带密码的新用户，
+// 再经由 gRPC 用密码登录，返回签发的 token。
 //
-// ctx 须携带应用凭据（见 authed）。密码本身没有专门的 gRPC 写入接口（这是
-// 后续任务的范围），SetPassword 这一步直接调用 service 层；登录判定路径
-// （SendLoginCode / Login 本身）仍然全部经过 gRPC，这样才检验到映射层代码。
+// ctx 须携带应用凭据（见 authed）。建号是管理端的事、没有对应的 gRPC 接口，
+// 所以这两步直接调 service；登录判定路径（Login 本身）仍然全部经过 gRPC。
 func (e *grpcEnv) loginWithPassword(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	phone := randomPhone()
+	const password = "hunter2hunter2"
 
-	if _, err := e.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: phone}); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
-	}
-	code := e.sms.LastParam("code")
-	if code == "" {
-		t.Fatal("假短信供应商没有收到验证码")
-	}
-
-	signup, err := e.client.Login(ctx, &fpv1.LoginRequest{
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   map[string]string{"phone": phone, "code": code},
+	user, _, _, err := e.users.EnsureUserWithIdentity(context.Background(), service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: phone,
 	})
 	if err != nil {
-		t.Fatalf("Login(sms_code): %v", err)
+		t.Fatalf("建号: %v", err)
 	}
-
-	userID, err := uuid.Parse(signup.GetUser().GetId())
-	if err != nil {
-		t.Fatalf("解析 userId %q: %v", signup.GetUser().GetId(), err)
-	}
-	const password = "hunter2hunter2"
-	if err := e.users.SetPassword(context.Background(), userID, password); err != nil {
+	if err := e.users.SetPassword(context.Background(), user.ID, password); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
 

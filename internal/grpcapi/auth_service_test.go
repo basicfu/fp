@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
 	fpv1 "github.com/basicfu/fp/sdk/gen/fp/v1"
 )
 
@@ -136,23 +137,26 @@ func TestRPCsRequireCredentials(t *testing.T) {
 	}
 }
 
-// TestSMSCodeLoginRoundTrip 走一遍发码→登录→校验。
-func TestSMSCodeLoginRoundTrip(t *testing.T) {
+// TestPasswordLoginRoundTrip 走一遍登录→校验。
+func TestPasswordLoginRoundTrip(t *testing.T) {
 	env := newGRPCEnv(t)
 	ctx := env.authed(context.Background())
 	const phone = "13800138000"
+	const password = "hunter2hunter2"
 
-	if _, err := env.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: phone}); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
+	user, _, _, err := env.users.EnsureUserWithIdentity(context.Background(), service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: phone,
+	})
+	if err != nil {
+		t.Fatalf("建号: %v", err)
 	}
-	code := env.sms.LastParam("code")
-	if code == "" {
-		t.Fatal("假短信供应商没有收到验证码")
+	if err := env.users.SetPassword(context.Background(), user.ID, password); err != nil {
+		t.Fatalf("SetPassword: %v", err)
 	}
 
 	login, err := env.client.Login(ctx, &fpv1.LoginRequest{
-		ConnectorType: "sms_code",
-		Credentials:   map[string]string{"phone": phone, "code": code},
+		ConnectorType: "password",
+		Credentials:   map[string]string{"account": phone, "password": password},
 	})
 	if err != nil {
 		t.Fatalf("Login: %v", err)

@@ -10,7 +10,6 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/httpapi"
-	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -23,13 +22,9 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 	rdb := testsupport.NewTestRedis(t)
 
 	users := service.NewUserService(pool)
-	codes := notify.NewCodeService(rdb)
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
-	}
-	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
 	}
 
 	epochs := store.NewEpochStore(rdb)
