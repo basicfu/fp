@@ -106,6 +106,21 @@ const (
 	CodeNotifyProviderMissing  = "NOTIFY_PROVIDER_MISSING"
 	CodeConfigVersionNotFound  = "CONFIG_VERSION_NOT_FOUND"
 
+	// 通知。
+
+	CodeNotifyTemplateNotFound  = "NOTIFY_TEMPLATE_NOT_FOUND"
+	CodeNotifyTemplateDisabled  = "NOTIFY_TEMPLATE_DISABLED"
+	CodeNotifyTemplateCodeTaken = "NOTIFY_TEMPLATE_CODE_TAKEN"
+	CodeNotifyTemplateInvalid   = "NOTIFY_TEMPLATE_INVALID"
+	CodeNotifyParamsInvalid     = "NOTIFY_PARAMS_INVALID"
+	CodeNotifyRecipientInvalid  = "NOTIFY_RECIPIENT_INVALID"
+	CodeNotifyInProgress        = "NOTIFY_IN_PROGRESS"
+	CodeNotifyProviderNotFound  = "NOTIFY_PROVIDER_NOT_FOUND"
+	CodeNotifyProviderInUse     = "NOTIFY_PROVIDER_IN_USE"
+	CodeNotifyProviderInvalid   = "NOTIFY_PROVIDER_INVALID"
+	CodeNotifyLinkInvalid       = "NOTIFY_LINK_INVALID"
+	CodeNotifySendFailed        = "NOTIFY_SEND_FAILED"
+
 	// CodeRouteNotFound 是路由层的 404：请求的 HTTP 路径不存在。
 	// 与"资源不存在"那一组不同——它意味着调用方把 URL 写错了，
 	// 而不是某个 id 查不到。
@@ -176,6 +191,19 @@ var codeSentinels = map[string]error{
 	CodeAccessKeyNotFound: ErrNotFound,
 	CodeRoleInUse:         ErrConflict,
 	CodeRoleBuiltin:       ErrInvalidArgument,
+
+	CodeNotifyTemplateNotFound:  ErrNotFound,
+	CodeNotifyTemplateDisabled:  ErrForbidden,
+	CodeNotifyTemplateCodeTaken: ErrConflict,
+	CodeNotifyTemplateInvalid:   ErrInvalidArgument,
+	CodeNotifyParamsInvalid:     ErrInvalidArgument,
+	CodeNotifyRecipientInvalid:  ErrInvalidArgument,
+	CodeNotifyInProgress:        ErrConflict,
+	CodeNotifyProviderNotFound:  ErrNotFound,
+	CodeNotifyProviderInUse:     ErrConflict,
+	CodeNotifyProviderInvalid:   ErrInvalidArgument,
+	CodeNotifyLinkInvalid:       ErrInvalidArgument,
+	CodeNotifySendFailed:        ErrInternal,
 
 	CodeInternal: ErrInternal,
 }
