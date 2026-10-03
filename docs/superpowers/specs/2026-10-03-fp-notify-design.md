@@ -23,6 +23,8 @@
 | 按应用隔离 code / 供应商 | 全局共享，一个 fp 部署一套，与"不做多租户"一致 |
 | 一个 code 同时发多个目标 | IM / webhook 先一对一，要多目标就建多个 code |
 | IM 的 markdown / 卡片消息 | 本期只发 text |
+| 供应商 secret 落库加密 | 与访问密钥 SK 同一先例：明文落库、读取脱敏；不引入新的必填环境变量 |
+| webhook / IM 目标地址的 SSRF 过滤 | 目标由唯一的超级管理员配置，不是终端用户输入 |
 | 腾讯云 / 助通短信、三方模板型邮件供应商 | 按同一 `Provider` 接口各加一个文件，不影响本设计 |
 
 ## 三、核心模型
@@ -38,7 +40,11 @@
 | vendor（供应商侧已审核的模板） | 供应商模板原文，**仅供查看核对，不参与渲染** | 传 `provider_template_id` + params，由供应商替换变量 |
 | custom（自建邮件、IM、webhook） | fp 自己的模板 | fp 渲染后发送 |
 
-**变量校验**：`Send` 的 params 键集合必须与模板 `variables` **完全一致**——缺了、多了都拒绝，拼错变量名当场报错，而不是发出一条缺内容的短信。custom 模式的占位符是 `{{name}}`（webhook / IM 的 body 常是 JSON，单花括号会与之冲突），保存时要求 content 里的 `{{x}}` 集合等于 `variables`；vendor 模式的 `variables` 按供应商模板填写（界面从 content 里按 `${x}` / `{{x}}` / `{x}` 预填）。custom 渲染时，body 是 JSON 的模板对替换值做 JSON 转义。
+**变量校验**：`Send` 的 params 键集合必须与模板 `variables` **完全一致**——缺了、多了都拒绝，拼错变量名当场报错，而不是发出一条缺内容的短信。
+
+**占位符**：custom 模式写 `{name}`，`name` 限 `[A-Za-z_][A-Za-z0-9_]*`。JSON 模板里的 `{"k": ...}` 花括号后面是引号，不匹配这个形状，不会被误认成占位符。保存时要求 content 里的占位符集合等于 `variables`；vendor 模式的 `variables` 按供应商模板填写（界面从 content 里按 `${x}` / `{{x}}` / `{x}` 预填）。
+
+**替换值转义**随目标格式走：`application/json` → JSON 字符串转义；`text/html` → HTML 转义；webhook GET 的 query → URL 转义；其余原样。
 
 ## 四、数据模型
 
@@ -99,7 +105,7 @@ CREATE INDEX notify_log_code_idx ON notify_log (code, created_at DESC);
 | telegram | `content`、`variables` |
 | wecom_bot | `content`、`variables`、`mentionedList`、`mentionedMobileList`（静态，@ 属于模板，由用户配置） |
 | dingtalk_bot | `content`、`variables`、`atMobiles`、`isAtAll` |
-| webhook | `content`、`contentType`（`application/json` \| `text/plain`）、`variables` |
+| webhook | `method`（`GET` \| `POST`）、`content`（POST 是 body 模板，GET 是 query 模板）、`contentType`（仅 POST：`application/json` \| `text/plain`）、`variables` |
 
 **供应商类型**（代码里的注册表 `type → 构造函数`；控制台"新建供应商"按 `ConfigSchema` 动态渲染表单，新增类型不改前端）：
 
@@ -110,16 +116,16 @@ CREATE INDEX notify_log_code_idx ON notify_log (code, created_at DESC);
 | `telegram` | telegram | `botToken`🔒、`chatId` | `https://api.telegram.org/bot{token}/sendMessage` |
 | `wecom_bot` | wecom_bot | `key`🔒 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=` |
 | `dingtalk_bot` | dingtalk_bot | `accessToken`🔒、`secret`🔒（加签用） | `https://oapi.dingtalk.com/robot/send?access_token=` 与 HMAC-SHA256 加签 |
-| `webhook` | webhook | `url`、`secret`🔒（可选） | POST；body = 渲染后的 content，`Content-Type` 取模板的 `contentType`；配了 `secret` 时加 `X-Fp-Signature: sha256=hex(HMAC-SHA256(secret, body))`；2xx 为成功，超时 10s |
+| `webhook` | webhook | `url`、`secret`🔒（可选） | 方法与报文由模板定义。POST：body = 渲染后的 content，`Content-Type` 取模板的 `contentType`；GET：渲染后的 content 作为 query 追加到 `url`（`url` 已带 `?` 则用 `&` 连接）。配了 `secret` 时加 `X-Fp-Signature: sha256=hex(HMAC-SHA256(secret, 被签内容))`，POST 签 body、GET 签渲染后的 query；2xx 为成功，超时 10s |
 | `log` | 任意（config 里选） | `channel` | 只打日志不真发；仅 `FP_ENV` 非 prod 时可建，替代今天 `main.go` 里"凭据不全就退化成 fake" |
 
 🔒 = secret 字段，处理见下。
 
 **secret 字段**（`ConfigSchema` 里 `FieldTypeSecret`）：
 
-- 控制台读取时脱敏为 `********`；`PUT` 时值为 `********` 表示保持原值。
-- 落库前用 AES-256-GCM 加密字段值，主密钥取环境变量 `FP_SECRET_KEY`（32 字节 base64）。该变量缺失时服务照常启动，但保存含 secret 的供应商配置会被拒绝——明文落库不是备选。
-- 机制放在公共层，不绑死 notify。这同时还清 `domain/field.go` 终审注释里"secret 脱敏与落库加密尚未实现"的债务：此前没有任何 connector 声明 secret 字段，本模块要声明一大批。
+- 控制台读取时脱敏为 `********`；`PUT` 时值为 `********` 表示保持原值。脱敏放在公共层，不绑死 notify。
+- **落库不加密**：secret 明文存在 `config` 里，与访问密钥 SK 同一先例（见 `docs/access-key.md`"已接受的限制"），不引入 `FP_SECRET_KEY` 这类新的必填环境变量。
+- `domain/field.go` 终审注释里"脱敏与落库加密尚未实现"的债务：脱敏由本模块还清（此前没有任何 connector 声明 secret 字段，本模块要声明一大批，不脱敏就会在列表接口里明文返回）；落库加密按上一条不做，注释同步改成"已接受的限制"。
 
 ## 五、发送流程
 
@@ -198,7 +204,7 @@ GET  /logs
 
 - 路由：优先级分组、同组随机、禁用跳过（模板 / 关联 / 实例三层）、全部失败、IM 不降级。
 - 幂等状态机：抢占、完成后重复调用、失败释放、处理中冲突。
-- 校验：params 缺 / 多、`to` 规则、模式 × 渠道的合法组合、custom 占位符与 `variables` 一致。
-- 各 provider 的请求构造纯函数；HTTP 类用 `httptest`；`dingtalk_bot` 加签、`webhook` 签名头各一条固定向量。
-- secret：脱敏、`********` 保持原值、加解密往返、无 `FP_SECRET_KEY` 时拒绝保存。
+- 校验：params 缺 / 多、`to` 规则、模式 × 渠道的合法组合、custom 占位符与 `variables` 一致；占位符识别不误伤 JSON 花括号；替换值转义（JSON / HTML / URL）。
+- 各 provider 的请求构造纯函数；HTTP 类用 `httptest`；`dingtalk_bot` 加签、`webhook` 签名头（POST 签 body、GET 签 query）各一条固定向量；webhook GET 的 query 拼接（`url` 带或不带 `?`）。
+- secret：读取脱敏、`PUT` 带 `********` 保持原值。
 - 回归：`notify_log` 里没有 params 与渲染内容。
