@@ -641,6 +641,13 @@ func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
 	if _, err := e.auth.Login(ctx, in); !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("Login err = %v, want ErrForbidden", err)
 	}
+	// 错误密码同样得到 ErrForbidden 而不是 ErrInvalidCredential：应用停用先于
+	// 凭据校验，否则停用的应用还能被拿来试探账号密码。
+	bad := in
+	bad.Credentials = connector.Credentials{"account": "13800138000", "password": "wrong-password"}
+	if _, err := e.auth.Login(ctx, bad); !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("错误密码 Login err = %v, want ErrForbidden（应用停用应先于凭据校验）", err)
+	}
 	// 已签发的 token 也必须立刻失效
 	if _, err := e.auth.ValidateToken(ctx, e.app.AppID, res.Session.Token); !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("ValidateToken err = %v, want ErrForbidden", err)

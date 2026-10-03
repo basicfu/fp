@@ -141,6 +141,33 @@ func TestPhase1EndToEnd(t *testing.T) {
 	_ = internalID
 }
 
+// 一个用户的多个登录标识共用一个密码：手机号用户再挂一个用户名，
+// 用户名 + 同一个密码经真实登录流程必须落到同一个用户。
+func TestUsernameLoginResolvesToSameUserAsPhone(t *testing.T) {
+	e := newEnv(t)
+	e.adminLogin()
+	_, appID, _ := e.createApp("A", "a")
+	ctx := context.Background()
+
+	byPhone := e.passwordLogin(appID, "13800138000")
+	if _, err := e.users.AttachIdentity(ctx, byPhone.User.ID, service.EnsureIdentityInput{
+		Type: domain.IdentityTypeUsername, Subject: "alice",
+	}); err != nil {
+		t.Fatalf("AttachIdentity: %v", err)
+	}
+
+	byUsername, err := e.auth.Login(ctx, service.LoginInput{
+		AppID: appID, ConnectorType: connector.TypePassword,
+		Credentials: connector.Credentials{"account": "alice", "password": "hunter2hunter2"},
+	})
+	if err != nil {
+		t.Fatalf("用户名密码登录: %v", err)
+	}
+	if byUsername.User.ID != byPhone.User.ID {
+		t.Fatalf("用户名登录落到了另一个用户: %v vs %v", byUsername.User.ID, byPhone.User.ID)
+	}
+}
+
 func TestTokenValidationAndRejection(t *testing.T) {
 	e := newEnv(t)
 	e.adminLogin()

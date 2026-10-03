@@ -85,6 +85,9 @@ func Parse(yamlText string, env string) (*Config, error) {
 	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("config: 解析系统配置: %w", err)
 	}
+	// 旧 sms 段读进来只是为了过 KnownFields；不丢掉的话，ToYAML 会把其中
+	// 的 access_key_secret 原样写回库里。
+	c.LegacySMS = nil
 	return c, nil
 }
 

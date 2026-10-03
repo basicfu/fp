@@ -202,9 +202,8 @@ const createSchema = z.object({
 type CreateValues = z.infer<typeof createSchema>
 
 /**
- * CreateDialog 是管理端手动建号的唯一入口。普通用户永远通过登录流程
- * 隐式建号，这里是给线下开户、导入这类场景用的——手机号是唯一支持的
- * 登录标识，密码可留空（留空则该用户暂时无法用密码登录）。
+ * CreateDialog 是建号的唯一入口：目前没有任何登录方式会自动建号。
+ * 手机号是唯一支持的登录标识，密码可留空（留空则该用户暂时无法用密码登录）。
  */
 function CreateDialog({
   open,

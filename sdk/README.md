@@ -222,7 +222,7 @@ if errors.Is(err, fpsdk.ErrUnauthorized) { ... } // 哨兵判断依然有效
 |---|---|---|
 | `ErrNoToken` / `ErrUnauthorized` | 401 | 未登录 / token 无效过期 |
 | `ErrUnavailable` | 503 | **fp 不可达，不是鉴权失败**。回 401 会让客户端清掉一个其实有效的 token，把一次 fp 抖动放大成全体用户被迫重新登录 |
-| `ErrInvalidArgument` | 400 | 参数不合法（参数格式不对等），不是凭据问题 |
+| `ErrInvalidArgument` | 400 | 参数不合法（比如 account 或 password 没填），不是凭据问题 |
 | `ErrRateLimited` | 429 | 被限流，凭据本身没问题 |
 
 ## 3. 鉴权（Authz / RBAC）

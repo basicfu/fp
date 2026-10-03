@@ -183,15 +183,24 @@ func TestParseAcceptsLegacySMSBlock(t *testing.T) {
 }
 
 func TestToYAMLNoLongerEmitsSMS(t *testing.T) {
-	cfg, err := Parse("", "dev")
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	out, err := ToYAML(cfg)
-	if err != nil {
-		t.Fatalf("ToYAML: %v", err)
-	}
-	if strings.Contains(out, "sms") {
-		t.Fatalf("新生成的系统配置不该再带 sms 段:\n%s", out)
+	for _, tc := range []struct{ name, in string }{
+		{"全新配置", ""},
+		// 旧 sms 段只为通过 KnownFields 才被读进来，Parse 之后必须已经丢掉，
+		// 否则 ToYAML 会把其中的 access_key_secret 原样写回库里。
+		{"带历史 sms 段的旧配置", "log:\n  level: info\nsms:\n  aliyun:\n    access_key_id: id\n    access_key_secret: legacy-secret\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse(tc.in, "dev")
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := ToYAML(cfg)
+			if err != nil {
+				t.Fatalf("ToYAML: %v", err)
+			}
+			if strings.Contains(out, "sms") || strings.Contains(out, "legacy-secret") {
+				t.Fatalf("系统配置不该再带 sms 段:\n%s", out)
+			}
+		})
 	}
 }

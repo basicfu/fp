@@ -7,6 +7,9 @@ package domain
 // 每个都应当是调用方真正会分支判断的东西。
 //
 // **一经发布不得更名，也不得复用于其他语义。**
+//
+// 已停用、码值不得再用：CODE_INVALID、SMS_TEMPLATE_MISSING——随短信验证码
+// 登录一并移除。
 const (
 	// 登录与认证。这一组的 Msg 会被接入方直接展示给终端用户。
 
@@ -35,9 +38,9 @@ const (
 	// CodeAppMustBeDisabled 是删除应用前置条件不满足：必须先停用才能删，
 	// 见 ApplicationService.Delete 的注释。
 	CodeAppMustBeDisabled = "APP_MUST_BE_DISABLED"
-	CodeConnectorDisabled    = "CONNECTOR_DISABLED"
-	CodeConnectorUnknown     = "CONNECTOR_UNKNOWN"
-	CodeRateLimited          = "RATE_LIMITED"
+	CodeConnectorDisabled = "CONNECTOR_DISABLED"
+	CodeConnectorUnknown  = "CONNECTOR_UNKNOWN"
+	CodeRateLimited       = "RATE_LIMITED"
 
 	// 管理端。
 

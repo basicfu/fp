@@ -209,7 +209,7 @@ func (s *ApplicationService) GetByAppID(ctx context.Context, appID string) (*dom
 
 // GetActiveByAppID 按对外 appId 取应用，并要求它处于启用状态。
 //
-// 应用被停用后，登录、发码、token 校验、Watch 撤销流——所有入口都必须
+// 应用被停用后，登录、token 校验、Watch 撤销流——所有入口都必须
 // 立即失效，否则"停用应用"只是个不生效的标记位：`status` 列有值、有
 // 常量，却没人读取，是最容易在后续阶段酿成事故的一类死字段（第一阶段
 // 就吃过这个亏）。

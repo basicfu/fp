@@ -20,7 +20,7 @@ var (
 	ErrUnauthorized = errors.New("fpsdk: token 无效或已过期")
 	// ErrUnavailable fp 不可达，且本地没有可用的缓存结果。
 	ErrUnavailable = errors.New("fpsdk: fp 不可达且无可用缓存")
-	// ErrInvalidArgument 调用方给的参数不合法（参数格式不对等）。
+	// ErrInvalidArgument 调用方给的参数不合法（比如 account 或 password 没填）。
 	// 与 ErrUnauthorized 的区别是：这不是"凭据不对"，是"请求本身就没法处理"，
 	// 客户端不该因此清掉会话或跳登录页。
 	ErrInvalidArgument = errors.New("fpsdk: 参数不合法")
