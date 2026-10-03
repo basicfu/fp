@@ -584,9 +584,8 @@ func TestLoginInvalidArgumentReturnsErrInvalidArgument(t *testing.T) {
 // translate 是纯粹按 gRPC status code 分类的函数，不关心具体是哪个 RPC
 // 触发的——用 Login 覆盖这一分支，与 TestLoginUnavailableReturnsErrUnavailable
 // /TestLoginInvalidArgumentReturnsErrInvalidArgument 保持同一种装配方式。
-// 限流在真实系统里最常见于 SendLoginCode（验证码发送过于频繁），但那不
-// 影响这里要验证的东西：只要 gRPC 返回 ResourceExhausted，无论出现在
-// 哪条 RPC 上，都必须落到 ErrRateLimited 而不是 ErrUnauthorized。
+// 只要 gRPC 返回 ResourceExhausted，无论出现在哪条 RPC 上，都必须落到
+// ErrRateLimited 而不是 ErrUnauthorized。
 func TestLoginRateLimitedReturnsErrRateLimited(t *testing.T) {
 	env := newStubEnvFull(t, &stubServer{
 		validate: okValidate("u1", 1000),

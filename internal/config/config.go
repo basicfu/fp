@@ -29,7 +29,11 @@ type Config struct {
 	HTTP           Listen         `yaml:"http"` // 管理控制台
 	GRPC           Listen         `yaml:"grpc"` // SDK 接入
 	BootstrapAdmin BootstrapAdmin `yaml:"bootstrap_admin"`
-	SMS            SMS            `yaml:"sms"`
+	// LegacySMS 只为兼容：Parse 开着 KnownFields(true)，而存量系统配置的第一版是
+	// seedDefaultsYAML 把默认值整份写进去的，里面带着 sms: 段。直接删字段会让这些
+	// 库启动时解析失败；版本快照又不允许改写。读进来、丢掉；omitempty 保证 ToYAML
+	// 不再输出它。
+	LegacySMS any `yaml:"sms,omitempty"`
 }
 
 type Log struct {
@@ -47,26 +51,6 @@ type Listen struct {
 type BootstrapAdmin struct {
 	User     string `yaml:"user"`
 	Password string `yaml:"password"`
-}
-
-type SMS struct {
-	Aliyun Aliyun `yaml:"aliyun"`
-}
-
-// Aliyun 是阿里云短信供应商的配置（见 cmd/fp/main.go）。不强制必填——
-// 任何环境缺任一项时，cmd/fp/main.go 都会退化成
-// notify.NewLoggingFakeProvider 并打一条醒目的 WARN，不静默、但也不拦住
-// 启动。阿里云短信只是短信这一种通知渠道的其中一个供应商，后续会挪进
-// 统一的通知中心配置，不该由 fp 自己的系统配置在启动时强制卡它。
-//
-// Endpoint 任何环境下都可以留空，notify.NewAliyunSMS 会套用它自己的默认
-// 接入点。
-type Aliyun struct {
-	AccessKeyID       string `yaml:"access_key_id"`
-	AccessKeySecret   string `yaml:"access_key_secret"`
-	SignName          string `yaml:"sign_name"`
-	TemplateLoginCode string `yaml:"template_login_code"` // 映射 service.LoginCodeTemplate 到阿里云侧模板 ID
-	Endpoint          string `yaml:"endpoint"`
 }
 
 // IsProd 报告当前是否为生产环境。

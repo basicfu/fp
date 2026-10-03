@@ -76,7 +76,7 @@ func callerAppID(ctx context.Context) (string, error) {
 // requireNotIM 拒绝 fp-im 网关调用面向业务应用的接口。
 //
 // 双向隔离而不是提权：type=im 能做的事是普通应用的一个**不同**子集，不是
-// 超集。最关键的是 Login/SendLoginCode——能签发会话意味着一份泄露的 IM
+// 超集。最关键的是 Login——能签发会话意味着一份泄露的 IM
 // 凭据可以对任意应用冒充任意用户。ReportPermissions/GetPolicy 与配置读取
 // 同理：那些是业务方自己的东西，网关没有任何理由碰。
 func requireNotIM(ctx context.Context) error {
@@ -107,20 +107,6 @@ func (s *authServer) requireIMEnabled(ctx context.Context, appID string) error {
 		return status.Error(codes.FailedPrecondition, "该应用未启用 IM 接入")
 	}
 	return nil
-}
-
-func (s *authServer) SendLoginCode(ctx context.Context, req *fpv1.SendLoginCodeRequest) (*fpv1.SendLoginCodeResponse, error) {
-	if err := requireNotIM(ctx); err != nil {
-		return nil, err
-	}
-	appID, err := callerAppID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.auth.SendLoginCode(ctx, appID, req.GetPhone()); err != nil {
-		return nil, StatusFrom(err)
-	}
-	return &fpv1.SendLoginCodeResponse{}, nil
 }
 
 func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.LoginResponse, error) {

@@ -37,7 +37,7 @@ type Result struct {
 	// Nickname 仅在需要新建用户时用作初始昵称。
 	Nickname string
 	// AllowCreate 表示标识不存在时是否允许自动建号。
-	// 短信验证码登录为 true（验证码本身证明了手机号归属）；
+	// 目前没有任何登录方式为 true，为将来的第三方登录保留；
 	// 密码登录为 false（连账号都不存在，谈不上密码正确）。
 	AllowCreate bool
 }

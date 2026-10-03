@@ -19,7 +19,6 @@ import (
 	"github.com/basicfu/fp/internal/grpcapi"
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/logging"
-	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/web"
@@ -133,13 +132,9 @@ func run() error {
 	configPub := store.NewConfigPublisher(rdb)
 
 	userSvc := service.NewUserService(pool)
-	codeSvc := notify.NewCodeService(rdb)
 
 	registry := connector.NewRegistry()
 	if err := registry.Register(connector.NewPassword(userSvc)); err != nil {
-		return err
-	}
-	if err := registry.Register(connector.NewSMSCode(codeSvc)); err != nil {
 		return err
 	}
 
@@ -160,43 +155,12 @@ func run() error {
 
 	configSvc := service.NewConfigService(pool, configPub)
 
-	// 短信供应商：四项阿里云凭据齐全就用真实供应商，不管是不是生产环境。
-	// 凭据不全时一律（含生产环境）退化成 notify.NewLoggingFakeProvider
-	// （验证码只进内存，不会真的发短信，但发送成功后会以 WARN 级别把
-	// 整条消息——含验证码——打进日志）并打一条 WARN，不拦住启动——阿里云
-	// 只是短信这一种通知渠道的其中一个供应商，不该由 fp 自己在启动时
-	// 强制卡它，后续会挪进统一的通知中心配置。
-	smsSender := notify.NewSender(pool, store.NewRateLimiter(rdb), nil)
-	aliyunConfigured := cfg.SMS.Aliyun.AccessKeyID != "" && cfg.SMS.Aliyun.AccessKeySecret != "" &&
-		cfg.SMS.Aliyun.SignName != "" && cfg.SMS.Aliyun.TemplateLoginCode != ""
-	if aliyunConfigured {
-		aliyunSMS, err := notify.NewAliyunSMS(notify.AliyunConfig{
-			AccessKeyID:     cfg.SMS.Aliyun.AccessKeyID,
-			AccessKeySecret: cfg.SMS.Aliyun.AccessKeySecret,
-			Endpoint:        cfg.SMS.Aliyun.Endpoint,
-			SignName:        cfg.SMS.Aliyun.SignName,
-			Templates: map[string]string{
-				service.LoginCodeTemplate: cfg.SMS.Aliyun.TemplateLoginCode,
-			},
-		})
-		if err != nil {
-			return err
-		}
-		smsSender.AddProvider(aliyunSMS)
-	} else {
-		log.Warn("阿里云短信未配置，短信通道使用内存假供应商——验证码不会真的发送，" +
-			"仅限本地开发/测试使用；发送成功的验证码会以 WARN 级别打进本进程日志")
-		smsSender.AddProvider(notify.NewLoggingFakeProvider(notify.ChannelSMS, "fake"))
-	}
-
 	authSvc := service.NewAuthService(service.AuthDeps{
 		Apps:     appSvc,
 		Users:    userSvc,
 		Sessions: sessionSvc,
 		Logs:     logSvc,
 		Registry: registry,
-		Notifier: smsSender,
-		Codes:    codeSvc,
 		Authz:    authzSvc,
 	})
 

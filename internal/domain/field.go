@@ -13,8 +13,8 @@ const (
 	// json.Marshal 明文写进 application_connector.config（JSONB，见
 	// service/application.go 的 SetConnector），ListConnectors 也原样
 	// unmarshal 明文返回；前端 DynamicForm 把 secret 字段渲染成
-	// <input type="password"> 只是纯视觉遮挡，不是加密。当前两个已注册的
-	// connector（password、sms_code）都没有声明任何 secret 字段，所以现在
+	// <input type="password"> 只是纯视觉遮挡，不是加密。当前已注册的
+	// connector（password）没有声明任何 secret 字段，所以现在
 	// 没有实际泄露——这是本阶段计划里明确记为"本阶段不做"的一项。但新增
 	// 任何带 secret 字段的 connector（比如微信登录的 AppSecret）之前，必须
 	// 先把这两样补上：否则那个 secret 会明文出现在

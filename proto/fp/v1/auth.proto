@@ -11,9 +11,6 @@ option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
 // 认证方式：每个 RPC 的 metadata 必须带 fp-app-id 与 fp-app-secret，
 // 由服务端拦截器校验（见 internal/grpcapi/auth_interceptor.go）。
 service AuthService {
-  // SendLoginCode 给手机号发送登录验证码。
-  rpc SendLoginCode(SendLoginCodeRequest) returns (SendLoginCodeResponse);
-
   // Login 用某种登录方式的凭据换取会话 token。
   rpc Login(LoginRequest) returns (LoginResponse);
 
@@ -45,18 +42,9 @@ service AuthService {
   rpc ReportAccessKeyUsage(ReportAccessKeyUsageRequest) returns (ReportAccessKeyUsageResponse);
 }
 
-// SendLoginCodeRequest 是一次发码请求。
-message SendLoginCodeRequest {
-  // phone 是接收验证码的手机号。
-  string phone = 1;
-}
-
-// SendLoginCodeResponse 是发码结果。成功即空响应，失败走 gRPC status。
-message SendLoginCodeResponse {}
-
 // LoginRequest 是一次登录请求。
 message LoginRequest {
-  // connector_type 是登录方式，例如 "password" / "sms_code"。
+  // connector_type 是登录方式，例如 "password"。
   string connector_type = 1;
   // credentials 是该登录方式所需的凭据，键名由各 connector 定义。
   map<string, string> credentials = 2;

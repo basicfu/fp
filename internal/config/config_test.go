@@ -23,13 +23,6 @@ grpc:
 bootstrap_admin:
   user: root
   password: s3cret
-sms:
-  aliyun:
-    access_key_id: ak
-    access_key_secret: sk
-    sign_name: 测试签名
-    template_login_code: SMS_0001
-    endpoint: dysmsapi.example.com
 `, "prod")
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
@@ -41,11 +34,6 @@ sms:
 		{"grpc.addr", cfg.GRPC.Addr, ":19090"},
 		{"bootstrap_admin.user", cfg.BootstrapAdmin.User, "root"},
 		{"bootstrap_admin.password", cfg.BootstrapAdmin.Password, "s3cret"},
-		{"sms.aliyun.access_key_id", cfg.SMS.Aliyun.AccessKeyID, "ak"},
-		{"sms.aliyun.access_key_secret", cfg.SMS.Aliyun.AccessKeySecret, "sk"},
-		{"sms.aliyun.sign_name", cfg.SMS.Aliyun.SignName, "测试签名"},
-		{"sms.aliyun.template_login_code", cfg.SMS.Aliyun.TemplateLoginCode, "SMS_0001"},
-		{"sms.aliyun.endpoint", cfg.SMS.Aliyun.Endpoint, "dysmsapi.example.com"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
@@ -133,11 +121,6 @@ func TestIsProd(t *testing.T) {
 	}
 }
 
-// TestParseAllowsMissingAliyunInAnyEnv 钉住阿里云短信凭据在任何环境
-// （包括 prod）都允许留空——不该由 fp 自己的系统配置在启动时强制卡它，
-// 阿里云只是短信这一种通知渠道的其中一个供应商，后续会挪进统一的通知
-// 中心配置。真正装配假供应商并打 WARN 的逻辑在 cmd/fp/main.go 里，这里
-// 只钉住 Parse 不替它做这个决定。
 // TestToYAMLRoundTrips 钉住 ToYAML 产出的文本能被 Parse 读回来，值不丢——
 // cmd/fp/main.go 靠这一点把首次启动解析出来的默认值写回系统配置表。
 func TestToYAMLRoundTrips(t *testing.T) {
@@ -151,9 +134,6 @@ grpc:
 bootstrap_admin:
   user: admin
   password: admin
-sms:
-  aliyun:
-    access_key_id: ak
 `, "prod")
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
@@ -175,9 +155,6 @@ sms:
 	if got.BootstrapAdmin != cfg.BootstrapAdmin {
 		t.Errorf("往返后 BootstrapAdmin = %+v，期望 %+v", got.BootstrapAdmin, cfg.BootstrapAdmin)
 	}
-	if got.SMS.Aliyun.AccessKeyID != cfg.SMS.Aliyun.AccessKeyID {
-		t.Errorf("往返后 SMS.Aliyun.AccessKeyID = %q，期望 %q", got.SMS.Aliyun.AccessKeyID, cfg.SMS.Aliyun.AccessKeyID)
-	}
 }
 
 // TestToYAMLOmitsEnv 钉住 env 不出现在 ToYAML 的输出里——它只能来自
@@ -197,14 +174,24 @@ func TestToYAMLOmitsEnv(t *testing.T) {
 	}
 }
 
-func TestParseAllowsMissingAliyunInAnyEnv(t *testing.T) {
-	for _, env := range []string{"dev", "prod", "PROD"} {
-		cfg, err := Parse("", env)
-		if err != nil {
-			t.Fatalf("Parse(env=%q) error = %v，任何环境阿里云凭据都允许留空", env, err)
-		}
-		if cfg.SMS.Aliyun.AccessKeyID != "" {
-			t.Errorf("env=%q: SMS.Aliyun.AccessKeyID = %q, want empty", env, cfg.SMS.Aliyun.AccessKeyID)
-		}
+// 存量库里的系统配置第一版带着 sms: 段，删掉 SMS 配置后它们仍必须能被解析。
+func TestParseAcceptsLegacySMSBlock(t *testing.T) {
+	yamlText := "log:\n  level: info\nsms:\n  aliyun:\n    access_key_id: \"\"\n    sign_name: x\n"
+	if _, err := Parse(yamlText, "dev"); err != nil {
+		t.Fatalf("Parse 应接受历史版本里的 sms 段: %v", err)
+	}
+}
+
+func TestToYAMLNoLongerEmitsSMS(t *testing.T) {
+	cfg, err := Parse("", "dev")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, err := ToYAML(cfg)
+	if err != nil {
+		t.Fatalf("ToYAML: %v", err)
+	}
+	if strings.Contains(out, "sms") {
+		t.Fatalf("新生成的系统配置不该再带 sms 段:\n%s", out)
 	}
 }

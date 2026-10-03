@@ -198,13 +198,13 @@ func defaultOnRotate(opts MiddlewareOptions) func(http.ResponseWriter, *http.Req
 // 这条性质本身就是本函数存在、取代各接入方自己拼错误信息的理由之一，
 // 见 TestWriteErrorNeverEchoesUnderlyingError。
 //
-// 供不经过 Middleware 的路由复用——SendLoginCode/Login 发生在鉴权中间件
+// 供不经过 Middleware 的路由复用——Login 发生在鉴权中间件
 // 之前，拿不到 defaultOnError 的实现（defaultOnError 本身也是靠这个函数
 // 实现的，是唯一实现，不留第二份分类逻辑）。每个接入方原本都要自己重写
 // 一遍这个分类，而写反的方向是危险的一边：把 ErrUnavailable（fp 抖动）
 // 误判成 401 会让全体接入方的用户被强制登出，比把普通鉴权失败误判成 503
 // 后果重得多；同理，把 ErrInvalidArgument（用户手机号打错了一位数字）
-// 或 ErrRateLimited（验证码发送被限流）误判成 401，会让客户端把一次
+// 或 ErrRateLimited 误判成 401，会让客户端把一次
 // 纯粹的输入问题或频率问题当成鉴权失败去清 cookie、跳登录页。
 func WriteError(w http.ResponseWriter, err error) {
 	// 访问密钥的拒绝原因走结构化响应（错误码 + 待签名串），不是固定文案——
@@ -224,12 +224,12 @@ func WriteError(w http.ResponseWriter, err error) {
 		// fp 抖动放大成全体用户重新登录。
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 	case errors.Is(err, ErrInvalidArgument):
-		// 400：请求本身没法处理（手机号格式错、验证码格式错），不是
+		// 400：请求本身没法处理（参数格式错），不是
 		// 凭据问题。回 401 会让客户端误以为要清会话/跳登录页，而用户
 		// 可能只是手机号少打了一位。
 		http.Error(w, "bad request", http.StatusBadRequest)
 	case errors.Is(err, ErrRateLimited):
-		// 429：被服务端限流（验证码发送过于频繁），用户的凭据没有任何
+		// 429：被服务端限流，用户的凭据没有任何
 		// 问题，同样不该被当成鉴权失败。
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 	case errors.Is(err, ErrForbidden):

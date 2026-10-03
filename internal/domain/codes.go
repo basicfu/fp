@@ -13,9 +13,6 @@ const (
 	// CodeCredentialInvalid 同时覆盖账号不存在、账号类型未开放、密码错误
 	// 三种情况，**刻意不拆**——拆开等于给攻击者一个账号枚举预言机。
 	CodeCredentialInvalid = "CREDENTIAL_INVALID"
-	// CodeCodeInvalid 合并"验证码错误"与"验证码已过期"，同样刻意不拆：
-	// 拆开会泄露某个手机号有没有被发过验证码。
-	CodeCodeInvalid = "CODE_INVALID"
 	// CodeAccountFrozen 只在 user.Status == FROZEN 时使用。
 	//
 	// 能看到这个码的调用方已经先通过了 Authenticate（凭据校验在
@@ -104,7 +101,6 @@ const (
 	CodeSessionNotFound        = "SESSION_NOT_FOUND"
 	CodeConnectorNotConfigured = "CONNECTOR_NOT_CONFIGURED"
 	CodeNotifyProviderMissing  = "NOTIFY_PROVIDER_MISSING"
-	CodeSMSTemplateMissing     = "SMS_TEMPLATE_MISSING"
 	CodeConfigVersionNotFound  = "CONFIG_VERSION_NOT_FOUND"
 
 	// CodeRouteNotFound 是路由层的 404：请求的 HTTP 路径不存在。
@@ -127,7 +123,6 @@ const (
 // 没有任何测试守住；现在由 TestCodeRegistryMatchesTransports 断言一致。
 var codeSentinels = map[string]error{
 	CodeCredentialInvalid:  ErrInvalidCredential,
-	CodeCodeInvalid:        ErrInvalidCredential,
 	CodeAccountFrozen:      ErrForbidden,
 	CodeAccountUnavailable: ErrForbidden,
 	CodeTokenInvalid:       ErrUnauthorized,
@@ -162,7 +157,6 @@ var codeSentinels = map[string]error{
 	CodeSessionNotFound:        ErrNotFound,
 	CodeConnectorNotConfigured: ErrNotFound,
 	CodeNotifyProviderMissing:  ErrNotFound,
-	CodeSMSTemplateMissing:     ErrNotFound,
 	CodeConfigVersionNotFound:  ErrNotFound,
 	CodeRouteNotFound:          ErrNotFound,
 

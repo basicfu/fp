@@ -31,34 +31,19 @@ func main() {
 	auth := client.Auth()
 	mux := http.NewServeMux()
 
-	// 公开路由：发验证码、登录。
-	mux.HandleFunc("POST /api/login/code", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Phone string `json:"phone"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		if err := auth.SendLoginCode(r.Context(), req.Phone); err != nil {
-			fpsdk.WriteError(w, err)
-			return
-		}
-		writeJSON(w, map[string]any{"ok": true})
-	})
-
+	// 公开路由：登录。
 	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Phone string `json:"phone"`
-			Code  string `json:"code"`
+			Account  string `json:"account"`
+			Password string `json:"password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		res, err := auth.Login(r.Context(), fpsdk.LoginInput{
-			ConnectorType: "sms_code",
-			Credentials:   map[string]string{"phone": req.Phone, "code": req.Code},
+			ConnectorType: "password",
+			Credentials:   map[string]string{"account": req.Account, "password": req.Password},
 			IP:            r.RemoteAddr,
 			UserAgent:     r.UserAgent(),
 		})

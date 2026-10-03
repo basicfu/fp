@@ -259,7 +259,7 @@ func TestMiddlewareUnavailableReturns503(t *testing.T) {
 // TestWriteErrorNeverEchoesUnderlyingError 把 default 纳入用例，但只断言
 // 响应体不含标记串，没断言 rec.Code，把 401 改成别的值不会被任何测试拦下）。
 //
-// WriteError 存在的理由：SendLoginCode/Login 这类不经过 Middleware 的路由
+// WriteError 存在的理由：Login 这类不经过 Middleware 的路由
 // 拿不到 defaultOnError，此前每个接入方都要自己重写一遍 503/401 分类
 // （examples/demo/main.go 的 writeAuthError 就是一例），而写反的方向是
 // 危险的一边——把 ErrUnavailable 误判成 401 会让一次 fp 抖动变成全员登出。
@@ -293,7 +293,7 @@ func TestWriteErrorMapsSentinelsToStatusCodes(t *testing.T) {
 // 它会流进前端日志、浏览器控制台、错误上报平台——一个仍然有效的凭据
 // 就此四处流传。这条直接测导出的 WriteError 本身（不经过 Middleware）：
 // TestMiddlewareDoesNotEchoToken 测的是走 Middleware 的路径，覆盖不到
-// SendLoginCode/Login 这类直接调用 WriteError 的调用方。
+// Login 这类直接调用 WriteError 的调用方。
 func TestWriteErrorDoesNotEchoCredential(t *testing.T) {
 	const secretToken = "非常独特的令牌值-write-error-7c1e"
 	err := errors.Join(ErrUnauthorized, fmt.Errorf("token %q 校验失败", secretToken))
@@ -412,7 +412,7 @@ func TestMiddlewareTokenTakesPriorityOverGuestID(t *testing.T) {
 //
 // TestWriteErrorDoesNotEchoCredential 只覆盖了 ErrUnauthorized 这一个
 // 分支。这里补齐其余分支：ErrInvalidArgument 包着的 err 可能带着调用方
-// 递上来的原始手机号/验证码，ErrRateLimited、ErrUnavailable 包着的 err
+// 递上来的原始手机号/口令，ErrRateLimited、ErrUnavailable 包着的 err
 // 也都可能携带内部细节（连接地址、限流窗口之类）。"固定文案、不回显"
 // 是删掉 examples/demo 那份自建 writeAuthError（它会回显 err.Error()）
 // 的理由之一，需要一条测试把全部分支一起守住，而不是只守一个。

@@ -9,16 +9,7 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
-	"github.com/basicfu/fp/internal/notify"
 )
-
-// LoginCodeTemplate 是登录验证码使用的 fp 内部模板 key。
-// 各供应商把它映射到自己的模板 ID（见 notify.AliyunConfig.Templates）。
-// 导出它是为了 cmd/fp/main.go 装配 notify.AliyunConfig.Templates 时可以
-// 直接引用这个常量，而不是重复写一遍 "login_code" 字面量——两处一旦
-// 打字不一致，SendLoginCode 会在第一次真实发送时才报"模板未映射"，
-// 而不是在装配阶段就暴露出来。
-const LoginCodeTemplate = "login_code"
 
 // AuthDeps 是 AuthService 的依赖集合。
 type AuthDeps struct {
@@ -27,8 +18,6 @@ type AuthDeps struct {
 	Sessions *SessionService
 	Logs     *LoginLogService
 	Registry *connector.Registry
-	Notifier *notify.Sender
-	Codes    *notify.CodeService
 	// Authz 解析用户在本应用的有效角色，签发会话时刻进去。
 	// 可为 nil——授权模块未启用时会话不带角色，判定一律拒绝（默认拒绝）。
 	Authz *AuthzService
@@ -60,34 +49,6 @@ type LoginInput struct {
 type LoginResult struct {
 	User    *domain.User
 	Session *domain.Session
-}
-
-// SendLoginCode 给手机号发送登录验证码。
-//
-// 校验顺序：应用 → 登录方式是否启用 → 手机号格式 → 频率限制 → 发送。
-// 格式校验必须早于验证码生成，否则畸形号码也会消耗一次发送额度。
-func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) error {
-	app, err := s.activeApp(ctx, appID)
-	if err != nil {
-		return err
-	}
-	if _, err := s.enabledConnector(ctx, app, connector.TypeSMSCode); err != nil {
-		return err
-	}
-	if connector.DetectIdentityType(phone) != domain.IdentityTypePhone {
-		return domain.Failf(domain.ErrInvalidArgument, domain.CodePhoneInvalid, "手机号格式不正确")
-	}
-
-	code, err := s.deps.Codes.Issue(ctx, notify.PurposeLogin, phone)
-	if err != nil {
-		return err
-	}
-	return s.deps.Notifier.Send(ctx, notify.Message{
-		Channel:  notify.ChannelSMS,
-		To:       phone,
-		Template: LoginCodeTemplate,
-		Params:   map[string]string{"code": code},
-	})
 }
 
 // Login 执行一次完整登录。
@@ -135,9 +96,9 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 
 	// 认证之后的每一步失败，都必须照样留下审计记录。
 	//
-	// 这些恰恰是"凭据已经验过、一次性验证码已经被消费掉"的那些尝试——
-	// 出事故时最想查的就是它们。只在凭据校验失败时记录，等于把成功通过
-	// 认证却没能建立会话的那批请求全部丢进黑洞。
+	// 这些恰恰是"凭据已经验过"的那些尝试——出事故时最想查的就是它们。
+	// 只在凭据校验失败时记录，等于把成功通过认证却没能建立会话的那批
+	// 请求全部丢进黑洞。
 	if err := s.deps.Users.EnsureRegistration(ctx, user.ID, app.ID); err != nil {
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
@@ -217,9 +178,9 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 // **别把它"优化"成比较 updated_at 之类的时间戳**：那既会被其他更新列的操作
 // 误触发，又依赖数据库时钟精度，两头都不如直接比哈希准。
 //
-// 这一条对**每一种登录方式**都成立，包括压根没碰过密码的 sms_code：
+// 这一条对**每一种登录方式**都成立，不论它碰没碰过密码：
 // ResetPassword 的语义是"把这个账号现有的会话全部作废"，一次恰好在
-// RevokeUser 枚举之后落地的短信登录同样绕过了它，没有理由放行。
+// RevokeUser 枚举之后落地的登录同样绕过了它，没有理由放行。
 //
 // 读不到用户时按不可登录处理：宁可让一次合法登录失败，也不放行一个
 // 可能已经被冻结、或凭据已经换掉的会话。
@@ -228,8 +189,8 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 // 快照读取严格早于管理动作提交，**并且** RevokeUser 的枚举严格早于 Issue 的写入。
 // 两个条件同时成立的窗口仍然存在。另外还剩一小段它够不着的区间：密码登录时，
 // connector 自己校验口令发生在 resolveUser 读快照**之前**，改密若恰好落在这两步
-// 之间，快照拿到的已经是新哈希，比对就看不出差异了（短信登录没有这一段，
-// 因为它的凭据校验与 password_hash 无关）。真正的栅栏需要把校验和会话写入放进
+// 之间，快照拿到的已经是新哈希，比对就看不出差异了（凭据校验与
+// password_hash 无关的登录方式没有这一段）。真正的栅栏需要把校验和会话写入放进
 // 同一个事务边界里——例如给用户加一个撤销版本号，随状态和密码一起递增，
 // 签发时带上、校验时比对——那是计划二的事。这里做的只是把"静默失守好几天"
 // 换成一个窄得多的竞态，而且它自愈：管理员下一次操作、或任何一次后续撤销都会清掉它。
@@ -428,7 +389,7 @@ func (s *AuthService) writeLog(ctx context.Context, e domain.LoginLog) {
 // "已冻结"**——那种谎报会让用户和客服都往错的方向排查。
 //
 // 安全前提：这个错误只在 conn.Authenticate() 成功之后才可能返回，也就是
-// 调用方已经证明了自己知道密码或持有有效验证码，所以暴露"账号被冻结"
+// 调用方已经证明了自己持有有效凭据，所以暴露"账号被冻结"
 // 不构成账号枚举泄露。不要把这个判断挪到凭据校验之前。
 func accountUnavailableError(u *domain.User) *domain.Error {
 	if u.Status == domain.UserStatusFrozen {

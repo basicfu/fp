@@ -113,10 +113,6 @@ func TestRPCsRequireCredentials(t *testing.T) {
 	bare := context.Background()
 
 	calls := map[string]func() error{
-		"SendLoginCode": func() error {
-			_, err := env.client.SendLoginCode(bare, &fpv1.SendLoginCodeRequest{Phone: "13800138000"})
-			return err
-		},
 		"Login": func() error {
 			_, err := env.client.Login(bare, &fpv1.LoginRequest{ConnectorType: "password"})
 			return err
@@ -322,10 +318,6 @@ func TestIMCallerCannotMintSessions(t *testing.T) {
 	}{
 		{"Login", func() error {
 			_, err := env.client.Login(ctx, &fpv1.LoginRequest{ConnectorType: "password"})
-			return err
-		}},
-		{"SendLoginCode", func() error {
-			_, err := env.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: "13800000000"})
 			return err
 		}},
 		{"Logout", func() error {
