@@ -17,7 +17,7 @@ import (
 )
 
 // stubSchemas 让 SetConnector 的校验测试不依赖真实 registry，
-// 从而能覆盖到"必填字段"这条——线上两个 connector 恰好都没有必填字段。
+// 从而能覆盖到"必填字段"这条——线上的 password 恰好没有必填字段。
 type stubSchemas map[string][]domain.Field
 
 func (s stubSchemas) Schemas() map[string][]domain.Field { return s }
@@ -27,9 +27,6 @@ func newAppService(t *testing.T) *service.ApplicationService {
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(nil)); err != nil {
 		t.Fatalf("注册 password: %v", err)
-	}
-	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
 	}
 	return service.NewApplicationService(testsupport.NewTestDB(t), reg)
 }
@@ -267,7 +264,7 @@ func TestSetConnectorRejectsWrongValueType(t *testing.T) {
 }
 
 func TestSetConnectorRejectsMissingRequiredField(t *testing.T) {
-	// 线上两个 connector 都没有必填字段，只能用 stub 覆盖这条分支。
+	// 线上的 password 没有必填字段，只能用 stub 覆盖这条分支。
 	svc := service.NewApplicationService(testsupport.NewTestDB(t), stubSchemas{
 		"demo": {
 			{Key: "apiKey", Label: "API Key", Type: domain.FieldTypeString, Required: true},
@@ -638,9 +635,6 @@ func newAppServiceWith(t *testing.T, pool *pgxpool.Pool) *service.ApplicationSer
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(nil)); err != nil {
 		t.Fatalf("注册 password: %v", err)
-	}
-	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
 	}
 	return service.NewApplicationService(pool, reg)
 }

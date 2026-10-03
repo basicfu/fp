@@ -10,7 +10,6 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
-	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -24,8 +23,6 @@ type authEnv struct {
 	accounts *service.AccountService
 	sess     *service.SessionService
 	logs     *service.LoginLogService
-	sms      *notify.FakeProvider
-	codes    *notify.CodeService
 	app      *domain.Application
 	// pool 用于少数需要绕过 service 层直接改库的用例（例如制造"应用已停用"这种
 	// 第一阶段还没有管理接口可以到达的状态）。
@@ -52,119 +49,65 @@ func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
 	sessions := service.NewSessionServiceWithClock(
 		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, now)
 	logs := service.NewLoginLogService(pool)
-	codes := notify.NewCodeService(rdb)
 
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
 	}
-	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
-	}
 	apps := service.NewApplicationService(pool, reg)
 
-	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	// 显式关闭频率限制（[]RateRule{} 而不是 nil——nil 会套用默认的
-	// "30 秒 1 条"）：下面好几个用例要对同一个手机号连发几次验证码，
-	// 真实限制会把它们卡死。要测限制本身的用例自己传规则进来。
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb), []notify.RateRule{})
-	sender.AddProvider(sms)
-
-	app, _, err := apps.Create(context.Background(), "测试应用", "test-app")
+	ctx := context.Background()
+	app, _, err := apps.Create(ctx, "测试应用", "test-app")
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}
-	ctx := context.Background()
-	for _, typ := range []string{connector.TypePassword, connector.TypeSMSCode} {
-		if err := apps.SetConnector(ctx, app.ID, typ, true, nil); err != nil {
-			t.Fatalf("启用 %s: %v", typ, err)
-		}
+	if err := apps.SetConnector(ctx, app.ID, connector.TypePassword, true, nil); err != nil {
+		t.Fatalf("启用 password: %v", err)
 	}
 
 	return &authEnv{
 		auth: service.NewAuthService(service.AuthDeps{
-			Apps: apps, Users: users, Sessions: sessions, Logs: logs,
-			Registry: reg, Notifier: sender, Codes: codes,
+			Apps: apps, Users: users, Sessions: sessions, Logs: logs, Registry: reg,
 		}),
 		apps: apps, users: users, sess: sessions, logs: logs,
 		accounts: service.NewAccountService(users, sessions, epochs, logs),
-		sms:      sms, codes: codes, app: app, pool: pool,
+		app:      app, pool: pool,
 	}
 }
 
-func (e *authEnv) smsLogin(t *testing.T, phone string) *service.LoginResult {
+const authTestPassword = "hunter2hunter2"
+
+// passwordInput 保证手机号对应的用户存在并带固定密码，返回一份 password 登录的入参。
+//
+// 密码登录不会自动建号，所以先建；同一个手机号多次调用拿到的是同一个用户。
+// 需要在登录之前改状态、挂钩子的用例拿这份入参自己调 e.auth.Login，不要调 passwordLogin。
+func (e *authEnv) passwordInput(t *testing.T, phone string) service.LoginInput {
 	t.Helper()
 	ctx := context.Background()
-	if err := e.auth.SendLoginCode(ctx, e.app.AppID, phone); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
-	}
-	code := e.sms.LastParam("code")
-	if code == "" {
-		t.Fatal("未从假供应商取到验证码")
-	}
-	res, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         e.app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": phone, "code": code},
-		IP:            "1.2.3.4", UA: "go-test",
+	user, _, _, err := e.users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
+		Type: domain.IdentityTypePhone, Subject: phone,
 	})
 	if err != nil {
-		t.Fatalf("Login(sms_code): %v", err)
+		t.Fatalf("EnsureUserWithIdentity: %v", err)
 	}
-	return res
-}
-
-func TestSMSCodeLoginCreatesUser(t *testing.T) {
-	e := newAuthEnv(t)
-	res := e.smsLogin(t, "13800138000")
-
-	if res.User == nil || res.Session == nil {
-		t.Fatal("返回结果不完整")
-	}
-	if res.Session.Token == "" {
-		t.Fatal("token 为空")
-	}
-	if res.User.Status != domain.UserStatusActive {
-		t.Fatalf("Status = %q", res.User.Status)
-	}
-
-	// 签发的 token 立刻可用
-	vr, err := e.auth.ValidateToken(context.Background(), e.app.AppID, res.Session.Token)
-	if err != nil {
-		t.Fatalf("ValidateToken: %v", err)
-	}
-	if vr.Session.UserID != res.User.ID {
-		t.Fatal("token 指向的用户不对")
-	}
-	if vr.CacheTTL <= 0 {
-		t.Fatalf("CacheTTL = %v", vr.CacheTTL)
-	}
-}
-
-// 端到端验证账号归并：短信建的号，设完密码后用手机号+密码登录，必须是同一个人。
-func TestPasswordAndSMSLoginResolveToSameUser(t *testing.T) {
-	e := newAuthEnv(t)
-	ctx := context.Background()
-
-	first := e.smsLogin(t, "13800138000")
-	if err := e.users.SetPassword(ctx, first.User.ID, "hunter2hunter2"); err != nil {
+	if err := e.users.SetPassword(ctx, user.ID, authTestPassword); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
-
-	second, err := e.auth.Login(ctx, service.LoginInput{
+	return service.LoginInput{
 		AppID:         e.app.AppID,
 		ConnectorType: connector.TypePassword,
-		Credentials:   connector.Credentials{"account": "13800138000", "password": "hunter2hunter2"},
-	})
+		Credentials:   connector.Credentials{"account": phone, "password": authTestPassword},
+		IP:            "1.2.3.4", UA: "go-test",
+	}
+}
+
+func (e *authEnv) passwordLogin(t *testing.T, phone string) *service.LoginResult {
+	t.Helper()
+	res, err := e.auth.Login(context.Background(), e.passwordInput(t, phone))
 	if err != nil {
 		t.Fatalf("Login(password): %v", err)
 	}
-	if second.User.ID != first.User.ID {
-		t.Fatalf("归并失败: %v vs %v", second.User.ID, first.User.ID)
-	}
-	if second.Session.Token == first.Session.Token {
-		t.Fatal("两次登录应签发不同的 token")
-	}
+	return res
 }
 
 // 密码登录不建号：账号不存在时必须拒绝，而不是悄悄注册一个。
@@ -198,51 +141,6 @@ func TestLoginRejectsDisabledConnector(t *testing.T) {
 	}
 }
 
-// 停用登录方式后，一次被拒绝的登录尝试不能消费掉验证码——这个断言比
-// "返回 ErrForbidden" 更严格：两种实现（开关检查在 Authenticate 之前或之后）
-// 在被拒绝这件事上表现一致，只有验证码是否被消费能区分它们。
-func TestDisabledConnectorRejectsBeforeConsumingCode(t *testing.T) {
-	e := newAuthEnv(t)
-	ctx := context.Background()
-
-	// 先在启用状态下拿到一个真实验证码
-	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
-	}
-	code := e.sms.LastParam("code")
-	if code == "" {
-		t.Fatal("未取到验证码")
-	}
-
-	// 再停用该登录方式
-	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, false, nil); err != nil {
-		t.Fatalf("停用 sms_code: %v", err)
-	}
-
-	if _, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         e.app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": "13800138000", "code": code},
-	}); !errors.Is(err, domain.ErrForbidden) {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
-
-	// 关键断言：验证码必须**没有被消费**。
-	// 重新启用后它应当仍然可用——若已被消费，说明 Authenticate 被调用了，
-	// 也就是说开关检查发生在凭据校验之后。
-	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, true, nil); err != nil {
-		t.Fatalf("重新启用 sms_code: %v", err)
-	}
-	if _, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         e.app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": "13800138000", "code": code},
-	}); err != nil {
-		t.Fatalf("验证码在被拒绝的那次登录中已被消费——说明应用级开关检查"+
-			"发生在 Authenticate 之后，顺序错了: %v", err)
-	}
-}
-
 func TestLoginRejectsUnconfiguredConnector(t *testing.T) {
 	e := newAuthEnv(t)
 	_, err := e.auth.Login(context.Background(), service.LoginInput{
@@ -271,19 +169,13 @@ func TestLoginRejectsFrozenUser(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 	if _, err := e.users.SetStatus(ctx, res.User.ID, domain.UserStatusFrozen); err != nil {
 		t.Fatalf("冻结: %v", err)
 	}
 
-	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
-	}
-	_, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         e.app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
-	})
+	in := e.passwordInput(t, "13800138000")
+	_, err := e.auth.Login(ctx, in)
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
 	}
@@ -326,6 +218,9 @@ func TestLoginRejectsFreezeCommittedBetweenCheckAndSessionWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("建号: %v", err)
 	}
+	// 入参在挂钩子之前备好：passwordInput 只碰 UserService，不会走到会话时钟，
+	// 也就不会提前触发钩子。
+	in := e.passwordInput(t, "13800138000")
 
 	// 用 AccountService 而不是 UserService：要复现的是管理员那条完整路径
 	// （改状态 + 撤销全部会话），而不只是把状态列改掉。
@@ -335,15 +230,8 @@ func TestLoginRejectsFreezeCommittedBetweenCheckAndSessionWrite(t *testing.T) {
 		}
 	}
 
-	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
-	}
-	_, err = e.auth.Login(ctx, service.LoginInput{
-		AppID:         e.app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
-		IP:            "5.5.5.5", UA: "go-test",
-	})
+	in.IP = "5.5.5.5"
+	_, err = e.auth.Login(ctx, in)
 
 	if hook != nil {
 		t.Fatal("钩子没有触发——测试构造已失效，下面的断言不再有意义")
@@ -394,10 +282,6 @@ func TestLoginRejectsFreezeCommittedBetweenCheckAndSessionWrite(t *testing.T) {
 // "密码泄露了赶紧改密码"这个动作的全部意义就是把已经落在攻击者手里的会话作废掉。
 // 一次校验过**旧密码**的登录在 RevokeUser 之后落地，等于让改密对这个正在飞的
 // 请求完全失效——恰恰是最该拦住的那一个。
-//
-// 两种登录方式都要覆盖：password 是最直观的场景，而 sms_code 压根没碰过密码，
-// 它能被拦住靠的完全是 password_hash 比对这条通用规则——注释里既然写了
-// "对每一种登录方式都成立"，就必须有用例钉住它，不能只留一句断言在注释里。
 func TestLoginRejectsPasswordResetCommittedBetweenCheckAndSessionWrite(t *testing.T) {
 	const (
 		oldPassword = "hunter2hunter2"
@@ -415,22 +299,6 @@ func TestLoginRejectsPasswordResetCommittedBetweenCheckAndSessionWrite(t *testin
 					AppID:         e.app.AppID,
 					ConnectorType: connector.TypePassword,
 					Credentials:   connector.Credentials{"account": "13800138000", "password": oldPassword},
-					IP:            "6.6.6.6", UA: "go-test",
-				})
-				return err
-			},
-		},
-		{
-			name: "短信登录_压根没碰密码",
-			login: func(t *testing.T, e *authEnv) error {
-				ctx := context.Background()
-				if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
-					t.Fatalf("SendLoginCode: %v", err)
-				}
-				_, err := e.auth.Login(ctx, service.LoginInput{
-					AppID:         e.app.AppID,
-					ConnectorType: connector.TypeSMSCode,
-					Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
 					IP:            "6.6.6.6", UA: "go-test",
 				})
 				return err
@@ -535,12 +403,12 @@ func TestLoginCancelsPendingDeletion(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	first := e.smsLogin(t, "13800138000")
+	first := e.passwordLogin(t, "13800138000")
 	if _, err := e.users.SetStatus(ctx, first.User.ID, domain.UserStatusPendingDelete); err != nil {
 		t.Fatalf("提交注销: %v", err)
 	}
 
-	second := e.smsLogin(t, "13800138000")
+	second := e.passwordLogin(t, "13800138000")
 	if second.User.ID != first.User.ID {
 		t.Fatal("不是同一个用户")
 	}
@@ -560,7 +428,7 @@ func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	first := e.smsLogin(t, "13800138000")
+	first := e.passwordLogin(t, "13800138000")
 
 	var n int
 	if err := e.pool.QueryRow(ctx,
@@ -572,7 +440,7 @@ func TestLoginRecordsRegistrationIdempotently(t *testing.T) {
 		t.Fatalf("注册关系数 = %d, want 1——登录没有写入 user_extra", n)
 	}
 
-	again := e.smsLogin(t, "13800138000")
+	again := e.passwordLogin(t, "13800138000")
 	if again.User.ID != first.User.ID {
 		t.Fatal("两次登录不是同一用户")
 	}
@@ -594,7 +462,7 @@ func TestLoginTouchesIdentityLastLoginAt(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 
 	ids, err := e.users.ListIdentities(ctx, res.User.ID)
 	if err != nil {
@@ -618,7 +486,7 @@ func TestLoginWritesAuditLog(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 	list, err := e.logs.ListByUser(ctx, res.User.ID, 10)
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
@@ -648,7 +516,7 @@ func TestFailedLoginWritesAuditLog(t *testing.T) {
 	ctx := context.Background()
 
 	// 先建号并设密码，这样失败记录能挂到 user_id 上，便于按用户查询
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 	if err := e.users.SetPassword(ctx, res.User.ID, "hunter2hunter2"); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
@@ -697,20 +565,14 @@ func TestFrozenUserLoginWritesAuditLog(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 	if _, err := e.users.SetStatus(ctx, res.User.ID, domain.UserStatusFrozen); err != nil {
 		t.Fatalf("冻结: %v", err)
 	}
 
-	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
-		t.Fatalf("SendLoginCode: %v", err)
-	}
-	if _, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         e.app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": "13800138000", "code": e.sms.LastParam("code")},
-		IP:            "7.7.7.7",
-	}); !errors.Is(err, domain.ErrForbidden) {
+	in := e.passwordInput(t, "13800138000")
+	in.IP = "7.7.7.7"
+	if _, err := e.auth.Login(ctx, in); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
 	}
 
@@ -735,7 +597,7 @@ func TestLogoutWritesAuditLog(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 	if err := e.auth.Logout(ctx, e.app.AppID, res.Session.Token); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
@@ -760,13 +622,15 @@ func TestLogoutWritesAuditLog(t *testing.T) {
 	}
 }
 
-// 应用被停用后，登录、发码、token 校验三条入口必须同时失效。
+// 应用被停用后，登录、token 校验两条入口必须同时失效。
 // 第一阶段没有停用应用的管理接口，因此这里直接改库来制造该状态。
 func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
+	// 凭据完全合法，登录被拒就只可能是因为应用已停用。
+	in := e.passwordInput(t, "13800138000")
 
 	if _, err := e.pool.Exec(ctx,
 		`UPDATE application SET status = $2 WHERE id = $1`,
@@ -774,14 +638,7 @@ func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
 		t.Fatalf("停用应用: %v", err)
 	}
 
-	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); !errors.Is(err, domain.ErrForbidden) {
-		t.Errorf("SendLoginCode err = %v, want ErrForbidden", err)
-	}
-	if _, err := e.auth.Login(ctx, service.LoginInput{
-		AppID:         e.app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": "13800138000", "code": "123456"},
-	}); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := e.auth.Login(ctx, in); !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("Login err = %v, want ErrForbidden", err)
 	}
 	// 已签发的 token 也必须立刻失效
@@ -790,34 +647,12 @@ func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
 	}
 }
 
-func TestSendLoginCodeRequiresEnabledConnector(t *testing.T) {
-	e := newAuthEnv(t)
-	ctx := context.Background()
-
-	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, false, nil); err != nil {
-		t.Fatalf("停用 sms_code: %v", err)
-	}
-	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); !errors.Is(err, domain.ErrForbidden) {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
-}
-
-func TestSendLoginCodeRejectsMalformedPhone(t *testing.T) {
-	e := newAuthEnv(t)
-	if err := e.auth.SendLoginCode(context.Background(), e.app.AppID, "12345"); !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Fatalf("err = %v, want ErrInvalidArgument", err)
-	}
-	if len(e.sms.Sent()) != 0 {
-		t.Fatal("格式非法时不应真的发短信")
-	}
-}
-
 // 命名加 AuthService 前缀以区别于 admin_test.go 里同名但测 AdminService 的用例。
 func TestAuthServiceLogoutInvalidatesToken(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()
 
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 	if err := e.auth.Logout(ctx, e.app.AppID, res.Session.Token); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
@@ -834,109 +669,9 @@ func TestValidateTokenRejectsWrongApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}
-	res := e.smsLogin(t, "13800138000")
+	res := e.passwordLogin(t, "13800138000")
 
 	if _, err := e.auth.ValidateToken(ctx, other.AppID, res.Session.Token); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrUnauthorized", err)
-	}
-}
-
-// 被限流的重发绝不能作废用户手里已经收到的验证码。
-//
-// 这是个用户侧的死锁：如果 Issue 无条件覆盖，窗口内第二次点"发送"会用新码
-// 顶掉旧码，而新码又因限流发不出去——用户手上的码作废了、补发没到、
-// 再点又滚一次，整个窗口内都登录不了。
-func TestRateLimitedResendDoesNotInvalidateDeliveredCode(t *testing.T) {
-	pool := testsupport.NewTestDB(t)
-	rdb := testsupport.NewTestRedis(t)
-
-	users := service.NewUserService(pool)
-	codes := notify.NewCodeService(rdb)
-	reg := connector.NewRegistry()
-	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
-		t.Fatalf("注册: %v", err)
-	}
-	apps := service.NewApplicationService(pool, reg)
-	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb),
-		[]notify.RateRule{{Name: "30s", Window: 30 * time.Second, Limit: 1}})
-	sender.AddProvider(sms)
-
-	ctx := context.Background()
-	app, _, err := apps.Create(ctx, "A", "a")
-	if err != nil {
-		t.Fatalf("创建应用: %v", err)
-	}
-	if err := apps.SetConnector(ctx, app.ID, connector.TypeSMSCode, true, nil); err != nil {
-		t.Fatalf("启用: %v", err)
-	}
-	auth := service.NewAuthService(service.AuthDeps{
-		Apps: apps, Users: users,
-		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), store.NewEpochStore(rdb)),
-		Logs:     service.NewLoginLogService(pool),
-		Registry: reg, Notifier: sender, Codes: codes,
-	})
-
-	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); err != nil {
-		t.Fatalf("首次发送: %v", err)
-	}
-	delivered := sms.LastParam("code")
-	if delivered == "" {
-		t.Fatal("未取到已送达的验证码")
-	}
-
-	// 窗口内再点一次，必然被限流
-	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); !errors.Is(err, domain.ErrRateLimited) {
-		t.Fatalf("二次发送 err = %v, want ErrRateLimited", err)
-	}
-
-	// 关键断言：用户手里那个码必须仍然可用
-	if _, err := auth.Login(ctx, service.LoginInput{
-		AppID:         app.AppID,
-		ConnectorType: connector.TypeSMSCode,
-		Credentials:   connector.Credentials{"phone": "13800138000", "code": delivered},
-	}); err != nil {
-		t.Fatalf("被限流的重发作废了用户已收到的验证码，用户被锁在窗口外: %v", err)
-	}
-}
-
-func TestSendLoginCodeIsRateLimitedPerPhone(t *testing.T) {
-	pool := testsupport.NewTestDB(t)
-	rdb := testsupport.NewTestRedis(t)
-
-	users := service.NewUserService(pool)
-	codes := notify.NewCodeService(rdb)
-	reg := connector.NewRegistry()
-	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
-		t.Fatalf("注册: %v", err)
-	}
-	apps := service.NewApplicationService(pool, reg)
-	sms := notify.NewFakeProvider(notify.ChannelSMS, "fake")
-	// 启用 30 秒一次的限制
-	sender := notify.NewSender(pool, store.NewRateLimiter(rdb),
-		[]notify.RateRule{{Name: "30s", Window: 30 * time.Second, Limit: 1}})
-	sender.AddProvider(sms)
-
-	app, _, err := apps.Create(context.Background(), "A", "a")
-	if err != nil {
-		t.Fatalf("创建应用: %v", err)
-	}
-	ctx := context.Background()
-	if err := apps.SetConnector(ctx, app.ID, connector.TypeSMSCode, true, nil); err != nil {
-		t.Fatalf("启用: %v", err)
-	}
-
-	auth := service.NewAuthService(service.AuthDeps{
-		Apps: apps, Users: users,
-		Sessions: service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), store.NewEpochStore(rdb)),
-		Logs:     service.NewLoginLogService(pool),
-		Registry: reg, Notifier: sender, Codes: codes,
-	})
-
-	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); err != nil {
-		t.Fatalf("首次: %v", err)
-	}
-	if err := auth.SendLoginCode(ctx, app.AppID, "13800138000"); !errors.Is(err, domain.ErrRateLimited) {
-		t.Fatalf("二次 err = %v, want ErrRateLimited", err)
 	}
 }

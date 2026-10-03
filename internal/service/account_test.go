@@ -47,9 +47,6 @@ func newAccountEnv(t *testing.T) *accountEnv {
 	if err := reg.Register(connector.NewPassword(nil)); err != nil {
 		t.Fatalf("注册 password: %v", err)
 	}
-	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
-	}
 	return &accountEnv{
 		accounts: service.NewAccountService(users, sessions, epochs, logs),
 		users:    users,

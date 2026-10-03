@@ -59,18 +59,18 @@ func TestEnsureUserWithIdentityCreatesThenReuses(t *testing.T) {
 	}
 }
 
-// 归并规则的核心用例：同一手机号在 sms_code 与 password 两种登录方式下
-// 必须落到同一个 user。两者共用 identity(type='phone')。
+// 归并规则的核心用例：同一手机号先建号、再设密码，用手机号+密码登录
+// 必须落到同一个 user。建号与密码登录共用 identity(type='phone')。
 func TestSamePhoneAcrossConnectorsMergesToOneUser(t *testing.T) {
 	svc := newUserService(t)
 	ctx := context.Background()
 
-	// 短信验证码首次登录，创建用户
+	// 先按手机号建号
 	u1, _, _, err := svc.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{
 		Type: domain.IdentityTypePhone, Subject: "13800138000",
 	})
 	if err != nil {
-		t.Fatalf("短信登录建号: %v", err)
+		t.Fatalf("手机号建号: %v", err)
 	}
 
 	// 该用户设置密码后，用手机号+密码登录，查到的必须是同一个 user
@@ -558,9 +558,6 @@ func TestEnsureRegistrationIsIdempotent(t *testing.T) {
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(nil)); err != nil {
 		t.Fatalf("注册 password: %v", err)
-	}
-	if err := reg.Register(connector.NewSMSCode(nil)); err != nil {
-		t.Fatalf("注册 sms_code: %v", err)
 	}
 	apps := service.NewApplicationService(pool, reg)
 	ctx := context.Background()
