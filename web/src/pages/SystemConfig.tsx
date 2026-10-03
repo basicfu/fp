@@ -20,9 +20,6 @@ const PLACEHOLDER = [
   'bootstrap_admin:',
   '  user: admin',
   '  password: admin',
-  'sms:',
-  '  aliyun:',
-  '    access_key_id: ""',
 ].join('\n')
 
 export default function SystemConfig() {
@@ -61,7 +58,7 @@ export default function SystemConfig() {
       </div>
 
       <p className="text-sm text-muted-foreground">
-        fp 进程自身的启动配置——env、监听地址、首次启动的管理员账号、阿里云短信凭据。保存后需要重启 fp 才会生效。
+        fp 进程自身的启动配置——env、监听地址、首次启动的管理员账号。保存后需要重启 fp 才会生效。
       </p>
 
       {snapshot.data === null && snapshot.loading && <p className="text-sm text-muted-foreground">加载中…</p>}

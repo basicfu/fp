@@ -14,8 +14,7 @@
 
 | 路由 | 说明 |
 |---|---|
-| `POST /api/login/code` | 给手机号发登录验证码。body: `{"phone":"13800138000"}` |
-| `POST /api/login` | 用手机号 + 验证码换 token。body: `{"phone":"...","code":"..."}`。成功后响应体带 `token`，并顺手把它写进一个 cookie |
+| `POST /api/login` | 用账号 + 密码换 token。body: `{"account":"...","password":"..."}`。成功后响应体带 `token`，并顺手把它写进一个 cookie |
 | `GET /api/me` | 受保护路由，`auth.Middleware` 一行接入。返回 `{"userId","sessionId","stale"}` |
 | `GET /api/partner/ping` | 第三方签名调用示例。返回 `{"accessKeyId","remark"}` |
 | `GET /healthz` | 暴露 `client.StreamHealthy()`——撤销推送流是否健康，手工验收第 4 步要看它 |
@@ -54,7 +53,7 @@ TLS，两者都是 fpsdk 原生支持，不需要额外配置项。
 
 按顺序做，每一步都写清楚了**该看到什么**。
 
-### 第 1 步：起 fp，建应用，启用 sms_code
+### 第 1 步：起 fp，建应用，启用 password 登录并建一个测试用户
 
 > 从第三阶段起，下面这些准备步骤都可以在管理控制台里点完，不必用 curl：
 > 先 `./scripts/build-web.sh` 构建前端，再照下面一样 `./scripts/run.sh` 起服务，
@@ -71,7 +70,7 @@ TLS，两者都是 fpsdk 原生支持，不需要额外配置项。
 首次启动建的平台管理员来自 `config.yaml` 的 `bootstrap_admin.user` /
 `bootstrap_admin.password`；`config.example.yaml` 给的是 `admin` / `admin`。
 
-另开一个终端，用管理员账号登录管理 API、建一个应用、启用 `sms_code`：
+另开一个终端，用管理员账号登录管理 API、建一个应用、启用 `password`、建一个测试用户：
 
 ```bash
 # 1a. 管理员登录，拿到管理端 token。
@@ -108,15 +107,25 @@ curl -s -X POST http://localhost:8080/admin/api/applications \
 `appSecret`（写进 `.env.local` 要用）。
 
 ```bash
-# 1c. 启用 sms_code 登录方式（把 <id> 换成上一步的 application.id）。
+# 1c. 启用 password 登录方式（把 <id> 换成上一步的 application.id）。
 curl -s -o /dev/null -w '%{http_code}\n' \
-  -X PUT "http://localhost:8080/admin/api/applications/<id>/connectors/sms_code" \
+  -X PUT "http://localhost:8080/admin/api/applications/<id>/connectors/password" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"enabled":true,"config":{}}'
 ```
 
 **该看到**：`204`。
+
+```bash
+# 1d. 建一个带密码的测试用户（密码登录不会自动建号）。
+curl -s -X POST http://localhost:8080/admin/api/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"13800138000","password":"hunter2hunter2","nickname":"demo"}'
+```
+
+**该看到**：`201`。
 
 最后，把 `appId` / `appSecret` 追加到仓库根目录的 `.env.local`：
 
@@ -133,42 +142,12 @@ FP_APP_SECRET=<appSecret>
 
 **该看到**：`demo 监听 :8090，fp 地址 grpc://127.0.0.1:9090`。
 
-发验证码：
-
-```bash
-curl -s -X POST http://localhost:8090/api/login/code \
-  -H 'Content-Type: application/json' \
-  -d '{"phone":"13800138000"}'
-```
-
-**该看到**：`{"ok":true}`。
-
-本机没配阿里云短信凭据，fp 会用内存假供应商——验证码不会真的发到手机
-上，而是以 **WARN** 级别打在 **fp 自己的进程日志**里（不是 demo 的日志），
-形如：
-
-（如果你的 `.env.local` 里 `FP_ALIYUN_*` 四项凑巧填了值——比如复用了别的
-手工验证场景留下的占位凭据——fp 会走真实阿里云供应商分支，不会打这条
-日志。这一步只是想验证"接入 fp 能登录"，不是在测阿里云通道，把这四项
-先注释掉或清空、重启 fp，就会回到假供应商路径。）
-
-```json
-{"time":"...","level":"WARN","msg":"notify: 假供应商收到一条消息——这不是真短信，不会真的送达，仅用于本地开发/手工验收；验证码就在 params 里","channel":"sms","to":"13800138000","template":"login_code","params":{"code":"123456"}}
-```
-
-这条 WARN 日志专门为这一步的手工验收而加：`FakeProvider` 本身只把消息
-留在内存里，进程外读不到，验证码除了这条日志没有别的地方能看到。
-门控条件是"用的是假供应商"而不是"非生产环境"——真配了阿里云凭据的部署
-（哪怕不是生产环境）永远不会走到这条日志，不存在真验证码被打进日志的
-风险；反过来，如果拿"非生产环境"当门控，一个非生产但配齐了阿里云凭据、
-走真实短信通道的部署也会命中，那就是真实验证码泄露到日志里了。
-
-把 `params` 里的 6 位 `code` 抄出来，登录：
+用第 1 步建的测试用户登录：
 
 ```bash
 curl -is -X POST http://localhost:8090/api/login \
   -H 'Content-Type: application/json' \
-  -d '{"phone":"13800138000","code":"<上面抄的验证码>"}'
+  -d '{"account":"13800138000","password":"hunter2hunter2"}'
 ```
 
 **该看到**：`200`，响应头里有一个 `Set-Cookie: fp_token=...`，响应体形如

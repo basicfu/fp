@@ -72,7 +72,7 @@ test('int 字段提交的是数字而不是字符串', async () => {
 
 // 【辨别力】schema 里的 default 必须体现在界面初始状态上。
 //
-// password 与 sms_code 的开关默认值都是 true。若实现用 defaultValues: {}
+// password 的 allowPhone / allowUsername 开关默认值都是 true。若实现用 defaultValues: {}
 // 起手，开关会显示成"关"，而实际生效的是 connector 代码里的 true——
 // 界面在撒谎，管理员据此做的判断全是错的。
 test('未配置过时采用 schema 声明的默认值', async () => {

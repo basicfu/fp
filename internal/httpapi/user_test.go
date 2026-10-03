@@ -103,7 +103,7 @@ func TestCreateUserOverHTTP(t *testing.T) {
 	}
 }
 
-// 密码留空只建号，不设密码——之后只能靠验证码等其它方式登录。
+// 密码留空只建号，不设密码——该用户在设置密码之前无法登录。
 func TestCreateUserWithoutPasswordOverHTTP(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 

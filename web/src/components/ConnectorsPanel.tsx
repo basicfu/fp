@@ -11,7 +11,6 @@ import type { ConnectorConfig, ConnectorSchema } from '@/lib/types'
 /** 登录方式类型的中文名。认不出来的类型直接显示原始类型名，不阻塞。 */
 const typeLabels: Record<string, string> = {
   password: '密码登录',
-  sms_code: '短信验证码登录',
 }
 
 export default function ConnectorsPanel({ appId }: { appId: string }) {

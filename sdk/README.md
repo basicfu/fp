@@ -50,7 +50,7 @@ mux.Handle("GET /api/me", auth.Middleware(http.HandlerFunc(func(w http.ResponseW
 log.Fatal(http.ListenAndServe(":8090", mux))
 ```
 
-一个可以直接跑起来的完整版本（含登录、发验证码、健康检查）见
+一个可以直接跑起来的完整版本（含登录、健康检查）见
 [`examples/demo`](../examples/demo)。
 
 ## 目录
@@ -92,7 +92,7 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 
 > **`CallerType` 是给 fp-im 网关自己用的，业务方不要设。** 设成
 > `fpsdk.CallerTypeIM` 之后 fp 开放的是一组**收窄过**的接口：`Login` /
-> `Logout` / `SendLoginCode` / `GetPolicy` / `ReportPermissions` /
+> `Logout` / `GetPolicy` / `ReportPermissions` /
 > `GetConfig` 一律 `PermissionDenied`，只剩下 `Auth().Validate` 和网关专用
 > 的 `IMGateway()`；作用域也不再钉在连接上，`AppID` 允许留空，改由
 > `fpsdk.WithAppID(ctx, app)` 逐调用附上。业务方设了它只会得到一堆
@@ -180,11 +180,9 @@ id, err := auth.Validate(ctx, token)
 ### 登录 / 登出
 
 ```go
-if err := auth.SendLoginCode(ctx, phone); err != nil { ... }
-
 res, err := auth.Login(ctx, fpsdk.LoginInput{
-    ConnectorType: "sms_code",
-    Credentials:   map[string]string{"phone": phone, "code": code},
+    ConnectorType: "password",
+    Credentials:   map[string]string{"account": account, "password": password},
     IP:            r.RemoteAddr,
     UserAgent:     r.UserAgent(),
 })
@@ -194,7 +192,7 @@ err = auth.Logout(ctx, token)
 ```
 
 `ConnectorType` 与 `Credentials` 的取值由控制台里给该应用启用的登录方式
-决定（如 `sms_code` 需要 `phone` + `code`）。
+决定（如 `password` 需要 `account` + `password`）。
 
 ### 访客模式
 
@@ -224,8 +222,8 @@ if errors.Is(err, fpsdk.ErrUnauthorized) { ... } // 哨兵判断依然有效
 |---|---|---|
 | `ErrNoToken` / `ErrUnauthorized` | 401 | 未登录 / token 无效过期 |
 | `ErrUnavailable` | 503 | **fp 不可达，不是鉴权失败**。回 401 会让客户端清掉一个其实有效的 token，把一次 fp 抖动放大成全体用户被迫重新登录 |
-| `ErrInvalidArgument` | 400 | 参数不合法（手机号格式等），不是凭据问题 |
-| `ErrRateLimited` | 429 | 被限流（验证码发送过频），凭据本身没问题 |
+| `ErrInvalidArgument` | 400 | 参数不合法（参数格式不对等），不是凭据问题 |
+| `ErrRateLimited` | 429 | 被限流，凭据本身没问题 |
 
 ## 3. 鉴权（Authz / RBAC）
 

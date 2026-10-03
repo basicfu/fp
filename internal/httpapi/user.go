@@ -80,7 +80,7 @@ func (h *userHandler) list(w http.ResponseWriter, r *http.Request) {
 type createUserRequest struct {
 	Phone    string `json:"phone"`
 	Nickname string `json:"nickname"`
-	// Password 可留空：只建号不设密码，后续只能靠验证码等其它登录方式登录。
+	// Password 可留空：只建号不设密码，该用户在设置密码之前无法登录。
 	Password string `json:"password"`
 }
 

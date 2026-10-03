@@ -23,7 +23,7 @@
 ./scripts/run.sh
 ```
 
-另开终端，用管理员登录、建应用、启用 `sms_code`（与 `examples/demo`
+另开终端，用管理员登录、建应用、启用 `password`（与 `examples/demo`
 第 1 步完全一样，这里只是换了个应用名）：
 
 ```bash
@@ -37,10 +37,12 @@ curl -s -X POST http://localhost:8080/admin/api/applications \
 # 记下 application.id / application.appId / appSecret
 
 curl -s -o /dev/null -w '%{http_code}\n' \
-  -X PUT "http://localhost:8080/admin/api/applications/<application.id>/connectors/sms_code" \
+  -X PUT "http://localhost:8080/admin/api/applications/<application.id>/connectors/password" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"enabled":true,"config":{}}'
 # 该看到 204
 ```
+
+再按 `examples/demo` 的 1d 建一个测试用户。
 
 **本机手工验证实测**：`application.appId` = `IDxzbrx-KKUaIYGm8AjKqP9363T8GlZQzLrnq8rDTj8`，
 `appSecret` 只在建应用那一次响应里出现。
@@ -146,8 +148,8 @@ func main() {
 go build -o tmp/wsclient/wsclient.exe ./tmp/wsclient   # Linux/macOS 去掉 .exe
 ```
 
-登录拿一个 token（走法与 `examples/demo` 第 2 步相同：发验证码、从 fp
-自己的 WARN 日志里抄 6 位验证码、登录换 token）。
+登录拿一个 token（走法与 `examples/demo` 第 2 步相同：用测试用户的手机号
+和密码登录换 token）。
 
 ## 第 6 步：握手、发消息、看回显
 

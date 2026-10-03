@@ -11,7 +11,7 @@ import (
 // NewUserID 在库里插一个最小的用户并返回它的 ID。
 //
 // 授权相关的测试只需要一个合法的 user_id 用来挂角色，不需要走完整的注册
-// 流程——那会牵进 connector、验证码、会话一大串东西，而这些测试跟它们无关。
+// 流程——那会牵进 connector、会话一大串东西，而这些测试跟它们无关。
 func NewUserID(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID

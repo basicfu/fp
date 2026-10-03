@@ -3,7 +3,7 @@
 # 从 .env.local 载入凭据（这里用得到的是 FP_APP_ID / FP_APP_SECRET）。
 #
 # 前提：fp 已经在跑（./scripts/run.sh），且已经在管理端建好应用、启用了
-# sms_code、把 appId/appSecret 填进了 .env.local。完整步骤见
+# password、建好了测试用户、把 appId/appSecret 填进了 .env.local。完整步骤见
 # examples/demo/README.md。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
