@@ -154,7 +154,7 @@ func TestBuildEmailRejectsHeaderInjectionInRecipient(t *testing.T) {
 type fakeMail struct{ from, to, data string }
 
 // startFakeSMTP 起一个只处理一次投递的假 SMTP 服务器（明文、无认证）。
-func startFakeSMTP(t *testing.T) (port int, got <-chan fakeMail) {
+func startFakeSMTP(t *testing.T, dropOnQuit ...bool) (port int, got <-chan fakeMail) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -162,6 +162,7 @@ func startFakeSMTP(t *testing.T) (port int, got <-chan fakeMail) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	out := make(chan fakeMail, 1)
+	shouldDropOnQuit := len(dropOnQuit) > 0 && dropOnQuit[0]
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -209,6 +210,10 @@ func startFakeSMTP(t *testing.T) (port int, got <-chan fakeMail) {
 				reply("250 queued")
 				out <- m
 			case cmd == "QUIT":
+				if shouldDropOnQuit {
+					// 关闭连接而不回复 QUIT，模拟 QUIT 失败
+					return
+				}
 				reply("221 bye")
 				return
 			default: // EHLO / HELO 等
@@ -321,7 +326,7 @@ func TestBuildAliyunRequestValidatesPhoneNumber(t *testing.T) {
 
 // I2: SMTP 在服务器已接受邮件后，QUIT 失败不算发送失败
 func TestSMTPSendSucceedsEvenIfQuitFails(t *testing.T) {
-	port, got := startFakeSMTPFailQuit(t)
+	port, got := startFakeSMTP(t, true)
 	p, err := smtpSpec.New(Config{"host": "127.0.0.1", "port": port, "from": "noreply@example.com", "tls": "none"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -344,70 +349,4 @@ func TestSMTPSendSucceedsEvenIfQuitFails(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("假服务器没有收到邮件")
 	}
-}
-
-// startFakeSMTPFailQuit 起一个接受邮件但在 QUIT 时关闭连接的假 SMTP 服务器
-func startFakeSMTPFailQuit(t *testing.T) (port int, got <-chan fakeMail) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("监听: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	out := make(chan fakeMail, 1)
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		r := bufio.NewReader(conn)
-		reply := func(s string) { _, _ = fmt.Fprintf(conn, "%s\r\n", s) }
-		between := func(s string) string {
-			i, j := strings.Index(s, "<"), strings.LastIndex(s, ">")
-			if i < 0 || j < i {
-				return ""
-			}
-			return s[i+1 : j]
-		}
-		var m fakeMail
-		reply("220 fake ESMTP")
-		for {
-			line, err := r.ReadString('\n')
-			if err != nil {
-				return
-			}
-			cmd := strings.ToUpper(strings.TrimSpace(line))
-			switch {
-			case strings.HasPrefix(cmd, "MAIL FROM:"):
-				m.from = between(line)
-				reply("250 ok")
-			case strings.HasPrefix(cmd, "RCPT TO:"):
-				m.to = between(line)
-				reply("250 ok")
-			case cmd == "DATA":
-				reply("354 go ahead")
-				var sb strings.Builder
-				for {
-					l, err := r.ReadString('\n')
-					if err != nil {
-						return
-					}
-					if l == ".\r\n" {
-						break
-					}
-					sb.WriteString(l)
-				}
-				m.data = sb.String()
-				reply("250 queued")
-				out <- m
-			case cmd == "QUIT":
-				// 关闭连接而不回复 QUIT，模拟 QUIT 失败
-				return
-			default: // EHLO / HELO 等
-				reply("250 fake")
-			}
-		}
-	}()
-	return ln.Addr().(*net.TCPAddr).Port, out
 }
