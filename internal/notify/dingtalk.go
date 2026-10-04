@@ -64,7 +64,9 @@ func (p *dingtalkProvider) Send(ctx context.Context, d Delivery) error {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
-	_ = json.Unmarshal(body, &out)
+	if err := json.Unmarshal(body, &out); err != nil {
+		return fmt.Errorf("dingtalk_bot: HTTP %d, 响应不是合法 JSON", status)
+	}
 	if status != http.StatusOK || out.ErrCode != 0 {
 		return fmt.Errorf("dingtalk_bot: HTTP %d errcode=%d %s", status, out.ErrCode, out.ErrMsg)
 	}
