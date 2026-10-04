@@ -344,7 +344,7 @@ func TestDefaultRegistry(t *testing.T) {
 	for _, s := range dev {
 		names = append(names, s.Type)
 	}
-	if got := strings.Join(names, ","); got != "dingtalk_bot,log,telegram,webhook,wecom_bot" {
+	if got := strings.Join(names, ","); got != "aliyun,dingtalk_bot,log,smtp,telegram,webhook,wecom_bot" {
 		t.Fatalf("开发环境的类型 = %s", got)
 	}
 	// prod 环境的类型必须不包含 log（DevOnly）
@@ -356,8 +356,8 @@ func TestDefaultRegistry(t *testing.T) {
 			t.Fatalf("prod 环境不该暴露 DevOnly 类型 %s", s.Type)
 		}
 	}
-	if got := strings.Join(prodNames, ","); got != "dingtalk_bot,telegram,webhook,wecom_bot" {
-		t.Fatalf("prod 环境的类型 = %s, 期望 dingtalk_bot,telegram,webhook,wecom_bot", got)
+	if got := strings.Join(prodNames, ","); got != "aliyun,dingtalk_bot,smtp,telegram,webhook,wecom_bot" {
+		t.Fatalf("prod 环境的类型 = %s, 期望 aliyun,dingtalk_bot,smtp,telegram,webhook,wecom_bot", got)
 	}
 	if err := r.Register(telegramSpec); err == nil {
 		t.Fatal("重复登记应报错")

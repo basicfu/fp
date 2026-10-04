@@ -114,7 +114,7 @@ func (r *Registry) Types(isProd bool) []TypeSpec {
 // DefaultRegistry 登记全部内置的供应商类型。新增一家供应商就是在这里加一行。
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
-	for _, s := range []TypeSpec{telegramSpec, wecomSpec, dingtalkSpec, webhookSpec, logSpec} {
+	for _, s := range []TypeSpec{aliyunSpec, smtpSpec, telegramSpec, wecomSpec, dingtalkSpec, webhookSpec, logSpec} {
 		if err := r.Register(s); err != nil {
 			panic(err) // 内置类型重复登记是编程错误，由 TestDefaultRegistry 守住
 		}
