@@ -350,3 +350,28 @@ func TestSMTPSendSucceedsEvenIfQuitFails(t *testing.T) {
 		t.Fatal("假服务器没有收到邮件")
 	}
 }
+
+// I1: SMTP 收到 vendor 模板拒绝发送（vendor 模板永不被渲染，无内容可发）。
+func TestSMTPRefusesVendorTemplates(t *testing.T) {
+	// 指向已关闭的本地端口：如果 guard 有效，应在尝试连接前返回错误。
+	p, err := smtpSpec.New(Config{
+		"host": "127.0.0.1", "port": 1,
+		"from": "noreply@example.com", "tls": "none",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d := Delivery{
+		To:       "alice@example.com",
+		Template: domain.NotifyTemplate{Mode: domain.NotifyModeVendor},
+		Rendered: Rendered{},
+	}
+	err = p.Send(context.Background(), d)
+	if err == nil {
+		t.Fatal("vendor 模板应被拒绝")
+	}
+	errStr := err.Error()
+	if !strings.Contains(errStr, "供应商模板") && !strings.Contains(errStr, "vendor") {
+		t.Errorf("错误应提及供应商模板，实际: %s", errStr)
+	}
+}

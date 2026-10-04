@@ -82,6 +82,10 @@ func isLoopbackHost(host string) bool {
 }
 
 func (p *smtpProvider) Send(ctx context.Context, d Delivery) error {
+	// vendor 模板永不被渲染，故无内容可发，拒绝发送。
+	if d.Template.Mode == domain.NotifyModeVendor {
+		return errors.New("SMTP 供应商仅支持发送自定义（fp 渲染）模板，不支持供应商模板")
+	}
 	ct := d.Template.Content.ContentType
 	if ct == "" {
 		ct = "text/plain"
