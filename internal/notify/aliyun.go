@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"regexp"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/client"
 	dysmsapi "github.com/alibabacloud-go/dysmsapi-20170525/v2/client"
@@ -21,6 +23,8 @@ const (
 	aliyunConnectTimeoutMS = 5_000
 	aliyunReadTimeoutMS    = 10_000
 )
+
+var aliyunPhoneRegex = regexp.MustCompile(`^\+?\d{5,20}$`)
 
 var aliyunSpec = TypeSpec{
 	Type:    "aliyun",
@@ -79,6 +83,11 @@ func (p *aliyunProvider) Send(_ context.Context, d Delivery) error {
 	}
 	resp, err := p.client.SendSms(req)
 	if err != nil {
+		// 阿里云 SDK 的 *url.Error 包含请求 URL（带上了手机号和参数），不能暴露给日志。
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return fmt.Errorf("调用阿里云短信接口: %w", err)
 	}
 	if resp.Body == nil || resp.Body.Code == nil {
@@ -95,6 +104,9 @@ func (p *aliyunProvider) Send(_ context.Context, d Delivery) error {
 func buildAliyunRequest(cfg aliyunConfig, d Delivery) (*dysmsapi.SendSmsRequest, error) {
 	if d.ProviderTemplateID == "" {
 		return nil, errors.New("缺少阿里云短信模板 ID")
+	}
+	if !aliyunPhoneRegex.MatchString(d.To) {
+		return nil, errors.New("收件人手机号不合法")
 	}
 	// encoding/json 对 map 按键排序：同一条消息每次生成的请求体完全一致，便于排障。
 	param := []byte("{}")

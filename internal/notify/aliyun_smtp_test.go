@@ -39,7 +39,7 @@ func TestBuildAliyunRequestRequiresTemplateID(t *testing.T) {
 
 func TestBuildAliyunRequestEmptyParams(t *testing.T) {
 	for name, params := range map[string]map[string]string{"nil": nil, "空": {}} {
-		req, err := buildAliyunRequest(aliyunConfig{}, Delivery{ProviderTemplateID: "SMS_1", Params: params})
+		req, err := buildAliyunRequest(aliyunConfig{}, Delivery{To: "13800138000", ProviderTemplateID: "SMS_1", Params: params})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -51,7 +51,7 @@ func TestBuildAliyunRequestEmptyParams(t *testing.T) {
 
 // 模板参数的键顺序必须稳定，否则同一条消息每次生成的请求体都不同，无法排障。
 func TestBuildAliyunRequestParamOrderIsStable(t *testing.T) {
-	d := Delivery{ProviderTemplateID: "SMS_1", Params: map[string]string{"z": "1", "a": "2", "m": "3"}}
+	d := Delivery{To: "13800138000", ProviderTemplateID: "SMS_1", Params: map[string]string{"z": "1", "a": "2", "m": "3"}}
 	first, _ := buildAliyunRequest(aliyunConfig{}, d)
 	want := `{"a":"2","m":"3","z":"1"}`
 	for i := 0; i < 20; i++ {
@@ -259,4 +259,155 @@ func TestSMTPSendReportsConnectionFailure(t *testing.T) {
 	if err := p.Send(context.Background(), d); err == nil {
 		t.Fatal("连不上应报错")
 	}
+}
+
+// I1: 阿里云错误不能暴露手机号、OTP 或凭据
+func TestAliyunSendDoesNotExposePhoneOrCredentialsInError(t *testing.T) {
+	// 指向已关闭的本地端口：连接会快速失败
+	p, err := aliyunSpec.New(Config{
+		"accessKeyId":     "test_ak_123456789",
+		"accessKeySecret": "test_sk_secret_value",
+		"signName":        "示例签名",
+		"endpoint":        "127.0.0.1:1",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d := Delivery{
+		To:                 "13800138000",
+		ProviderTemplateID: "SMS_1",
+		Params:             map[string]string{"code": "654321"},
+	}
+	err = p.Send(context.Background(), d)
+	if err == nil {
+		t.Fatal("向关闭的端口发送应报错")
+	}
+	errStr := err.Error()
+	for _, secret := range []string{"13800138000", "654321", "test_ak_123456789", "test_sk_secret_value"} {
+		if strings.Contains(errStr, secret) {
+			t.Errorf("错误信息不应包含 %q，实际: %s", secret, errStr)
+		}
+	}
+}
+
+// I3: 阿里云短信收件人必须是合法的手机号
+func TestBuildAliyunRequestValidatesPhoneNumber(t *testing.T) {
+	cases := map[string]bool{
+		"13800138000":             true,  // 合法
+		"+8613800138000":          true,  // 合法：带 + 前缀
+		"12345":                   true,  // 合法：最短 5 位
+		"123456789012345678901":   false, // 过长：21 位
+		"1234":                    false, // 过短：4 位
+		"13800138000,13900139000": false, // 含逗号：非法
+		"13800138000 ":            false, // 末尾空格
+		" 13800138000":            false, // 开头空格
+		"1380013800a":             false, // 含字母
+		"":                        false, // 空字符串
+	}
+	for phone, shouldPass := range cases {
+		_, err := buildAliyunRequest(aliyunConfig{}, Delivery{
+			To:                 phone,
+			ProviderTemplateID: "SMS_1",
+		})
+		if shouldPass && err != nil {
+			t.Errorf("合法号码 %q 被拒绝: %v", phone, err)
+		} else if !shouldPass && err == nil {
+			t.Errorf("非法号码 %q 不应被接受", phone)
+		} else if !shouldPass && err != nil && phone != "" && strings.Contains(err.Error(), phone) {
+			t.Errorf("错误信息不应回显号码 %q，实际: %v", phone, err)
+		}
+	}
+}
+
+// I2: SMTP 在服务器已接受邮件后，QUIT 失败不算发送失败
+func TestSMTPSendSucceedsEvenIfQuitFails(t *testing.T) {
+	port, got := startFakeSMTPFailQuit(t)
+	p, err := smtpSpec.New(Config{"host": "127.0.0.1", "port": port, "from": "noreply@example.com", "tls": "none"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d := Delivery{
+		To:       "alice@example.com",
+		Template: domain.NotifyTemplate{Content: domain.NotifyContent{ContentType: "text/plain"}},
+		Rendered: Rendered{Subject: "test", Body: "body"},
+	}
+	// Send 必须成功，即使 QUIT 失败
+	if err := p.Send(context.Background(), d); err != nil {
+		t.Fatalf("Send 应成功（QUIT 失败不算）: %v", err)
+	}
+	// 假服务器必须收到邮件
+	select {
+	case m := <-got:
+		if m.to != "alice@example.com" {
+			t.Fatalf("收件人: %q", m.to)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("假服务器没有收到邮件")
+	}
+}
+
+// startFakeSMTPFailQuit 起一个接受邮件但在 QUIT 时关闭连接的假 SMTP 服务器
+func startFakeSMTPFailQuit(t *testing.T) (port int, got <-chan fakeMail) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	out := make(chan fakeMail, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		r := bufio.NewReader(conn)
+		reply := func(s string) { _, _ = fmt.Fprintf(conn, "%s\r\n", s) }
+		between := func(s string) string {
+			i, j := strings.Index(s, "<"), strings.LastIndex(s, ">")
+			if i < 0 || j < i {
+				return ""
+			}
+			return s[i+1 : j]
+		}
+		var m fakeMail
+		reply("220 fake ESMTP")
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			cmd := strings.ToUpper(strings.TrimSpace(line))
+			switch {
+			case strings.HasPrefix(cmd, "MAIL FROM:"):
+				m.from = between(line)
+				reply("250 ok")
+			case strings.HasPrefix(cmd, "RCPT TO:"):
+				m.to = between(line)
+				reply("250 ok")
+			case cmd == "DATA":
+				reply("354 go ahead")
+				var sb strings.Builder
+				for {
+					l, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if l == ".\r\n" {
+						break
+					}
+					sb.WriteString(l)
+				}
+				m.data = sb.String()
+				reply("250 queued")
+				out <- m
+			case cmd == "QUIT":
+				// 关闭连接而不回复 QUIT，模拟 QUIT 失败
+				return
+			default: // EHLO / HELO 等
+				reply("250 fake")
+			}
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, out
 }

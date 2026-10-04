@@ -175,5 +175,7 @@ func (p *smtpProvider) deliver(ctx context.Context, to string, msg []byte) error
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("SMTP 提交邮件: %w", err)
 	}
-	return c.Quit()
+	// 邮件已被服务器接受，QUIT 失败不算发送失败
+	_ = c.Quit()
+	return nil
 }
