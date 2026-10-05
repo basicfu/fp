@@ -4,6 +4,7 @@ import { render, screen, fireEvent, within, waitFor } from '@testing-library/rea
 import { MemoryRouter, Route, Routes } from 'react-router'
 import Layout from './Layout'
 import { CurrentAppProvider, useCurrentApp } from '@/lib/current-app'
+import { stubApi } from '@/lib/testApi'
 import type { Application } from '@/lib/types'
 
 const authMock = vi.hoisted(() => ({
@@ -18,7 +19,8 @@ vi.mock('@/lib/auth', () => ({ useAuth: () => authMock }))
 afterEach(() => vi.unstubAllGlobals())
 
 function stubEmptyApplications() {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([]), { status: 200 })))
+  // 改密对话框一打开还会 GET /me：各路由各给各的响应，别让它和应用列表抢同一个 Response 的 body。
+  stubApi({ 'GET /applications': [], 'GET /me': { id: '1', username: 'alice' } })
 }
 
 function renderLayout(initialEntries: string[]) {

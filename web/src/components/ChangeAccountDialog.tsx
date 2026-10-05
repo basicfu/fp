@@ -40,6 +40,24 @@ export function ChangeAccountDialog() {
     }
   }, [accountDialogOpen, username, reset])
 
+  // 别的标签页改名后 cookie 随之换新、本页不会掉线，登录名却还是旧的：照它回填再只改密码，
+  // 提交会把名字悄悄改回去，所以每次打开先向后端取一次当前登录名。名字变了，上面的重置会按新名
+  // 回填并清空表单——用户刚打开、还没填什么，这个代价可以接受；没变则 React 跳过重渲染，不打断输入。
+  // 失败静默：401 由 api.ts 全局接管，其余错误不该打断用户。
+  useEffect(() => {
+    if (!accountDialogOpen) return
+    let alive = true
+    api
+      .get<{ username: string }>('/me')
+      .then((me) => {
+        if (alive) renameUser(me.username)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [accountDialogOpen, renameUser])
+
   async function onSubmit(v: Values) {
     try {
       const res = await api.put<{ username: string }>('/me', {
