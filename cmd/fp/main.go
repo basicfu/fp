@@ -26,6 +26,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		os.Exit(runSubcommand(os.Args[1:], os.Stdout, os.Stderr))
+	}
 	if err := run(); err != nil {
 		slog.Error("fp 启动失败", "err", err)
 		os.Exit(1)

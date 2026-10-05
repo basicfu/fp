@@ -32,11 +32,16 @@
 
     go build -o fp ./cmd/fp && FP_POSTGRES_URL=... FP_REDIS_URL=... ./fp
 
-**控制台的登录账号**：系统配置里的 `bootstrap_admin.user` /
-`bootstrap_admin.password`，两项都为空时（包括全新库、从未配置过）落到
-内置默认值 `admin` / `admin`。注意 `EnsureBootstrap` 是
-`ON CONFLICT DO NOTHING`——账号一旦建过，改系统配置里的这两项不会改
-密码，得直接改库或在控制台里改密码。
+**控制台的登录账号**：全新库首次启动时创建 `admin` / `admin`（系统配置里
+`bootstrap_admin` 两项都为空时的内置默认值）。账号存在数据库 `admin` 表里，
+之后改系统配置不会改已有账号。登录名与密码都可以在控制台右上角「修改密码」
+里改；登录时若仍是默认密码，会弹一条可忽略的提示。
+
+**忘记密码**：只有一条路——在服务器上执行 `./fp reset-password`。它把用户名
+恢复成 `admin`、密码重置为随机值并打印出来（只显示这一次），同时作废全部
+管理端会话。容器里二进制叫 `bootstrap`：
+
+    docker exec <容器名> ./bootstrap reset-password
 
 **没跑过 `build-web.sh` 也能 `go build`**（`web/dist/` 里提交了一个
 `.gitkeep`，embed 指令用的是 `all:` 前缀），只是打开控制台会看到一句

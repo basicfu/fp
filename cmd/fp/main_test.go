@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/basicfu/fp/internal/config"
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/testsupport"
 )
 
 func TestResolveBootstrapAdminDefaultsWhenEmpty(t *testing.T) {
@@ -82,5 +87,41 @@ func TestSeedDefaultsYAMLSkipsWhenVersionExists(t *testing.T) {
 	}
 	if yamlText != "" {
 		t.Errorf("ok=false 时 yamlText 应当是空字符串，得到 %q", yamlText)
+	}
+}
+
+func TestRunSubcommandRejectsUnknownArgument(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runSubcommand([]string{"reset-pasword"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("退出码 = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "用法") || stdout.Len() != 0 {
+		t.Fatalf("stderr = %q, stdout = %q", stderr.String(), stdout.String())
+	}
+}
+
+// 登录名被改过的实例：重置必须把用户名一并恢复，打印出来的账号密码必须真的能登录。
+func TestResetPasswordPrintsCredentialsThatWork(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+	svc := service.NewAdminService(pool, rdb)
+	ctx := context.Background()
+	if err := svc.EnsureBootstrap(ctx, "root", "some-password"); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := resetPassword(ctx, svc, &out); err != nil {
+		t.Fatalf("resetPassword: %v", err)
+	}
+	m := regexp.MustCompile(`用户名：(\S+)\n\s*密码：(\S+)`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("输出里找不到用户名与密码: %q", out.String())
+	}
+	if m[1] != "admin" {
+		t.Fatalf("用户名 = %q, want admin", m[1])
+	}
+	if _, err := svc.Login(ctx, m[1], m[2]); err != nil {
+		t.Fatalf("打印出来的账号密码登录不了: %v", err)
 	}
 }
