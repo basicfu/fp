@@ -133,9 +133,9 @@ CREATE INDEX notify_log_code_idx ON notify_log (code, created_at DESC);
 
 1. **取模板**：不存在 → `NOTIFY_TEMPLATE_NOT_FOUND`；`enabled=false` → `NOTIFY_TEMPLATE_DISABLED`。
 2. **校验**：params 键集合与 `variables` 完全一致，否则 `NOTIFY_PARAMS_INVALID`（detail 列出缺失与多余的键）；`sms` / `email` 必须有 `to`，IM / webhook 必须没有，否则 `NOTIFY_RECIPIENT_INVALID`。
-3. **幂等**（`idempotencyKey` 非空时），Redis 键 `fp:notify:idem:{code}:{key}`：
-   - `SET NX EX 60` 抢占为"处理中"。抢不到：已完成 → 直接返回成功、不再发送；处理中 → `NOTIFY_IN_PROGRESS`（`ErrConflict`，SDK 当可重试处理）。
-   - 发送成功 → 改为"已完成"，TTL 24h；发送失败 → 删键，让重试真的能重发。
+3. **幂等**（`idempotencyKey` 非空时），Redis 键 `fp:notify:idem:{appId}:{code}:{key}`：
+   - `SET NX EX 60` 抢占为"处理中"，标记带归属令牌。抢不到：已完成 → 直接返回成功、不再发送；处理中 → `NOTIFY_IN_PROGRESS`（`ErrConflict`，SDK 当可重试处理）。
+   - 每次尝试供应商前续期"处理中"标记；发送成功 → 写 `"2"`（已完成），TTL 24h；发送失败 → 只删自己的标记，让重试真的能重发。
    - 进程在发送中途崩掉，60s 后键过期，重试会再发一次——这个窗口里是至少一次，接受。
 4. **选供应商并发送**：
    - `sms` / `email`：候选 = 关联行 `enabled` 且实例 `enabled` 的；按 `priority` 降序分组，同组内随机洗牌；依次尝试，首个成功即返回，失败降级到下一个。指定优先（`priority` 高）的失败后同样会降级到其他未禁用的。没有候选 → `NOTIFY_PROVIDER_MISSING`。

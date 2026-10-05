@@ -94,7 +94,7 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 > **`CallerType` 是给 fp-im 网关自己用的，业务方不要设。** 设成
 > `fpsdk.CallerTypeIM` 之后 fp 开放的是一组**收窄过**的接口：`Login` /
 > `Logout` / `GetPolicy` / `ReportPermissions` /
-> `GetConfig` 一律 `PermissionDenied`，只剩下 `Auth().Validate` 和网关专用
+> `GetConfig` / `Notify().Send` 一律 `PermissionDenied`，只剩下 `Auth().Validate` 和网关专用
 > 的 `IMGateway()`；作用域也不再钉在连接上，`AppID` 允许留空，改由
 > `fpsdk.WithAppID(ctx, app)` 逐调用附上。业务方设了它只会得到一堆
 > `PermissionDenied`。
@@ -450,25 +450,27 @@ err = c.Send(ctx, []byte(`{"hi":1}`))
 
 ## 6. 通知（Notify）
 
-业务代码只传「模板 code + 收件人 + 变量」；发给谁、走哪家供应商、文案是什么，都在控制台「通知中心」里配置，见 [docs/notify.md](../docs/notify.md)。调用方必须是用 `AppID` / `AppSecret` 认证的应用，fp-im 网关的凭据会被拒绝。
+业务代码只传「模板 code + 收件人 + 变量」；走哪家供应商、文案是什么，都在控制台「通知中心」里配置，见 [docs/notify.md](../docs/notify.md)。调用方必须是用 `AppID` / `AppSecret` 认证的应用，fp-im 网关的凭据会被拒绝。
 
 ```go
 // 短信 / 邮件：to 是手机号 / 邮箱
 err := client.Notify().Send(ctx, "login_sms", "13800138000", map[string]string{"code": "123456"})
 
-// Telegram / 企业微信 / 钉钉 / webhook：发给模板里配好的固定目标，to 传空串
+// Telegram / 企业微信 / 钉钉 / webhook：发给供应商实例里配好的固定目标，to 传空串
 err = client.Notify().Send(ctx, "order_alert", "", map[string]string{"orderNo": "A1001"})
 ```
 
 `params` 的键必须与模板声明的变量**完全一致**，多了少了都会被拒绝。
 
-**幂等与重试**：`Send` 每次调用自动生成一个幂等键。fp 不可达、超时、或上一次相同请求还在处理，这类瞬时失败最多重试两次（200ms 起指数退避，单次尝试 30 秒超时），整个调用复用同一个键，服务端据此保证同一条通知不会因为重试发出两次。想让业务自己的重试（重跑任务、重放消息）也不重复发送，用业务事件的 ID 当键：
+**幂等与重试**：`Send` 每次调用自动生成一个幂等键。fp 不可达、超时、或上一次相同请求还在处理，这类瞬时失败最多重试两次（200ms 起指数退避，单次尝试 30 秒超时），整个调用复用同一个键，服务端据此避免同一条通知因为重试而发出两次（例外见 [已知限制](../docs/notify.md#6-已知限制)）。想让业务自己的重试（重跑任务、重放消息）也不重复发送，用业务事件的 ID 当键：
 
 ```go
 err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotencyKey("order-A1001-shipped"))
 ```
 
-**错误**：按[错误处理](#错误处理)的方式取 `*fpsdk.Error`，用 `Code` 分支：`NOTIFY_TEMPLATE_NOT_FOUND`、`NOTIFY_TEMPLATE_DISABLED`、`NOTIFY_PARAMS_INVALID`（`Detail` 里有 `missing` / `unexpected`）、`NOTIFY_RECIPIENT_INVALID`、`NOTIFY_PROVIDER_MISSING`、`NOTIFY_SEND_FAILED`（全部供应商都失败，原因在控制台「发送记录」，不会回给调用方）。完整列表见 [docs/notify.md](../docs/notify.md)。
+键按应用隔离，只需在本应用内唯一；最长 128 字节。
+
+**错误**：按[错误处理](#错误处理)的方式取 `*fpsdk.Error`，用 `Code` 分支：`NOTIFY_TEMPLATE_NOT_FOUND`、`NOTIFY_TEMPLATE_DISABLED`、`NOTIFY_PARAMS_INVALID`（`Detail` 里有 `missing` / `unexpected`）、`NOTIFY_RECIPIENT_INVALID`、`NOTIFY_PROVIDER_MISSING`、`NOTIFY_IN_PROGRESS`（相同幂等键的请求仍在处理，SDK 已自动重试两次）、`NOTIFY_SEND_FAILED`（全部供应商都失败，原因在控制台「发送记录」，不会回给调用方）。完整列表见 [docs/notify.md](../docs/notify.md)。
 
 ## 7. 生产环境清单
 
@@ -484,7 +486,7 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 - 需要"fp 挂了也不完全瘫痪"的降级能力时，评估是否开启
   `AllowStaleOnOutage`，并明确 `MaxStaleness` 的业务含义（延用的是登录时
   验证过的旧身份，不是重新鉴权）。
-- 用到通知的应用，先在控制台「通知中心」建好模板并关联可用的供应商；`log` 供应商只在非生产环境可用，生产必须配真实供应商。
+- 用到通知的应用，先在控制台「通知中心」建好模板并关联可用的供应商；`log` 供应商只在非生产环境可用（以 fp 的 `FP_ENV=prod` 为准，缺省或写成 production 都算非生产），生产必须配真实供应商。
 
 ## 8. 常见问题
 
