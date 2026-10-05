@@ -48,8 +48,10 @@ func (p *recordingNotifyProvider) count() int {
 type notifyGRPCEnv struct {
 	client   fpv1.NotifyServiceClient
 	notify   *service.NotifyService
+	apps     *service.ApplicationService
 	provider *recordingNotifyProvider
 	appID    string
+	appUUID  uuid.UUID
 	secret   string
 	imSecret string
 }
@@ -114,7 +116,10 @@ func newNotifyGRPCEnv(t *testing.T) *notifyGRPCEnv {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	e := &notifyGRPCEnv{client: fpv1.NewNotifyServiceClient(conn), notify: notifySvc, provider: rec, appID: app.AppID, secret: secret, imSecret: imSecret}
+	e := &notifyGRPCEnv{
+		client: fpv1.NewNotifyServiceClient(conn), notify: notifySvc, apps: apps, provider: rec,
+		appID: app.AppID, appUUID: app.ID, secret: secret, imSecret: imSecret,
+	}
 	p, err := notifySvc.CreateProvider(context.Background(), service.CreateNotifyProviderInput{Type: "fake_sms", Enabled: true, Config: map[string]any{"name": "a"}})
 	if err != nil {
 		t.Fatalf("CreateProvider: %v", err)
@@ -217,5 +222,23 @@ func TestNotifySendAuthBoundaries(t *testing.T) {
 	}
 	if e.provider.count() != 0 {
 		t.Fatalf("被拒绝的调用不该到达供应商")
+	}
+}
+
+// 拦截器只校验 appSecret、不看应用状态，停用应用的凭据照样通过认证；
+// 能不能发通知只能靠 handler 里的 GetActiveByAppID 拦（与 GetConfig 同一条规矩）。
+func TestNotifySendRejectsDisabledApplication(t *testing.T) {
+	e := newNotifyGRPCEnv(t)
+	if _, err := e.apps.SetStatus(context.Background(), e.appUUID, domain.ApplicationStatusDisabled); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	req := &fpv1.SendRequest{Code: "login_sms", To: "13800138000", Params: map[string]string{"code": "1"}}
+	_, err := e.client.Send(e.authed(context.Background()), req)
+	if status.Code(err) != codes.PermissionDenied || errorDetailCode(t, err) != domain.CodeAppDisabled {
+		t.Fatalf("err = %v (detail code %q), want PermissionDenied / %s", err, errorDetailCode(t, err), domain.CodeAppDisabled)
+	}
+	if e.provider.count() != 0 {
+		t.Fatalf("停用应用的请求不该到达供应商, calls = %d", e.provider.count())
 	}
 }

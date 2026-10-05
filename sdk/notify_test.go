@@ -177,17 +177,81 @@ func TestNotifySendKeyOptionsAndGeneration(t *testing.T) {
 	}
 }
 
-// 调用方自己的 ctx 已经取消：别再重试，更别在退避里干等。
-func TestNotifySendStopsRetryingWhenContextIsCancelled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	n, stub := newNotifyForTest(t, func(int, *fpv1.SendRequest) error {
-		cancel()
+// fakeNotifyRPC 直接实现 fpv1.NotifyServiceClient，不走网络。
+//
+// 不用上面的桩服务端：真实 gRPC 客户端遇到已结束的 ctx 会自己返回 Canceled，而 Canceled 本来就不重试，
+// 重试循环自己认不认 ctx 在那条路上永远测不出来。这里的假客户端无视 ctx、照样返回可重试的 Unavailable。
+type fakeNotifyRPC struct {
+	mu    sync.Mutex
+	calls int
+	fn    func() error
+}
+
+func (f *fakeNotifyRPC) Send(context.Context, *fpv1.SendRequest, ...grpc.CallOption) (*fpv1.SendResponse, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	if err := f.fn(); err != nil {
+		return nil, err
+	}
+	return &fpv1.SendResponse{}, nil
+}
+
+func (f *fakeNotifyRPC) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// requireStopsAfterOneAttempt 用一个每次都返回 Unavailable 的假 RPC 调一次 Send（onCall 在每次 RPC 里先执行），
+// 要求它在 1 秒内带着错误返回，且只发起过一次 RPC。调用前 notifyBackoff 必须已被调成远大于 1 秒。
+func requireStopsAfterOneAttempt(t *testing.T, ctx context.Context, onCall func()) {
+	t.Helper()
+	rpc := &fakeNotifyRPC{fn: func() error {
+		if onCall != nil {
+			onCall()
+		}
 		return status.Error(codes.Unavailable, "down")
+	}}
+	n := &Notify{c: &Client{notifyRPC: rpc}}
+
+	done := make(chan error, 1)
+	go func() { done <- n.Send(ctx, "c", "", nil) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("应返回错误")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send 超过 1 秒没返回：ctx 已结束，却还在退避里干等")
+	}
+	if got := rpc.callCount(); got != 1 {
+		t.Fatalf("calls = %d, want 1（ctx 已结束，不该再重试）", got)
+	}
+}
+
+// 调用方自己的 ctx 已经结束（取消或到期）：别再重试，更别在退避里干等。
+// 退避被调成 1 小时，任何真去睡它的实现都会撞上 1 秒的断言。
+func TestNotifySendStopsRetryingWhenContextIsDone(t *testing.T) {
+	old := notifyBackoff
+	notifyBackoff = time.Hour
+	t.Cleanup(func() { notifyBackoff = old })
+
+	t.Run("第一次尝试期间被取消", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		requireStopsAfterOneAttempt(t, ctx, cancel)
 	})
-	if err := n.Send(ctx, "c", "", nil); err == nil {
-		t.Fatal("应返回错误")
-	}
-	if stub.callCount() != 1 {
-		t.Fatalf("calls = %d, want 1", stub.callCount())
-	}
+	t.Run("截止时间在调用前就已过", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Minute))
+		defer cancel()
+		requireStopsAfterOneAttempt(t, ctx, nil)
+	})
+	// 前两个用例在进退避之前就被 ctx.Err() 拦下了，只有这个会真的走到等待那一步。
+	t.Run("退避等待期间被取消", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		time.AfterFunc(50*time.Millisecond, cancel)
+		requireStopsAfterOneAttempt(t, ctx, nil)
+	})
 }

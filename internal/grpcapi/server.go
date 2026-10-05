@@ -139,7 +139,7 @@ func New(d Deps) *Server {
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))
 	fpv1.RegisterIMGatewayServiceServer(srv, newIMServer(d.Apps))
 	if d.Notify != nil {
-		fpv1.RegisterNotifyServiceServer(srv, newNotifyServer(d.Notify))
+		fpv1.RegisterNotifyServiceServer(srv, newNotifyServer(d.Notify, d.Apps))
 	}
 
 	return &Server{grpc: srv, hub: hub, configHub: configHub}
