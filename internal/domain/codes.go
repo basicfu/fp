@@ -50,6 +50,10 @@ const (
 	// "凭据损坏"——后者对使用者没有意义（那是 cookie 被篡改或存储损坏），
 	// 差异进 Detail["desc"]。
 	CodeAdminSessionInvalid = "ADMIN_SESSION_INVALID"
+	// CodeAdminOldPasswordWrong 是改账号时旧密码不对。映射 ErrInvalidArgument（400）
+	// 而不是 ErrInvalidCredential（401）：前端对任何 401 都清登录态跳登录页，
+	// 输错旧密码不该把人踢出去。
+	CodeAdminOldPasswordWrong = "ADMIN_OLD_PASSWORD_WRONG"
 
 	// 参数与校验。
 
@@ -156,6 +160,7 @@ var codeSentinels = map[string]error{
 	CodeAdminCredentialInvalid: ErrInvalidCredential,
 	CodeAdminDisabled:          ErrForbidden,
 	CodeAdminSessionInvalid:    ErrUnauthorized,
+	CodeAdminOldPasswordWrong:  ErrInvalidArgument,
 
 	CodeInvalidArgument:            ErrInvalidArgument,
 	CodeConnectorConfigInvalid:     ErrInvalidArgument,
