@@ -537,13 +537,15 @@ func TestChangeAccountValidatesInput(t *testing.T) {
 }
 
 // 控制字符的校验不能误伤正常的名字：中文、名字内部的空格、组合附加符号都是人能打出来的。
+// U+2EBF0（CJK 扩展 I 的首字）是合法字符，但 Go 的 Unicode 表（15.0）还不认识它：按"未分配码位"
+// 拒绝，就会把凡是晚于 Go 表版本才收录的新字都误拒掉。
 func TestChangeAccountAcceptsOrdinaryUsernames(t *testing.T) {
 	e := newAdminTestEnv(t)
 	ctx := context.Background()
 	e.bootstrap(t, "admin", "secret123456")
 	_, id := e.loginAs(t, "admin", "secret123456")
 
-	for _, name := range []string{"管理员", "ops team", "e\u0301", "a-b_c.d@e"} {
+	for _, name := range []string{"管理员", "ops team", "e\u0301", "a-b_c.d@e", "\U0002EBF0"} {
 		if _, got, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: name, OldPassword: "secret123456"}); err != nil || got != name {
 			t.Errorf("ChangeAccount(%q) = (%q, %v)，应当照常通过", name, got, err)
 		}

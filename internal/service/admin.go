@@ -231,9 +231,13 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 			"登录名需为 1–%d 个字符", maxAdminUsernameRunes)
 	}
 	// NUL 与非法 UTF-8 会让 PG 报 22021 而变成 500；换行、零宽字符、行/段分隔符、私用区这类
-	// 人打不出来的名字，则会让管理员把自己锁在外面：登录页上根本输不进去。只放行字母、标记、
-	// 数字、标点、符号与普通空格：枚举 Cc、Cf 的黑名单漏过了 U+2028/U+2029 与私用区。
-	if !utf8.ValidString(username) || strings.IndexFunc(username, func(r rune) bool { return !unicode.IsGraphic(r) }) >= 0 {
+	// 人打不出来的名字，则会让管理员把自己锁在外面：登录页上根本输不进去。所以拒绝 Cc、Cf、Zl、
+	// Zp、Co、Cs；非法 UTF-8 遍历时变成 U+FFFD，不在其中，由 ValidString 单独拦。
+	// 不用 !unicode.IsGraphic 做白名单：Go 的 Unicode 表落后于标准，晚于它收录的合法新字
+	// （如 CJK 扩展 I）会被当成未分配码位误拒。
+	if !utf8.ValidString(username) || strings.IndexFunc(username, func(r rune) bool {
+		return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Co, unicode.Cs)
+	}) >= 0 {
 		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"登录名不能包含控制字符或不可见字符")
 	}

@@ -41,7 +41,8 @@ func TestRedisFlushedBetweenTests(t *testing.T) {
 // redis.ParseURL 失败时的错误会把 URL 的片段原样带出来：密码里没做百分号编码的 # % / ? 等
 // 字符正是最常见的成因。这条错误会进服务端日志与 CLI 的 stderr，不能把密码带出去。
 // 前两条走 *url.Error，后三条是 go-redis 自己的解析错误（invalid URL path、invalid database
-// number、unexpected option），不是 *url.Error，只擦前者挡不住它们。
+// number、unexpected option），不是 *url.Error，只擦前者挡不住它们。最后两条没有密码，是缺
+// scheme / scheme 写错：这类错误只提示密码编码会把人带偏，文案还得给出整体格式。
 // 解析在联网之前就失败，所以这个用例不碰任何库。
 func TestOpenRedisParseErrorDoesNotLeakPassword(t *testing.T) {
 	cases := []struct {
@@ -53,6 +54,8 @@ func TestOpenRedisParseErrorDoesNotLeakPassword(t *testing.T) {
 		{"密码以 / 开头（invalid URL path）", "redis://:/SeCrEt@127.0.0.1:6379/0", []string{"SeCrEt"}},
 		{"密码以 / 开头且没有库号（invalid database number）", "redis://:/SeCrEt@127.0.0.1:6379", []string{"SeCrEt"}},
 		{"密码里有 ?（unexpected option）", "redis://:12?SeCrEt@127.0.0.1:6379/0", []string{"SeCrEt"}},
+		{"缺 scheme", "localhost:6379", nil},
+		{"scheme 写错", "http://127.0.0.1:6379/0", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -67,6 +70,9 @@ func TestOpenRedisParseErrorDoesNotLeakPassword(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "百分号编码") {
 				t.Errorf("错误应提示密码里的特殊字符要百分号编码: %v", err)
+			}
+			if !strings.Contains(err.Error(), "redis://") {
+				t.Errorf("错误应给出整体格式 redis://...，不能只提密码: %v", err)
 			}
 		})
 	}

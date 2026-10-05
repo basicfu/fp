@@ -104,7 +104,8 @@ func run() error {
 			return err
 		}
 		if redisOpt, err = redis.ParseURL(redisURL); err != nil {
-			return fmt.Errorf("解析 FP_REDIS_URL: %w", err)
+			// 不带原错误：它会把 URL 里的密码片段原样回显（同 store.OpenRedis），而这条错误会打到 stderr。
+			return errors.New("解析 FP_REDIS_URL: 格式不正确（应为 redis://[:密码@]主机:端口/库号；密码里的特殊字符要百分号编码）")
 		}
 	}
 

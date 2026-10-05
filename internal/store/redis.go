@@ -16,7 +16,8 @@ func OpenRedis(ctx context.Context, rawURL string) (*redis.Client, error) {
 		// 错误（invalid URL path / invalid database number / unexpected option）带从密码里
 		// 的 / ? 处截出的尾巴。最常见的成因恰恰是密码里没做百分号编码的 @ # % / ?，而错误会进
 		// 服务端日志、CLI 的 stderr 与 fp-dbclean 的输出，所以任何失败都只说类别、不带原因。
-		return nil, errors.New("store: 解析 redis url: 格式不正确（密码里的特殊字符要百分号编码）")
+		// 文案同时给出整体格式：缺 scheme、写成 http:// 这类错误与密码无关，只提编码会把人带偏。
+		return nil, errors.New("store: 解析 redis url: 格式不正确（应为 redis://[:密码@]主机:端口/库号；密码里的特殊字符要百分号编码）")
 	}
 	c := redis.NewClient(opt)
 	if err := c.Ping(ctx).Err(); err != nil {

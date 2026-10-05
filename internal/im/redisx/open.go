@@ -4,6 +4,7 @@ package redisx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -23,7 +24,8 @@ const (
 func Open(ctx context.Context, url string) (redis.UniversalClient, Mode, error) {
 	opt, err := redis.ParseURL(url)
 	if err != nil {
-		return nil, "", fmt.Errorf("redisx: 解析 redis url: %w", err)
+		// 不带原错误：它会把 URL 片段（含没做百分号编码的密码）原样回显，而这条错误会进日志。
+		return nil, "", errors.New("redisx: 解析 redis url: 格式不正确（应为 redis://[:密码@]主机:端口/库号；密码里的特殊字符要百分号编码）")
 	}
 	single := redis.NewClient(opt)
 	info, err := single.Info(ctx, "cluster").Result()
