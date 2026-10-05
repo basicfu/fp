@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -13,14 +12,11 @@ import (
 func OpenRedis(ctx context.Context, rawURL string) (*redis.Client, error) {
 	opt, err := redis.ParseURL(rawURL)
 	if err != nil {
-		// *url.Error 的文本带着整条 URL（含密码），而最常见的成因恰恰是密码里没做百分号
-		// 编码的 @ # % /；错误会进服务端日志、CLI 的 stderr 与 fp-dbclean 的输出，所以只
-		// 说类别、不带原因。
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			return nil, errors.New("store: 解析 redis url: 格式不正确（密码里的特殊字符要百分号编码）")
-		}
-		return nil, fmt.Errorf("store: 解析 redis url: %w", err)
+		// ParseURL 的错误文本会把 URL 片段原样带出来：*url.Error 带整条 URL，go-redis 自己的
+		// 错误（invalid URL path / invalid database number / unexpected option）带从密码里
+		// 的 / ? 处截出的尾巴。最常见的成因恰恰是密码里没做百分号编码的 @ # % / ?，而错误会进
+		// 服务端日志、CLI 的 stderr 与 fp-dbclean 的输出，所以任何失败都只说类别、不带原因。
+		return nil, errors.New("store: 解析 redis url: 格式不正确（密码里的特殊字符要百分号编码）")
 	}
 	c := redis.NewClient(opt)
 	if err := c.Ping(ctx).Err(); err != nil {

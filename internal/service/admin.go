@@ -107,9 +107,15 @@ func (s *AdminService) Login(ctx context.Context, username, password string) (st
 		hash   string
 		status string
 	)
-	err = s.pool.QueryRow(ctx,
-		`SELECT id, password_hash, status FROM admin WHERE username = $1`, username).
-		Scan(&id, &hash, &status)
+	// 含 NUL 或非法 UTF-8 的名字存不进库（ChangeAccount 拒绝），原样塞进 SQL 只会让 PG 报
+	// 22021：不用登录就能打出 500 与一条 error 日志。当作"用户不存在"，走下面同一条分支。
+	if strings.ContainsRune(username, 0) || !utf8.ValidString(username) {
+		err = pgx.ErrNoRows
+	} else {
+		err = s.pool.QueryRow(ctx,
+			`SELECT id, password_hash, status FROM admin WHERE username = $1`, username).
+			Scan(&id, &hash, &status)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 与密码错误返回同一错误，并且同样跑一遍 bcrypt：直接返回的话，几十毫秒的响应
 		// 时间差就是用户名枚举的预言机（做法同 UserService.VerifyPassword）。
@@ -224,9 +230,10 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"登录名需为 1–%d 个字符", maxAdminUsernameRunes)
 	}
-	// NUL 会让 PG 报 22021 而变成 500；换行、零宽字符这类人打不出来的名字，
-	// 则会让管理员把自己锁在外面：登录页上根本输不进去。
-	if strings.IndexFunc(username, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 {
+	// NUL 与非法 UTF-8 会让 PG 报 22021 而变成 500；换行、零宽字符、行/段分隔符、私用区这类
+	// 人打不出来的名字，则会让管理员把自己锁在外面：登录页上根本输不进去。只放行字母、标记、
+	// 数字、标点、符号与普通空格：枚举 Cc、Cf 的黑名单漏过了 U+2028/U+2029 与私用区。
+	if !utf8.ValidString(username) || strings.IndexFunc(username, func(r rune) bool { return !unicode.IsGraphic(r) }) >= 0 {
 		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"登录名不能包含控制字符或不可见字符")
 	}
@@ -235,13 +242,23 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 			"新密码过长（超过 %d 字节，约 %d 个汉字）", maxPasswordBytes, maxPasswordBytes/3)
 	}
 
-	var hash string
-	err = s.pool.QueryRow(ctx, `SELECT password_hash FROM admin WHERE id = $1`, id).Scan(&hash)
+	sessionInvalid := func() error {
+		return domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
+	}
+
+	var hash, status string
+	err = s.pool.QueryRow(ctx, `SELECT password_hash, status FROM admin WHERE id = $1`, id).Scan(&hash, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
+		return "", "", sessionInvalid()
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("service: 查询管理员: %w", err)
+	}
+	// 已停用的行与"行不存在"同样处理，且在校验旧密码之前。reset-password 对旧库里非保留的行
+	// 只改 status、不动哈希，下面所有只比哈希的检查都看不见这次停用；这里不拦，持着旧会话、
+	// 在途的 PUT /me 就能撑过重置。
+	if status != "ACTIVE" {
+		return "", "", sessionInvalid()
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.OldPassword)) != nil {
 		return "", "", domain.Fail(domain.ErrInvalidArgument, domain.CodeAdminOldPasswordWrong, "旧密码不正确")
@@ -257,10 +274,11 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 	}
 	// 条件里带开头读到的哈希：从校验旧密码到这里隔着一次 bcrypt，其间另一次改密或
 	// 重置若已提交，无条件的 UPDATE 会用旧数据把它盖回去（只改登录名时写回的就是
-	// 旧哈希本身）。bcrypt 每次加盐，哈希相同即"这期间没人动过密码"。
+	// 旧哈希本身）。bcrypt 每次加盐，哈希相同即"这期间没人动过密码"。status 同理：停用
+	// 不动哈希，这期间被停用的行光靠哈希条件拦不住。
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE admin SET username = $2, password_hash = $3, display_name = $2, updated_at = now()
-		WHERE id = $1 AND password_hash = $4`, id, username, newHash, hash)
+		WHERE id = $1 AND password_hash = $4 AND status = 'ACTIVE'`, id, username, newHash, hash)
 	if isUniqueViolation(err) {
 		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "登录名已被占用")
 	}
@@ -268,7 +286,16 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 		return "", "", fmt.Errorf("service: 更新管理员: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// 刚校验过的凭据已被换掉：对现在的账号而言，旧密码不再成立。
+		// 落空有两种成因，必须分清：行在这期间被停用（或删除），会话已失效；否则是密码被
+		// 换掉，刚校验过的凭据对现在的账号而言不再成立。
+		var current string
+		err = s.pool.QueryRow(ctx, `SELECT status FROM admin WHERE id = $1`, id).Scan(&current)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && current != "ACTIVE") {
+			return "", "", sessionInvalid()
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("service: 复核管理员状态: %w", err)
+		}
 		return "", "", domain.Fail(domain.ErrInvalidArgument, domain.CodeAdminOldPasswordWrong, "旧密码不正确")
 	}
 	// 先提交、后 INCR，顺序见 bumpEpoch。用本次 INCR 的返回值签发，不再读一遍计数器：
@@ -282,13 +309,15 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 	// UPDATE 照样命中；重置的 UPDATE 本来就不带条件。重读发生在本次 INCR 之后：此前提交
 	// 的变更都看得见，哈希对不上就不签发；此后才提交的变更自带更晚的 INCR，token 本来就会
 	// 失效。返回 401 是因为本会话已被自己的 INCR 作废，让前端回登录页。
-	var current string
-	err = s.pool.QueryRow(ctx, `SELECT password_hash FROM admin WHERE id = $1`, id).Scan(&current)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && current != newHash) {
-		return "", "", domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
+	// status 要一起读：reset-password 对旧库里非保留的行只停用、不动哈希，停用后的哈希与本次
+	// 写入的一模一样，只比哈希看不见它，签出的 token 就撑过了重置。
+	var current, currentStatus string
+	err = s.pool.QueryRow(ctx, `SELECT password_hash, status FROM admin WHERE id = $1`, id).Scan(&current, &currentStatus)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (current != newHash || currentStatus != "ACTIVE")) {
+		return "", "", sessionInvalid()
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("service: 复核管理员密码哈希: %w", err)
+		return "", "", fmt.Errorf("service: 复核管理员账号: %w", err)
 	}
 	token, err = s.issueToken(ctx, id, username, epoch)
 	if err != nil {

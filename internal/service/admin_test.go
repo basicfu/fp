@@ -156,24 +156,84 @@ func TestLoginReportsDisabledOnlyAfterPasswordIsVerified(t *testing.T) {
 	}
 }
 
-// 用户名不存在时也要跑完一遍 bcrypt，否则几十毫秒的响应时间差会泄露"这个用户名存不存在"。
+// 登录失败的两条路径都要付出一次 bcrypt 的代价，否则响应时间会泄露账号信息：用户名不存在时
+// 若直接返回，几十毫秒的时间差就能问出"这个用户名存不存在"；已停用的账号若在比对密码之前
+// 就返回，则能问出"它存在、且已停用"。
 //
-// 判定用"下限"而不是"两者之差"：bcrypt cost 10 要三十毫秒以上，短路掉它的路径只剩
-// Redis 与 Postgres 各一次往返（这台机器的局域网库上实测约 10 ms，所以不能照搬
-// TestVerifyPasswordEqualizesTiming 的 5 ms）。阈值取在两者之间，不做上限断言。
-func TestLoginUnknownUsernamePaysBcryptCost(t *testing.T) {
-	svc := newAdminService(t)
-	const minBcrypt = 20 * time.Millisecond
-
-	start := time.Now()
-	_, err := svc.Login(context.Background(), "nobody", "definitely-wrong-password")
-	elapsed := time.Since(start)
-
-	if !errors.Is(err, domain.ErrInvalidCredential) {
-		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+// 不写死毫秒数：Login 里除了 bcrypt 还有 Redis 与 Postgres 各一次往返，绝对值随机器、CPU 与
+// 网络漂移，这台机器上调出来的阈值换一台就可能误报或失效。改为当场量一次同 cost 的 bcrypt
+// 比对当参照，只要求登录耗时"不低于它的 0.6 倍"；只设下限、不设上限。去掉比对后登录只剩那
+// 两次往返，远低于一次 bcrypt。
+func TestLoginFailurePathsPayBcryptCost(t *testing.T) {
+	e := newAdminTestEnv(t)
+	ctx := context.Background()
+	e.bootstrap(t, "admin", "secret123456")
+	if _, err := e.pool.Exec(ctx, `UPDATE admin SET status = 'DISABLED'`); err != nil {
+		t.Fatalf("停用管理员: %v", err)
 	}
-	if elapsed < minBcrypt {
-		t.Errorf("耗时 %v < %v，说明跳过了 bcrypt，响应时间会泄露用户名是否存在", elapsed, minBcrypt)
+	// 参照用 bcrypt.DefaultCost，要与 service 的 bcryptCost 一致，否则 0.6 倍的下限没有意义。
+	// 两个常量同为 10；这里核对库里实际存的哈希，以后谁改了其中一个，这条会红而不是悄悄失准。
+	var stored string
+	if err := e.pool.QueryRow(ctx, `SELECT password_hash FROM admin WHERE username = 'admin'`).Scan(&stored); err != nil {
+		t.Fatalf("读管理员密码哈希: %v", err)
+	}
+	if cost, err := bcrypt.Cost([]byte(stored)); err != nil || cost != bcrypt.DefaultCost {
+		t.Fatalf("service 存的哈希 cost = %d (err %v)，参照用的是 bcrypt.DefaultCost = %d", cost, err, bcrypt.DefaultCost)
+	}
+	minElapsed := bcryptReference(t) * 6 / 10
+
+	cases := []struct{ name, username string }{
+		{"用户名不存在", "nobody"},
+		{"已停用账号 + 错误密码", "admin"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			start := time.Now()
+			_, err := e.svc.Login(ctx, c.username, "definitely-wrong-password")
+			elapsed := time.Since(start)
+
+			if !errors.Is(err, domain.ErrInvalidCredential) {
+				t.Fatalf("err = %v, want ErrInvalidCredential", err)
+			}
+			if elapsed < minElapsed {
+				t.Errorf("耗时 %v < %v（一次 bcrypt 比对的 0.6 倍），说明跳过了 bcrypt，响应时间会泄露账号信息", elapsed, minElapsed)
+			}
+		})
+	}
+}
+
+// bcryptReference 当场量一次 bcrypt 比对要多久，作为计时断言的参照。取三次里最小的：
+// 调度或 GC 的抖动只会把单次量大，最小值才最接近真实开销；参照虚高会让下限断言误报。
+func bcryptReference(t *testing.T) time.Duration {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("x"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+	var best time.Duration
+	for i := range 3 {
+		start := time.Now()
+		_ = bcrypt.CompareHashAndPassword(hash, []byte("definitely-wrong-password"))
+		if d := time.Since(start); i == 0 || d < best {
+			best = d
+		}
+	}
+	return best
+}
+
+// 登录名里的 NUL 或非法 UTF-8 原样进 SQL 会让 PG 报 22021：未登录就能触发 500 与一条 error 日志。
+// 这样的名字存不进库（ChangeAccount 拒绝），按"用户不存在"处理。
+func TestLoginTreatsUnstorableUsernameAsUnknown(t *testing.T) {
+	svc := newAdminService(t)
+	cases := []struct{ name, username string }{
+		{"含 NUL", "a\x00b"},
+		{"含非法 UTF-8", "a\xffb"},
+	}
+	for _, c := range cases {
+		_, err := svc.Login(context.Background(), c.username, "x")
+		if !errors.Is(err, domain.ErrInvalidCredential) || adminErrCode(err) != domain.CodeAdminCredentialInvalid {
+			t.Errorf("%s: err = %v (code %q), want ErrInvalidCredential / ADMIN_CREDENTIAL_INVALID", c.name, err, adminErrCode(err))
+		}
 	}
 }
 
@@ -237,6 +297,15 @@ func (e adminTestEnv) insertAdminRow(t *testing.T, username, password, status st
 		t.Fatalf("插入管理员 %q: %v", username, err)
 	}
 	return id
+}
+
+// insertLegacyAdmins 造旧版本留下的两行库，返回较晚那一行（admin/admin）的 ID：最早的 root
+// 是 reset-password 保留的行，较晚的 admin/admin 会被它停用（哈希不动）。
+func (e adminTestEnv) insertLegacyAdmins(t *testing.T) uuid.UUID {
+	t.Helper()
+	now := time.Now()
+	e.insertAdminRow(t, "root", "root-password", "ACTIVE", now.Add(-48*time.Hour))
+	return e.insertAdminRow(t, "admin", "admin", "ACTIVE", now.Add(-24*time.Hour))
 }
 
 func adminErrCode(err error) string {
@@ -450,10 +519,15 @@ func TestChangeAccountValidatesInput(t *testing.T) {
 		{"登录名为空白", service.ChangeAccountInput{Username: "  ", OldPassword: "secret123456"}},
 		{"登录名超过 64 字符", service.ChangeAccountInput{Username: strings.Repeat("a", 65), OldPassword: "secret123456"}},
 		{"新密码超过 72 字节", service.ChangeAccountInput{Username: "admin", OldPassword: "secret123456", NewPassword: strings.Repeat("a", 73)}},
-		// NUL 会让 PG 报 22021（500）；换行、零宽空格是人打不出来的字符，会让管理员自己登不进去。
+		// NUL 与非法 UTF-8 会让 PG 报 22021（500）；换行、零宽空格是人打不出来的字符，会让管理员自己登不进去。
 		{"登录名含 NUL", service.ChangeAccountInput{Username: "a\x00b", OldPassword: "secret123456"}},
+		{"登录名含非法 UTF-8", service.ChangeAccountInput{Username: "a\xffb", OldPassword: "secret123456"}},
 		{"登录名含换行", service.ChangeAccountInput{Username: "a\nb", OldPassword: "secret123456"}},
-		{"登录名含零宽空格", service.ChangeAccountInput{Username: "a​b", OldPassword: "secret123456"}},
+		{"登录名含零宽空格", service.ChangeAccountInput{Username: "a\u200bb", OldPassword: "secret123456"}},
+		// 行/段分隔符（Zl、Zp）与私用区（Co）既不是控制符也不是格式符，只排除 Cc 与 Cf 的谓词会放过它们。
+		{"登录名含行分隔符", service.ChangeAccountInput{Username: "a\u2028b", OldPassword: "secret123456"}},
+		{"登录名含段分隔符", service.ChangeAccountInput{Username: "a\u2029b", OldPassword: "secret123456"}},
+		{"登录名含私用区字符", service.ChangeAccountInput{Username: "a\ue000b", OldPassword: "secret123456"}},
 	}
 	for _, c := range cases {
 		if _, _, err := e.svc.ChangeAccount(context.Background(), id, c.in); !errors.Is(err, domain.ErrInvalidArgument) {
@@ -469,7 +543,7 @@ func TestChangeAccountAcceptsOrdinaryUsernames(t *testing.T) {
 	e.bootstrap(t, "admin", "secret123456")
 	_, id := e.loginAs(t, "admin", "secret123456")
 
-	for _, name := range []string{"管理员", "ops team", "é", "a-b_c.d@e"} {
+	for _, name := range []string{"管理员", "ops team", "e\u0301", "a-b_c.d@e"} {
 		if _, got, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: name, OldPassword: "secret123456"}); err != nil || got != name {
 			t.Errorf("ChangeAccount(%q) = (%q, %v)，应当照常通过", name, got, err)
 		}
@@ -797,6 +871,166 @@ func TestChangeAccountRefusesTokenWhenCredentialsChangedBeforeItsIncr(t *testing
 	}
 	if got := e.epoch(t); got != epochBefore+2 {
 		t.Errorf("纪元 %d -> %d, want +2（ChangeAccount 自己那次加上模拟的并发变更）", epochBefore, got)
+	}
+}
+
+// reset-password 对旧库里非保留的行只置 DISABLED、不动哈希。ChangeAccount 若只比哈希，就看不见
+// 这次停用：旧库里的 admin/admin 靠一个在途的 PUT /me（在重置的 INCR 之前通过鉴权）撑过重置，
+// 拿到有效会话。已停用的行与"行不存在"走同一条路：回会话失效，不必先付一次 bcrypt，
+// 旧密码错也一样（所以下面要有"旧密码错误"这一条，它才钉得住"在校验旧密码之前"）。
+func TestChangeAccountRefusesDisabledAdmin(t *testing.T) {
+	cases := []struct{ name, oldPassword string }{
+		{"旧密码正确", "admin"},
+		{"旧密码错误", "not-the-password"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newAdminTestEnv(t)
+			ctx := context.Background()
+			id := e.insertLegacyAdmins(t)
+			e.loginAs(t, "admin", "admin") // 停用前就持有的会话
+			if _, err := e.pool.Exec(ctx, `UPDATE admin SET status = 'DISABLED' WHERE id = $1`, id); err != nil {
+				t.Fatalf("停用管理员: %v", err)
+			}
+			epochBefore := e.epoch(t)
+
+			_, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: c.oldPassword})
+			if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
+				t.Errorf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
+			}
+			if got := e.epoch(t); got != epochBefore {
+				t.Errorf("纪元 %d -> %d，被拒的修改不该作废会话", epochBefore, got)
+			}
+			if n := e.tokenKeys(t); n != 1 {
+				t.Errorf("会话数 = %d, want 1（只有登录时签发的那个）", n)
+			}
+			var name string
+			if err := e.pool.QueryRow(ctx, `SELECT username FROM admin WHERE id = $1`, id).Scan(&name); err != nil {
+				t.Fatalf("读管理员行: %v", err)
+			}
+			if name != "admin" {
+				t.Errorf("登录名 = %q，被停用的行不该被改名", name)
+			}
+		})
+	}
+}
+
+// 停用发生在 ChangeAccount 的 UPDATE 提交之后、INCR 之前：reset-password 先提交（停用非保留行，
+// 哈希不动），它的 INCR 也先于 A 的 INCR 落地。A 签出的 token 带着最终纪元，只比哈希的重读
+// 看到的仍是本次写入的哈希，于是 token 在重置之后依然有效。重读要连 status 一起读。
+//
+// hook 在 A 的 INCR 发出之前模拟这次重置：停用该行，再经没挂 hook 的 base 做一次 INCR。
+func TestChangeAccountRefusesTokenWhenAdminDisabledBeforeItsIncr(t *testing.T) {
+	const oldPassword = "admin"
+	ctx := context.Background()
+	pool := testsupport.NewTestDB(t)
+	base := testsupport.NewTestRedis(t)
+	e := adminTestEnv{pool: pool, rdb: base}
+	id := e.insertLegacyAdmins(t)
+
+	var fired atomic.Bool
+	e.svc = service.NewAdminService(pool, hookedRedis(t, &redisCmdHook{
+		before: func(ctx context.Context, cmd redis.Cmder) {
+			if !isEpochCmd(cmd, "incr") || !fired.CompareAndSwap(false, true) {
+				return
+			}
+			if _, err := pool.Exec(ctx, `UPDATE admin SET status = 'DISABLED' WHERE id = $1`, id); err != nil {
+				t.Errorf("模拟重置，停用该行: %v", err)
+				return
+			}
+			if err := base.Incr(ctx, "fp:admin:epoch").Err(); err != nil {
+				t.Errorf("模拟重置，INCR: %v", err)
+			}
+		},
+	}))
+	e.loginAs(t, "admin", oldPassword)
+	epochBefore := e.epoch(t)
+
+	// 只改登录名：停用不动哈希，只比哈希的重读拦不住的就是这种。
+	token, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: oldPassword})
+	if !fired.Load() {
+		t.Fatal("hook 没有触发：ChangeAccount 没有 INCR 纪元？")
+	}
+	if err == nil {
+		_, _, aerr := e.svc.Authenticate(ctx, token)
+		t.Fatalf("该行已被停用，ChangeAccount 仍签发了 token（Authenticate err = %v，nil 即它是有效会话）", aerr)
+	}
+	if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
+		t.Fatalf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
+	}
+	if n := e.tokenKeys(t); n != 1 {
+		t.Errorf("会话数 = %d, want 1（只有登录时签发的那个，不该多出新的）", n)
+	}
+	if got := e.epoch(t); got != epochBefore+2 {
+		t.Errorf("纪元 %d -> %d, want +2（ChangeAccount 自己那次加上模拟的重置）", epochBefore, got)
+	}
+}
+
+// 停用发生在 ChangeAccount 读行之后、UPDATE 之前。UPDATE 若不带 status 条件，哈希没变就照样
+// 命中：被停用的行被改名，随后的 INCR 还会作废运维刚签发的新会话。落空之后要再查一次才分得清
+// 原因：行已停用是会话失效（401），不是旧密码不对（400）。
+//
+// 时序同 TestChangeAccountDoesNotOverwriteConcurrentPasswordChange，用行锁钉死：持锁事务在
+// UPDATE 卡住之后停用该行并提交，被唤醒的 UPDATE 重新求值 WHERE。
+func TestChangeAccountDoesNotUpdateAdminDisabledWhileBlocked(t *testing.T) {
+	e := newAdminTestEnv(t)
+	ctx := context.Background()
+	id := e.insertLegacyAdmins(t)
+	e.loginAs(t, "admin", "admin")
+	epochBefore := e.epoch(t)
+
+	holder, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("开启持锁事务: %v", err)
+	}
+	var wg sync.WaitGroup
+	defer func() {
+		// 中途失败也要放锁，并等卡住的 UPDATE 走完，免得它的写入落进下一个用例。
+		_ = holder.Rollback(ctx)
+		wg.Wait()
+	}()
+	var holderPID int32
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatalf("取持锁连接的 pid: %v", err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT 1 FROM admin WHERE id = $1 FOR UPDATE`, id); err != nil {
+		t.Fatalf("锁住管理员行: %v", err)
+	}
+
+	var changeErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		_, _, changeErr = e.svc.ChangeAccount(callCtx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: "admin"})
+	}()
+	waitUntilBlockedBy(t, e.pool, holderPID)
+
+	// reset-password 的第一步：停用该行，哈希不动。
+	if _, err := holder.Exec(ctx, `UPDATE admin SET status = 'DISABLED' WHERE id = $1`, id); err != nil {
+		t.Fatalf("另一个事务停用该行: %v", err)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("提交另一个事务: %v", err)
+	}
+	wg.Wait()
+
+	if !errors.Is(changeErr, domain.ErrUnauthorized) || adminErrCode(changeErr) != domain.CodeAdminSessionInvalid {
+		t.Errorf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID（行已停用，不是旧密码错）", changeErr, adminErrCode(changeErr))
+	}
+	var name, status string
+	if err := e.pool.QueryRow(ctx, `SELECT username, status FROM admin WHERE id = $1`, id).Scan(&name, &status); err != nil {
+		t.Fatalf("读管理员行: %v", err)
+	}
+	if name != "admin" || status != "DISABLED" {
+		t.Errorf("该行 = (%q, %q), want (admin, DISABLED)：被停用的行不该被改名", name, status)
+	}
+	if got := e.epoch(t); got != epochBefore {
+		t.Errorf("纪元 %d -> %d，被拒的修改不该作废会话", epochBefore, got)
+	}
+	if n := e.tokenKeys(t); n != 1 {
+		t.Errorf("会话数 = %d, want 1（只有登录时签发的那个）", n)
 	}
 }
 
