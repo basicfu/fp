@@ -100,6 +100,7 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Post("/logout", ah.logout)
 			r.Get("/me", ah.me)
+			r.Put("/me", ah.changeAccount)
 
 			r.Get("/connectors", connH.list)
 

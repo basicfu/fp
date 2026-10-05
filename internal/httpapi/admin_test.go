@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/testsupport"
 )
 
 func newAdminServer(t *testing.T) (http.Handler, *service.AdminService) {
@@ -130,5 +132,92 @@ func TestAdminLoginWrongPassword(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/api/login", body))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestAdminLoginReportsDefaultPassword(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+	svc := service.NewAdminService(pool, rdb)
+	if err := svc.EnsureBootstrap(context.Background(), "admin", "admin"); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+	h := httpapi.NewRouter(httpapi.Deps{Admin: svc})
+
+	rec := do(t, h, "", http.MethodPost, "/admin/api/login", `{"username":"admin","password":"admin"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"defaultPassword":true`) {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminLoginDoesNotReportDefaultPasswordForCustomPassword(t *testing.T) {
+	h, _, _ := newAdminEnv(t) // 引导密码是 secret123456
+	rec := do(t, h, "", http.MethodPost, "/admin/api/login", `{"username":"admin","password":"secret123456"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"defaultPassword":false`) {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChangeAccountKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	other, err := deps.Admin.Login(context.Background(), "admin", "secret123456")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	rec := do(t, h, token, http.MethodPut, "/admin/api/me",
+		`{"username":"boss","oldPassword":"secret123456","newPassword":"brand-new-pass"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Token    string `json:"token"`
+		Username string `json:"username"`
+	}
+	decode(t, rec, &out)
+	if out.Username != "boss" || out.Token == "" {
+		t.Fatalf("响应 = %+v", out)
+	}
+	var cookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "fp_admin" {
+			cookie = c
+		}
+	}
+	if cookie == nil || cookie.Value != out.Token {
+		t.Fatalf("应写入换新后的 fp_admin cookie, got %+v", cookie)
+	}
+
+	if me := do(t, h, out.Token, http.MethodGet, "/admin/api/me", ""); me.Code != http.StatusOK ||
+		!strings.Contains(me.Body.String(), `"username":"boss"`) {
+		t.Fatalf("新会话 /me: %d %s", me.Code, me.Body.String())
+	}
+	for name, old := range map[string]string{"发起修改的旧会话": token, "其他会话": other} {
+		if rec := do(t, h, old, http.MethodGet, "/admin/api/me", ""); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s 应已失效, status = %d", name, rec.Code)
+		}
+	}
+}
+
+// 【辨别力】旧密码错必须是 400 而不是 401：前端对任何 401 都清登录态并跳登录页。
+func TestChangeAccountWrongOldPasswordIs400AndKeepsSession(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	rec := do(t, h, token, http.MethodPut, "/admin/api/me",
+		`{"username":"admin","oldPassword":"nope","newPassword":"x"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "ADMIN_OLD_PASSWORD_WRONG") {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if me := do(t, h, token, http.MethodGet, "/admin/api/me", ""); me.Code != http.StatusOK {
+		t.Fatalf("失败的修改不该让会话失效, status = %d", me.Code)
+	}
+}
+
+func TestChangeAccountRequiresAuthAndRejectsUnknownFields(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	if rec := do(t, h, "", http.MethodPut, "/admin/api/me", `{"username":"a","oldPassword":"b"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录 status = %d, want 401", rec.Code)
+	}
+	if rec := do(t, h, token, http.MethodPut, "/admin/api/me", `{"username":"a","oldPassword":"b","extra":1}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("未知字段 status = %d, want 400", rec.Code)
 	}
 }

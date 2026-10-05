@@ -36,6 +36,9 @@ type adminLoginRequest struct {
 type adminLoginResponse struct {
 	Token    string `json:"token"`
 	Username string `json:"username"`
+	// DefaultPassword 为 true 表示这次登录用的仍是内置默认密码，前端据此弹一条
+	// 可忽略的提示。拿登录时的明文判断，不需要库里加标志位，也不会过期失真。
+	DefaultPassword bool `json:"defaultPassword"`
 }
 
 func (h *adminHandler) login(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +53,11 @@ func (h *adminHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, h.sessionCookie(token, 0))
-	writeJSON(w, http.StatusOK, adminLoginResponse{Token: token, Username: req.Username})
+	writeJSON(w, http.StatusOK, adminLoginResponse{
+		Token:           token,
+		Username:        req.Username,
+		DefaultPassword: req.Password == service.DefaultAdminPassword,
+	})
 }
 
 func (h *adminHandler) logout(w http.ResponseWriter, r *http.Request) {
@@ -72,4 +79,27 @@ func (h *adminHandler) me(w http.ResponseWriter, r *http.Request) {
 		ID:       adminIDFrom(r.Context()).String(),
 		Username: adminNameFrom(r.Context()),
 	})
+}
+
+type adminChangeAccountRequest struct {
+	Username    string `json:"username"`
+	OldPassword string `json:"oldPassword"`
+	NewPassword string `json:"newPassword"`
+}
+
+func (h *adminHandler) changeAccount(w http.ResponseWriter, r *http.Request) {
+	var req adminChangeAccountRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	token, username, err := h.svc.ChangeAccount(r.Context(), adminIDFrom(r.Context()), service.ChangeAccountInput{
+		Username: req.Username, OldPassword: req.OldPassword, NewPassword: req.NewPassword,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	http.SetCookie(w, h.sessionCookie(token, 0))
+	writeJSON(w, http.StatusOK, adminLoginResponse{Token: token, Username: username})
 }
