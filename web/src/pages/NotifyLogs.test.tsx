@@ -60,3 +60,17 @@ test('翻页用 offset，总数来自后端', async () => {
   expect(await screen.findByText('共 45 条，第 2 / 3 页')).toBeTruthy()
   expect(calls.at(-1)!.url).toBe('/notify/logs?limit=20&offset=20')
 })
+
+test('在第 2 页改筛选会回到第 1 页', async () => {
+  const calls = stubApi({
+    'GET /notify/logs?limit=20&offset=0': { items: [ok], total: 45 },
+    'GET /notify/logs?limit=20&offset=20': { items: [ok], total: 45 },
+    'GET /notify/logs?limit=20&offset=0&success=false': { items: [], total: 0 },
+    'GET /notify/logs?limit=20&offset=20&success=false': { items: [], total: 0 },
+  })
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: '下一页' }))
+  expect(await screen.findByText('共 45 条，第 2 / 3 页')).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('按结果筛选'), { target: { value: 'false' } })
+  await waitFor(() => expect(calls.at(-1)!.url).toBe('/notify/logs?limit=20&offset=0&success=false'))
+})
