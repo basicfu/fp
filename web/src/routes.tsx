@@ -13,6 +13,11 @@ import AccessKeys from '@/pages/AccessKeys'
 import Roles from '@/pages/Roles'
 import RoleDetail from '@/pages/RoleDetail'
 import Permissions from '@/pages/Permissions'
+import NotifyTemplates from '@/pages/NotifyTemplates'
+import NotifyTemplateDetail from '@/pages/NotifyTemplateDetail'
+import NotifyProviders from '@/pages/NotifyProviders'
+import NotifyProviderDetail from '@/pages/NotifyProviderDetail'
+import NotifyLogs from '@/pages/NotifyLogs'
 import { useAuth } from '@/lib/auth'
 import { CurrentAppProvider } from '@/lib/current-app'
 
@@ -60,6 +65,12 @@ export default function AppRoutes() {
         <Route path="/config/versions" element={<ConfigVersions />} />
         <Route path="/system-config" element={<SystemConfig />} />
         <Route path="/system-config/versions" element={<SystemConfigVersions />} />
+        <Route path="/notify" element={<Navigate to="/notify/templates" replace />} />
+        <Route path="/notify/templates" element={<NotifyTemplates />} />
+        <Route path="/notify/templates/:code" element={<NotifyTemplateDetail />} />
+        <Route path="/notify/providers" element={<NotifyProviders />} />
+        <Route path="/notify/providers/:id" element={<NotifyProviderDetail />} />
+        <Route path="/notify/logs" element={<NotifyLogs />} />
       </Route>
       <Route path="*" element={<Navigate to="/applications" replace />} />
     </Routes>

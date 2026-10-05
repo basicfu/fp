@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation } from 'react-router'
 import type { LucideIcon } from 'lucide-react'
 import {
   AppWindow,
+  Bell,
   Key,
   KeyRound,
   LogOut,
@@ -55,6 +56,7 @@ const nav: { to: string; label: string; icon: LucideIcon }[] = [
   { to: '/roles', label: '角色管理', icon: ShieldCheck },
   { to: '/permissions', label: '权限管理', icon: KeyRound },
   { to: '/config', label: '配置中心', icon: Settings },
+  { to: '/notify', label: '通知中心', icon: Bell },
   { to: '/system-config', label: '系统配置', icon: Server },
 ]
 

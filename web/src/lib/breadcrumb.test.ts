@@ -39,3 +39,17 @@ test('未知路径回退成一段「fp」，不抛错', () => {
 test('访问密钥的面包屑', () => {
   expect(buildBreadcrumb('/access-keys')).toEqual([{ label: '访问密钥' }])
 })
+
+test('通知中心：三个页内标签，详情页带回对应列表', () => {
+  expect(buildBreadcrumb('/notify/templates')).toEqual([{ label: '通知中心' }, { label: '模板' }])
+  expect(buildBreadcrumb('/notify/providers')).toEqual([{ label: '通知中心' }, { label: '供应商' }])
+  expect(buildBreadcrumb('/notify/logs')).toEqual([{ label: '通知中心' }, { label: '发送记录' }])
+  expect(buildBreadcrumb('/notify/templates/login_sms')).toEqual([
+    { label: '通知中心' },
+    { label: '模板', to: '/notify/templates' },
+    { label: 'login_sms' },
+  ])
+  // code 里的特殊字符是编码过的，面包屑要还原；编码本身有问题时原样显示，不抛错。
+  expect(buildBreadcrumb('/notify/templates/a%2Fb')[2]).toEqual({ label: 'a/b' })
+  expect(buildBreadcrumb('/notify/templates/%E0%A4%A')[2]).toEqual({ label: '%E0%A4%A' })
+})

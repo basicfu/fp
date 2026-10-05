@@ -1,0 +1,289 @@
+import { useState } from 'react'
+import { useParams } from 'react-router'
+import { toast } from 'sonner'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { NativeSelect } from '@/components/NativeSelect'
+import NotifyContentFields from '@/components/NotifyContentFields'
+import { ApiError, api } from '@/lib/api'
+import { needsRecipient, notifyChannelLabels, notifyModeLabels } from '@/lib/notify'
+import { errorMessage, useResource } from '@/lib/useResource'
+import type { NotifyContent, NotifyLink, NotifyProvider, NotifyTemplateDetail as Detail } from '@/lib/types'
+
+/** 一条关联：供应商实例 + 它在这个模板下的供应商侧模板 ID、优先级、启停。 */
+function LinkRow({ code, vendor, link, onChanged }: { code: string; vendor: boolean; link: NotifyLink; onChanged: () => void }) {
+  const [providerTemplateId, setProviderTemplateId] = useState(link.providerTemplateId)
+  const [priority, setPriority] = useState(String(link.priority))
+  const [enabled, setEnabled] = useState(link.enabled)
+  const path = `/notify/templates/${encodeURIComponent(code)}/providers/${link.providerId}`
+  const name = link.providerDescription || link.providerType
+
+  async function save(nextEnabled = enabled) {
+    try {
+      await api.put(path, { providerTemplateId, enabled: nextEnabled, priority: Number(priority) || 0 })
+      toast.success('已保存')
+      onChanged()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  async function remove() {
+    try {
+      await api.del(path)
+      toast.success('已解除关联')
+      onChanged()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  return (
+    <TableRow>
+      <TableCell>
+        {name}
+        {!link.providerEnabled && <Badge variant="secondary" className="ml-2">供应商已停用</Badge>}
+      </TableCell>
+      <TableCell>
+        {vendor ? (
+          <Input
+            aria-label={`${name} 的供应商侧模板 ID`}
+            className="font-mono text-xs"
+            value={providerTemplateId}
+            onChange={(e) => setProviderTemplateId(e.target.value)}
+          />
+        ) : (
+          '-'
+        )}
+      </TableCell>
+      <TableCell>
+        <Input
+          aria-label={`${name} 的优先级`}
+          type="number"
+          className="w-24"
+          value={priority}
+          onChange={(e) => setPriority(e.target.value)}
+        />
+      </TableCell>
+      <TableCell>
+        <Switch
+          aria-label={`启用 ${name}`}
+          checked={enabled}
+          onCheckedChange={(v) => {
+            setEnabled(v)
+            void save(v)
+          }}
+        />
+      </TableCell>
+      <TableCell className="space-x-2">
+        <Button variant="outline" size="sm" onClick={() => void save()}>
+          保存
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => void remove()}>
+          移除
+        </Button>
+      </TableCell>
+    </TableRow>
+  )
+}
+
+function AddLink({ code, detail, onAdded }: { code: string; detail: Detail; onAdded: () => void }) {
+  const providers = useResource(() => api.get<NotifyProvider[]>('/notify/providers'), [])
+  const [providerId, setProviderId] = useState('')
+  const [providerTemplateId, setProviderTemplateId] = useState('')
+  const vendor = detail.mode === 'vendor'
+  const linked = new Set(detail.providers.map((l) => l.providerId))
+  const candidates = (providers.data ?? []).filter((p) => p.channel === detail.channel && !linked.has(p.id))
+
+  async function add() {
+    try {
+      await api.put(`/notify/templates/${encodeURIComponent(code)}/providers/${providerId}`, {
+        providerTemplateId,
+        enabled: true,
+        priority: 0,
+      })
+      toast.success('已关联')
+      setProviderId('')
+      setProviderTemplateId('')
+      onAdded()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-end gap-3">
+      <div className="space-y-2">
+        <Label htmlFor="add-provider">添加供应商</Label>
+        <NativeSelect id="add-provider" className="w-64" value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+          <option value="">{candidates.length === 0 ? '没有可关联的同渠道供应商' : '请选择'}</option>
+          {candidates.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.description || p.type}（{p.type}）
+            </option>
+          ))}
+        </NativeSelect>
+      </div>
+      {vendor && (
+        <div className="space-y-2">
+          <Label htmlFor="add-ptid">供应商侧模板 ID</Label>
+          <Input id="add-ptid" className="w-56 font-mono text-xs" value={providerTemplateId} onChange={(e) => setProviderTemplateId(e.target.value)} />
+        </div>
+      )}
+      <Button onClick={() => void add()} disabled={!providerId || (vendor && !providerTemplateId.trim())}>
+        关联
+      </Button>
+    </div>
+  )
+}
+
+function TestSendDialog({ detail, open, onOpenChange }: { detail: Detail; open: boolean; onOpenChange: (v: boolean) => void }) {
+  const [to, setTo] = useState('')
+  const [params, setParams] = useState<Record<string, string>>({})
+  const recipient = needsRecipient(detail.channel)
+
+  async function send() {
+    try {
+      await api.post(`/notify/templates/${encodeURIComponent(detail.code)}/test`, { to, params })
+      toast.success('已发送，结果见「发送记录」')
+      onOpenChange(false)
+    } catch (e) {
+      // 只有"全部供应商都失败"才有记录可看；其余错误（没有可用供应商、变量不对……）原因就在提示本身。
+      const hint = e instanceof ApiError && e.code === 'NOTIFY_SEND_FAILED' ? '（具体原因见「发送记录」）' : ''
+      toast.error(errorMessage(e) + hint)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>测试发送</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">走与业务方调用完全相同的发送路径，会真的发出去。</p>
+          {recipient && (
+            <div className="space-y-2">
+              <Label htmlFor="ts-to">{detail.channel === 'sms' ? '手机号' : '邮箱'}</Label>
+              <Input id="ts-to" value={to} onChange={(e) => setTo(e.target.value)} />
+            </div>
+          )}
+          {detail.content.variables.map((v) => (
+            <div key={v} className="space-y-2">
+              <Label htmlFor={`ts-${v}`}>{v}</Label>
+              <Input id={`ts-${v}`} value={params[v] ?? ''} onChange={(e) => setParams({ ...params, [v]: e.target.value })} />
+            </div>
+          ))}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button onClick={() => void send()}>发送</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+export default function NotifyTemplateDetail() {
+  const { code = '' } = useParams()
+  const detail = useResource(() => api.get<Detail>(`/notify/templates/${encodeURIComponent(code)}`), [code])
+  const [draft, setDraft] = useState<{ content: NotifyContent; description: string; enabled: boolean } | null>(null)
+  const [testing, setTesting] = useState(false)
+
+  if (detail.error) return <p className="text-sm text-destructive">{detail.error}</p>
+  if (!detail.data) return <p className="text-sm text-muted-foreground">加载中…</p>
+
+  const d = detail.data
+  const cur = draft ?? { content: d.content, description: d.description, enabled: d.enabled }
+  const vendor = d.mode === 'vendor'
+  const singleProvider = !needsRecipient(d.channel)
+
+  async function save() {
+    try {
+      await api.patch(`/notify/templates/${encodeURIComponent(code)}`, {
+        content: cur.content,
+        description: cur.description,
+        enabled: cur.enabled,
+      })
+      toast.success('已保存')
+      setDraft(null)
+      detail.reload()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  return (
+    <div className="max-w-3xl space-y-8">
+      <div className="flex items-center gap-3">
+        <h1 className="font-mono text-xl font-semibold">{d.code}</h1>
+        <Badge variant="secondary">{notifyChannelLabels[d.channel]}</Badge>
+        <Badge variant="secondary">{notifyModeLabels[d.mode]}</Badge>
+        <Button className="ml-auto" variant="outline" onClick={() => setTesting(true)}>
+          测试发送
+        </Button>
+      </div>
+
+      <section className="space-y-4">
+        <h2 className="text-base font-medium">模板内容</h2>
+        <div className="space-y-2">
+          <Label htmlFor="ntd-desc">备注</Label>
+          <Input id="ntd-desc" value={cur.description} onChange={(e) => setDraft({ ...cur, description: e.target.value })} />
+        </div>
+        <div className="flex items-center gap-3">
+          <Switch id="ntd-enabled" checked={cur.enabled} onCheckedChange={(v) => setDraft({ ...cur, enabled: v })} />
+          <Label htmlFor="ntd-enabled">启用（停用后业务方调用会被拒绝）</Label>
+        </div>
+        <NotifyContentFields
+          key={d.updatedAt}
+          channel={d.channel}
+          mode={d.mode}
+          value={cur.content}
+          onChange={(content) => setDraft({ ...cur, content })}
+        />
+        <Button onClick={() => void save()} disabled={draft === null}>
+          保存模板
+        </Button>
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-base font-medium">关联的供应商</h2>
+        <p className="text-sm text-muted-foreground">
+          {singleProvider
+            ? '这个渠道的模板只能关联一个供应商实例，不做降级。'
+            : '发送时按优先级从高到低尝试，同优先级的随机排序；失败自动降级到下一个。禁用的供应商不参与。'}
+        </p>
+        {d.providers.length === 0 ? (
+          <p className="text-sm text-destructive">还没有关联供应商，业务方调用会失败。</p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>供应商</TableHead>
+                <TableHead>{vendor ? '供应商侧模板 ID' : ''}</TableHead>
+                <TableHead>优先级</TableHead>
+                <TableHead>启用</TableHead>
+                <TableHead>操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {d.providers.map((l) => (
+                <LinkRow key={l.providerId} code={d.code} vendor={vendor} link={l} onChanged={detail.reload} />
+              ))}
+            </TableBody>
+          </Table>
+        )}
+        {!(singleProvider && d.providers.length > 0) && <AddLink code={d.code} detail={d} onAdded={detail.reload} />}
+      </section>
+
+      <TestSendDialog detail={d} open={testing} onOpenChange={setTesting} />
+    </div>
+  )
+}

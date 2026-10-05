@@ -35,5 +35,20 @@ export function buildBreadcrumb(pathname: string): BreadcrumbSegment[] {
     if (parts[1] === 'versions') return [{ label: '配置中心', to: '/config' }, { label: '版本历史' }]
   }
 
+  if (parts[0] === 'notify') {
+    const tabs: Record<string, string> = { templates: '模板', providers: '供应商', logs: '发送记录' }
+    const tab = tabs[parts[1] ?? 'templates'] ?? '模板'
+    if (parts.length <= 2) return [{ label: '通知中心' }, { label: tab }]
+    return [{ label: '通知中心' }, { label: tab, to: `/notify/${parts[1]}` }, { label: safeDecode(parts[2]) }]
+  }
+
   return [{ label: 'fp' }]
+}
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
 }

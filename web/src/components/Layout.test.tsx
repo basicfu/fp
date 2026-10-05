@@ -46,6 +46,7 @@ test('渲染六个导航项，当前用户名、面包屑和页面内容都显�
   expect(within(navMenu).getByRole('link', { name: /权限管理/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /配置中心/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /系统配置/ })).toBeTruthy()
+  expect(within(navMenu).getByRole('link', { name: /通知中心/ })).toBeTruthy()
   expect(screen.getByText('alice')).toBeTruthy()
   expect(screen.getByText('应用页内容')).toBeTruthy()
   await waitFor(() => expect(screen.getByText('还没有应用')).toBeTruthy())
