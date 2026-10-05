@@ -161,7 +161,7 @@ func TestBuildEmail(t *testing.T) {
 }
 
 // 【辨别力】收件人来自业务方：换行符不能注入新的邮件头（比如偷偷加一个 Bcc）。
-// 带引号的本地部分会被 ParseAddress 去掉引号、原样进 RCPT 命令：空格与尖括号能往信封里塞 ESMTP 参数，
+// 带引号的本地部分会被 ParseAddress 去掉引号、原样进 RCPT 命令：空白（空格、TAB）与尖括号能往信封里塞 ESMTP 参数，
 // 多出来的 @ 能让收件域与业务方按后缀校验过的那个不一样。
 func TestBuildEmailRejectsHeaderInjectionInRecipient(t *testing.T) {
 	from := &mail.Address{Address: "noreply@example.com"}
@@ -170,6 +170,8 @@ func TestBuildEmailRejectsHeaderInjectionInRecipient(t *testing.T) {
 		`"x> NOTIFY=NEVER"@example.com`,
 		`"a@evil.com> ORCPT=rfc822;x"@corp.com`,
 		`"a@evil.com"@corp.com`,
+		// 引号里的 TAB 同样能通过 ParseAddress，原样进 RCPT 命令（x<TAB>NOTIFY=NEVER@example.com）。
+		"\"x\tNOTIFY=NEVER\"@example.com",
 	} {
 		if _, _, err := buildEmail(from, bad, "s", "text/plain", "x", time.Now()); err == nil {
 			t.Errorf("收件人 %q 应被拒绝", bad)

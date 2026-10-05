@@ -107,9 +107,9 @@ func (p *smtpProvider) Send(ctx context.Context, d Delivery) error {
 // 主题用 RFC 2047 编码；正文一律 base64，省得处理 8bit 与行长限制。
 func buildEmail(from *mail.Address, to, subject, contentType, body string, now time.Time) (string, []byte, error) {
 	toAddr, err := mail.ParseAddress(to)
-	// ParseAddress 会去掉本地部分的引号，去引号后的地址原样进 RCPT 命令：空格与尖括号能往信封里
-	// 塞 ESMTP 参数（"x> NOTIFY=NEVER"@a.com），多出来的 @ 能让实际收件域不是业务方校验过的那个。
-	if err != nil || strings.ContainsAny(toAddr.Address, " <>\"\\") || strings.Count(toAddr.Address, "@") != 1 {
+	// ParseAddress 会去掉本地部分的引号（引号里的空格与 TAB 它都放行），去引号后的地址原样进 RCPT 命令：
+	// 空白与尖括号能往信封里塞 ESMTP 参数（"x> NOTIFY=NEVER"@a.com），多出来的 @ 能让实际收件域不是业务方校验过的那个。
+	if err != nil || strings.ContainsAny(toAddr.Address, " \t<>\"\\") || strings.Count(toAddr.Address, "@") != 1 {
 		return "", nil, errors.New("收件人邮箱不合法")
 	}
 	var b strings.Builder

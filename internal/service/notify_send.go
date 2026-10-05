@@ -22,8 +22,9 @@ const (
 	// 键过期后被同键的新请求重新占上，旧请求才认得出它已不归自己、不会删它或给它续期。
 	// "已完成"的值固定为 "2"，留 24 小时。
 	//
-	// "处理中"的 TTL 只需大于两次续期之间的最长间隔：一次尝试（每家最多 30s）加一次记录写入（最多 5s）
-	// 与一次续期（最多 2s）。每次尝试前都会续期，逐家降级跑得再久也不会过期。进程在发送中途崩掉时它自己过期，重试就能重发。
+	// "处理中"的 TTL 只需大于两次续期之间的最长间隔：一次续期（最多约 5s，见 notifyIdemOpTimeout）、一次尝试
+	// （每家最多 30s）与一次记录写入（最多 5s），合计 40s，小于 60s。每次尝试前都会续期，逐家降级跑得再久也不会过期。
+	// 进程在发送中途崩掉时它自己过期，重试就能重发。
 	notifyIdemProcessingPrefix = "1:"
 	notifyIdemDone             = "2"
 	notifyIdemProcessingTTL    = 60 * time.Second
@@ -32,6 +33,8 @@ const (
 	notifyAttemptTimeout = 30 * time.Second
 	// 收尾与记录脱离了调用方的取消，就得自带上限：Redis 或数据库卡住时 Send 不能一直挂着，
 	// 两次续期的间隔也不能因此超过"处理中"的 TTL。
+	// 但 notifyIdemOpTimeout 的 2s 只管得住拨号与等连接池，并让 go-redis 读超时之后不再重试：OpenRedis 没开
+	// ContextTimeoutEnabled，socket 读写不看 ctx 的截止时间，只受 ReadTimeout（默认 5s）约束，所以一次 Redis 调用实际最多约 5s。
 	notifyIdemOpTimeout   = 2 * time.Second
 	notifyLogWriteTimeout = 5 * time.Second
 
@@ -180,7 +183,8 @@ func (s *NotifyService) renewIdem(ctx context.Context, l *idemLease) {
 		return
 	}
 	// 续期护的是马上要开始的这次尝试，不随调用方的取消或所剩无几的截止时间失败；
-	// 但要自带上限，否则 Redis 卡住时每次尝试之前都要先等上十几秒。
+	// 但要自带上限，否则 Redis 卡住时 go-redis 读超时之后还会重试，每次尝试之前都要先等上十几秒。
+	// 有了它只会等一次读超时（约 5s），见 notifyIdemOpTimeout。
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyIdemOpTimeout)
 	defer cancel()
 	owned, err := idemRenewScript.Run(ctx, s.rdb, []string{l.key}, l.mark(), int(notifyIdemProcessingTTL.Seconds())).Int()
@@ -194,7 +198,7 @@ func (s *NotifyService) renewIdem(ctx context.Context, l *idemLease) {
 
 // settleIdem 收尾：发送成功记下"已完成"，失败时删掉自己的"处理中"——让重试真的能重发。
 // 脱离调用方的取消：调用方断开不该让"已发送"这件事没记上，否则它的重试会重发；但要自带上限，
-// Redis 卡住时 Send 不能一直挂着。
+// Redis 卡住时 Send 不能一直挂着（实际最多约 5s，见 notifyIdemOpTimeout）。
 func (s *NotifyService) settleIdem(ctx context.Context, l *idemLease, sendErr error) {
 	if l == nil {
 		return
@@ -276,6 +280,10 @@ func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate
 	sendFailed := domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "通知发送失败，请稍后重试")
 	var lastErr error
 	for i, c := range cands {
+		// 逐家降级的总耗时可能超过"处理中"的 TTL：每次尝试前都续满，同键的重试才抢不到还在发送中的键。
+		// 续期放在检查调用方之前：Redis 卡顿时它要等好几秒，截止时间可能恰好在这期间到点，
+		// 检查在前的话，这次尝试拿到的是已经过期的 ctx。
+		s.renewIdem(ctx, lease)
 		if ctx.Err() != nil {
 			// 调用方已放弃（断开或到了截止时间）：剩下的不再试，每家都只会立刻失败、白写一行记录，
 			// 不认 ctx 的供应商甚至会在调用方收到错误之后真把消息发出去。这不是供应商全挂了，不报 ERROR；
@@ -283,8 +291,6 @@ func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate
 			slog.Warn("notify: 调用方已放弃，停止降级", "code", tpl.Code)
 			return sendFailed
 		}
-		// 逐家降级的总耗时可能超过"处理中"的 TTL：每次尝试前都续满，同键的重试才抢不到还在发送中的键。
-		s.renewIdem(ctx, lease)
 		d.ProviderTemplateID = c.providerTemplateID
 		err := s.sendVia(ctx, c, d, len(cands)-i)
 		s.writeNotifyLog(ctx, tpl, in, c, err)

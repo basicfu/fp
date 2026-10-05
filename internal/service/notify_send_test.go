@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
@@ -712,6 +713,54 @@ func TestNotifySendStopsFailingOverOnceCallerGivesUp(t *testing.T) {
 	}
 	if _, total, _ := e.svc.ListLogs(context.Background(), service.NotifyLogFilter{}); total != 1 {
 		t.Fatalf("发送记录 = %d 条, want 1（只有 a 的那一行）", total)
+	}
+	if got := idemValue(e); got != "" {
+		t.Fatalf("按失败收尾，幂等键应已释放, got %q", got)
+	}
+}
+
+// evalHook 在每条 EVAL / EVALSHA（幂等键的续期与失败收尾都是 Lua 脚本）执行完之后调一次 after。
+type evalHook struct{ after func() }
+
+func (evalHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h evalHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		err := next(ctx, cmd)
+		if name := cmd.Name(); name == "eval" || name == "evalsha" {
+			h.after()
+		}
+		return err
+	}
+}
+
+func (evalHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// 续期在 Redis 卡顿时可能要等好几秒，调用方的截止时间可能恰好在这期间到点。续期之后必须再看一眼调用方：
+// 先检查再续期的话，这次尝试拿到的是已经过期的 ctx，阿里云这类不认 ctx 的照样会在调用方收到错误之后把短信发出去。
+func TestNotifySendDoesNotAttemptWhenCallerGivesUpDuringRenewal(t *testing.T) {
+	e := twoSMSProvidersAThenB(t)
+	// 共用的 Redis 客户端不能挂钩子：给这个测试单开一个，续期脚本一跑完就取消调用方。
+	opt := *e.rdb.Options()
+	rdb := redis.NewClient(&opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rdb.AddHook(evalHook{after: cancel})
+	svc := service.NewNotifyService(e.pool, rdb, e.reg, service.WithNotifyShuffle(func(int, func(i, j int)) {}))
+
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = "evt-1"
+	if err := svc.Send(ctx, in); notifyErrCode(err) != domain.CodeNotifySendFailed {
+		t.Fatalf("err = %v, want NOTIFY_SEND_FAILED", err)
+	}
+	if a, b := e.fake("a").callCount(), e.fake("b").callCount(); a != 0 || b != 0 {
+		t.Fatalf("调用方在续期期间放弃，不该再有尝试: a/b 调用数 = %d/%d", a, b)
+	}
+	if _, total, _ := e.svc.ListLogs(context.Background(), service.NotifyLogFilter{}); total != 0 {
+		t.Fatalf("发送记录 = %d 条, want 0（没有发生过尝试）", total)
 	}
 	if got := idemValue(e); got != "" {
 		t.Fatalf("按失败收尾，幂等键应已释放, got %q", got)
