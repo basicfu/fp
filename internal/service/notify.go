@@ -517,8 +517,9 @@ func (s *NotifyService) SetTemplateProvider(ctx context.Context, code string, pr
 	linkInvalid := func(format string, a ...any) error {
 		return domain.Failf(domain.ErrInvalidArgument, domain.CodeNotifyLinkInvalid, format, a...)
 	}
-	sp, ok := s.reg.Spec(prov.Type)
-	if !ok {
+	// 与发送路径一致：prod 里 DevOnly 的类型当作不存在，库里已有的这类实例不能再挂到模板上。
+	sp, err := s.spec(prov.Type)
+	if err != nil {
 		return linkInvalid("供应商类型 %q 已不受支持", prov.Type)
 	}
 	if ch := sp.ChannelOf(prov.Config); ch != tpl.Channel {

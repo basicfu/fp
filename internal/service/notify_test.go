@@ -22,13 +22,26 @@ type fakeProvider struct {
 	mu    sync.Mutex
 	calls []notify.Delivery
 	fail  error
+	// hook 非空时在记录调用之后执行（不持有 mu），参数是本次调用的序号（从 1 起），返回值取代 fail。
+	// 并发测试靠它把某一次调用卡在供应商里，或在发送途中观察外部状态。
+	hook func(ctx context.Context, n int) error
 }
 
-func (f *fakeProvider) Send(_ context.Context, d notify.Delivery) error {
+func (f *fakeProvider) Send(ctx context.Context, d notify.Delivery) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, d)
+	n, fail, hook := len(f.calls), f.fail, f.hook
+	f.mu.Unlock()
+	if hook != nil {
+		return hook(ctx, n)
+	}
+	return fail
+}
+
+func (f *fakeProvider) setHook(h func(ctx context.Context, n int) error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, d)
-	return f.fail
+	f.hook = h
 }
 
 func (f *fakeProvider) callCount() int {
@@ -53,9 +66,17 @@ type notifyEnv struct {
 	svc  *service.NotifyService
 	pool *pgxpool.Pool
 	rdb  *redis.Client
+	reg  *notify.Registry
 
 	mu    sync.Mutex
 	fakes map[string]*fakeProvider // 按实例配置里的 name 取
+}
+
+// service 在同一份数据（库、Redis、类型注册表）上再起一个 NotifyService，
+// 用来对比不同选项（比如是否 prod）下同样的数据会有什么不同的表现。
+// 不能为此再调 newNotifyEnv：它会清空库。
+func (e *notifyEnv) service(opts ...service.NotifyOption) *service.NotifyService {
+	return service.NewNotifyService(e.pool, e.rdb, e.reg, opts...)
 }
 
 // fake 取（或创建）名为 name 的假供应商。构造函数每次都返回同一个对象，
@@ -73,6 +94,7 @@ func newNotifyEnv(t *testing.T, opts ...service.NotifyOption) *notifyEnv {
 	t.Helper()
 	e := &notifyEnv{pool: testsupport.NewTestDB(t), rdb: testsupport.NewTestRedis(t), fakes: map[string]*fakeProvider{}}
 	reg := notify.NewRegistry()
+	e.reg = reg
 	schema := []domain.Field{
 		{Key: "name", Label: "名称", Type: domain.FieldTypeString, Required: true},
 		{Key: "token", Label: "令牌", Type: domain.FieldTypeSecret},

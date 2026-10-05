@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -349,5 +350,339 @@ func TestNotifySendUsesNewProviderAfterConfigUpdate(t *testing.T) {
 	}
 	if e.fake("old").callCount() != 1 || e.fake("new").callCount() != 1 {
 		t.Fatalf("calls old/new = %d/%d, want 1/1", e.fake("old").callCount(), e.fake("new").callCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 幂等键的续期与归属
+// ---------------------------------------------------------------------------
+
+// 下面几个测试用的幂等键 evt-1（模板 login_sms）在 Redis 里的键名。
+const idemRedisKey = "fp:notify:idem:login_sms:evt-1"
+
+// idemValue 读幂等键当前的值；键不存在时是空串。
+func idemValue(e *notifyEnv) string {
+	return e.rdb.Get(context.Background(), idemRedisKey).Val()
+}
+
+// gate 把假供应商的一次调用卡住：调用进入时关闭 entered，等 open 之后才放行。
+type gate struct {
+	entered chan struct{}
+	opened  chan struct{}
+	once    sync.Once
+}
+
+func newGate() *gate {
+	return &gate{entered: make(chan struct{}), opened: make(chan struct{})}
+}
+
+// hold 在供应商的调用里执行：宣告已进入，然后等放行。
+func (g *gate) hold() {
+	close(g.entered)
+	<-g.opened
+}
+
+// open 放行被卡住的调用，可重复调用。
+func (g *gate) open() { g.once.Do(func() { close(g.opened) }) }
+
+// asyncSend 是后台发起的一次发送。
+type asyncSend struct {
+	done chan struct{}
+	err  error
+}
+
+// sendAsync 在后台发送。测试结束时（包括失败退出）会调 release 放行它并等它收尾：
+// 还在跑的后台请求之后写进库与 Redis 的东西，会污染下一个测试。
+func sendAsync(t *testing.T, e *notifyEnv, in service.NotifySendInput, release func()) *asyncSend {
+	t.Helper()
+	a := &asyncSend{done: make(chan struct{})}
+	go func() {
+		defer close(a.done)
+		a.err = notifySend(e, in)
+	}()
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-a.done:
+		case <-time.After(10 * time.Second):
+			t.Error("后台发送没有收尾")
+		}
+	})
+	return a
+}
+
+// wait 等后台发送返回，带超时：被测代码出问题时测试该失败，不是挂死。
+func (a *asyncSend) wait(t *testing.T) error {
+	t.Helper()
+	select {
+	case <-a.done:
+		return a.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待后台发送返回超时")
+		return nil
+	}
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("等待%s超时", what)
+	}
+}
+
+// 逐家降级的总耗时可以超过"处理中"的 TTL（每家最多 30 秒）。每次尝试前都要把它续满，
+// 否则同键的重试会在第一个请求还在降级时抢到键，造成重复发送。
+func TestNotifySendRenewsIdempotencyKeyBeforeEachAttempt(t *testing.T) {
+	e := newNotifyEnv(t, service.WithNotifyShuffle(func(int, func(i, j int)) {}))
+	e.smsTemplate(t, "login_sms")
+	a := e.provider(t, "fake_sms", "a")
+	b := e.provider(t, "fake_sms", "b")
+	e.link(t, "login_sms", a, "SMS_A", 10)
+	e.link(t, "login_sms", b, "SMS_B", 0)
+
+	// a 拖 2 秒后失败；b 成功，并在发送途中读幂等键的剩余 TTL。
+	e.fake("a").setHook(func(context.Context, int) error {
+		time.Sleep(2 * time.Second)
+		return errors.New("a down")
+	})
+	var ttl time.Duration
+	e.fake("b").setHook(func(ctx context.Context, _ int) error {
+		var err error
+		ttl, err = e.rdb.PTTL(ctx, idemRedisKey).Result()
+		return err
+	})
+
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = "evt-1"
+	if err := notifySend(e, in); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	// 占位时设的是 60 秒；没有续期的话，a 耗掉 2 秒之后只剩不到 58 秒。
+	if ttl <= 59*time.Second {
+		t.Fatalf("b 发送时幂等键的剩余 TTL = %v, want > 59s（每次尝试前都该续满）", ttl)
+	}
+}
+
+// 慢请求 A 的"处理中"标记过期、同键的 B 重新占位并发送成功之后，A 才失败收尾：
+// A 的续期与收尾都只能动自己的标记。它既不能把 B 记下的"已完成"删掉，也不能给它续成 60 秒——
+// 否则同键的重试会被放行（或 24 小时的去重窗口缩成 60 秒），造成重复发送。
+func TestNotifySendStaleFailureDoesNotTouchNewerRequestsDoneMark(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	e.smsTemplate(t, "login_sms")
+	a := e.provider(t, "fake_sms", "a")
+	b := e.provider(t, "fake_sms", "b")
+	e.link(t, "login_sms", a, "SMS_A", 10)
+	e.link(t, "login_sms", b, "SMS_B", 0)
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = "evt-1"
+
+	// A 先卡在 a 里再失败，然后降级到同样失败的 b；B 的 a 直接成功。
+	gA := newGate()
+	e.fake("a").setHook(func(_ context.Context, n int) error {
+		if n > 1 {
+			return nil
+		}
+		gA.hold()
+		return errors.New("a down")
+	})
+	e.fake("b").setFail(errors.New("b down"))
+	reqA := sendAsync(t, e, in, gA.open)
+	waitClosed(t, gA.entered, "A 进入供应商")
+
+	// 模拟 A 的"处理中"标记过期：同键的 B 重新占位、发送成功、记下"已完成"。
+	if err := e.rdb.Del(ctx, idemRedisKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifySend(e, in); err != nil {
+		t.Fatalf("B: %v", err)
+	}
+	if got := idemValue(e); got != "2" {
+		t.Fatalf("B 成功后键 = %q, want 2", got)
+	}
+
+	gA.open()
+	if err := reqA.wait(t); notifyErrCode(err) != domain.CodeNotifySendFailed {
+		t.Fatalf("A: err = %v, want NOTIFY_SEND_FAILED", err)
+	}
+	if got := e.fake("b").callCount(); got != 1 {
+		t.Fatalf("b 的调用数 = %d, want 1（A 降级到了 b，所以续过一次期）", got)
+	}
+	if got := idemValue(e); got != "2" {
+		t.Fatalf("A 失败收尾后键 = %q, want 仍是 B 记下的 2（A 不该删掉别人的标记）", got)
+	}
+	if ttl := e.rdb.PTTL(ctx, idemRedisKey).Val(); ttl < 23*time.Hour {
+		t.Fatalf("A 收尾后 B 的\"已完成\"剩余 TTL = %v, want 约 24 小时（A 不该给别人的标记续期）", ttl)
+	}
+	// 同键的重试仍被当成已发送，不会再到供应商。
+	if err := notifySend(e, in); err != nil {
+		t.Fatalf("重试: %v", err)
+	}
+	if got := e.fake("a").callCount(); got != 2 {
+		t.Fatalf("a 的调用数 = %d, want 2（A 与 B 各一次，重试不再发送）", got)
+	}
+}
+
+// 慢请求 A 收尾时，同键的 B 已重新占位、还在发送：A 即使成功，
+// 也不能把 B 的"处理中"盖成"已完成"，否则 B 还没发完，同键的第三个请求就被当成已发送而丢掉。
+func TestNotifySendStaleSuccessDoesNotOverwriteNewerRequestsProcessingMark(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	e.smsTemplate(t, "login_sms")
+	e.link(t, "login_sms", e.provider(t, "fake_sms", "a"), "SMS_A", 0)
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = "evt-1"
+
+	gA, gB := newGate(), newGate()
+	e.fake("a").setHook(func(_ context.Context, n int) error {
+		switch n {
+		case 1:
+			gA.hold()
+		case 2:
+			gB.hold()
+		}
+		return nil
+	})
+	a := sendAsync(t, e, in, gA.open)
+	waitClosed(t, gA.entered, "A 进入供应商")
+
+	// 模拟 A 的"处理中"标记过期：B 重新占位，并卡在供应商里。
+	if err := e.rdb.Del(ctx, idemRedisKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+	b := sendAsync(t, e, in, gB.open)
+	waitClosed(t, gB.entered, "B 进入供应商")
+	processing := idemValue(e)
+	if processing == "" || processing == "2" {
+		t.Fatalf("B 在发送途中，键应是它的处理中标记，实际 %q", processing)
+	}
+
+	gA.open()
+	if err := a.wait(t); err != nil {
+		t.Fatalf("A: %v", err)
+	}
+	if got := idemValue(e); got != processing {
+		t.Fatalf("A 成功收尾后键 = %q, want 仍是 B 的处理中标记 %q（A 不该盖掉别人的标记）", got, processing)
+	}
+	if err := notifySend(e, in); notifyErrCode(err) != domain.CodeNotifyInProgress {
+		t.Fatalf("B 还在发送时，同键的新请求 err = %v, want NOTIFY_IN_PROGRESS", err)
+	}
+
+	// B 收尾时键仍归它：照常记下"已完成"。
+	gB.open()
+	if err := b.wait(t); err != nil {
+		t.Fatalf("B: %v", err)
+	}
+	if got := idemValue(e); got != "2" {
+		t.Fatalf("B 成功收尾后键 = %q, want 2", got)
+	}
+}
+
+// 慢请求的"处理中"标记过期、也没有别的请求接手：它成功收尾时仍要记下"已完成"，
+// 否则同键的重试会把已经发出去的消息再发一遍。
+func TestNotifySendRecordsDoneWhenProcessingMarkExpiredMeanwhile(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	e.smsTemplate(t, "login_sms")
+	e.link(t, "login_sms", e.provider(t, "fake_sms", "a"), "SMS_A", 0)
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = "evt-1"
+
+	g := newGate()
+	e.fake("a").setHook(func(_ context.Context, n int) error {
+		if n == 1 {
+			g.hold()
+		}
+		return nil
+	})
+	a := sendAsync(t, e, in, g.open)
+	waitClosed(t, g.entered, "请求进入供应商")
+	if err := e.rdb.Del(ctx, idemRedisKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	g.open()
+	if err := a.wait(t); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := idemValue(e); got != "2" {
+		t.Fatalf("成功收尾后键 = %q, want 2", got)
+	}
+	if err := notifySend(e, in); err != nil {
+		t.Fatalf("重试: %v", err)
+	}
+	if got := e.fake("a").callCount(); got != 1 {
+		t.Fatalf("a 的调用数 = %d, want 1（重试不再发送）", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DevOnly 的供应商类型在 prod 环境
+// ---------------------------------------------------------------------------
+
+// 已经存进库里的 DevOnly 实例（比如开发环境留下的 log）在 prod 环境不能再被关联。
+func TestNotifySetTemplateProviderRefusesDevOnlyTypeInProd(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	e.smsTemplate(t, "login_sms")
+	// 只有非 prod 的服务建得出 DevOnly 实例；这里用它模拟 prod 库里已有的历史数据。
+	dev := e.provider(t, "fake_dev", "dev")
+	in := service.SetNotifyLinkInput{ProviderTemplateID: "SMS_D", Enabled: true}
+
+	prod := e.service(service.WithNotifyProd(true))
+	err := prod.SetTemplateProvider(ctx, "login_sms", dev, in)
+	if !errors.Is(err, domain.ErrInvalidArgument) || notifyErrCode(err) != domain.CodeNotifyLinkInvalid {
+		t.Fatalf("err = %v (code %q), want NOTIFY_LINK_INVALID", err, notifyErrCode(err))
+	}
+	d, err := e.svc.GetTemplate(ctx, "login_sms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Links) != 0 {
+		t.Fatalf("被拒绝的关联不该落库: %+v", d.Links)
+	}
+
+	// 对照：同一份数据，非 prod 的服务照常关联——上面被拒绝只因为 prod，不是别的校验。
+	if err := e.svc.SetTemplateProvider(ctx, "login_sms", dev, in); err != nil {
+		t.Fatalf("非 prod 应能关联: %v", err)
+	}
+}
+
+// DevOnly 实例可能已经躺在 prod 库里（开发环境建的，或手工插进去的）：prod 的发送路径必须当它不存在。
+// 它会把变量取值打进日志，还会"发送成功"而挡住真正的降级。
+func TestNotifySendNeverUsesDevOnlyProvidersInProd(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	e.smsTemplate(t, "login_sms")
+	dev := e.provider(t, "fake_dev", "dev")
+	e.link(t, "login_sms", dev, "SMS_D", 10)
+	prod := e.service(service.WithNotifyProd(true))
+	send := func(svc *service.NotifyService) error { return svc.Send(ctx, notifySMSInput("login_sms")) }
+
+	// 只有 DevOnly 实例可用：失败，只回通用错误，供应商一次也没被调用。
+	if err := send(prod); notifyErrCode(err) != domain.CodeNotifySendFailed {
+		t.Fatalf("err = %v (code %q), want NOTIFY_SEND_FAILED", err, notifyErrCode(err))
+	}
+	if got := e.fake("dev").callCount(); got != 0 {
+		t.Fatalf("prod 调用了 DevOnly 供应商 %d 次", got)
+	}
+
+	// 还有别的可用实例时，DevOnly 那次只算一次失败的尝试，照常降级。
+	e.link(t, "login_sms", e.provider(t, "fake_sms", "real"), "SMS_R", 0)
+	if err := send(prod); err != nil {
+		t.Fatalf("prod 应降级到 real: %v", err)
+	}
+	if e.fake("dev").callCount() != 0 || e.fake("real").callCount() != 1 {
+		t.Fatalf("calls dev/real = %d/%d, want 0/1", e.fake("dev").callCount(), e.fake("real").callCount())
+	}
+
+	// 对照：同样的数据在非 prod 的服务里照常使用 DevOnly 实例（它的优先级最高）。
+	if err := send(e.svc); err != nil {
+		t.Fatalf("非 prod: %v", err)
+	}
+	if e.fake("dev").callCount() != 1 || e.fake("real").callCount() != 1 {
+		t.Fatalf("calls dev/real = %d/%d, want 1/1", e.fake("dev").callCount(), e.fake("real").callCount())
 	}
 }
