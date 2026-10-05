@@ -37,6 +37,40 @@ test('vendor 模式：变量手填，也可以从供应商模板原文提取', (
   expect(current().variables).toEqual(['code'])
 })
 
+// 【辨别力】逗号分隔的变量框同 @ 列表：刚敲下的逗号与空格不能被"解析再回写"吃掉，
+// 否则第二个变量只能粘贴、没法手敲。每一键之后输入框都得原样显示已敲的内容。
+test('vendor 模式：逐键敲 "code, minutes"，输入框始终显示已敲的内容', () => {
+  render(<Harness channel="sms" mode="vendor" />)
+  const input = screen.getByLabelText('变量') as HTMLInputElement
+  let typed = ''
+  for (const ch of 'code, minutes') {
+    typed += ch
+    fireEvent.change(input, { target: { value: input.value + ch } })
+    expect(input.value).toBe(typed)
+  }
+  expect(current().variables).toEqual(['code', 'minutes'])
+})
+
+// 输入框的文字归本地所有后，value 被外部改掉（这里是"从原文提取"）时显示必须跟着变。
+test('vendor 模式：点"从原文提取"后，变量框显示提取结果而不是之前敲的字', () => {
+  render(<Harness channel="sms" mode="vendor" />)
+  fireEvent.change(screen.getByLabelText(/供应商模板原文/), { target: { value: '验证码 ${code}' } })
+  const input = screen.getByLabelText('变量') as HTMLInputElement
+  fireEvent.change(input, { target: { value: 'abc' } })
+  expect(input.value).toBe('abc')
+
+  fireEvent.click(screen.getByRole('button', { name: '从原文提取' }))
+  expect(input.value).toBe('code')
+  expect(current().variables).toEqual(['code'])
+})
+
+// 同一类外部改动的另一条来路：custom 模式的变量由正文推出，只读框里显示的也得是推出的结果。
+test('custom 模式：只读的变量框显示由正文推出的变量', () => {
+  render(<Harness channel="telegram" mode="custom" />)
+  fireEvent.change(screen.getByLabelText('消息模板'), { target: { value: '订单 {id}，{name}' } })
+  expect((screen.getByLabelText('变量') as HTMLInputElement).value).toBe('id, name')
+})
+
 test('webhook：GET 没有 Content-Type，正文标签变成 Query 模板', () => {
   render(<Harness channel="webhook" mode="custom" />)
   expect(screen.getByLabelText('Content-Type')).toBeTruthy()

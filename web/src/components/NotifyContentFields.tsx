@@ -47,6 +47,57 @@ function LinesField({
   )
 }
 
+function parseVariables(text: string): string[] {
+  return text
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function sameList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i])
+}
+
+/**
+ * VariablesInput 是"逗号分隔"的变量输入，文本同样放在本地 state 里，道理同 LinesField：拿解析后的
+ * 数组回写显示的话，刚敲下的逗号与空格（解析时被丢掉）会立刻消失，第二个变量只能粘贴、没法手敲。
+ * 只有 value 被外部改掉（"从原文提取"、custom 模式由正文重新推出）才覆盖文本；自己敲出来的 value
+ * 解析后必与文本一致，不会被覆盖。
+ */
+function VariablesInput({
+  id,
+  value,
+  readOnly,
+  placeholder,
+  onChange,
+}: {
+  id: string
+  value: string[]
+  readOnly: boolean
+  placeholder: string
+  onChange: (v: string[]) => void
+}) {
+  const [text, setText] = useState(value.join(', '))
+  const [seen, setSeen] = useState(value)
+  // 在渲染期同步而不用 effect：effect 会先把过期的文本画出来一帧。
+  if (value !== seen) {
+    setSeen(value)
+    if (!sameList(parseVariables(text), value)) setText(value.join(', '))
+  }
+  return (
+    <Input
+      id={id}
+      value={text}
+      readOnly={readOnly}
+      placeholder={placeholder}
+      onChange={(e) => {
+        setText(e.target.value)
+        onChange(parseVariables(e.target.value))
+      }}
+    />
+  )
+}
+
 function contentLabel(channel: NotifyChannel, mode: NotifyMode, method?: string): string {
   if (mode === 'vendor') return '供应商模板原文（仅供核对，不参与渲染）'
   if (channel === 'webhook') return method === 'GET' ? 'Query 模板（如 title={title}&body={body}）' : 'Body 模板'
@@ -155,20 +206,12 @@ export default function NotifyContentFields({ channel, mode, value, onChange }: 
             </Button>
           )}
         </div>
-        <Input
+        <VariablesInput
           id="nc-vars"
-          value={value.variables.join(', ')}
+          value={value.variables}
           readOnly={custom}
           placeholder={custom ? '由内容自动推出' : '逗号分隔，如 code, minutes'}
-          onChange={(e) =>
-            onChange({
-              ...value,
-              variables: e.target.value
-                .split(',')
-                .map((s) => s.trim())
-                .filter(Boolean),
-            })
-          }
+          onChange={(variables) => onChange({ ...value, variables })}
         />
         <p className="text-xs text-muted-foreground">调用方传的 params 必须与这里的变量完全一致，多了少了都会被拒绝。</p>
       </div>

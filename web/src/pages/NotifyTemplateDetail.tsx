@@ -29,6 +29,8 @@ function LinkRow({ code, vendor, link, onChanged }: { code: string; vendor: bool
       toast.success('已保存')
       onChanged()
     } catch (e) {
+      // 开关是先翻后存的；失败时服务端仍是 link.enabled，不退回去界面就和实际生效的状态对不上。
+      setEnabled(link.enabled)
       toast.error(errorMessage(e))
     }
   }
@@ -145,17 +147,24 @@ function AddLink({ code, detail, onAdded }: { code: string; detail: Detail; onAd
 function TestSendDialog({ detail, open, onOpenChange }: { detail: Detail; open: boolean; onOpenChange: (v: boolean) => void }) {
   const [to, setTo] = useState('')
   const [params, setParams] = useState<Record<string, string>>({})
+  const [sending, setSending] = useState(false)
   const recipient = needsRecipient(detail.channel)
 
   async function send() {
+    setSending(true)
     try {
-      await api.post(`/notify/templates/${encodeURIComponent(detail.code)}/test`, { to, params })
+      // 后端要求 params 的键集合与模板当前的变量完全一致（值可以是空串）。params 里是敲过的键：
+      // 变量改名后会残留旧键，没填的变量又缺席，两种都会被整条拒绝，所以按当前变量表生成。
+      const body = Object.fromEntries(detail.content.variables.map((v) => [v, params[v] ?? '']))
+      await api.post(`/notify/templates/${encodeURIComponent(detail.code)}/test`, { to, params: body })
       toast.success('已发送，结果见「发送记录」')
       onOpenChange(false)
     } catch (e) {
       // 只有"全部供应商都失败"才有记录可看；其余错误（没有可用供应商、变量不对……）原因就在提示本身。
       const hint = e instanceof ApiError && e.code === 'NOTIFY_SEND_FAILED' ? '（具体原因见「发送记录」）' : ''
       toast.error(errorMessage(e) + hint)
+    } finally {
+      setSending(false)
     }
   }
 
@@ -175,8 +184,8 @@ function TestSendDialog({ detail, open, onOpenChange }: { detail: Detail; open: 
           )}
           {detail.content.variables.map((v) => (
             <div key={v} className="space-y-2">
-              <Label htmlFor={`ts-${v}`}>{v}</Label>
-              <Input id={`ts-${v}`} value={params[v] ?? ''} onChange={(e) => setParams({ ...params, [v]: e.target.value })} />
+              <Label htmlFor={`ts-var-${v}`}>{v}</Label>
+              <Input id={`ts-var-${v}`} value={params[v] ?? ''} onChange={(e) => setParams({ ...params, [v]: e.target.value })} />
             </div>
           ))}
         </div>
@@ -184,7 +193,9 @@ function TestSendDialog({ detail, open, onOpenChange }: { detail: Detail; open: 
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={() => void send()}>发送</Button>
+          <Button onClick={() => void send()} disabled={sending}>
+            发送
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

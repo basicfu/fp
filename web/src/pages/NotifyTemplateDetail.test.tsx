@@ -2,8 +2,8 @@ import { test, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import NotifyTemplateDetail from './NotifyTemplateDetail'
-import { apiError, stubApi } from '@/lib/testApi'
-import type { NotifyProvider, NotifyTemplateDetail as Detail } from '@/lib/types'
+import { apiError, stubApi, type RecordedCall } from '@/lib/testApi'
+import type { NotifyContent, NotifyProvider, NotifyTemplateDetail as Detail } from '@/lib/types'
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
 vi.mock('sonner', () => ({ toast: toasts }))
@@ -59,8 +59,27 @@ test('拨启用开关立即保存这一条关联', async () => {
   const calls = stubApi({ ...routes(), 'PUT /notify/templates/login_sms/providers/p1': undefined })
   renderPage()
   fireEvent.click(await screen.findByRole('switch', { name: '启用 阿里云-主账号' }))
-  await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
-  expect(calls.find((c) => c.method === 'PUT')!.body).toEqual({ providerTemplateId: 'SMS_1', enabled: false, priority: 5 })
+  await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('已保存'))
+  // "只影响这一个模板"靠的是恰好一次写请求、打在这个模板的这条关联上；只看第一个 PUT 的请求体发现不了写错地方或多写。
+  const writes = calls.filter((c) => c.method !== 'GET')
+  expect(writes.map((c) => `${c.method} ${c.url}`)).toEqual(['PUT /notify/templates/login_sms/providers/p1'])
+  expect(writes[0].body).toEqual({ providerTemplateId: 'SMS_1', enabled: false, priority: 5 })
+})
+
+// 开关一拨就保存，保存失败时服务端仍是旧值：开关必须退回去，否则界面写着"已停用"而发送仍在用这家，
+// 只剩一条几秒就消失的提示。
+test('拨启用开关保存失败：开关退回服务端的旧值', async () => {
+  stubApi({
+    ...routes(),
+    'PUT /notify/templates/login_sms/providers/p1': apiError(400, 'NOTIFY_LINK_INVALID', '供应商类型 "log" 已不受支持'),
+  })
+  renderPage()
+  const sw = await screen.findByRole('switch', { name: '启用 阿里云-主账号' })
+  fireEvent.click(sw)
+  expect(sw.getAttribute('aria-checked')).toBe('false') // 点下去先翻过去，回滚才有意义
+  await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('供应商类型 "log" 已不受支持'))
+  await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('true'))
+  expect(toasts.success).not.toHaveBeenCalled()
 })
 
 test('改优先级后点保存；移除关联', async () => {
@@ -127,6 +146,111 @@ test('测试发送：按渠道要收件人，按变量逐个填，提交到 test
   await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
   expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ to: '13800138000', params: { code: '123456' } })
   await waitFor(() => expect(toasts.success).toHaveBeenCalled())
+})
+
+// 后端按键集合校验 params：必须恰好等于模板当前的变量，多一个（改名后残留的旧键）少一个（没填的）都整条拒绝，
+// 而且不告诉你是哪个键。所以请求体里的 params 只能由当前变量表生成，不能是"用户敲过的键"。
+test('测试发送：变量改名后，旧变量名不会再随请求发出', async () => {
+  let cur: Detail = smsDetail
+  const calls = stubApi({
+    'GET /notify/providers': providers,
+    'GET /notify/templates/login_sms': () => cur,
+    'PATCH /notify/templates/login_sms': (c: RecordedCall) => {
+      cur = { ...cur, content: (c.body as { content: NotifyContent }).content, updatedAt: cur.updatedAt + 1 }
+      return cur
+    },
+    'POST /notify/templates/login_sms/test': undefined,
+  })
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: '测试发送' }))
+  fireEvent.change(await screen.findByLabelText('code'), { target: { value: '123456' } })
+  fireEvent.click(screen.getByRole('button', { name: '取消' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+  // 变量 code 改名为 otp 并保存，再重新打开弹窗（重新拉取返回前弹窗里还是旧变量，findBy 会等到 otp 出现）。
+  fireEvent.change(screen.getByLabelText('变量'), { target: { value: 'otp' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存模板' }))
+  await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('已保存'))
+  fireEvent.click(screen.getByRole('button', { name: '测试发送' }))
+  fireEvent.change(await screen.findByLabelText('otp'), { target: { value: '654321' } })
+  fireEvent.change(screen.getByLabelText('手机号'), { target: { value: '13800138000' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送' }))
+  await waitFor(() => expect(toasts.success).toHaveBeenCalledWith(expect.stringContaining('已发送')))
+  expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ to: '13800138000', params: { otp: '654321' } })
+})
+
+// 空串值后端认（只校验键集合），整个键缺席不认。
+test('测试发送：没填的变量以空串发出，键集合始终与变量一致', async () => {
+  const calls = stubApi({ ...routes(), 'POST /notify/templates/login_sms/test': undefined })
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: '测试发送' }))
+  fireEvent.change(await screen.findByLabelText('手机号'), { target: { value: '13800138000' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送' }))
+  await waitFor(() => expect(toasts.success).toHaveBeenCalled())
+  expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ to: '13800138000', params: { code: '' } })
+})
+
+// 变量可以叫 to：它的输入框 id 不能与收件人输入框重名，否则点标签聚焦到错的框、两个框的值串在一起。
+test('测试发送：变量名叫 to 时，收件人与变量各填各的', async () => {
+  const toVar: Detail = { ...smsDetail, content: { content: '验证码 ${to}', variables: ['to'] } }
+  const calls = stubApi({ ...routes(toVar), 'POST /notify/templates/login_sms/test': undefined })
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: '测试发送' }))
+  fireEvent.change(await screen.findByLabelText('手机号'), { target: { value: '13800138000' } })
+  fireEvent.change(screen.getByLabelText('to'), { target: { value: '654321' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送' }))
+  await waitFor(() => expect(toasts.success).toHaveBeenCalled())
+  expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ to: '13800138000', params: { to: '654321' } })
+})
+
+// 一次真发要等各家供应商依次尝试，可能长达几十秒；请求在途时再点"发送"不能再发一条。
+test('测试发送：请求在途时按钮禁用，再点一次不会重复发送', async () => {
+  const calls = stubApi({ ...routes(), 'POST /notify/templates/login_sms/test': undefined })
+  // stubApi 的路由只能立即应答；在它外面再包一层，让 test 请求的响应挂着，直到测试放行。
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  const respond = globalThis.fetch
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    const res = respond(url, init)
+    return init?.method === 'POST' ? gate.then(() => res) : res
+  })
+  const posts = () => calls.filter((c) => c.method === 'POST')
+
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: '测试发送' }))
+  fireEvent.change(await screen.findByLabelText('手机号'), { target: { value: '13800138000' } })
+  fireEvent.change(screen.getByLabelText('code'), { target: { value: '123456' } })
+  const send = screen.getByRole('button', { name: '发送' }) as HTMLButtonElement
+  fireEvent.click(send)
+  await waitFor(() => expect(posts()).toHaveLength(1)) // 第一条已发出，响应还挂着
+  expect(send.disabled).toBe(true)
+  fireEvent.click(send)
+
+  release()
+  await waitFor(() => expect(toasts.success).toHaveBeenCalled())
+  expect(posts()).toHaveLength(1)
+})
+
+// 在途保护不能把失败锁死：失败后按钮要恢复，否则一次失败就再也发不了（弹窗重开也不行）。
+test('测试发送失败后按钮恢复，可以再发一次', async () => {
+  let attempt = 0
+  const calls = stubApi({
+    ...routes(),
+    'POST /notify/templates/login_sms/test': () =>
+      ++attempt === 1 ? apiError(500, 'NOTIFY_SEND_FAILED', '通知发送失败，请稍后重试') : undefined,
+  })
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: '测试发送' }))
+  fireEvent.change(await screen.findByLabelText('手机号'), { target: { value: '13800138000' } })
+  fireEvent.change(screen.getByLabelText('code'), { target: { value: '123456' } })
+  const send = screen.getByRole('button', { name: '发送' }) as HTMLButtonElement
+  fireEvent.click(send)
+  await waitFor(() => expect(toasts.error).toHaveBeenCalled())
+  await waitFor(() => expect(send.disabled).toBe(false))
+
+  fireEvent.click(send)
+  await waitFor(() => expect(toasts.success).toHaveBeenCalled())
+  expect(calls.filter((c) => c.method === 'POST')).toHaveLength(2)
 })
 
 // 全部供应商失败时后端只回通用错误，具体原因在发送记录里——提示里要把人指过去。

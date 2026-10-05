@@ -77,25 +77,50 @@ test('切换渠道会重置模式与内容表单', async () => {
   expect(Array.from(emailMode.options).map((o) => o.value)).toEqual(['vendor', 'custom'])
 })
 
-// code 创建后不可改，写错了只能删掉重建；确认弹窗里要说清后果。
-test('删除模板：确认后调用 DELETE 并刷新列表', async () => {
+// DELETE 之后再拉取列表，login_sms 那一行就没了。
+function stubDeletable() {
   let deleted = false
-  const calls = stubApi({
+  return stubApi({
     'GET /notify/templates': () => (deleted ? [rows[1]] : rows),
     'DELETE /notify/templates/login_sms': () => {
       deleted = true
       return undefined
     },
   })
-  renderPage()
+}
+
+// 点 login_sms 那一行的「删除」，等确认弹窗（里面写着后果）出来。
+async function openDeleteConfirm() {
   const row = (await screen.findByRole('link', { name: 'login_sms' })).closest('tr')!
   fireEvent.click(Array.from(row.querySelectorAll('button')).find((b) => b.textContent === '删除')!)
   expect(await screen.findByText(/模板不存在/)).toBeTruthy()
+}
+
+// code 创建后不可改，写错了只能删掉重建；确认弹窗里要说清后果。
+test('删除模板：确认后才调用 DELETE（恰好一次）并刷新列表', async () => {
+  const calls = stubDeletable()
+  renderPage()
+  await openDeleteConfirm()
+  // 行内的「删除」只是打开确认弹窗，点弹窗里的确认之前不能有任何 DELETE。
+  expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
   fireEvent.click(screen.getByRole('button', { name: '删除' }))
 
   await waitFor(() => expect(screen.queryByRole('link', { name: 'login_sms' })).toBeNull())
-  expect(calls.some((c) => c.method === 'DELETE' && c.url === '/notify/templates/login_sms')).toBe(true)
+  expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual(['/notify/templates/login_sms'])
   expect(toasts.success).toHaveBeenCalledWith('已删除')
+})
+
+// 取消（与 Esc、点遮罩同一条路）是最安全的默认动作：什么都不会发生。
+test('删除模板：在确认弹窗里点取消不发 DELETE，这一行还在', async () => {
+  const calls = stubDeletable()
+  renderPage()
+  await openDeleteConfirm()
+  fireEvent.click(screen.getByRole('button', { name: '取消' }))
+
+  await waitFor(() => expect(screen.queryByText(/模板不存在/)).toBeNull())
+  expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+  expect(screen.getByRole('link', { name: 'login_sms' })).toBeTruthy()
+  expect(toasts.success).not.toHaveBeenCalled()
 })
 
 test('创建失败时提示后端原因，不跳转', async () => {
