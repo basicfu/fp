@@ -17,9 +17,14 @@ import { cleanup } from '@testing-library/react'
 import { takeUnmatched } from '@/lib/testApi'
 
 afterEach(() => {
-  cleanup()
+  let missed: string[]
+  try {
+    cleanup()
+  } finally {
+    // cleanup() 抛错时缓冲也要清空，否则这些记录会算到同文件的下一个测试头上；它自己的错照常往外抛。
+    missed = takeUnmatched()
+  }
   // stubApi 没登记的请求会被 api.ts 包成普通的连接错误、测试照样绿；在这里统一判失败。
-  const missed = takeUnmatched()
   if (missed.length > 0) throw new Error(`测试发出了没登记路由的请求：${missed.join('、')}`)
 })
 

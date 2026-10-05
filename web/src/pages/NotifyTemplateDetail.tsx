@@ -236,11 +236,13 @@ interface Form {
 export default function NotifyTemplateDetail() {
   const { code = '' } = useParams()
   const detail = useResource(() => api.get<Detail>(`/notify/templates/${encodeURIComponent(code)}`), [code])
-  // draft 是还没保存的编辑，只在保存成功时清掉。saved 是刚保存成功的内容：重新拉取返回之前
-  // （updatedAt 还是保存前的）由它顶替服务端值显示，否则表单会先闪回保存前的旧内容。
+  // draft 是还没保存的编辑，只在保存成功时清掉。saved 是刚保存成功的内容：服务端数据的 updatedAt
+  // 还没追上 upTo（重新拉取没返回）时，由它顶替服务端值显示，否则表单会先闪回保存前的旧内容。
+  // upTo 取保存响应里的 updatedAt，不能取点击保存时渲染出的那份：连点两次保存时，第一次的重新拉取可能在第二次
+  // 保存在途时才返回，点击时的 updatedAt 就比落地后的旧，第二次保存成功的那一刻会闪回服务端的上一版。
   // 草稿不能绑在 updatedAt 上：重新拉取会带来新的 updatedAt，保存成功后的新编辑会因此被当成过期而丢掉。
   const [draft, setDraft] = useState<Form | null>(null)
-  const [saved, setSaved] = useState<{ base: number; v: Form } | null>(null)
+  const [saved, setSaved] = useState<{ upTo: number; v: Form } | null>(null)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
@@ -255,7 +257,7 @@ export default function NotifyTemplateDetail() {
 
   const d = detail.data
   const cur =
-    draft ?? (saved?.base === d.updatedAt ? saved.v : { content: d.content, description: d.description, enabled: d.enabled })
+    draft ?? (saved && d.updatedAt < saved.upTo ? saved.v : { content: d.content, description: d.description, enabled: d.enabled })
   const vendor = d.mode === 'vendor'
   const singleProvider = !needsRecipient(d.channel)
 
@@ -264,13 +266,13 @@ export default function NotifyTemplateDetail() {
     const sent = draft
     setSaving(true)
     try {
-      await api.patch(`/notify/templates/${encodeURIComponent(code)}`, {
+      const resp = await api.patch<Pick<Detail, 'updatedAt'>>(`/notify/templates/${encodeURIComponent(code)}`, {
         content: sent.content,
         description: sent.description,
         enabled: sent.enabled,
       })
       toast.success('已保存')
-      setSaved({ base: d.updatedAt, v: sent })
+      setSaved({ upTo: resp.updatedAt, v: sent })
       // 请求在途时又改过的话，那次新编辑还没存，要留着。
       setDraft((x) => (x === sent ? null : x))
       detail.reload()

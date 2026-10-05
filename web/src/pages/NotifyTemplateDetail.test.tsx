@@ -69,7 +69,8 @@ function holdResponses(match: (method: string, url: string) => boolean) {
 }
 
 /**
- * statefulServer 是会记住 PATCH 的假服务端：保存之后再 GET，拿到的是保存后的内容，updatedAt 递增。
+ * statefulServer 是会记住 PATCH 的假服务端：保存之后再 GET，拿到的是保存后的内容，updatedAt 递增；
+ * PATCH 的响应也带着新的 updatedAt，页面靠它知道自己保存到了哪一版——桩若返回不变的 updatedAt，就测不到这条路径。
  * 它还模拟了真实服务端会做的两件事：规整备注（去首尾空白）；别处的变化随重新拉取一起到来（第一个供应商被改了名）——
  * 后者让测试在表单显示的是用户自己编辑的时候，也能确认"重新拉取已经落地"。
  */
@@ -169,7 +170,7 @@ test('添加供应商：只列同渠道且未关联的，vendor 模式必须填�
 })
 
 test('编辑内容后保存：PATCH 带内容、备注与启停', async () => {
-  const calls = stubApi({ ...routes(), 'PATCH /notify/templates/login_sms': smsDetail })
+  const calls = statefulServer()
   renderPage()
   const save = (await screen.findByRole('button', { name: '保存模板' })) as HTMLButtonElement
   expect(save.disabled).toBe(true) // 没改动不能保存
@@ -425,6 +426,47 @@ test('保存成功后、重新拉取返回之前的新编辑不会被丢掉', as
   expect(patches(calls).map((c) => (c.body as { description: string }).description)).toEqual(['A', 'B'])
 })
 
+// 保存 A 触发的重新拉取还没返回，又把备注改成 B 再保存（第二次保存在途）；这时第一次重新拉取返回，updatedAt 变了。
+// 第二次保存成功的那一刻，表单必须仍是 B：以点击保存时渲染的 updatedAt 记"保存到哪一版"，
+// 就会和已经落地的 updatedAt 对不上，表单闪回服务端的 A，直到第二次重新拉取返回。
+test('连点两次保存：第一次重新拉取在第二次保存在途时返回，第二次保存成功后表单仍是 B，不闪回 A', async () => {
+  const calls = statefulServer()
+  // 三道闸，依次挂起：第一次重新拉取、第二次保存、第二次重新拉取。
+  const refetch1 = holdResponses(isDetailGet)
+  const patch2 = holdResponses((method) => method === 'PATCH')
+  const refetch2 = holdResponses(isDetailGet)
+  const note = () => (screen.getByLabelText('备注') as HTMLInputElement).value
+  renderPage()
+
+  fireEvent.change(await screen.findByLabelText('备注'), { target: { value: 'A' } })
+  refetch1.hold()
+  fireEvent.click(saveButton()) // 保存 A：成功，它触发的重新拉取挂着
+  await waitFor(() => expect(detailGets(calls)).toHaveLength(2))
+
+  fireEvent.change(screen.getByLabelText('备注'), { target: { value: 'B  ' } }) // 尾部空白：服务端会去掉，借此看出第二次重新拉取何时落地
+  patch2.hold()
+  fireEvent.click(saveButton()) // 保存 B：在途
+  await waitFor(() => expect(patches(calls)).toHaveLength(2))
+
+  refetch1.release() // 第一次重新拉取在第二次保存在途时返回
+  await screen.findByText('阿里云-主账号（已改名）')
+  expect(note()).toBe('B  ')
+
+  refetch2.hold()
+  patch2.release() // 第二次保存成功，它触发的重新拉取挂着
+  await waitFor(() => expect(detailGets(calls)).toHaveLength(3))
+  // 让 React 把保存成功的状态更新渲染出来再看：闪回只发生在这次渲染里。
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+  expect(note()).toBe('B  ')
+  expect(saveButton().disabled).toBe(true) // 没有未保存的编辑
+
+  refetch2.release()
+  await waitFor(() => expect(note()).toBe('B')) // 第二次重新拉取落地，以服务端为准
+  expect(patches(calls).map((c) => (c.body as { description: string }).description)).toEqual(['A', 'B  '])
+})
+
 test('保存请求在途时又改了内容：成功后这次新编辑还在，按钮仍可点', async () => {
   const calls = statefulServer()
   const gate = holdResponses((method) => method === 'PATCH')
@@ -446,7 +488,7 @@ test('保存模板：请求在途时按钮禁用、再点不会重复提交；�
   const calls = stubApi({
     ...routes(),
     'PATCH /notify/templates/login_sms': () =>
-      ++attempt === 1 ? apiError(400, 'NOTIFY_TEMPLATE_INVALID', '模板内容不合法') : smsDetail,
+      ++attempt === 1 ? apiError(400, 'NOTIFY_TEMPLATE_INVALID', '模板内容不合法') : { ...smsDetail, updatedAt: 2 },
   })
   const gate = holdResponses((method) => method === 'PATCH')
   renderPage()

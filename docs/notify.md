@@ -51,7 +51,7 @@ err = client.Notify().Send(ctx, "order_alert", "", map[string]string{"orderNo": 
 err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotencyKey("order-A1001-shipped"))
 ```
 
-同一应用内相同 `code + 键` 发送成功后，24 小时内的重复请求直接返回成功、不再发送；上一次发送失败时键会被释放，重试能真的重发。键按调用方应用隔离，**不含收件人和变量**：同一个应用里不同收件人用了同一个键，会被当成同一条通知，所以业务键要能唯一标识「这一条通知」（如 `order-A1001-shipped`）。键最长 128 字节。
+同一应用内相同 `code + 键` 发送成功后，24 小时内的重复请求直接返回成功、不再发送；上一次发送失败时键会被释放，重试能真的重发。键按调用方应用隔离，**不含收件人和变量**：同一个应用里不同收件人用了同一个键，会被当成同一条通知，所以业务键要能唯一标识「这一条通知」（如 `order-A1001-shipped`）。键最长 128 字节，超长返回 `INVALID_ARGUMENT`。
 
 ## 4. 错误码
 
@@ -63,6 +63,7 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 | `NOTIFY_TEMPLATE_DISABLED` | 模板已停用 | 在控制台启用 |
 | `NOTIFY_PARAMS_INVALID` | 变量与模板声明的不一致 | `Detail` 里的 `missing` / `unexpected` 列出缺的与多的 |
 | `NOTIFY_RECIPIENT_INVALID` | sms / email 缺收件人，或 IM / webhook 传了收件人，或收件人超过 254 字节 | 按渠道传 |
+| `INVALID_ARGUMENT` | 幂等键超过 128 字节（通用参数错误码，不是通知专属的） | 换一个更短的键 |
 | `NOTIFY_PROVIDER_MISSING` | 模板没有可用的供应商（没关联，或全被禁用） | 去模板详情页检查 |
 | `NOTIFY_IN_PROGRESS` | 相同幂等键的请求还在处理 | SDK 已自动重试两次仍遇到才会返回；上一次的结果未知。想重试又不重复发送，要用 `WithIdempotencyKey` 传自己的键（见第 3 节） |
 | `NOTIFY_SEND_FAILED` | 全部供应商都失败（手机号 / 邮箱格式不对被供应商拒绝也在这里） | 具体原因在控制台「发送记录」，不会回给调用方 |
@@ -81,7 +82,7 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 
 **`log` 与 `FP_ENV`**：`log` 会把收件人、变量和渲染后的内容都写进服务端日志，绝不能出现在有真实数据的环境里。`FP_ENV` 等于 `prod`（不分大小写）时，它在类型列表里不出现、不能新建；库里已有的 `log` 实例不能再关联，已经关联的在发送时按失败的一次尝试处理、不会被调用。`FP_ENV` 不设时缺省是 `DEV`，写成 `production`、`staging` 之类也算非 prod——生产类部署必须显式设 `FP_ENV=prod`。
 
-**webhook 的请求形状**由模板定义：POST 时 body 是渲染后的内容，`Content-Type` 取模板设置；GET 时渲染出的内容作为 query 追加到 `url` 后面。配了 `secret` 时请求头带 `X-Fp-Signature: sha256=<hex>`，值是 `HMAC-SHA256(secret, 被签内容)`，POST 签 body、GET 签 query。2xx 视为成功，超时 10 秒，不跟随重定向。
+**webhook 的请求形状**由模板定义：POST 时 body 是渲染后的内容，`Content-Type` 取模板设置；GET 时渲染出的内容作为 query 追加到 `url` 后面。配了 `secret` 时请求头带 `X-Fp-Signature: sha256=<hex>`，值是 `HMAC-SHA256(secret, 被签内容)`，POST 签 body，GET 只签模板渲染出的那段 query，不含 `url` 里原有的参数（`url` 自带参数时，接收方按整条 query 验签会每次失败，要只取追加的那段）。2xx 视为成功，超时 10 秒，不跟随重定向。
 
 ## 6. 已知限制
 
