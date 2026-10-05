@@ -60,8 +60,9 @@ log.Fatal(http.ListenAndServe(":8090", mux))
 3. [鉴权（Authz / RBAC）](#3-鉴权authz--rbac)
 4. [配置中心](#4-配置中心)
 5. [WebSocket 网关（fp-im）](#5-websocket-网关fp-im)
-6. [生产环境清单](#6-生产环境清单)
-7. [常见问题](#7-常见问题)
+6. [通知（Notify）](#6-通知notify)
+7. [生产环境清单](#7-生产环境清单)
+8. [常见问题](#8-常见问题)
 
 ## 1. 连接（Client）
 
@@ -447,7 +448,29 @@ err = c.Send(ctx, []byte(`{"hi":1}`))
 `Send` 只表示写入了本机发送缓冲区，不代表对端已收到——可靠投递（去重、
 超时重发）需要业务自己在 payload 里带唯一 id 实现。
 
-## 6. 生产环境清单
+## 6. 通知（Notify）
+
+业务代码只传「模板 code + 收件人 + 变量」；发给谁、走哪家供应商、文案是什么，都在控制台「通知中心」里配置，见 [docs/notify.md](../docs/notify.md)。调用方必须是用 `AppID` / `AppSecret` 认证的应用，fp-im 网关的凭据会被拒绝。
+
+```go
+// 短信 / 邮件：to 是手机号 / 邮箱
+err := client.Notify().Send(ctx, "login_sms", "13800138000", map[string]string{"code": "123456"})
+
+// Telegram / 企业微信 / 钉钉 / webhook：发给模板里配好的固定目标，to 传空串
+err = client.Notify().Send(ctx, "order_alert", "", map[string]string{"orderNo": "A1001"})
+```
+
+`params` 的键必须与模板声明的变量**完全一致**，多了少了都会被拒绝。
+
+**幂等与重试**：`Send` 每次调用自动生成一个幂等键。fp 不可达、超时、或上一次相同请求还在处理，这类瞬时失败最多重试两次（200ms 起指数退避，单次尝试 30 秒超时），整个调用复用同一个键，服务端据此保证同一条通知不会因为重试发出两次。想让业务自己的重试（重跑任务、重放消息）也不重复发送，用业务事件的 ID 当键：
+
+```go
+err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotencyKey("order-A1001-shipped"))
+```
+
+**错误**：按[错误处理](#错误处理)的方式取 `*fpsdk.Error`，用 `Code` 分支：`NOTIFY_TEMPLATE_NOT_FOUND`、`NOTIFY_TEMPLATE_DISABLED`、`NOTIFY_PARAMS_INVALID`（`Detail` 里有 `missing` / `unexpected`）、`NOTIFY_RECIPIENT_INVALID`、`NOTIFY_PROVIDER_MISSING`、`NOTIFY_SEND_FAILED`（全部供应商都失败，原因在控制台「发送记录」，不会回给调用方）。完整列表见 [docs/notify.md](../docs/notify.md)。
+
+## 7. 生产环境清单
 
 - `MiddlewareOptions.CookieSecure` 显式设 `true`。
 - `AllowGuest` 只在真的需要匿名访问时开启。
@@ -461,8 +484,9 @@ err = c.Send(ctx, []byte(`{"hi":1}`))
 - 需要"fp 挂了也不完全瘫痪"的降级能力时，评估是否开启
   `AllowStaleOnOutage`，并明确 `MaxStaleness` 的业务含义（延用的是登录时
   验证过的旧身份，不是重新鉴权）。
+- 用到通知的应用，先在控制台「通知中心」建好模板并关联可用的供应商；`log` 供应商只在非生产环境可用，生产必须配真实供应商。
 
-## 7. 常见问题
+## 8. 常见问题
 
 **为什么受保护接口偶尔返回 503 而不是 401？**
 fp 短暂不可达且本地没有可用缓存。这是有意设计——见 [错误处理](#错误处理)。

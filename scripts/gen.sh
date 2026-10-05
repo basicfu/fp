@@ -8,7 +8,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GOBIN="$(go env GOPATH)/bin"
+GOPATH_DIR="$(go env GOPATH)"
+# Windows 的 Git Bash 里 go env 给的是 D:\... 形式，直接拼进 PATH 会被冒号切碎，command -v 找不到 buf。
+if command -v cygpath >/dev/null 2>&1; then GOPATH_DIR="$(cygpath -u "$GOPATH_DIR")"; fi
+GOBIN="$GOPATH_DIR/bin"
 export PATH="$GOBIN:$PATH"
 
 # 与 go.mod 里的运行时依赖对齐，升级时两处一起改。

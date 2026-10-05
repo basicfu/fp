@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package fp.v1;
+
+option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
+
+// NotifyService 是业务方发送通知的唯一入口。
+//
+// 认证方式与 AuthService 相同：metadata 带 fp-app-id 与 fp-app-secret，
+// 由 internal/grpcapi/auth_interceptor.go 统一校验；fp-im 网关凭据不能调用。
+service NotifyService {
+  // Send 按通知模板 code 发送一条通知。
+  rpc Send(SendRequest) returns (SendResponse);
+}
+
+message SendRequest {
+  // code 是控制台里创建的通知模板的唯一标识，决定渠道、模板与供应商。
+  string code = 1;
+  // to 是收件人：sms 是手机号，email 是邮箱；telegram / 企业微信 / 钉钉 / webhook 必须为空。
+  string to = 2;
+  // params 是模板变量的取值，键集合必须与模板声明的变量完全一致。
+  map<string, string> params = 3;
+  // idempotency_key 可选。相同 code + key 在 24 小时内只会真正发送一次。
+  // SDK 会自动生成并在重试时复用；直接调用 gRPC 的调用方需要自己保证。
+  string idempotency_key = 4;
+}
+
+// SendResponse 是发送结果。成功即空响应，失败走 gRPC status。
+message SendResponse {}

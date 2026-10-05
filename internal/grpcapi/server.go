@@ -40,6 +40,9 @@ type Deps struct {
 
 	// AccessKeys 提供访问密钥的校验材料与使用时间记录。为 nil 时两个 RPC 返回 Unimplemented。
 	AccessKeys *service.AccessKeyService
+
+	// Notify 提供通知发送。为 nil 时 NotifyService 不注册（调用得到 Unimplemented）。
+	Notify *service.NotifyService
 }
 
 // deniedIMCreds 在没有配置 IM 凭据校验器时拒绝一切 im 调用。
@@ -135,6 +138,9 @@ func New(d Deps) *Server {
 	}))
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))
 	fpv1.RegisterIMGatewayServiceServer(srv, newIMServer(d.Apps))
+	if d.Notify != nil {
+		fpv1.RegisterNotifyServiceServer(srv, newNotifyServer(d.Notify))
+	}
 
 	return &Server{grpc: srv, hub: hub, configHub: configHub}
 }
