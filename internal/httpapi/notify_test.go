@@ -117,23 +117,38 @@ func TestNotifyProviderTypes(t *testing.T) {
 
 func TestNotifyProviderLifecycleAndSecretMasking(t *testing.T) {
 	h, token, _ := newNotifyHTTPEnv(t)
-	id := createProviderOverHTTP(t, h, token, "fake_sms", "a", "REAL-SECRET")
+	const secret = "REAL-SECRET"
+	// 凡是返回供应商的响应（创建、读取、更新）都不能带出 secret 原文，secret 字段只以掩码出现。
+	masked := func(body string) bool {
+		return !strings.Contains(body, secret) && strings.Contains(body, domain.SecretMask)
+	}
+
+	// 不用 createProviderOverHTTP：它只取 id，而创建响应本身也要检查。
+	created := do(t, h, token, http.MethodPost, "/admin/api/notify/providers",
+		`{"type":"fake_sms","description":"a","config":{"name":"a","token":"`+secret+`"}}`)
+	if created.Code != http.StatusCreated || !masked(created.Body.String()) {
+		t.Fatalf("POST 创建: %d %s", created.Code, created.Body.String())
+	}
+	var out idResp
+	decode(t, created, &out)
+	id := out.ID
 
 	// 任何读取接口都不能把 secret 原文带出来。
 	for _, path := range []string{"/admin/api/notify/providers/" + id, "/admin/api/notify/providers"} {
 		rec := do(t, h, token, http.MethodGet, path, "")
-		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "REAL-SECRET") || !strings.Contains(rec.Body.String(), domain.SecretMask) {
+		if rec.Code != http.StatusOK || !masked(rec.Body.String()) {
 			t.Fatalf("%s: status = %d, body = %s", path, rec.Code, rec.Body.String())
 		}
 	}
 
 	// 局部更新：掩码原样传回 = 保持原值；不带 config = 只改备注。
 	rec := do(t, h, token, http.MethodPatch, "/admin/api/notify/providers/"+id, `{"config":{"name":"a2","token":"********"}}`)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"name":"a2"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"name":"a2"`) || !masked(rec.Body.String()) {
 		t.Fatalf("PATCH config: %d %s", rec.Code, rec.Body.String())
 	}
 	rec = do(t, h, token, http.MethodPatch, "/admin/api/notify/providers/"+id, `{"description":"主账号","enabled":false}`)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"description":"主账号"`) || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"description":"主账号"`) ||
+		!strings.Contains(rec.Body.String(), `"enabled":false`) || !masked(rec.Body.String()) {
 		t.Fatalf("PATCH 备注/启停: %d %s", rec.Code, rec.Body.String())
 	}
 
