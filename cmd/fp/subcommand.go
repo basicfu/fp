@@ -20,8 +20,13 @@ const usage = `用法：
 func runSubcommand(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "reset-password":
+		// --help / --dry-run 这类探路参数若被静默忽略，就会真的重置账号、作废全部会话。
+		if len(args) > 1 {
+			fmt.Fprintf(stderr, "reset-password 不接受参数 %q\n\n%s", args[1], usage)
+			return 2
+		}
 		if err := runResetPassword(context.Background(), stdout); err != nil {
-			fmt.Fprintf(stderr, "重置失败：%v\n", err)
+			fmt.Fprintf(stderr, "重置失败：%v\n本命令可安全重跑；若失败发生在写库之后，旧密码已失效，只有重跑才能拿到新密码。\n", err)
 			return 1
 		}
 		return 0

@@ -90,13 +90,70 @@ func TestSeedDefaultsYAMLSkipsWhenVersionExists(t *testing.T) {
 	}
 }
 
+// 下面几个 runSubcommand 用例走的都是"拒绝/失败"分支，本不该碰库。清空连接串是兜底：
+// scripts/test.sh 会把 .env.local 里的真实连接串带进测试进程，守卫万一回归，用例也只会
+// 因缺环境变量而失败，而不是真的去重置某个库里的管理员。
+func clearConnectionEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("FP_POSTGRES_URL", "")
+	t.Setenv("FP_REDIS_URL", "")
+}
+
 func TestRunSubcommandRejectsUnknownArgument(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	if code := runSubcommand([]string{"reset-pasword"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("退出码 = %d, want 2", code)
+	clearConnectionEnv(t)
+	// 空串与 -h / --help / help 也算未知：fp 没有帮助子命令，它们和拼错的子命令一样
+	// 走"未知参数 + 用法"、退出码 2。
+	for _, arg := range []string{"reset-pasword", "", "-h", "--help", "help", "bogus"} {
+		t.Run(arg, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := runSubcommand([]string{arg}, &stdout, &stderr); code != 2 {
+				t.Fatalf("退出码 = %d, want 2", code)
+			}
+			if !strings.Contains(stderr.String(), "用法") || stdout.Len() != 0 {
+				t.Fatalf("stderr = %q, stdout = %q", stderr.String(), stdout.String())
+			}
+		})
 	}
-	if !strings.Contains(stderr.String(), "用法") || stdout.Len() != 0 {
-		t.Fatalf("stderr = %q, stdout = %q", stderr.String(), stdout.String())
+}
+
+// reset-password 后面的任何参数都要在碰库之前拒绝：--help / --dry-run 这类探路参数
+// 若被静默忽略，会真的重置唯一管理员的密码并作废全部会话。
+func TestRunSubcommandRejectsTrailingArguments(t *testing.T) {
+	clearConnectionEnv(t)
+	for _, args := range [][]string{
+		{"reset-password", "--help"},
+		{"reset-password", "-h"},
+		{"reset-password", "--dry-run"},
+		{"reset-password", "extra"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := runSubcommand(args, &stdout, &stderr); code != 2 {
+				t.Fatalf("退出码 = %d, want 2（stderr = %q）", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "用法") || stdout.Len() != 0 {
+				t.Fatalf("stderr = %q, stdout = %q", stderr.String(), stdout.String())
+			}
+		})
+	}
+}
+
+// 借"缺连接串"这条不碰库的失败路径，钉住失败时给运维的提示。"可安全重跑"不是客套：
+// ResetPassword 先提交库、后 INCR 会话纪元，后一步失败时密码已变而新密码没打印出来，
+// 这时只有重跑才能拿回账号。
+func TestRunSubcommandResetPasswordFailureHintsSafeRerun(t *testing.T) {
+	clearConnectionEnv(t)
+	var stdout, stderr bytes.Buffer
+	if code := runSubcommand([]string{"reset-password"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("退出码 = %d, want 1（stderr = %q）", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("失败时 stdout 必须为空，得到 %q", stdout.String())
+	}
+	for _, want := range []string{"FP_POSTGRES_URL", "可安全重跑", "旧密码已失效"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr 缺少 %q：%q", want, stderr.String())
+		}
 	}
 }
 

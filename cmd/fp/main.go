@@ -39,8 +39,8 @@ func main() {
 // 配置表首次启动必然是空的，不给默认值会导致数据库里一个管理员都没有、
 // 谁都登不进控制台去创建这张表的第一条记录——见
 // docs/superpowers/specs/2026-09-21-fp-system-config-design.md 第六节。
-// EnsureBootstrap 本身是 ON CONFLICT DO NOTHING，这个默认值只在"库里
-// 还没有任何管理员"时才真正生效。
+// EnsureBootstrap 靠 WHERE NOT EXISTS 判空（ON CONFLICT 只兜两实例同时首启的
+// 竞态），这个默认值只在"库里还没有任何管理员"时才真正生效。
 func resolveBootstrapAdmin(cfg config.BootstrapAdmin) config.BootstrapAdmin {
 	if cfg.User == "" && cfg.Password == "" {
 		return config.BootstrapAdmin{User: "admin", Password: "admin"}

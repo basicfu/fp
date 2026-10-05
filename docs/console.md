@@ -43,6 +43,9 @@
 
     docker exec <容器名> ./bootstrap reset-password
 
+命令读执行它的那个 shell 里的 `FP_POSTGRES_URL` / `FP_REDIS_URL`：`docker exec`
+继承容器自己的，裸机上要先设成服务运行时用的同一组值。
+
 **没跑过 `build-web.sh` 也能 `go build`**（`web/dist/` 里提交了一个
 `.gitkeep`，embed 指令用的是 `all:` 前缀），只是打开控制台会看到一句
 "管理控制台前端尚未构建"。
