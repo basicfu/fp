@@ -18,15 +18,21 @@ var webhookSpec = TypeSpec{
 	Type:    "webhook",
 	Channel: domain.NotifyChannelWebhook,
 	ConfigSchema: []domain.Field{
-		{Key: "url", Label: "URL", Type: domain.FieldTypeString, Required: true, Help: "http:// 或 https:// 开头；GET 模板渲染出的 query 会追加在它后面"},
-		{Key: "secret", Label: "签名密钥", Type: domain.FieldTypeSecret, Help: "填了就在请求头 X-Fp-Signature 里带 sha256=HMAC-SHA256(secret, 被签内容)：POST 签 body，GET 签 query"},
+		{Key: "url", Label: "URL", Type: domain.FieldTypeString, Required: true, Help: "http:// 或 https:// 开头，不能带 #；GET 模板渲染出的 query 会追加在它后面"},
+		{Key: "secret", Label: "签名密钥", Type: domain.FieldTypeSecret, Help: "填了就在请求头 X-Fp-Signature 里带 sha256=HMAC-SHA256(secret, 被签内容)：POST 签 body，GET 只签模板渲染出的那段 query，不含 url 里原有的参数"},
 	},
 	New: func(cfg Config) (Provider, error) {
-		u, err := url.Parse(cfg.String("url"))
+		raw := cfg.String("url")
+		u, err := url.Parse(raw)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return nil, errors.New("url 必须是 http:// 或 https:// 开头的完整地址")
 		}
-		return &webhookProvider{url: cfg.String("url"), secret: cfg.String("secret")}, nil
+		// GET 渲染出的 query 会被拼进 # 后面的片段，接收端拿不到参数却照样回 2xx。
+		// 按字符查：只有 # 没有片段时 u.Fragment 也是空串。
+		if strings.Contains(raw, "#") {
+			return nil, errors.New("url 不能带 #")
+		}
+		return &webhookProvider{url: raw, secret: cfg.String("secret")}, nil
 	},
 }
 

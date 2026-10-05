@@ -556,16 +556,16 @@ func TestLoginUnavailableReturnsErrUnavailable(t *testing.T) {
 // TestLoginInvalidArgumentReturnsErrInvalidArgument 钉住 translate 把
 // InvalidArgument 映射成 ErrInvalidArgument 这一分支，经 Login 这条路径。
 //
-// 服务端对畸形凭据（比如手机号格式不对）返回这个码——这不是"凭据不对"，
+// 服务端对畸形凭据（比如账号或密码没填）返回这个码——这不是"凭据不对"，
 // 是"请求本身就没法处理"。此前 translate 原样透传这个码（不匹配任何
-// case），落进 WriteError 的 default 分支变成 401——用户手机号打错一位，
+// case），落进 WriteError 的 default 分支变成 401——用户漏填了密码，
 // 会收到"未授权"，而不是"参数不对"。必须能被 errors.Is 与 ErrUnauthorized
 // 区分开，否则业务方没法对这两种情况做出不同的响应。
 func TestLoginInvalidArgumentReturnsErrInvalidArgument(t *testing.T) {
 	env := newStubEnvFull(t, &stubServer{
 		validate: okValidate("u1", 1000),
 		login: func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error) {
-			return nil, status.Error(codes.InvalidArgument, "手机号格式不正确")
+			return nil, status.Error(codes.InvalidArgument, "password 不能为空")
 		},
 	})
 

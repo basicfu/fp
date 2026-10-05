@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -446,5 +447,190 @@ func TestNotifyListLogsFiltersAndPaginates(t *testing.T) {
 	page, total, _ := e.svc.ListLogs(ctx, service.NotifyLogFilter{Limit: 2, Offset: 3})
 	if total != 4 || len(page) != 1 {
 		t.Fatalf("分页：total = %d（应是过滤后的总数）, 本页 %d 条（应是最后 1 条）", total, len(page))
+	}
+}
+
+// 只按 code 过滤、最新的在前；limit / offset 越界时规整成可用的值，而不是报错或全表返回。
+func TestNotifyListLogsCodeOnlyOrderingAndClamps(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i, row := range []struct {
+		code    string
+		success bool
+	}{{"a", true}, {"a", false}, {"b", true}, {"a", true}} {
+		// error 列的长度就是插入的次序，用来核对排序。
+		if _, err := e.pool.Exec(ctx, `
+			INSERT INTO notify_log (channel, target, code, provider, success, error, created_at)
+			VALUES ('sms', '138', $1, 'fake_sms', $2, $3, $4)`,
+			row.code, row.success, strings.Repeat("e", i), base.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, total, err := e.svc.ListLogs(ctx, service.NotifyLogFilter{Code: "a"})
+	if err != nil || total != 3 || len(a) != 3 {
+		t.Fatalf("code=a: %d 条, total = %d, err = %v", len(a), total, err)
+	}
+	if len(a[0].Error) != 3 || len(a[1].Error) != 1 || len(a[2].Error) != 0 {
+		t.Errorf("没有按最新在前排序: %q %q %q", a[0].Error, a[1].Error, a[2].Error)
+	}
+	ok := true
+	if okRows, total, _ := e.svc.ListLogs(ctx, service.NotifyLogFilter{Success: &ok}); total != 3 || len(okRows) != 3 {
+		t.Errorf("success=true: %d 条, total = %d", len(okRows), total)
+	}
+	if all, total, _ := e.svc.ListLogs(ctx, service.NotifyLogFilter{Limit: -5, Offset: -3}); total != 4 || len(all) != 4 {
+		t.Errorf("负的 limit / offset: %d 条, total = %d", len(all), total)
+	}
+	if huge, total, _ := e.svc.ListLogs(ctx, service.NotifyLogFilter{Limit: 100000, Offset: 100000}); total != 4 || len(huge) != 0 {
+		t.Errorf("offset 越过末尾: %d 条, total = %d", len(huge), total)
+	}
+}
+
+// 保存时就用构造函数试构造一次：配置错了当场报 NOTIFY_PROVIDER_INVALID，而不是等到第一次发送才失败。
+func TestNotifyTrialConstructionRejectsBadConfig(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+	reg := notify.NewRegistry()
+	if err := reg.Register(notify.TypeSpec{
+		Type: "picky", Channel: domain.NotifyChannelSMS,
+		ConfigSchema: []domain.Field{{Key: "name", Label: "名称", Type: domain.FieldTypeString, Required: true}},
+		New: func(cfg notify.Config) (notify.Provider, error) {
+			if cfg.String("name") == "bad" {
+				return nil, errors.New("name 不能是 bad")
+			}
+			return &fakeProvider{}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := service.NewNotifyService(pool, rdb, reg)
+	ctx := context.Background()
+
+	if _, err := svc.CreateProvider(ctx, service.CreateNotifyProviderInput{Type: "picky", Config: map[string]any{"name": "bad"}}); notifyErrCode(err) != domain.CodeNotifyProviderInvalid {
+		t.Errorf("创建: err = %v, want NOTIFY_PROVIDER_INVALID", err)
+	}
+	p, err := svc.CreateProvider(ctx, service.CreateNotifyProviderInput{Type: "picky", Config: map[string]any{"name": "good"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UpdateProvider(ctx, p.ID, service.UpdateNotifyProviderInput{Config: map[string]any{"name": "bad"}}); notifyErrCode(err) != domain.CodeNotifyProviderInvalid {
+		t.Errorf("修改: err = %v, want NOTIFY_PROVIDER_INVALID", err)
+	}
+}
+
+// 每次修改都要推进 updated_at：发送路径按 id@updated_at 缓存已构造的供应商，它不动，改过的配置就不会生效。
+func TestNotifyUpdateProviderBumpsUpdatedAt(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	p, err := e.svc.CreateProvider(ctx, service.CreateNotifyProviderInput{
+		Type: "fake_sms", Enabled: true, Config: map[string]any{"name": "a", "token": "t1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := p.UpdatedAt
+	for i := range 5 {
+		on := i%2 == 1
+		up, err := e.svc.UpdateProvider(ctx, p.ID, service.UpdateNotifyProviderInput{Enabled: &on})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !up.UpdatedAt.After(prev) {
+			t.Errorf("第 %d 次启停: updated_at %v 没有越过 %v", i, up.UpdatedAt, prev)
+		}
+		prev = up.UpdatedAt
+	}
+	up, err := e.svc.UpdateProvider(ctx, p.ID, service.UpdateNotifyProviderInput{Config: map[string]any{"name": "a", "token": "t2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !up.UpdatedAt.After(prev) {
+		t.Errorf("换配置: updated_at %v 没有越过 %v", up.UpdatedAt, prev)
+	}
+}
+
+// code 被业务代码硬引用：合法的写法（含 64 字符的边界）都要能建，换行、全角字符、斜杠这类不能混进来。
+func TestNotifyCodeRegexpPositiveAndNegative(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	create := func(code string) error {
+		_, err := e.svc.CreateTemplate(ctx, service.CreateNotifyTemplateInput{
+			Code: code, Channel: domain.NotifyChannelTelegram, Mode: domain.NotifyModeCustom,
+			Content: domain.NotifyContent{Content: "x", Variables: []string{}},
+		})
+		return err
+	}
+	for _, code := range []string{"ok.code-1_x", "A", "0", strings.Repeat("a", 64)} {
+		if err := create(code); err != nil {
+			t.Errorf("code %q 应被接受: %v", code, err)
+		}
+	}
+	for _, code := range []string{"a\n", ".a", "_a", "a/b", "a%20b", "ａ", strings.Repeat("a", 65)} {
+		if err := create(code); notifyErrCode(err) != domain.CodeNotifyTemplateInvalid {
+			t.Errorf("code %q 应被拒绝为 NOTIFY_TEMPLATE_INVALID, err = %v", code, err)
+		}
+	}
+}
+
+// 类型已从代码里下线的实例：认不出哪些字段是 secret，配置一概不返回；也不能再被关联或改配置。
+// 只改备注时库里的配置（包括 secret）原样保留，日后类型恢复还能接着用。
+func TestNotifyRetiredProviderType(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	var id uuid.UUID
+	if err := e.pool.QueryRow(ctx, `INSERT INTO notify_provider (type, description, enabled, config)
+		VALUES ('gone_type', 'old', true, '{"token":"sekret-xyz","name":"n"}') RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.svc.GetProvider(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := e.svc.MaskConfig(*p); len(m) != 0 {
+		t.Errorf("下线类型的 MaskConfig = %v, want 空", m)
+	}
+	if ch := e.svc.ProviderChannel(*p); ch != "" {
+		t.Errorf("ProviderChannel = %q, want 空", ch)
+	}
+	e.smsTemplate(t, "login_sms")
+	if err := e.svc.SetTemplateProvider(ctx, "login_sms", id, service.SetNotifyLinkInput{ProviderTemplateID: "X", Enabled: true}); notifyErrCode(err) != domain.CodeNotifyLinkInvalid {
+		t.Errorf("关联下线类型: err = %v, want NOTIFY_LINK_INVALID", err)
+	}
+	if _, err := e.svc.UpdateProvider(ctx, id, service.UpdateNotifyProviderInput{Config: map[string]any{"name": "n"}}); notifyErrCode(err) != domain.CodeNotifyProviderInvalid {
+		t.Errorf("改下线类型的配置: err = %v, want NOTIFY_PROVIDER_INVALID", err)
+	}
+	d := "renamed"
+	up, err := e.svc.UpdateProvider(ctx, id, service.UpdateNotifyProviderInput{Description: &d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Config["token"] != "sekret-xyz" {
+		t.Errorf("只改备注却丢了 secret: %v", up.Config)
+	}
+	if views, err := e.svc.ListProviders(ctx); err != nil || len(views) != 1 {
+		t.Fatalf("列表里仍应有它: views = %+v, err = %v", views, err)
+	}
+}
+
+// 关联与修改时引用的模板、供应商不存在，回各自的 NOT_FOUND 码，控制台据此提示；
+// 只有空白的供应商侧模板 ID 等于没填。
+func TestNotifyNotFoundCodes(t *testing.T) {
+	e := newNotifyEnv(t)
+	ctx := context.Background()
+	pid := e.provider(t, "fake_sms", "a")
+	e.smsTemplate(t, "login_sms")
+	in := service.SetNotifyLinkInput{ProviderTemplateID: "X", Enabled: true}
+
+	if err := e.svc.SetTemplateProvider(ctx, "nope", pid, in); !errors.Is(err, domain.ErrNotFound) || notifyErrCode(err) != domain.CodeNotifyTemplateNotFound {
+		t.Errorf("模板不存在: err = %v", err)
+	}
+	if err := e.svc.SetTemplateProvider(ctx, "login_sms", uuid.New(), in); !errors.Is(err, domain.ErrNotFound) || notifyErrCode(err) != domain.CodeNotifyProviderNotFound {
+		t.Errorf("供应商不存在: err = %v", err)
+	}
+	if _, err := e.svc.UpdateProvider(ctx, uuid.New(), service.UpdateNotifyProviderInput{}); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("修改不存在的供应商: err = %v", err)
+	}
+	if err := e.svc.SetTemplateProvider(ctx, "login_sms", pid, service.SetNotifyLinkInput{ProviderTemplateID: "   ", Enabled: true}); notifyErrCode(err) != domain.CodeNotifyLinkInvalid {
+		t.Errorf("空白的供应商侧模板 ID: err = %v, want NOTIFY_LINK_INVALID", err)
 	}
 }

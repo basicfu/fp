@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/mail"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,9 @@ func TestBuildAliyunRequestParamOrderIsStable(t *testing.T) {
 	}
 }
 
-// 阿里云客户端必须带着显式的连接/读取超时被创建出来：SDK 默认不设超时，而 Send 拿不到 ctx。
+// 阿里云客户端必须带着显式的超时被创建出来：SDK 默认不设超时，而 Send 拿不到 ctx。
+// 两个值的单位不同：SDK 默认的拨号器按秒读 ConnectTimeout，ReadTimeout 按毫秒设成 http.Client.Timeout。
+// 按错单位填，连接超时就成了几千秒，或者短到连不上。
 func TestNewAliyunSetsExplicitTimeouts(t *testing.T) {
 	p, err := aliyunSpec.New(Config{"accessKeyId": "ak", "accessKeySecret": "sk", "signName": "示例签名"})
 	if err != nil {
@@ -74,8 +77,10 @@ func TestNewAliyunSetsExplicitTimeouts(t *testing.T) {
 	if client.ConnectTimeout == nil || client.ReadTimeout == nil {
 		t.Fatal("客户端没有设置超时——吊死的接入点会永久占住一个 goroutine")
 	}
-	if tea.IntValue(client.ConnectTimeout) != aliyunConnectTimeoutMS || tea.IntValue(client.ReadTimeout) != aliyunReadTimeoutMS {
-		t.Fatalf("超时 = %d / %d", tea.IntValue(client.ConnectTimeout), tea.IntValue(client.ReadTimeout))
+	connect := time.Duration(tea.IntValue(client.ConnectTimeout)) * time.Second
+	total := time.Duration(tea.IntValue(client.ReadTimeout)) * time.Millisecond
+	if connect != 5*time.Second || total != 10*time.Second {
+		t.Fatalf("连接超时 = %v，整次调用上限 = %v, want 5s / 10s", connect, total)
 	}
 }
 
@@ -96,6 +101,9 @@ func TestNewSMTPValidatesConfig(t *testing.T) {
 		"from 不是邮箱": {"host": "h", "port": 25, "from": "not an address"},
 		"tls 取值非法":  {"host": "h", "port": 25, "from": "a@b.com", "tls": "tls1.3"},
 		"不加密却配了密码（非回环主机）": {"host": "smtp.example.com", "port": 25, "from": "a@b.com", "tls": "none", "username": "u", "password": "p"},
+		// net/smtp 的 PlainAuth 只认这三个名字是本机，别的回环写法保存时放过、第一次发送才报错。
+		"不加密却配了密码（127.0.0.2）":        {"host": "127.0.0.2", "port": 25, "from": "a@b.com", "tls": "none", "username": "u", "password": "p"},
+		"不加密却配了密码（::ffff:127.0.0.1）": {"host": "::ffff:127.0.0.1", "port": 25, "from": "a@b.com", "tls": "none", "username": "u", "password": "p"},
 	}
 	for name, cfg := range cases {
 		if _, err := smtpSpec.New(cfg); err == nil {
@@ -103,8 +111,10 @@ func TestNewSMTPValidatesConfig(t *testing.T) {
 		}
 	}
 	// 本机回环可以不加密带认证（开发用的本地 SMTP 捕获工具）。
-	if _, err := smtpSpec.New(Config{"host": "127.0.0.1", "port": 1025, "from": "a@b.com", "tls": "none", "username": "u", "password": "p"}); err != nil {
-		t.Errorf("回环主机应允许: %v", err)
+	for _, host := range []string{"localhost", "127.0.0.1", "::1"} {
+		if _, err := smtpSpec.New(Config{"host": host, "port": 1025, "from": "a@b.com", "tls": "none", "username": "u", "password": "p"}); err != nil {
+			t.Errorf("回环主机 %s 应允许: %v", host, err)
+		}
 	}
 }
 
@@ -130,6 +140,13 @@ func TestBuildEmail(t *testing.T) {
 	}
 	if addr, _ := mail.ParseAddress(m.Header.Get("To")); addr == nil || addr.Address != "alice@example.com" {
 		t.Fatalf("To = %q", m.Header.Get("To"))
+	}
+	// Gmail 等收件方要求有效的 Message-ID；它只带随机数与发件人的域名。
+	if id := m.Header.Get("Message-ID"); !regexp.MustCompile(`^<[0-9a-f]{32}@example\.com>$`).MatchString(id) {
+		t.Fatalf("Message-ID = %q", id)
+	}
+	if _, again, _ := buildEmail(from, "alice@example.com", "s", "text/plain", "x", time.Now()); strings.Contains(string(again), m.Header.Get("Message-ID")) {
+		t.Fatal("两封邮件的 Message-ID 不能相同")
 	}
 	body, _ := io.ReadAll(m.Body)
 	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(string(body), "\r\n", ""))
@@ -167,16 +184,33 @@ func TestBuildEmailRejectsHeaderInjectionInRecipient(t *testing.T) {
 
 type fakeMail struct{ from, to, data string }
 
-// startFakeSMTP 起一个只处理一次投递的假 SMTP 服务器（明文、无认证）。
-func startFakeSMTP(t *testing.T, dropOnQuit ...bool) (port int, got <-chan fakeMail) {
+// smtpFault 让假服务器在某个命令上出岔子；零值表示一切正常。
+type smtpFault struct {
+	// dropOnQuit：收到 QUIT 直接断开、不回复。
+	dropOnQuit bool
+	// hangOn 非空时，收到以它开头的命令（大写，如 "QUIT"、"MAIL FROM:"）后既不回复也不断开，
+	// 直到测试结束；开始挂起时关闭 hung（非 nil 时）。
+	hangOn string
+	hung   chan struct{}
+}
+
+// startFakeSMTP 起一个只处理一次投递的假 SMTP 服务器（明文、无认证）。fault 最多给一个。
+func startFakeSMTP(t *testing.T, fault ...smtpFault) (port int, got <-chan fakeMail) {
 	t.Helper()
+	var f smtpFault
+	if len(fault) > 0 {
+		f = fault[0]
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("监听: %v", err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(done)
+		_ = ln.Close()
+	})
 	out := make(chan fakeMail, 1)
-	shouldDropOnQuit := len(dropOnQuit) > 0 && dropOnQuit[0]
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -200,6 +234,13 @@ func startFakeSMTP(t *testing.T, dropOnQuit ...bool) (port int, got <-chan fakeM
 				return
 			}
 			cmd := strings.ToUpper(strings.TrimSpace(line))
+			if f.hangOn != "" && strings.HasPrefix(cmd, f.hangOn) {
+				if f.hung != nil {
+					close(f.hung)
+				}
+				<-done
+				return
+			}
 			switch {
 			case strings.HasPrefix(cmd, "MAIL FROM:"):
 				m.from = between(line)
@@ -224,8 +265,7 @@ func startFakeSMTP(t *testing.T, dropOnQuit ...bool) (port int, got <-chan fakeM
 				reply("250 queued")
 				out <- m
 			case cmd == "QUIT":
-				if shouldDropOnQuit {
-					// 关闭连接而不回复 QUIT，模拟 QUIT 失败
+				if f.dropOnQuit {
 					return
 				}
 				reply("221 bye")
@@ -280,9 +320,10 @@ func TestSMTPSendReportsConnectionFailure(t *testing.T) {
 	}
 }
 
-// I1: 阿里云错误不能暴露手机号、OTP 或凭据
+// 网络层失败时 SDK 返回的 *url.Error 带着整条请求 URL：手机号、模板变量（验证码）、AccessKeyId 都在 query 里，
+// 而错误文本会进 notify_log 与服务端日志。
 func TestAliyunSendDoesNotExposePhoneOrCredentialsInError(t *testing.T) {
-	// 指向已关闭的本地端口：连接会快速失败
+	// 1 号端口上没人监听，连接立刻被拒。
 	p, err := aliyunSpec.New(Config{
 		"accessKeyId":     "test_ak_123456789",
 		"accessKeySecret": "test_sk_secret_value",
@@ -387,7 +428,8 @@ func TestAliyunSendRejectsUnparseableResponses(t *testing.T) {
 	}
 }
 
-// I3: 阿里云短信收件人必须是合法的手机号
+// PhoneNumbers 是逗号分隔的列表：不校验的话，业务方传来的一个"收件人"就能扇出成多条短信。
+// 拒绝时也不回显号码，错误文本会进日志。
 func TestBuildAliyunRequestValidatesPhoneNumber(t *testing.T) {
 	cases := map[string]bool{
 		"13800138000":             true,  // 合法
@@ -416,9 +458,9 @@ func TestBuildAliyunRequestValidatesPhoneNumber(t *testing.T) {
 	}
 }
 
-// I2: SMTP 在服务器已接受邮件后，QUIT 失败不算发送失败
+// 服务器已经接受了邮件，QUIT 失败也算发送成功：报成失败会触发降级，同一封邮件就发了两次。
 func TestSMTPSendSucceedsEvenIfQuitFails(t *testing.T) {
-	port, got := startFakeSMTP(t, true)
+	port, got := startFakeSMTP(t, smtpFault{dropOnQuit: true})
 	p, err := smtpSpec.New(Config{"host": "127.0.0.1", "port": port, "from": "noreply@example.com", "tls": "none"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -428,11 +470,9 @@ func TestSMTPSendSucceedsEvenIfQuitFails(t *testing.T) {
 		Template: domain.NotifyTemplate{Content: domain.NotifyContent{ContentType: "text/plain"}},
 		Rendered: Rendered{Subject: "test", Body: "body"},
 	}
-	// Send 必须成功，即使 QUIT 失败
 	if err := p.Send(context.Background(), d); err != nil {
 		t.Fatalf("Send 应成功（QUIT 失败不算）: %v", err)
 	}
-	// 假服务器必须收到邮件
 	select {
 	case m := <-got:
 		if m.to != "alice@example.com" {
@@ -443,9 +483,9 @@ func TestSMTPSendSucceedsEvenIfQuitFails(t *testing.T) {
 	}
 }
 
-// I1: SMTP 收到 vendor 模板拒绝发送（vendor 模板永不被渲染，无内容可发）。
+// vendor 模板从不由 fp 渲染，SMTP 拿到它就没有内容可发：必须报错，不能发出一封空邮件还记成成功。
 func TestSMTPRefusesVendorTemplates(t *testing.T) {
-	// 指向已关闭的本地端口：如果 guard 有效，应在尝试连接前返回错误。
+	// 1 号端口上没人监听：守卫生效时根本走不到连接这一步，错误是守卫给的，不是连接失败。
 	p, err := smtpSpec.New(Config{
 		"host": "127.0.0.1", "port": 1,
 		"from": "noreply@example.com", "tls": "none",
@@ -462,8 +502,73 @@ func TestSMTPRefusesVendorTemplates(t *testing.T) {
 	if err == nil {
 		t.Fatal("vendor 模板应被拒绝")
 	}
-	errStr := err.Error()
-	if !strings.Contains(errStr, "供应商模板") && !strings.Contains(errStr, "vendor") {
+	if errStr := err.Error(); !strings.Contains(errStr, "供应商模板") {
 		t.Errorf("错误应提及供应商模板，实际: %s", errStr)
+	}
+}
+
+// plainSMTP 是连本机假服务器的 SMTP 供应商（明文、无认证）。
+func plainSMTP(t *testing.T, port int) Provider {
+	t.Helper()
+	p, err := smtpSpec.New(Config{"host": "127.0.0.1", "port": port, "from": "noreply@example.com", "tls": "none"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return p
+}
+
+func textEmail(to string) Delivery {
+	return Delivery{
+		To:       to,
+		Template: domain.NotifyTemplate{Content: domain.NotifyContent{ContentType: "text/plain"}},
+		Rendered: Rendered{Subject: "s", Body: "b"},
+	}
+}
+
+// 邮件已被接受之后 QUIT 卡住：只能再等一小会儿就按成功返回。拖到 30 秒的截止时间的话，
+// 调用方（SDK 每次 RPC 也是 30 秒）会先超时，换新键重发就成了重复投递。
+func TestSMTPSendReturnsSoonWhenQuitHangsAfterAcceptance(t *testing.T) {
+	port, got := startFakeSMTP(t, smtpFault{hangOn: "QUIT"})
+	p := plainSMTP(t, port)
+	errc := make(chan error, 1)
+	go func() { errc <- p.Send(context.Background(), textEmail("alice@example.com")) }()
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("Send: %v（邮件已被接受，QUIT 卡住不算失败）", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("QUIT 卡住时 Send 没有在 5 秒内返回")
+	}
+	select {
+	case <-got:
+	default:
+		t.Fatal("假服务器没有收到邮件")
+	}
+}
+
+// 连上服务器之后调用方取消：Send 要尽快返回（Provider 的约定），不能等到 30 秒的截止时间。
+func TestSMTPSendReturnsSoonWhenCancelledAfterConnecting(t *testing.T) {
+	hung := make(chan struct{})
+	port, _ := startFakeSMTP(t, smtpFault{hangOn: "MAIL FROM:", hung: hung})
+	p := plainSMTP(t, port)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() { errc <- p.Send(ctx, textEmail("alice@example.com")) }()
+	select {
+	case <-hung:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send 没有走到 MAIL FROM")
+	}
+
+	cancel()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("取消之后邮件并没有被接受，应报错")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("取消之后 Send 没有在 2 秒内返回")
 	}
 }

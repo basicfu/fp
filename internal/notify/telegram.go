@@ -35,7 +35,10 @@ func (p *telegramProvider) Send(ctx context.Context, d Delivery) error {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	_ = json.Unmarshal(body, &out)
+	if err := json.Unmarshal(body, &out); err != nil {
+		return fmt.Errorf("telegram: HTTP %d, 响应不是合法 JSON", status)
+	}
+	// 没有 ok 字段（{}、null、WAF 拦截页的 JSON）按 false 算，记失败。
 	if status != http.StatusOK || !out.OK {
 		return fmt.Errorf("telegram: HTTP %d %s", status, out.Description)
 	}

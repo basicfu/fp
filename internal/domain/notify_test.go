@@ -115,3 +115,19 @@ func TestMaskAndMergeSecrets(t *testing.T) {
 		t.Errorf("none = %#v，掩码不该被存成真值", none)
 	}
 }
+
+// schema 之外的键一律不输出：某个 secret 字段日后改名或删掉，库里残留的旧键可能就是明文。
+// secret 字段只要非空就遮，不管值是什么类型。
+func TestMaskSecretsEmitsOnlySchemaKeys(t *testing.T) {
+	stored := map[string]any{"host": "h", "password": float64(123456), "legacyPassword": "old-plaintext"}
+	masked := domain.MaskSecrets(testSchema, stored)
+	if _, ok := masked["legacyPassword"]; ok {
+		t.Errorf("schema 之外的键不该输出: %#v", masked)
+	}
+	if masked["password"] != domain.SecretMask {
+		t.Errorf("非字符串的 secret 也要遮成掩码: %#v", masked)
+	}
+	if masked["host"] != "h" || len(masked) != 2 {
+		t.Errorf("masked = %#v, want 只有 host 与 password", masked)
+	}
+}

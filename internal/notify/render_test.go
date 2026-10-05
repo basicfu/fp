@@ -77,6 +77,24 @@ func TestValidateParams(t *testing.T) {
 		!reflect.DeepEqual(de.Detail["unexpected"], []string{"c", "d"}) {
 		t.Fatalf("detail = %v", de.Detail)
 	}
+
+	// 只缺或只多时，另一边在 detail 里是 [] 而不是 null：接入方按数组读它。
+	for name, c := range map[string]struct {
+		params map[string]string
+		want   string
+	}{
+		"只缺": {map[string]string{}, `{"missing":["a","b"],"unexpected":[]}`},
+		"只多": {map[string]string{"a": "1", "b": "2", "c": "3"}, `{"missing":[],"unexpected":["c"]}`},
+	} {
+		err := ValidateParams([]string{"a", "b"}, c.params)
+		if !errors.As(err, &de) {
+			t.Errorf("%s: err = %v", name, err)
+			continue
+		}
+		if got := de.DetailJSON(); got != c.want {
+			t.Errorf("%s: detail = %s, want %s", name, got, c.want)
+		}
+	}
 }
 
 func TestValidateContentAcceptsAndNormalizes(t *testing.T) {

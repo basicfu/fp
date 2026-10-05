@@ -2,8 +2,10 @@ package notify
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"mime"
@@ -17,7 +19,11 @@ import (
 	"github.com/basicfu/fp/internal/domain"
 )
 
-const smtpTimeout = 30 * time.Second
+const (
+	smtpTimeout = 30 * time.Second
+	// 邮件被接受之后只给 QUIT 留这么久：拖到调用方超时，它换个键重发就重复投递了。
+	smtpQuitTimeout = 2 * time.Second
+)
 
 var smtpSpec = TypeSpec{
 	Type:    "smtp",
@@ -73,12 +79,10 @@ func newSMTP(cfg Config) (Provider, error) {
 	return p, nil
 }
 
+// isLoopbackHost 与 net/smtp 的 PlainAuth 认的"本机"保持一致，只有这三个名字：放宽的话，
+// 127.0.0.2、::ffff:127.0.0.1 这类配置保存时通过，第一次发送才报 unencrypted connection。
 func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func (p *smtpProvider) Send(ctx context.Context, d Delivery) error {
@@ -113,6 +117,7 @@ func buildEmail(from *mail.Address, to, subject, contentType, body string, now t
 	b.WriteString("To: " + (&mail.Address{Address: toAddr.Address}).String() + "\r\n")
 	b.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", subject) + "\r\n")
 	b.WriteString("Date: " + now.Format(time.RFC1123Z) + "\r\n")
+	b.WriteString("Message-ID: " + messageID(from.Address) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: " + contentType + "; charset=UTF-8\r\n")
 	b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
@@ -124,6 +129,14 @@ func buildEmail(from *mail.Address, to, subject, contentType, body string, now t
 	}
 	b.WriteString(enc + "\r\n")
 	return toAddr.Address, []byte(b.String()), nil
+}
+
+// messageID 是随机 16 字节加发件人的域名：Gmail 等收件方要求邮件带有效的 Message-ID，
+// 经自建中继直投时没有它会被拒。除了发件人的域名不带任何别的信息。
+func messageID(fromAddress string) string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b) // Go 1.24 起 crypto/rand.Read 不会失败
+	return "<" + hex.EncodeToString(b) + "@" + fromAddress[strings.LastIndex(fromAddress, "@")+1:] + ">"
 }
 
 func (p *smtpProvider) deliver(ctx context.Context, to string, msg []byte) error {
@@ -142,6 +155,9 @@ func (p *smtpProvider) deliver(ctx context.Context, to string, msg []byte) error
 		return fmt.Errorf("连接 SMTP 服务器: %w", err)
 	}
 	defer conn.Close()
+	// 连上之后 net/smtp 不看 ctx，只认连接上的截止时间：ctx 一取消就关掉连接，卡在读写里的命令立刻返回。
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	deadline := time.Now().Add(smtpTimeout)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
@@ -181,7 +197,8 @@ func (p *smtpProvider) deliver(ctx context.Context, to string, msg []byte) error
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("SMTP 提交邮件: %w", err)
 	}
-	// 邮件已被服务器接受，QUIT 失败不算发送失败
+	// 邮件已被服务器接受：之后 QUIT 失败、卡住，或者 ctx 取消关掉了连接，都不改变成功的结果。
+	_ = conn.SetDeadline(time.Now().Add(smtpQuitTimeout))
 	_ = c.Quit()
 	return nil
 }

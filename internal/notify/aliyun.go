@@ -17,13 +17,17 @@ import (
 
 const defaultAliyunEndpoint = "dysmsapi.aliyuncs.com"
 
-// 阿里云 SDK 的超时（毫秒）。**必须显式设置**：SDK 默认不带超时，SendSms 又拿不到 ctx，
+// 阿里云 SDK 的超时。**必须显式设置**：SDK 默认不带超时，SendSms 又拿不到 ctx，
 // 一个吊死的接入点会把调用它的 goroutine 永久挂住，降级到下一家供应商也就无从谈起。
+//
+// 两个值单位不同：SDK 默认的拨号器把 ConnectTimeout 按秒解释（只有走 SOCKS5 代理时才按毫秒，这里不用）；
+// ReadTimeout 按毫秒设成 http.Client.Timeout，覆盖拨号、TLS 与读响应，是整次调用真正的上限。
 const (
-	aliyunConnectTimeoutMS = 5_000
-	aliyunReadTimeoutMS    = 10_000
+	aliyunConnectTimeoutSec = 5
+	aliyunReadTimeoutMS     = 10_000
 )
 
+// PhoneNumbers 是逗号分隔的号码列表：不校验成单个号码，业务方传来的一个"收件人"就能扇出成多条短信。
 var aliyunPhoneRegex = regexp.MustCompile(`^\+?\d{5,20}$`)
 
 var aliyunSpec = TypeSpec{
@@ -64,7 +68,7 @@ func newAliyun(cfg Config) (Provider, error) {
 		AccessKeyId:     tea.String(c.accessKeyID),
 		AccessKeySecret: tea.String(c.accessKeySecret),
 		Endpoint:        tea.String(c.endpoint),
-		ConnectTimeout:  tea.Int(aliyunConnectTimeoutMS),
+		ConnectTimeout:  tea.Int(aliyunConnectTimeoutSec),
 		ReadTimeout:     tea.Int(aliyunReadTimeoutMS),
 	})
 	if err != nil {

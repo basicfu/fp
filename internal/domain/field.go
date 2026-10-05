@@ -101,19 +101,21 @@ func NormalizeConfig(schema []Field, in map[string]any) (map[string]any, *Config
 	return out, nil
 }
 
-// MaskSecrets 返回一份副本，其中 secret 字段的非空值换成 SecretMask。
+// MaskSecrets 返回供控制台展示的副本：只含 schema 里声明的键，secret 字段的任何非空值换成 SecretMask。
+//
+// schema 之外的键一律不输出：某个 secret 字段日后改名或删掉，库里残留的旧键可能就是明文；
+// 控制台把它原样传回来时 NormalizeConfig 又会按"未知的配置项"拒绝，这个实例就再也保存不了。
 func MaskSecrets(schema []Field, config map[string]any) map[string]any {
-	out := make(map[string]any, len(config))
-	for k, v := range config {
-		out[k] = v
-	}
+	out := make(map[string]any, len(schema))
 	for _, f := range schema {
-		if f.Type != FieldTypeSecret {
+		v, ok := config[f.Key]
+		if !ok {
 			continue
 		}
-		if s, ok := out[f.Key].(string); ok && s != "" {
-			out[f.Key] = SecretMask
+		if f.Type == FieldTypeSecret && v != nil && v != "" {
+			v = SecretMask
 		}
+		out[f.Key] = v
 	}
 	return out
 }

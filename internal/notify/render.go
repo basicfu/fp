@@ -77,7 +77,8 @@ func ValidateParams(variables []string, params map[string]string) error {
 	for _, v := range variables {
 		want[v] = true
 	}
-	var missing, unexpected []string
+	// 非 nil：只缺或只多时，另一边在 detail 里要是 [] 而不是 null，接入方按数组读它。
+	missing, unexpected := []string{}, []string{}
 	for _, v := range variables {
 		if _, ok := params[v]; !ok {
 			missing = append(missing, v)

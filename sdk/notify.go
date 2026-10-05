@@ -39,6 +39,7 @@ type sendOptions struct{ idempotencyKey string }
 
 // WithIdempotencyKey 指定幂等键，覆盖 SDK 默认自动生成的那个。
 // 用业务事件的 ID 当键，业务方自己的重试（重跑任务、重放消息）也不会重复发送。
+// 键只需在本应用内唯一，最长 128 字节。
 func WithIdempotencyKey(key string) SendOption {
 	return func(o *sendOptions) { o.idempotencyKey = key }
 }
@@ -48,8 +49,9 @@ func WithIdempotencyKey(key string) SendOption {
 // to 是收件人：短信是手机号，邮件是邮箱；telegram / 企业微信 / 钉钉 / webhook 传空串。
 // params 的键集合必须与模板声明的变量完全一致。
 //
-// 默认每次调用自动生成一个幂等键，并在内部重试时复用它：fp 不可达、超时这类瞬时失败最多重试两次，
-// 服务端据此保证同一条通知不会因为重试而发出两次。
+// 默认每次调用自动生成一个幂等键，并在内部重试时复用它：fp 不可达、超时，以及同键的上一次请求
+// 还在处理（NOTIFY_IN_PROGRESS）时，最多重试两次。服务端凭这个键避免因 SDK 重试而重复发送；
+// 供应商超时但其实已经送达这类情况仍可能重复，详见 docs/notify.md。
 func (n *Notify) Send(ctx context.Context, code, to string, params map[string]string, opts ...SendOption) error {
 	var o sendOptions
 	for _, fn := range opts {

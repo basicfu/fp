@@ -55,8 +55,8 @@ type Client struct {
 	// notifyRPC 是通知服务的 RPC 客户端，供 Notify.Send 用。
 	notifyRPC fpv1.NotifyServiceClient
 
-	// auth / authz / imGateway 在 New 里构造一次，之后不再替换，因此无需
-	// 同步保护。
+	// auth / authz / imGateway / notify 在 New 里构造一次，之后不再替换，
+	// 因此无需同步保护。
 	auth      *Auth
 	authz     *Authz
 	imGateway *IMGateway

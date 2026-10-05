@@ -2,10 +2,13 @@ package httpapi_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/httpapi"
@@ -36,6 +39,13 @@ func (p *recordingProvider) count() int {
 // newNotifyHTTPEnv 装配管理 API，通知服务用两种假的供应商类型（短信与 telegram），返回已登录管理员的 token。
 func newNotifyHTTPEnv(t *testing.T) (http.Handler, string, *recordingProvider) {
 	t.Helper()
+	h, token, rec, _ := newNotifyHTTPEnvWithPool(t)
+	return h, token, rec
+}
+
+// newNotifyHTTPEnvWithPool 同 newNotifyHTTPEnv，另外交出连接池，给需要直接改库来制造状态的用例。
+func newNotifyHTTPEnvWithPool(t *testing.T) (http.Handler, string, *recordingProvider, *pgxpool.Pool) {
+	t.Helper()
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
@@ -64,7 +74,7 @@ func newNotifyHTTPEnv(t *testing.T) (http.Handler, string, *recordingProvider) {
 		t.Fatalf("Login: %v", err)
 	}
 	h := httpapi.NewRouter(httpapi.Deps{Admin: admin, Notify: service.NewNotifyService(pool, rdb, reg)})
-	return h, token, rec
+	return h, token, rec, pool
 }
 
 type idResp struct {
@@ -166,6 +176,36 @@ func TestNotifyProviderLifecycleAndSecretMasking(t *testing.T) {
 	}
 }
 
+// 库里的配置带着 schema 之外的键（比如某个 secret 字段改过名，旧键里还是明文）：读接口不能把它带出来；
+// 控制台把读到的配置改完整份传回来，也不能因为它是"未知的配置项"而存不进去。
+func TestNotifyProviderReadsOmitKeysOutsideSchema(t *testing.T) {
+	h, token, _, pool := newNotifyHTTPEnvWithPool(t)
+	id := createProviderOverHTTP(t, h, token, "fake_sms", "a", "s")
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE notify_provider SET config = config || '{"legacyToken":"LEGACY-PLAINTEXT"}'::jsonb WHERE id = $1`, id); err != nil {
+		t.Fatalf("写入 schema 之外的键: %v", err)
+	}
+
+	for _, path := range []string{"/admin/api/notify/providers/" + id, "/admin/api/notify/providers"} {
+		rec := do(t, h, token, http.MethodGet, path, "")
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "legacyToken") || strings.Contains(rec.Body.String(), "LEGACY-PLAINTEXT") {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	var got struct {
+		Config map[string]any `json:"config"`
+	}
+	decode(t, do(t, h, token, http.MethodGet, "/admin/api/notify/providers/"+id, ""), &got)
+	body, err := json.Marshal(map[string]any{"config": got.Config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, h, token, http.MethodPatch, "/admin/api/notify/providers/"+id, string(body)); rec.Code != http.StatusOK {
+		t.Fatalf("把读到的配置原样存回去: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestNotifyTemplateLifecycle(t *testing.T) {
 	h, token, _ := newNotifyHTTPEnv(t)
 
@@ -183,9 +223,20 @@ func TestNotifyTemplateLifecycle(t *testing.T) {
 	}
 
 	rec := do(t, h, token, http.MethodPatch, "/admin/api/notify/templates/login_sms",
-		`{"content":{"content":"验证码 ${code}","variables":["code"]},"enabled":false}`)
+		`{"content":{"content":"验证码 ${code}","variables":["code"]},"description":"改过的说明","enabled":false}`)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"enabled":false`) {
 		t.Fatalf("PATCH: %d %s", rec.Code, rec.Body.String())
+	}
+	// PATCH 带来的每个字段都要真正落库，不只是启停。
+	var saved struct {
+		Content struct {
+			Content string `json:"content"`
+		} `json:"content"`
+		Description string `json:"description"`
+	}
+	decode(t, do(t, h, token, http.MethodGet, "/admin/api/notify/templates/login_sms", ""), &saved)
+	if saved.Content.Content != "验证码 ${code}" || saved.Description != "改过的说明" {
+		t.Fatalf("PATCH 之后读到的模板 = %+v", saved)
 	}
 	// code / channel / mode 创建后不可改：请求体里带它们就是未知字段。
 	if rec := do(t, h, token, http.MethodPatch, "/admin/api/notify/templates/login_sms", `{"channel":"email"}`); rec.Code != http.StatusBadRequest {

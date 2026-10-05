@@ -623,7 +623,8 @@ func TestLogoutWritesAuditLog(t *testing.T) {
 }
 
 // 应用被停用后，登录、token 校验两条入口必须同时失效。
-// 第一阶段没有停用应用的管理接口，因此这里直接改库来制造该状态。
+// 直接改库而不调管理端的停用接口（ApplicationService.SetStatus）：要钉住的是这两条入口自己会查应用状态；
+// 日后停用接口若顺带吊销会话，"已签发的 token 立刻失效"就分不清是哪一层起的作用。
 func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
 	e := newAuthEnv(t)
 	ctx := context.Background()

@@ -96,13 +96,13 @@ func TestHTTPErrorsNeverContainCredentials(t *testing.T) {
 	}
 }
 
-// 【辨别力】request-construction errors（URL 解析失败等）也不能泄露凭据。
-// token 或 URL 里有控制字符时 url.Parse 或 http.NewRequest 会失败。
+// 【辨别力】构造请求时的错误（URL 解析失败等）同样不能带出凭据：http.NewRequest 的错误里有整条 URL。
+// token 或 URL 里有控制字符时，url.Parse 或 http.NewRequest 会失败。
 func TestConstructionErrorsNeverContainCredentials(t *testing.T) {
 	cases := map[string]Provider{
-		// token pasted with a trailing newline: control char in URL, url.Parse fails
+		// token 粘贴时多带了一个换行：URL 里有控制字符，url.Parse 失败。
 		"telegram": &telegramProvider{baseURL: "https://api.telegram.org", token: "SECRET-TOKEN\n", chatID: "1"},
-		// GET template whose static text contains a newline: assembled URL has a control char
+		// GET 模板的固定文本里有换行：拼出来的 URL 带控制字符。
 		"webhook-get": &webhookProvider{url: "https://example.com/hook?token=SECRET-TOKEN"},
 	}
 	deliveries := map[string]Delivery{
@@ -112,14 +112,15 @@ func TestConstructionErrorsNeverContainCredentials(t *testing.T) {
 	for name, p := range cases {
 		err := p.Send(context.Background(), deliveries[name])
 		if err == nil {
-			t.Errorf("%s: expected failure", name)
+			t.Errorf("%s: 应在构造请求时失败", name)
 			continue
 		}
 		if strings.Contains(err.Error(), "SECRET-TOKEN") {
-			t.Errorf("%s: credential leaked in error: %v", name, err)
+			t.Errorf("%s: 错误里带了凭据: %v", name, err)
 		}
+		// 必须是构造阶段的失败：构造成功的话这条用例会变成一次真实的外网请求，上面的断言也就没在测它想测的东西。
 		if !strings.Contains(err.Error(), "URL 不合法") {
-			t.Logf("%s: err = %q (should contain 'URL 不合法')", name, err.Error())
+			t.Errorf("%s: err = %q, want 构造请求失败（URL 不合法）", name, err.Error())
 		}
 	}
 }
@@ -165,11 +166,37 @@ func TestWecomRejectsNonJSONResponse(t *testing.T) {
 		srv, _ := capturingServer(t, 200, body)
 		p := &wecomProvider{baseURL: srv.URL, key: "SECRET-KEY"}
 		err := p.Send(context.Background(), delivery("x", domain.NotifyContent{}))
-		if err == nil || !strings.Contains(err.Error(), "响应不是合法 JSON") {
-			t.Errorf("body=%q: expected JSON parse error, got: %v", body, err)
+		if err == nil {
+			t.Errorf("body=%q: 应报错", body)
+			continue
+		}
+		if !strings.Contains(err.Error(), "响应不是合法 JSON") {
+			t.Errorf("body=%q: err = %v, want 响应不是合法 JSON", body, err)
 		}
 		if strings.Contains(err.Error(), "SECRET-KEY") {
-			t.Errorf("body=%q: credential leaked in error: %v", body, err)
+			t.Errorf("body=%q: 错误里带了凭据: %v", body, err)
+		}
+	}
+}
+
+// 合法 JSON 却没有结果字段的 200（{}、null、WAF 拦截页的 JSON）不是成功：记成成功的话，
+// 幂等键记下"已完成"，消息就静默丢了。企业微信与钉钉看 errcode，telegram 看 ok。
+func TestIMProvidersRejectResponsesWithoutResultField(t *testing.T) {
+	providers := map[string]struct {
+		mk      func(baseURL string) Provider
+		wantErr string
+	}{
+		"wecom_bot":    {func(u string) Provider { return &wecomProvider{baseURL: u, key: "k"} }, "响应缺少 errcode"},
+		"dingtalk_bot": {func(u string) Provider { return &dingtalkProvider{baseURL: u, accessToken: "t", now: time.Now} }, "响应缺少 errcode"},
+		"telegram":     {func(u string) Provider { return &telegramProvider{baseURL: u, token: "t", chatID: "1"} }, "HTTP 200"},
+	}
+	for name, p := range providers {
+		for _, body := range []string{`{}`, `null`, `{"status":"blocked"}`} {
+			srv, _ := capturingServer(t, 200, body)
+			err := p.mk(srv.URL).Send(context.Background(), delivery("x", domain.NotifyContent{}))
+			if err == nil || !strings.Contains(err.Error(), p.wantErr) {
+				t.Errorf("%s: 回包 %s: err = %v, want 失败（%s）", name, body, err, p.wantErr)
+			}
 		}
 	}
 }
@@ -193,7 +220,11 @@ func TestDingtalkSend(t *testing.T) {
 	if got.rawQuery != wantQuery {
 		t.Fatalf("query = %s\nwant    %s", got.rawQuery, wantQuery)
 	}
-	at := jsonOf(t, got.body)["at"].(map[string]any)
+	m := jsonOf(t, got.body)
+	if text, _ := m["text"].(map[string]any); m["msgtype"] != "text" || text["content"] != "告警" {
+		t.Fatalf("body = %s", got.body)
+	}
+	at := m["at"].(map[string]any)
 	if at["isAtAll"] != true || at["atMobiles"].([]any)[0] != "13800138000" {
 		t.Fatalf("at = %v", at)
 	}
@@ -219,11 +250,33 @@ func TestDingtalkRejectsNonJSONResponse(t *testing.T) {
 		srv, _ := capturingServer(t, 200, body)
 		p := &dingtalkProvider{baseURL: srv.URL, accessToken: "SECRET-TOKEN", now: time.Now}
 		err := p.Send(context.Background(), delivery("x", domain.NotifyContent{}))
-		if err == nil || !strings.Contains(err.Error(), "响应不是合法 JSON") {
-			t.Errorf("body=%q: expected JSON parse error, got: %v", body, err)
+		if err == nil {
+			t.Errorf("body=%q: 应报错", body)
+			continue
+		}
+		if !strings.Contains(err.Error(), "响应不是合法 JSON") {
+			t.Errorf("body=%q: err = %v, want 响应不是合法 JSON", body, err)
 		}
 		if strings.Contains(err.Error(), "SECRET-TOKEN") {
-			t.Errorf("body=%q: credential leaked in error: %v", body, err)
+			t.Errorf("body=%q: 错误里带了凭据: %v", body, err)
+		}
+	}
+}
+
+func TestTelegramRejectsNonJSONResponse(t *testing.T) {
+	for _, body := range []string{"<html>blocked</html>", ""} {
+		srv, _ := capturingServer(t, 200, body)
+		p := &telegramProvider{baseURL: srv.URL, token: "SECRET-TOKEN", chatID: "1"}
+		err := p.Send(context.Background(), delivery("x", domain.NotifyContent{}))
+		if err == nil {
+			t.Errorf("body=%q: 应报错", body)
+			continue
+		}
+		if !strings.Contains(err.Error(), "响应不是合法 JSON") {
+			t.Errorf("body=%q: err = %v, want 响应不是合法 JSON", body, err)
+		}
+		if strings.Contains(err.Error(), "SECRET-TOKEN") {
+			t.Errorf("body=%q: 错误里带了凭据: %v", body, err)
 		}
 	}
 }
@@ -299,7 +352,9 @@ func TestWebhookDoesNotFollowRedirects(t *testing.T) {
 }
 
 func TestWebhookNewValidatesURL(t *testing.T) {
-	for _, bad := range []string{"", "not a url", "ftp://example.com/x", "http://", "/relative"} {
+	// 带 # 的 url：GET 渲染出的 query 会被拼进片段，接收端拿不到参数却回 2xx，发送被记成成功。
+	// 只有 # 没有片段的那种 u.Fragment 也是空串，所以要按字符拒绝。
+	for _, bad := range []string{"", "not a url", "ftp://example.com/x", "http://", "/relative", "https://example.com/hook#frag", "https://example.com/hook#"} {
 		if _, err := webhookSpec.New(Config{"url": bad}); err == nil {
 			t.Errorf("url %q 应被拒绝", bad)
 		}
