@@ -229,3 +229,103 @@ export interface AppPermissions {
   appName: string
   points: { key: string; name: string }[]
 }
+
+// ---------------------------------------------------------------------------
+// 通知中心（与 internal/httpapi/notify.go 的 DTO 一一对应）
+// ---------------------------------------------------------------------------
+
+export type NotifyChannel = 'sms' | 'email' | 'telegram' | 'wecom_bot' | 'dingtalk_bot' | 'webhook'
+
+/** vendor：供应商侧已审核的模板，fp 只存原文供核对；custom：fp 自己渲染。 */
+export type NotifyMode = 'vendor' | 'custom'
+
+/** 供应商类型：代码里写死的实现。channel 为空表示由实例配置里的 channel 决定（log 类型）。 */
+export interface NotifyProviderType {
+  type: string
+  channel: NotifyChannel | ''
+  fields: Field[]
+}
+
+/** 供应商实例。config 里的 secret 字段已被后端脱敏成 ********，写回时原样传回表示保持原值。 */
+export interface NotifyProvider {
+  id: string
+  type: string
+  channel: NotifyChannel | ''
+  description: string
+  enabled: boolean
+  config: Record<string, unknown>
+  createdAt: number
+  updatedAt: number
+  /** 仅列表接口返回。 */
+  templateCount?: number
+}
+
+/** 模板内容，各渠道只用其中一部分字段。 */
+export interface NotifyContent {
+  subject?: string
+  content: string
+  contentType?: string
+  method?: string
+  variables: string[]
+  mentionedList?: string[]
+  mentionedMobileList?: string[]
+  atMobiles?: string[]
+  isAtAll?: boolean
+}
+
+export interface NotifyTemplateRow {
+  code: string
+  channel: NotifyChannel
+  mode: NotifyMode
+  description: string
+  enabled: boolean
+  providerCount: number
+  updatedAt: number
+}
+
+/** 模板与供应商实例的关联。 */
+export interface NotifyLink {
+  providerId: string
+  providerType: string
+  providerDescription: string
+  providerEnabled: boolean
+  /** 该实例在供应商那边审核通过的模板 ID，仅 vendor 模式有值。 */
+  providerTemplateId: string
+  enabled: boolean
+  priority: number
+}
+
+export interface NotifyTemplateDetail {
+  code: string
+  channel: NotifyChannel
+  mode: NotifyMode
+  content: NotifyContent
+  description: string
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+  providers: NotifyLink[]
+}
+
+/** 供应商详情页里"被哪个模板引用"的一行。 */
+export interface NotifyProviderUsage {
+  code: string
+  channel: NotifyChannel
+  templateEnabled: boolean
+  providerTemplateId: string
+  enabled: boolean
+  priority: number
+}
+
+export interface NotifyLog {
+  id: string
+  channel: string
+  target: string
+  code: string
+  provider: string
+  providerId: string
+  appId: string
+  success: boolean
+  error: string
+  createdAt: number
+}
