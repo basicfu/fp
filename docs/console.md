@@ -15,7 +15,8 @@
     ERROR fp 启动失败 err="config: 环境变量 FP_POSTGRES_URL 未设置"
 
 `FP_ENV` 是第三个、可选的环境变量，缺省 `DEV`（大小写不敏感）。它决定两件
-事：一是生产专属校验（目前只有管理端 cookie 带不带 `Secure` 这一项），
+事：一是生产专属校验（目前有两项：管理端 cookie 带不带 `Secure`；通知中心
+仅供开发用的 `log` 供应商类型，`FP_ENV` 不是 `prod` 才能新建），
 二是日志要不要同时落盘——`FP_ENV` 不是 `dev` 时，日志除了打 stdout，还会
 **同时**写一份到 `/logs` 目录，按天滚动成 `2026-06-11.log` 这种文件名，
 默认保留 30 天，超期自动删除；`dev`（缺省值）下只打 stdout，不碰
@@ -108,8 +109,15 @@ Vite 把 `/admin/api` 代理到 `localhost:8080`，浏览器看到的仍是同�
 | `/access-keys/:id` | 访问密钥详情：基本信息、按应用分组的可调用接口、编辑 |
 | `/config` | 当前应用的配置中心：按 DEFAULT / WEB 分区查看与编辑配置项 |
 | `/config/versions` | 当前应用的配置版本历史：逐版 diff、回滚到某一版 |
+| `/notify/templates` | 通知模板列表：新建（选渠道、定 code、写内容）、删除 |
+| `/notify/templates/:code` | 通知模板详情：编辑内容与启停、关联供应商（供应商侧模板 ID、优先级、临时禁用）、测试发送 |
+| `/notify/providers` | 通知供应商列表：新建（选类型，表单随类型变化）、启停；secret 读取时脱敏 |
+| `/notify/providers/:id` | 通知供应商详情：编辑配置，反向查看被哪些模板引用 |
+| `/notify/logs` | 通知发送记录：按模板 code、结果筛选；每次供应商尝试一条，不含变量与内容 |
 | `/system-config` | fp 自身的系统配置：env、监听地址、首次管理员，保存后重启生效 |
 | `/system-config/versions` | 系统配置版本历史：查看某一版内容、回滚到某一版 |
+
+通知的模型与调用方式见 [通知接入文档](notify.md)。
 
 授权相关的三处刻意分开放，因为它们的归属不同：
 
