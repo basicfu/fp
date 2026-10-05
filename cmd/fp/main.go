@@ -19,6 +19,7 @@ import (
 	"github.com/basicfu/fp/internal/grpcapi"
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/logging"
+	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/web"
@@ -155,6 +156,9 @@ func run() error {
 
 	configSvc := service.NewConfigService(pool, configPub)
 
+	// 供应商类型写死在代码里；log 类型只在非 prod 环境可建，本机不用真实凭据就能走通整条通知链路。
+	notifySvc := service.NewNotifyService(pool, rdb, notify.DefaultRegistry(), service.WithNotifyProd(cfg.IsProd()))
+
 	authSvc := service.NewAuthService(service.AuthDeps{
 		Apps:     appSvc,
 		Users:    userSvc,
@@ -179,6 +183,7 @@ func run() error {
 			SystemConfigs: systemConfigs,
 			IMCreds:       imCredSvc,
 			AccessKeys:    accessKeySvc,
+			Notify:        notifySvc,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
 			Console:       web.Dist(),
@@ -213,6 +218,7 @@ func run() error {
 		Configs:    configSvc,
 		ConfigPub:  configPub,
 		AccessKeys: accessKeySvc,
+		Notify:     notifySvc,
 	})
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPC.Addr)
