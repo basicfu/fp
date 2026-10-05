@@ -63,11 +63,22 @@ func runResetPassword(ctx context.Context, out io.Writer) error {
 	return resetPassword(ctx, service.NewAdminService(pool, rdb), out)
 }
 
-func resetPassword(ctx context.Context, svc *service.AdminService, out io.Writer) error {
-	username, password, err := svc.ResetPassword(ctx)
+// passwordResetter 是 resetPassword 对服务层的全部依赖，拆出来让输出格式不连库也能测。
+type passwordResetter interface {
+	ResetPassword(ctx context.Context) (username, password string, disabled int, err error)
+}
+
+func resetPassword(ctx context.Context, svc passwordResetter, out io.Writer) error {
+	username, password, disabled, err := svc.ResetPassword(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(out, "管理员账号已重置，所有管理端会话已作废：\n  用户名：%s\n  密码：%s\n", username, password)
+	if _, err := fmt.Fprintf(out, "管理员账号已重置，所有管理端会话已作废：\n  用户名：%s\n  密码：%s\n", username, password); err != nil {
+		return err
+	}
+	// 放在凭据块之后，不改变用户名、密码两行原有的格式与位置。
+	if disabled > 0 {
+		_, err = fmt.Fprintf(out, "另有 %d 个旧版本遗留的管理员账号已停用。\n", disabled)
+	}
 	return err
 }

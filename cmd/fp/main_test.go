@@ -182,3 +182,39 @@ func TestResetPasswordPrintsCredentialsThatWork(t *testing.T) {
 		t.Fatalf("打印出来的账号密码登录不了: %v", err)
 	}
 }
+
+// fakeResetter 让 resetPassword 的输出不连库也能测。
+type fakeResetter struct {
+	disabled int
+}
+
+func (f fakeResetter) ResetPassword(context.Context) (string, string, int, error) {
+	return "admin", "k7Qd3mXz9RtVw2Pb", f.disabled, nil
+}
+
+// 旧库里还有别的管理员行时，重置会把它们停用（可能含口令是 admin 的账号）：运维得在输出里
+// 看到这件事。提示在凭据块之后，用户名/密码两行的格式不变。
+func TestResetPasswordReportsRetiredLegacyAccounts(t *testing.T) {
+	var out bytes.Buffer
+	if err := resetPassword(context.Background(), fakeResetter{disabled: 2}, &out); err != nil {
+		t.Fatalf("resetPassword: %v", err)
+	}
+	const want = "另有 2 个旧版本遗留的管理员账号已停用。\n"
+	got := out.String()
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("输出应以 %q 结尾，得到 %q", want, got)
+	}
+	if !regexp.MustCompile(`用户名：admin\n\s*密码：k7Qd3mXz9RtVw2Pb\n`).MatchString(got) {
+		t.Fatalf("用户名/密码两行的格式变了: %q", got)
+	}
+}
+
+func TestResetPasswordSaysNothingAboutLegacyAccountsWhenNoneRetired(t *testing.T) {
+	var out bytes.Buffer
+	if err := resetPassword(context.Background(), fakeResetter{disabled: 0}, &out); err != nil {
+		t.Fatalf("resetPassword: %v", err)
+	}
+	if strings.Contains(out.String(), "已停用") {
+		t.Fatalf("没有旧账号被停用时不该有这条提示: %q", out.String())
+	}
+}

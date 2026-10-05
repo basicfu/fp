@@ -39,12 +39,21 @@
 
 **忘记密码**：只有一条路——在服务器上执行 `./fp reset-password`。它把用户名
 恢复成 `admin`、密码重置为随机值并打印出来（只显示这一次），同时作废全部
-管理端会话。容器里二进制叫 `bootstrap`：
+管理端会话。若库里还有旧版本遗留的其他管理员账号，`reset-password` 只保留
+最早创建的那一个，其余停用（并改名腾出 `admin`）。容器里二进制叫 `bootstrap`：
 
     docker exec <容器名> ./bootstrap reset-password
 
 命令读执行它的那个 shell 里的 `FP_POSTGRES_URL` / `FP_REDIS_URL`：`docker exec`
 继承容器自己的，裸机上要先设成服务运行时用的同一组值。
+
+**升级前检查（管理员账号）**：旧版本启动时按"用户名是否冲突"判断要不要建管理员，同一个库里可能留下不止一行，其中可能有口令是 `admin` 的 `admin/admin`。先查一遍：
+
+```sql
+SELECT username, status, created_at FROM admin ORDER BY created_at;
+```
+
+多于一行就是旧版本遗留的；执行一次 `reset-password` 即可收敛（只保留最早的一行，其余停用）。
 
 **没跑过 `build-web.sh` 也能 `go build`**（`web/dist/` 里提交了一个
 `.gitkeep`，embed 指令用的是 `all:` 前缀），只是打开控制台会看到一句

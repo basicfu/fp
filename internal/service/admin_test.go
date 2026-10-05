@@ -136,6 +136,47 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	}
 }
 
+// 先验凭据、后报状态（见 domain.CodeAccountFrozen 的说明）：不知道密码的人，不该借
+// "已停用"这个不同的错误探出用户名存在。
+func TestLoginReportsDisabledOnlyAfterPasswordIsVerified(t *testing.T) {
+	e := newAdminTestEnv(t)
+	ctx := context.Background()
+	e.bootstrap(t, "admin", "secret123456")
+	if _, err := e.pool.Exec(ctx, `UPDATE admin SET status = 'DISABLED'`); err != nil {
+		t.Fatalf("停用管理员: %v", err)
+	}
+
+	_, err := e.svc.Login(ctx, "admin", "wrong")
+	if !errors.Is(err, domain.ErrInvalidCredential) || adminErrCode(err) != domain.CodeAdminCredentialInvalid {
+		t.Fatalf("停用账号 + 错误密码 err = %v (code %q), want ErrInvalidCredential / ADMIN_CREDENTIAL_INVALID", err, adminErrCode(err))
+	}
+	_, err = e.svc.Login(ctx, "admin", "secret123456")
+	if !errors.Is(err, domain.ErrForbidden) || adminErrCode(err) != domain.CodeAdminDisabled {
+		t.Fatalf("停用账号 + 正确密码 err = %v (code %q), want ErrForbidden / ADMIN_DISABLED", err, adminErrCode(err))
+	}
+}
+
+// 用户名不存在时也要跑完一遍 bcrypt，否则几十毫秒的响应时间差会泄露"这个用户名存不存在"。
+//
+// 判定用"下限"而不是"两者之差"：bcrypt cost 10 要三十毫秒以上，短路掉它的路径只剩
+// Redis 与 Postgres 各一次往返（这台机器的局域网库上实测约 10 ms，所以不能照搬
+// TestVerifyPasswordEqualizesTiming 的 5 ms）。阈值取在两者之间，不做上限断言。
+func TestLoginUnknownUsernamePaysBcryptCost(t *testing.T) {
+	svc := newAdminService(t)
+	const minBcrypt = 20 * time.Millisecond
+
+	start := time.Now()
+	_, err := svc.Login(context.Background(), "nobody", "definitely-wrong-password")
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+	if elapsed < minBcrypt {
+		t.Errorf("耗时 %v < %v，说明跳过了 bcrypt，响应时间会泄露用户名是否存在", elapsed, minBcrypt)
+	}
+}
+
 type adminTestEnv struct {
 	svc  *service.AdminService
 	pool *pgxpool.Pool
@@ -178,6 +219,24 @@ func (e adminTestEnv) adminRows(t *testing.T) int {
 		t.Fatalf("统计 admin 行数: %v", err)
 	}
 	return n
+}
+
+// insertAdminRow 直接插一行管理员并返回它的 ID，用来造旧版本留下的多行库：EnsureBootstrap
+// 现在只在表为空时才建，造不出来。createdAt 显式给出，"最早一行"才不取决于插入先后。
+func (e adminTestEnv) insertAdminRow(t *testing.T, username, password, status string, createdAt time.Time) uuid.UUID {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+	var id uuid.UUID
+	err = e.pool.QueryRow(context.Background(), `
+		INSERT INTO admin (username, password_hash, display_name, status, created_at)
+		VALUES ($1, $2, $1, $3, $4) RETURNING id`, username, string(hash), status, createdAt).Scan(&id)
+	if err != nil {
+		t.Fatalf("插入管理员 %q: %v", username, err)
+	}
+	return id
 }
 
 func adminErrCode(err error) string {
@@ -391,10 +450,28 @@ func TestChangeAccountValidatesInput(t *testing.T) {
 		{"登录名为空白", service.ChangeAccountInput{Username: "  ", OldPassword: "secret123456"}},
 		{"登录名超过 64 字符", service.ChangeAccountInput{Username: strings.Repeat("a", 65), OldPassword: "secret123456"}},
 		{"新密码超过 72 字节", service.ChangeAccountInput{Username: "admin", OldPassword: "secret123456", NewPassword: strings.Repeat("a", 73)}},
+		// NUL 会让 PG 报 22021（500）；换行、零宽空格是人打不出来的字符，会让管理员自己登不进去。
+		{"登录名含 NUL", service.ChangeAccountInput{Username: "a\x00b", OldPassword: "secret123456"}},
+		{"登录名含换行", service.ChangeAccountInput{Username: "a\nb", OldPassword: "secret123456"}},
+		{"登录名含零宽空格", service.ChangeAccountInput{Username: "a​b", OldPassword: "secret123456"}},
 	}
 	for _, c := range cases {
 		if _, _, err := e.svc.ChangeAccount(context.Background(), id, c.in); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: err = %v, want ErrInvalidArgument", c.name, err)
+		}
+	}
+}
+
+// 控制字符的校验不能误伤正常的名字：中文、名字内部的空格、组合附加符号都是人能打出来的。
+func TestChangeAccountAcceptsOrdinaryUsernames(t *testing.T) {
+	e := newAdminTestEnv(t)
+	ctx := context.Background()
+	e.bootstrap(t, "admin", "secret123456")
+	_, id := e.loginAs(t, "admin", "secret123456")
+
+	for _, name := range []string{"管理员", "ops team", "é", "a-b_c.d@e"} {
+		if _, got, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: name, OldPassword: "secret123456"}); err != nil || got != name {
+			t.Errorf("ChangeAccount(%q) = (%q, %v)，应当照常通过", name, got, err)
 		}
 	}
 }
@@ -606,6 +683,62 @@ func TestChangeAccountSignsTokenWithItsOwnEpochBump(t *testing.T) {
 	}
 }
 
+// 改账号"先提交、后 INCR"，两步之间若夹进另一次凭据变更 X 的提交与 INCR（C_A < C_X <
+// I_X < I_A），A 用自己那次 INCR 签出的 token 带着最终纪元，会撑过 X：只改登录名时 A 写回
+// 的是原哈希，并发改密的条件 UPDATE 照样命中；重置的 UPDATE 本来就不带条件。INCR 之后重读
+// 哈希，对不上就不能签发。
+//
+// hook 在 A 的 INCR 发出之前模拟 X：提交另一个哈希，再经没挂 hook 的 base 做一次 INCR。
+func TestChangeAccountRefusesTokenWhenCredentialsChangedBeforeItsIncr(t *testing.T) {
+	const oldPassword = "secret123456"
+	ctx := context.Background()
+	pool := testsupport.NewTestDB(t)
+	base := testsupport.NewTestRedis(t)
+	otherHash, err := bcrypt.GenerateFromPassword([]byte("written-by-other-change"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+
+	var fired atomic.Bool
+	hook := &redisCmdHook{
+		before: func(ctx context.Context, cmd redis.Cmder) {
+			if !isEpochCmd(cmd, "incr") || !fired.CompareAndSwap(false, true) {
+				return
+			}
+			if _, err := pool.Exec(ctx, `UPDATE admin SET password_hash = $1`, string(otherHash)); err != nil {
+				t.Errorf("模拟并发改密，写库: %v", err)
+				return
+			}
+			if err := base.Incr(ctx, "fp:admin:epoch").Err(); err != nil {
+				t.Errorf("模拟并发改密，INCR: %v", err)
+			}
+		},
+	}
+	e := adminTestEnv{svc: service.NewAdminService(pool, hookedRedis(t, hook)), pool: pool, rdb: base}
+	e.bootstrap(t, "admin", oldPassword)
+	_, id := e.loginAs(t, "admin", oldPassword)
+	epochBefore := e.epoch(t)
+
+	// 只改登录名：UPDATE 写回的恰是原哈希，条件 UPDATE 拦不住的就是这种。
+	token, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "boss", OldPassword: oldPassword})
+	if !fired.Load() {
+		t.Fatal("hook 没有触发：ChangeAccount 没有 INCR 纪元？")
+	}
+	if err == nil {
+		_, _, aerr := e.svc.Authenticate(ctx, token)
+		t.Fatalf("凭据已被另一次变更换掉，ChangeAccount 仍签发了 token（Authenticate err = %v，nil 即它是有效会话）", aerr)
+	}
+	if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
+		t.Fatalf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
+	}
+	if n := e.tokenKeys(t); n != 1 {
+		t.Errorf("会话数 = %d, want 1（只有登录时签发的那个，不该多出新的）", n)
+	}
+	if got := e.epoch(t); got != epochBefore+2 {
+		t.Errorf("纪元 %d -> %d, want +2（ChangeAccount 自己那次加上模拟的并发变更）", epochBefore, got)
+	}
+}
+
 var generatedPasswordRE = regexp.MustCompile(`^[a-km-zA-HJ-NP-Z2-9]{16}$`)
 
 func TestResetPasswordRestoresAdminWithRandomPassword(t *testing.T) {
@@ -621,12 +754,15 @@ func TestResetPasswordRestoresAdminWithRandomPassword(t *testing.T) {
 		t.Fatalf("停用管理员: %v", err)
 	}
 
-	username, password, err := e.svc.ResetPassword(ctx)
+	username, password, disabled, err := e.svc.ResetPassword(ctx)
 	if err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 	if username != "admin" {
 		t.Fatalf("username = %q, want admin", username)
+	}
+	if disabled != 0 {
+		t.Fatalf("disabled = %d, want 0（只有一行时没有旧账号可停用）", disabled)
 	}
 	if !generatedPasswordRE.MatchString(password) {
 		t.Fatalf("password = %q，应为 16 位且不含 0 O 1 l I", password)
@@ -647,7 +783,7 @@ func TestResetPasswordRestoresAdminWithRandomPassword(t *testing.T) {
 
 func TestResetPasswordCreatesAdminWhenTableEmpty(t *testing.T) {
 	e := newAdminTestEnv(t)
-	_, password, err := e.svc.ResetPassword(context.Background())
+	_, password, _, err := e.svc.ResetPassword(context.Background())
 	if err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
@@ -659,13 +795,89 @@ func TestResetPasswordCreatesAdminWhenTableEmpty(t *testing.T) {
 	}
 }
 
+// 旧版 EnsureBootstrap 是 ON CONFLICT (username) DO NOTHING：引导用户名不存在就补插一行，
+// 老库里因此可能有多行（例如升级后系统配置为空，兜底的 admin/admin 被补插成较晚的一行）。
+// 只改最早一行的话：admin 这个名字被较晚的行占着时 UPDATE 撞唯一约束，唯一的恢复路径失效；
+// 否则其余行（可能正是 admin/admin）在"所有会话已作废"之后照样能登录。
+func TestResetPasswordRetiresLegacyAdminRows(t *testing.T) {
+	cases := []struct {
+		name         string
+		lateName     string
+		lateStatus   string
+		wantDisabled int
+		wantRenamed  bool
+	}{
+		{"较晚的一行占着 admin", "admin", "ACTIVE", 1, true},
+		// 改名与停用互相独立：早已停用的行照样占着名字，不腾出来保留行就改不回 admin。
+		{"占着 admin 的那一行早已停用", "admin", "DISABLED", 0, true},
+		{"较晚的一行是别的名字", "legacy", "ACTIVE", 1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newAdminTestEnv(t)
+			ctx := context.Background()
+			now := time.Now()
+			e.insertAdminRow(t, "root", "root-password", "ACTIVE", now.Add(-48*time.Hour))
+			lateID := e.insertAdminRow(t, c.lateName, "admin", c.lateStatus, now.Add(-24*time.Hour))
+
+			username, password, disabled, err := e.svc.ResetPassword(ctx)
+			if err != nil {
+				t.Fatalf("ResetPassword: %v", err)
+			}
+			if username != "admin" || disabled != c.wantDisabled {
+				t.Fatalf("username = %q, disabled = %d, want admin / %d", username, disabled, c.wantDisabled)
+			}
+			if _, err := e.svc.Login(ctx, "admin", password); err != nil {
+				t.Fatalf("返回的新密码应能以 admin 登录: %v", err)
+			}
+			if _, err := e.svc.Login(ctx, "admin", "admin"); !errors.Is(err, domain.ErrInvalidCredential) {
+				t.Fatalf("旧的 admin/admin 不该再能登录, err = %v", err)
+			}
+
+			if n := e.adminRows(t); n != 2 {
+				t.Fatalf("admin 行数 = %d, want 2（不删数据）", n)
+			}
+			wantName := c.lateName
+			if c.wantRenamed {
+				wantName = "admin#" + lateID.String()
+			}
+			var gotName, gotStatus string
+			if err := e.pool.QueryRow(ctx, `SELECT username, status FROM admin WHERE id = $1`, lateID).Scan(&gotName, &gotStatus); err != nil {
+				t.Fatalf("读较晚的一行: %v", err)
+			}
+			if gotName != wantName || gotStatus != "DISABLED" {
+				t.Fatalf("较晚的一行 = (%q, %q), want (%q, DISABLED)", gotName, gotStatus, wantName)
+			}
+			// 停用的账号即使口令还是众所周知的 admin，也拿不到会话。
+			if _, err := e.svc.Login(ctx, wantName, "admin"); !errors.Is(err, domain.ErrForbidden) || adminErrCode(err) != domain.CodeAdminDisabled {
+				t.Fatalf("停用账号登录 err = %v (code %q), want ErrForbidden / ADMIN_DISABLED", err, adminErrCode(err))
+			}
+
+			// 幂等：可安全重跑，第二次没有新的行要停用。
+			_, again, disabled, err := e.svc.ResetPassword(ctx)
+			if err != nil {
+				t.Fatalf("第二次 ResetPassword: %v", err)
+			}
+			if disabled != 0 {
+				t.Fatalf("第二次 disabled = %d, want 0", disabled)
+			}
+			if n := e.adminRows(t); n != 2 {
+				t.Fatalf("第二次之后 admin 行数 = %d, want 2", n)
+			}
+			if _, err := e.svc.Login(ctx, "admin", again); err != nil {
+				t.Fatalf("第二次重置的密码应能登录: %v", err)
+			}
+		})
+	}
+}
+
 func TestResetPasswordIsRandomEachTime(t *testing.T) {
 	e := newAdminTestEnv(t)
-	_, first, err := e.svc.ResetPassword(context.Background())
+	_, first, _, err := e.svc.ResetPassword(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, second, err := e.svc.ResetPassword(context.Background())
+	_, second, _, err := e.svc.ResetPassword(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -110,17 +111,21 @@ func (s *AdminService) Login(ctx context.Context, username, password string) (st
 		`SELECT id, password_hash, status FROM admin WHERE username = $1`, username).
 		Scan(&id, &hash, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// 与密码错误返回同一错误，避免用户名枚举。
+		// 与密码错误返回同一错误，并且同样跑一遍 bcrypt：直接返回的话，几十毫秒的响应
+		// 时间差就是用户名枚举的预言机（做法同 UserService.VerifyPassword）。
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
 		return "", domain.Failf(domain.ErrInvalidCredential, domain.CodeAdminCredentialInvalid, "用户名或密码不正确")
 	}
 	if err != nil {
 		return "", fmt.Errorf("service: 查询管理员: %w", err)
 	}
-	if status != "ACTIVE" {
-		return "", domain.Failf(domain.ErrForbidden, domain.CodeAdminDisabled, "管理员账号已停用")
-	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
 		return "", domain.Failf(domain.ErrInvalidCredential, domain.CodeAdminCredentialInvalid, "用户名或密码不正确")
+	}
+	// 状态在密码之后判断：先验凭据、后报状态（同 domain.CodeAccountFrozen 的说明）。
+	// 反过来的话，不知道密码的人也能探出"这个用户名存在，且已停用"。
+	if status != "ACTIVE" {
+		return "", domain.Failf(domain.ErrForbidden, domain.CodeAdminDisabled, "管理员账号已停用")
 	}
 	return s.issueToken(ctx, id, username, epoch)
 }
@@ -219,6 +224,12 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"登录名需为 1–%d 个字符", maxAdminUsernameRunes)
 	}
+	// NUL 会让 PG 报 22021 而变成 500；换行、零宽字符这类人打不出来的名字，
+	// 则会让管理员把自己锁在外面：登录页上根本输不进去。
+	if strings.IndexFunc(username, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 {
+		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
+			"登录名不能包含控制字符或不可见字符")
+	}
 	if len(in.NewPassword) > maxPasswordBytes {
 		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodePasswordTooLong,
 			"新密码过长（超过 %d 字节，约 %d 个汉字）", maxPasswordBytes, maxPasswordBytes/3)
@@ -266,6 +277,19 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 	if err != nil {
 		return "", "", err
 	}
+	// 提交与 INCR 之间若夹进另一次凭据变更 X 的提交和 INCR（C_A < C_X < I_X < I_A），上面
+	// 的纪元盖不住 X，签出的 token 会撑过它：只改登录名时写回的是原哈希，并发改密的条件
+	// UPDATE 照样命中；重置的 UPDATE 本来就不带条件。重读发生在本次 INCR 之后：此前提交
+	// 的变更都看得见，哈希对不上就不签发；此后才提交的变更自带更晚的 INCR，token 本来就会
+	// 失效。返回 401 是因为本会话已被自己的 INCR 作废，让前端回登录页。
+	var current string
+	err = s.pool.QueryRow(ctx, `SELECT password_hash FROM admin WHERE id = $1`, id).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && current != newHash) {
+		return "", "", domain.Failf(domain.ErrUnauthorized, domain.CodeAdminSessionInvalid, "管理端登录已过期，请重新登录")
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("service: 复核管理员密码哈希: %w", err)
+	}
 	token, err = s.issueToken(ctx, id, username, epoch)
 	if err != nil {
 		return "", "", err
@@ -273,23 +297,27 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 	return token, username, nil
 }
 
-// ResetPassword 把唯一的管理员恢复成用户名 admin + 随机密码，并作废全部会话。
+// ResetPassword 把管理员账号恢复成用户名 admin + 随机密码，并作废全部会话。
 // 表为空时创建。供 `fp reset-password` 使用：这是唯一的重置路径，不依赖通知渠道。
 //
+// 只保留 created_at 最早的一行。旧版本的首次启动按"用户名冲突"判断管理员是否存在，
+// 老库里可能留着多行（含口令人尽皆知的 admin/admin）：其余行一律停用，占着 admin
+// 这个名字的那一行改名腾位。disabled 是这次新停用的行数，供调用方提示运维。
+//
 // 返回的明文密码只有这一次，库里只存 bcrypt 哈希。
-func (s *AdminService) ResetPassword(ctx context.Context) (username, password string, err error) {
+func (s *AdminService) ResetPassword(ctx context.Context) (username, password string, disabled int, err error) {
 	password, err = randomPassword(generatedPasswordLen)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
-		return "", "", fmt.Errorf("service: 计算管理员密码哈希: %w", err)
+		return "", "", 0, fmt.Errorf("service: 计算管理员密码哈希: %w", err)
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("service: 开启事务: %w", err)
+		return "", "", 0, fmt.Errorf("service: 开启事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -301,22 +329,44 @@ func (s *AdminService) ResetPassword(ctx context.Context) (username, password st
 			INSERT INTO admin (username, password_hash, display_name) VALUES ($1, $2, $1)`,
 			DefaultAdminUsername, string(hash))
 	case err == nil:
-		_, err = tx.Exec(ctx, `
-			UPDATE admin SET username = $2, password_hash = $3, display_name = $2,
-			                 status = 'ACTIVE', updated_at = now()
-			WHERE id = $1`, id, DefaultAdminUsername, string(hash))
+		// 先处理其余行再改保留行：名字被别的行占着时，保留行改名会撞唯一约束。
+		disabled, err = retireOtherAdmins(ctx, tx, id)
+		if err == nil {
+			_, err = tx.Exec(ctx, `
+				UPDATE admin SET username = $2, password_hash = $3, display_name = $2,
+				                 status = 'ACTIVE', updated_at = now()
+				WHERE id = $1`, id, DefaultAdminUsername, string(hash))
+		}
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("service: 重置管理员: %w", err)
+		return "", "", 0, fmt.Errorf("service: 重置管理员: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", "", fmt.Errorf("service: 提交重置: %w", err)
+		return "", "", 0, fmt.Errorf("service: 提交重置: %w", err)
 	}
 	// 先提交、后 INCR，顺序见 bumpEpoch。
 	if _, err := s.bumpEpoch(ctx); err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
-	return DefaultAdminUsername, password, nil
+	return DefaultAdminUsername, password, disabled, nil
+}
+
+// retireOtherAdmins 停用 keep 之外的全部管理员，并把占着默认用户名的那一行改名腾位，
+// 返回新停用的行数。不删数据：admin 表没有外键引用，按 id 拼后缀既保证唯一，也让重跑
+// 无事可做。改名与停用互相独立——早已是 DISABLED 的行照样可能占着名字。
+func retireOtherAdmins(ctx context.Context, tx pgx.Tx, keep uuid.UUID) (int, error) {
+	tag, err := tx.Exec(ctx, `
+		UPDATE admin SET status = 'DISABLED', updated_at = now()
+		WHERE id <> $1 AND status <> 'DISABLED'`, keep)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE admin SET username = username || '#' || id::text
+		WHERE id <> $1 AND username = $2`, keep, DefaultAdminUsername); err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (s *AdminService) currentEpoch(ctx context.Context) (int64, error) {
