@@ -5,12 +5,14 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
@@ -183,6 +185,52 @@ func adminErrCode(err error) string {
 	return ""
 }
 
+// epoch 读管理端会话纪元；键还不存在时为 0（与服务端一致）。
+func (e adminTestEnv) epoch(t *testing.T) int64 {
+	t.Helper()
+	v, err := e.rdb.Get(context.Background(), "fp:admin:epoch").Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("读纪元: %v", err)
+	}
+	return v
+}
+
+// tokenKeys 数 Redis 里现存的管理端会话。
+func (e adminTestEnv) tokenKeys(t *testing.T) int {
+	t.Helper()
+	keys, err := e.rdb.Keys(context.Background(), "fp:admin:tok:*").Result()
+	if err != nil {
+		t.Fatalf("列管理端会话: %v", err)
+	}
+	return len(keys)
+}
+
+// waitUntilBlockedBy 轮询到有语句卡在 pid 持有的锁上。拿锁等待当同步信号，
+// 比 sleep 凑时序可靠：它成立时，被卡住的那条语句之前的步骤必已全部完成。
+func waitUntilBlockedBy(t *testing.T, pool *pgxpool.Pool, pid int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int
+		err := pool.QueryRow(context.Background(), `
+			SELECT count(*) FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid))`, pid).Scan(&n)
+		if err != nil {
+			t.Fatalf("查询锁等待: %v", err)
+		}
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("等待超时：没有语句卡在持锁事务的锁上")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // 登录名可改之后，"用户名冲突"不再能代表"管理员已存在"：改名后重启，
 // admin 这个名字空出来，旧实现会再插入一个已知密码的 admin/admin。
 func TestEnsureBootstrapDoesNotRecreateDefaultAdminAfterRename(t *testing.T) {
@@ -314,6 +362,97 @@ func TestChangeAccountAllowsPipeInUsername(t *testing.T) {
 	}
 	if _, name, err := e.svc.Authenticate(context.Background(), token); err != nil || name != "a|b" {
 		t.Fatalf("name = %q, err = %v, want a|b", name, err)
+	}
+}
+
+// 校验旧密码到写库之间隔着一次 bcrypt，其间另一次改密或重置若已提交，无条件的
+// UPDATE 会用开头读到的旧哈希把它盖回去：重置白做，发起人还拿着刚签发的有效会话。
+//
+// 时序用第二个事务的行锁钉死，不靠 sleep：先锁住管理员行，ChangeAccount 开头的
+// 普通 SELECT 不受影响、读到旧哈希，随后它的 UPDATE 确定地卡在锁上；确认卡住后
+// 在锁内改密并提交。READ COMMITTED 下被唤醒的 UPDATE 会重新求值 WHERE，
+// 条件里带着开头读到的哈希，才会一行都不命中。
+func TestChangeAccountDoesNotOverwriteConcurrentPasswordChange(t *testing.T) {
+	const (
+		oldPassword   = "secret123456"
+		otherPassword = "written-by-other-tx"
+	)
+	cases := []struct {
+		name string
+		in   service.ChangeAccountInput
+	}{
+		{"改登录名与密码", service.ChangeAccountInput{Username: "boss", OldPassword: oldPassword, NewPassword: "from-change-account"}},
+		// 只改登录名时 UPDATE 写回的是开头读到的旧哈希，盖掉的恰是别人刚写的新哈希。
+		{"只改登录名", service.ChangeAccountInput{Username: "boss", OldPassword: oldPassword}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newAdminTestEnv(t)
+			ctx := context.Background()
+			e.bootstrap(t, "admin", oldPassword)
+			_, id := e.loginAs(t, "admin", oldPassword)
+			epochBefore := e.epoch(t)
+			otherHash, err := bcrypt.GenerateFromPassword([]byte(otherPassword), bcrypt.MinCost)
+			if err != nil {
+				t.Fatalf("bcrypt: %v", err)
+			}
+
+			holder, err := e.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("开启持锁事务: %v", err)
+			}
+			var wg sync.WaitGroup
+			defer func() {
+				// 中途失败也要放锁，并等卡住的 UPDATE 走完，免得它的写入落进下一个用例。
+				_ = holder.Rollback(ctx)
+				wg.Wait()
+			}()
+			var holderPID int32
+			if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+				t.Fatalf("取持锁连接的 pid: %v", err)
+			}
+			if _, err := holder.Exec(ctx, `SELECT 1 FROM admin WHERE id = $1 FOR UPDATE`, id); err != nil {
+				t.Fatalf("锁住管理员行: %v", err)
+			}
+
+			var changeErr error
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				defer cancel()
+				_, _, changeErr = e.svc.ChangeAccount(callCtx, id, c.in)
+			}()
+			waitUntilBlockedBy(t, e.pool, holderPID)
+
+			if _, err := holder.Exec(ctx, `UPDATE admin SET password_hash = $2 WHERE id = $1`, id, string(otherHash)); err != nil {
+				t.Fatalf("另一个事务改密: %v", err)
+			}
+			if err := holder.Commit(ctx); err != nil {
+				t.Fatalf("提交另一个事务: %v", err)
+			}
+			wg.Wait()
+
+			if !errors.Is(changeErr, domain.ErrInvalidArgument) || adminErrCode(changeErr) != domain.CodeAdminOldPasswordWrong {
+				t.Errorf("err = %v (code %q), want ErrInvalidArgument / ADMIN_OLD_PASSWORD_WRONG", changeErr, adminErrCode(changeErr))
+			}
+			// 失败的修改既不能作废会话，也不能签发新会话。
+			if got := e.epoch(t); got != epochBefore {
+				t.Errorf("纪元 %d -> %d，失败的修改不该作废会话", epochBefore, got)
+			}
+			if n := e.tokenKeys(t); n != 1 {
+				t.Errorf("会话数 = %d, want 1（只有登录时签发的那个）", n)
+			}
+			// 另一个事务写入的密码与原登录名原样保留。
+			if _, err := e.svc.Login(ctx, "admin", otherPassword); err != nil {
+				t.Errorf("另一个事务写入的密码应原样保留: %v", err)
+			}
+			if c.in.NewPassword != "" {
+				if _, err := e.svc.Login(ctx, "admin", c.in.NewPassword); !errors.Is(err, domain.ErrInvalidCredential) {
+					t.Errorf("ChangeAccount 想设的新密码不该生效, err = %v", err)
+				}
+			}
+		})
 	}
 }
 

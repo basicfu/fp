@@ -92,12 +92,21 @@ func (s *AdminService) EnsureBootstrap(ctx context.Context, username, password s
 
 // Login 校验用户名密码并签发一个管理端会话 token。
 func (s *AdminService) Login(ctx context.Context, username, password string) (string, error) {
+	// 纪元必须在查库之前读，不能挪到校验之后。改账号与重置是"先提交库、再 INCR"：
+	// 这里读到新纪元，说明下面的 SELECT 一定看得见新哈希，旧密码过不了；读到旧纪元，
+	// 签出的 token 在 INCR 落地时失配。若校验完再读，bcrypt 那几十毫秒里完成的改密
+	// 会让旧密码的登录领到新纪元的 token，而 Authenticate 每次访问都会顺延它。
+	epoch, err := s.currentEpoch(ctx)
+	if err != nil {
+		return "", err
+	}
+
 	var (
 		id     uuid.UUID
 		hash   string
 		status string
 	)
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`SELECT id, password_hash, status FROM admin WHERE username = $1`, username).
 		Scan(&id, &hash, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -113,15 +122,13 @@ func (s *AdminService) Login(ctx context.Context, username, password string) (st
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
 		return "", domain.Failf(domain.ErrInvalidCredential, domain.CodeAdminCredentialInvalid, "用户名或密码不正确")
 	}
-	return s.issueToken(ctx, id, username)
+	return s.issueToken(ctx, id, username, epoch)
 }
 
-// issueToken 签发一个带当前纪元的会话 token。
-func (s *AdminService) issueToken(ctx context.Context, id uuid.UUID, username string) (string, error) {
-	epoch, err := s.currentEpoch(ctx)
-	if err != nil {
-		return "", err
-	}
+// issueToken 签发一个带指定纪元的会话 token。纪元由调用方传入、这里不读：
+// 登录要用查库之前读到的值，改账号要用自己那次 INCR 的返回值，
+// 签发时再读一遍就把这两处刻意安排的先后冲掉了。
+func (s *AdminService) issueToken(ctx context.Context, id uuid.UUID, username string, epoch int64) (string, error) {
 	token, err := randomToken()
 	if err != nil {
 		return "", err
@@ -237,19 +244,29 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 		}
 		newHash = string(h)
 	}
-	_, err = s.pool.Exec(ctx, `
+	// 条件里带开头读到的哈希：从校验旧密码到这里隔着一次 bcrypt，其间另一次改密或
+	// 重置若已提交，无条件的 UPDATE 会用旧数据把它盖回去（只改登录名时写回的就是
+	// 旧哈希本身）。bcrypt 每次加盐，哈希相同即"这期间没人动过密码"。
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE admin SET username = $2, password_hash = $3, display_name = $2, updated_at = now()
-		WHERE id = $1`, id, username, newHash)
+		WHERE id = $1 AND password_hash = $4`, id, username, newHash, hash)
 	if isUniqueViolation(err) {
 		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "登录名已被占用")
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("service: 更新管理员: %w", err)
 	}
-	if err := s.bumpEpoch(ctx); err != nil {
+	if tag.RowsAffected() == 0 {
+		// 刚校验过的凭据已被换掉：对现在的账号而言，旧密码不再成立。
+		return "", "", domain.Fail(domain.ErrInvalidArgument, domain.CodeAdminOldPasswordWrong, "旧密码不正确")
+	}
+	// 先提交、后 INCR，顺序见 bumpEpoch。用本次 INCR 的返回值签发，不再读一遍计数器：
+	// 读回来的可能已是别处新一轮 INCR 的结果，会把这个会话错放进新纪元。
+	epoch, err := s.bumpEpoch(ctx)
+	if err != nil {
 		return "", "", err
 	}
-	token, err = s.issueToken(ctx, id, username)
+	token, err = s.issueToken(ctx, id, username, epoch)
 	if err != nil {
 		return "", "", err
 	}
@@ -295,7 +312,8 @@ func (s *AdminService) ResetPassword(ctx context.Context) (username, password st
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", fmt.Errorf("service: 提交重置: %w", err)
 	}
-	if err := s.bumpEpoch(ctx); err != nil {
+	// 先提交、后 INCR，顺序见 bumpEpoch。
+	if _, err := s.bumpEpoch(ctx); err != nil {
 		return "", "", err
 	}
 	return DefaultAdminUsername, password, nil
@@ -312,11 +330,15 @@ func (s *AdminService) currentEpoch(ctx context.Context) (int64, error) {
 	return v, nil
 }
 
-func (s *AdminService) bumpEpoch(ctx context.Context) error {
-	if err := s.rdb.Incr(ctx, adminEpochKey).Err(); err != nil {
-		return fmt.Errorf("service: 作废管理端会话: %w", err)
+// bumpEpoch 递增纪元以作废全部管理端会话，返回递增后的值。必须在数据库写入提交
+// 之后调用：INCR 若先于提交，读到新纪元的登录仍可能读到旧哈希（READ COMMITTED），
+// Login "先读纪元再查库"的栅栏就破了。
+func (s *AdminService) bumpEpoch(ctx context.Context) (int64, error) {
+	v, err := s.rdb.Incr(ctx, adminEpochKey).Result()
+	if err != nil {
+		return 0, fmt.Errorf("service: 作废管理端会话: %w", err)
 	}
-	return nil
+	return v, nil
 }
 
 // randomToken 生成 32 字节的密码学随机 token，base64url 编码后为 43 字符。
