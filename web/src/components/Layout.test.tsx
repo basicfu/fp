@@ -32,7 +32,7 @@ function renderLayout(initialEntries: string[]) {
   )
 }
 
-test('渲染六个导航项，当前用户名、面包屑和页面内容都显示', async () => {
+test('渲染全部导航项，当前用户名、面包屑和页面内容都显示', async () => {
   renderLayout(['/applications'])
   // shadcn 的 BreadcrumbPage 本身也带 role="link"（aria-disabled，标记当前页），
   // /applications 这种单段路径下面包屑文案和侧边栏导航项现在都是"应用列表"，
@@ -42,6 +42,7 @@ test('渲染六个导航项，当前用户名、面包屑和页面内容都显�
   const navMenu = document.querySelector('[data-sidebar="content"] [data-sidebar="menu"]') as HTMLElement
   expect(within(navMenu).getByRole('link', { name: /应用列表/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /用户管理/ })).toBeTruthy()
+  expect(within(navMenu).getByRole('link', { name: /访问密钥/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /角色管理/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /权限管理/ })).toBeTruthy()
   expect(within(navMenu).getByRole('link', { name: /配置中心/ })).toBeTruthy()

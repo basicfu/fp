@@ -1,5 +1,5 @@
 import { test, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import NotifyProviders from './NotifyProviders'
 import { apiError, stubApi } from '@/lib/testApi'
@@ -84,15 +84,28 @@ test('新建：选类型后按该类型的字段渲染表单，提交带上备�
 })
 
 // 供应商仍被模板引用时后端返回 409，页面要把原因告诉人，而不是静默没反应。
-test('删除被引用的供应商：显示后端的原因', async () => {
-  stubApi({
+test('删除被引用的供应商：确认后才发 DELETE（恰好一次），并显示后端的原因', async () => {
+  const calls = stubApi({
     'GET /notify/providers': [aliyun],
     'GET /notify/provider-types': types,
     'DELETE /notify/providers/p1': apiError(409, 'NOTIFY_PROVIDER_IN_USE', '供应商仍被模板引用，请先在模板里解除关联'),
   })
   renderPage()
   const row = (await screen.findByRole('link', { name: '阿里云-主账号' })).closest('tr')!
-  fireEvent.click(row.querySelector('button')!)
-  fireEvent.click(await screen.findByRole('button', { name: '删除', hidden: false }))
+  fireEvent.click(within(row).getByRole('button', { name: '删除' }))
+  // 行内的「删除」只是打开确认弹窗，点弹窗里的确认之前不能有任何 DELETE。
+  expect(await screen.findByText(/仍被模板引用的供应商无法删除/)).toBeTruthy()
+  expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: '删除' }))
+
   await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('供应商仍被模板引用，请先在模板里解除关联'))
+  expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual(['/notify/providers/p1'])
+})
+
+// 类型列表拉不下来时「新建供应商」只能禁用，但要说清为什么，而不是一个无解释的灰按钮。
+test('类型列表加载失败：显示原因，「新建供应商」保持禁用', async () => {
+  stubApi({ 'GET /notify/providers': [aliyun], 'GET /notify/provider-types': apiError(500, 'INTERNAL', '服务器内部错误') })
+  renderPage()
+  expect(await screen.findByText('服务器内部错误')).toBeTruthy()
+  expect((screen.getByRole('button', { name: '新建供应商' }) as HTMLButtonElement).disabled).toBe(true)
 })

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
@@ -20,28 +20,43 @@ function LinkRow({ code, vendor, link, onChanged }: { code: string; vendor: bool
   const [providerTemplateId, setProviderTemplateId] = useState(link.providerTemplateId)
   const [priority, setPriority] = useState(String(link.priority))
   const [enabled, setEnabled] = useState(link.enabled)
+  // 请求在途时整行不能再操作：双击「移除」的第二个 DELETE 会 404，用户先看到成功又看到失败。
+  const [busy, setBusy] = useState(false)
+  // 服务端已确认的启用状态。link 是重新拉取之后才更新的 prop，一次保存成功到重新拉取返回之间它还是旧值，
+  // 回滚用它的话会把开关退到一个服务端已经不是的状态。
+  const confirmed = useRef(link.enabled)
+  useEffect(() => {
+    confirmed.current = link.enabled
+  }, [link.enabled])
   const path = `/notify/templates/${encodeURIComponent(code)}/providers/${link.providerId}`
   const name = link.providerDescription || link.providerType
 
   async function save(nextEnabled = enabled) {
+    setBusy(true)
     try {
       await api.put(path, { providerTemplateId, enabled: nextEnabled, priority: Number(priority) || 0 })
+      confirmed.current = nextEnabled
       toast.success('已保存')
       onChanged()
     } catch (e) {
-      // 开关是先翻后存的；失败时服务端仍是 link.enabled，不退回去界面就和实际生效的状态对不上。
-      setEnabled(link.enabled)
+      // 开关是先翻后存的；失败时服务端仍是上一次确认的值，不退回去界面就和实际生效的状态对不上。
+      setEnabled(confirmed.current)
       toast.error(errorMessage(e))
+    } finally {
+      setBusy(false)
     }
   }
 
   async function remove() {
+    setBusy(true)
     try {
       await api.del(path)
       toast.success('已解除关联')
       onChanged()
     } catch (e) {
       toast.error(errorMessage(e))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -66,6 +81,7 @@ function LinkRow({ code, vendor, link, onChanged }: { code: string; vendor: bool
       <TableCell>
         <Input
           aria-label={`${name} 的优先级`}
+          title="数字越大越先试，默认 0"
           type="number"
           className="w-24"
           value={priority}
@@ -76,6 +92,7 @@ function LinkRow({ code, vendor, link, onChanged }: { code: string; vendor: bool
         <Switch
           aria-label={`启用 ${name}`}
           checked={enabled}
+          disabled={busy}
           onCheckedChange={(v) => {
             setEnabled(v)
             void save(v)
@@ -83,10 +100,10 @@ function LinkRow({ code, vendor, link, onChanged }: { code: string; vendor: bool
         />
       </TableCell>
       <TableCell className="space-x-2">
-        <Button variant="outline" size="sm" onClick={() => void save()}>
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => void save()}>
           保存
         </Button>
-        <Button variant="outline" size="sm" onClick={() => void remove()}>
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => void remove()}>
           移除
         </Button>
       </TableCell>
@@ -101,6 +118,14 @@ function AddLink({ code, detail, onAdded }: { code: string; detail: Detail; onAd
   const vendor = detail.mode === 'vendor'
   const linked = new Set(detail.providers.map((l) => l.providerId))
   const candidates = (providers.data ?? []).filter((p) => p.channel === detail.channel && !linked.has(p.id))
+  // 加载中、加载失败、确实没有可选的是三件事：失败时说"没有可关联"会误导人去重复新建。
+  const emptyLabel = providers.error
+    ? `加载供应商失败：${providers.error}`
+    : !providers.data
+      ? '加载中…'
+      : candidates.length === 0
+        ? '没有可关联的同渠道供应商'
+        : '请选择'
 
   async function add() {
     try {
@@ -123,7 +148,7 @@ function AddLink({ code, detail, onAdded }: { code: string; detail: Detail; onAd
       <div className="space-y-2">
         <Label htmlFor="add-provider">添加供应商</Label>
         <NativeSelect id="add-provider" className="w-64" value={providerId} onChange={(e) => setProviderId(e.target.value)}>
-          <option value="">{candidates.length === 0 ? '没有可关联的同渠道供应商' : '请选择'}</option>
+          <option value="">{emptyLabel}</option>
           {candidates.map((p) => (
             <option key={p.id} value={p.id}>
               {p.description || p.type}（{p.type}）
@@ -170,7 +195,7 @@ function TestSendDialog({ detail, open, onOpenChange }: { detail: Detail; open: 
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>测试发送</DialogTitle>
         </DialogHeader>
@@ -202,45 +227,71 @@ function TestSendDialog({ detail, open, onOpenChange }: { detail: Detail; open: 
   )
 }
 
+interface Form {
+  content: NotifyContent
+  description: string
+  enabled: boolean
+}
+
 export default function NotifyTemplateDetail() {
   const { code = '' } = useParams()
   const detail = useResource(() => api.get<Detail>(`/notify/templates/${encodeURIComponent(code)}`), [code])
-  const [draft, setDraft] = useState<{ content: NotifyContent; description: string; enabled: boolean } | null>(null)
+  // draft 是还没保存的编辑，只在保存成功时清掉。saved 是刚保存成功的内容：重新拉取返回之前
+  // （updatedAt 还是保存前的）由它顶替服务端值显示，否则表单会先闪回保存前的旧内容。
+  // 草稿不能绑在 updatedAt 上：重新拉取会带来新的 updatedAt，保存成功后的新编辑会因此被当成过期而丢掉。
+  const [draft, setDraft] = useState<Form | null>(null)
+  const [saved, setSaved] = useState<{ base: number; v: Form } | null>(null)
+  const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
-  if (detail.error) return <p className="text-sm text-destructive">{detail.error}</p>
-  if (!detail.data) return <p className="text-sm text-muted-foreground">加载中…</p>
+  // 整页错误只在还没有数据时出现；有数据时重新拉取失败，错误显示在页内，页面照常可用。
+  if (!detail.data) {
+    return detail.error ? (
+      <p className="text-sm text-destructive">{detail.error}</p>
+    ) : (
+      <p className="text-sm text-muted-foreground">加载中…</p>
+    )
+  }
 
   const d = detail.data
-  const cur = draft ?? { content: d.content, description: d.description, enabled: d.enabled }
+  const cur =
+    draft ?? (saved?.base === d.updatedAt ? saved.v : { content: d.content, description: d.description, enabled: d.enabled })
   const vendor = d.mode === 'vendor'
   const singleProvider = !needsRecipient(d.channel)
 
   async function save() {
+    if (!draft) return
+    const sent = draft
+    setSaving(true)
     try {
       await api.patch(`/notify/templates/${encodeURIComponent(code)}`, {
-        content: cur.content,
-        description: cur.description,
-        enabled: cur.enabled,
+        content: sent.content,
+        description: sent.description,
+        enabled: sent.enabled,
       })
       toast.success('已保存')
-      setDraft(null)
+      setSaved({ base: d.updatedAt, v: sent })
+      // 请求在途时又改过的话，那次新编辑还没存，要留着。
+      setDraft((x) => (x === sent ? null : x))
       detail.reload()
     } catch (e) {
       toast.error(errorMessage(e))
+    } finally {
+      setSaving(false)
     }
   }
 
   return (
     <div className="max-w-3xl space-y-8">
-      <div className="flex items-center gap-3">
-        <h1 className="font-mono text-xl font-semibold">{d.code}</h1>
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="font-mono text-xl font-semibold break-all">{d.code}</h1>
         <Badge variant="secondary">{notifyChannelLabels[d.channel]}</Badge>
         <Badge variant="secondary">{notifyModeLabels[d.mode]}</Badge>
         <Button className="ml-auto" variant="outline" onClick={() => setTesting(true)}>
           测试发送
         </Button>
       </div>
+      {detail.error && <p className="text-sm text-destructive">{detail.error}</p>}
 
       <section className="space-y-4">
         <h2 className="text-base font-medium">模板内容</h2>
@@ -259,7 +310,7 @@ export default function NotifyTemplateDetail() {
           value={cur.content}
           onChange={(content) => setDraft({ ...cur, content })}
         />
-        <Button onClick={() => void save()} disabled={draft === null}>
+        <Button onClick={() => void save()} disabled={draft === null || saving}>
           保存模板
         </Button>
       </section>
@@ -269,7 +320,7 @@ export default function NotifyTemplateDetail() {
         <p className="text-sm text-muted-foreground">
           {singleProvider
             ? '这个渠道的模板只能关联一个供应商实例，不做降级。'
-            : '发送时按优先级从高到低尝试，同优先级的随机排序；失败自动降级到下一个。禁用的供应商不参与。'}
+            : '发送时按优先级从高到低尝试（数字越大越先试，默认 0），同优先级的随机排序；失败自动降级到下一个。禁用的供应商不参与。'}
         </p>
         {d.providers.length === 0 ? (
           <p className="text-sm text-destructive">还没有关联供应商，业务方调用会失败。</p>

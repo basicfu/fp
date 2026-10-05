@@ -46,7 +46,7 @@ function CreateProviderDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>新建供应商</DialogTitle>
         </DialogHeader>
@@ -114,6 +114,7 @@ export default function NotifyProviders() {
         <p className="text-sm text-muted-foreground">一份凭据就是一个供应商实例；同一类型可以建多个（比如两个阿里云账号）。</p>
       </div>
 
+      {types.error && <p className="text-sm text-destructive">{types.error}</p>}
       {providers.loading && !providers.data && <p className="text-sm text-muted-foreground">加载中…</p>}
       {providers.error && <p className="text-sm text-destructive">{providers.error}</p>}
       {providers.data && (

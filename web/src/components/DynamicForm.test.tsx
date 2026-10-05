@@ -107,6 +107,48 @@ test('secret 字段渲染成密码输入框', () => {
   expect(screen.getByLabelText('密钥').getAttribute('type')).toBe('password')
 })
 
+const secretField: Field[] = [{ key: 'sk', label: '密钥', type: 'secret', required: false }]
+
+// 【辨别力】secret 回显的是掩码，后端只认"完全等于掩码"的值才保持原值。点进框直接粘贴会得到
+// `********新值`——一个坏凭据被静默存库，直到下次发送失败才暴露。聚焦即全选，第一下输入或粘贴就整段替换掩码。
+test('secret 字段聚焦时全选已有的掩码', () => {
+  render(<DynamicForm fields={secretField} values={{ sk: '********' }} onSubmit={vi.fn()} />)
+  const input = screen.getByLabelText('密钥') as HTMLInputElement
+  fireEvent.focus(input)
+  expect(input.selectionStart).toBe(0)
+  expect(input.selectionEnd).toBe(8)
+})
+
+// 通知中心的 aliyun 表单里文本框 accessKeyId 后面紧跟密码框 accessKeySecret，形状像登录框；
+// 浏览器的密码管理器可能把控制台管理员口令填进去。
+test('secret 字段声明 new-password，不让密码管理器自动填充', () => {
+  render(<DynamicForm fields={secretField} values={{}} onSubmit={vi.fn()} />)
+  expect(screen.getByLabelText('密钥').getAttribute('autocomplete')).toBe('new-password')
+})
+
+test('值是掩码时提示"已设置"，开始输入新值后提示消失', () => {
+  render(<DynamicForm fields={secretField} values={{ sk: '********' }} onSubmit={vi.fn()} />)
+  expect(screen.getByText(/不改动即保持原值/)).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('密钥'), { target: { value: 'new-key' } })
+  expect(screen.queryByText(/不改动即保持原值/)).toBeNull()
+})
+
+test('secret 字段没设置过时没有"已设置"提示', () => {
+  render(<DynamicForm fields={secretField} values={{}} onSubmit={vi.fn()} />)
+  expect(screen.queryByText(/不改动即保持原值/)).toBeNull()
+})
+
+// 提示与全选按字段类型走，不能是"值长得像掩码就提示"：普通文本字段恰好填了八个星号，不该被当成已设置的凭据。
+test('普通文本字段的值恰好是八个星号时，不提示、不全选、不加 autocomplete', () => {
+  const fields: Field[] = [{ key: 'note', label: '备注', type: 'string', required: false }]
+  render(<DynamicForm fields={fields} values={{ note: '********' }} onSubmit={vi.fn()} />)
+  const input = screen.getByLabelText('备注') as HTMLInputElement
+  fireEvent.focus(input)
+  expect(screen.queryByText(/不改动即保持原值/)).toBeNull()
+  expect(input.selectionStart).toBe(8)
+  expect(input.getAttribute('autocomplete')).toBeNull()
+})
+
 // 载荷规则：非必填的空字符串省略，让 connector 用自己代码里的默认值。
 test('非必填的空字符串不进入提交载荷', async () => {
   const onSubmit = vi.fn()

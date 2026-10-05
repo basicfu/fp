@@ -24,10 +24,16 @@ test('parseLines 去掉空行与首尾空白', () => {
 
 test('渠道规则与后端一致', () => {
   expect(allowedModes.sms).toEqual(['vendor'])
-  expect(allowedModes.email).toEqual(['vendor', 'custom'])
+  expect(allowedModes.email).toEqual(['custom', 'vendor'])
   expect(allowedModes.webhook).toEqual(['custom'])
   expect(needsRecipient('sms')).toBe(true)
   expect(needsRecipient('email')).toBe(true)
   expect(needsRecipient('telegram')).toBe(false)
   expect(needsRecipient('webhook')).toBe(false)
+})
+
+// 新建模板默认取第一个允许的模式。内置的邮件类型只有 smtp，它只能发自定义模板：
+// 默认成供应商模板的话，按默认值建出来的邮件模板每次发送都失败。
+test('邮件的默认模板模式是自定义内容', () => {
+  expect(allowedModes.email[0]).toBe('custom')
 })

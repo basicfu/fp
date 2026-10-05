@@ -74,7 +74,23 @@ test('切换渠道会重置模式与内容表单', async () => {
   fireEvent.change(screen.getByLabelText('渠道'), { target: { value: 'email' } })
   const emailMode = screen.getByLabelText('模板模式') as HTMLSelectElement
   expect(emailMode.disabled).toBe(false)
-  expect(Array.from(emailMode.options).map((o) => o.value)).toEqual(['vendor', 'custom'])
+  expect(Array.from(emailMode.options).map((o) => o.value)).toEqual(['custom', 'vendor'])
+  expect(emailMode.value).toBe('custom')
+})
+
+// 内置的邮件类型只有 smtp，它只能发自定义模板；默认成供应商模板，按默认值建出的模板关联 smtp 后每次发送都失败。
+test('新建邮件模板：不动模式，提交的是自定义内容', async () => {
+  const calls = stubApi({ 'GET /notify/templates': [], 'POST /notify/templates': { code: 'welcome' } })
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: '新建模板' }))
+  fireEvent.change(await screen.findByLabelText('渠道'), { target: { value: 'email' } })
+  fireEvent.change(screen.getByLabelText('code'), { target: { value: 'welcome' } })
+  fireEvent.change(screen.getByLabelText('邮件主题'), { target: { value: '欢迎 {name}' } })
+  fireEvent.change(screen.getByLabelText('正文模板'), { target: { value: '你好 {name}' } })
+  fireEvent.click(screen.getByRole('button', { name: '创建' }))
+
+  await waitFor(() => expect(screen.getByText('详情页')).toBeTruthy())
+  expect(calls.find((c) => c.method === 'POST')!.body).toMatchObject({ code: 'welcome', channel: 'email', mode: 'custom' })
 })
 
 // DELETE 之后再拉取列表，login_sms 那一行就没了。

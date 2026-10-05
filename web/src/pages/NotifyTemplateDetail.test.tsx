@@ -1,5 +1,5 @@
 import { test, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import NotifyTemplateDetail from './NotifyTemplateDetail'
 import { apiError, stubApi, type RecordedCall } from '@/lib/testApi'
@@ -41,6 +41,56 @@ const routes = (detail: Detail = smsDetail) => ({
   'GET /notify/templates/login_sms': detail,
   'GET /notify/providers': providers,
 })
+
+const saveButton = () => screen.getByRole('button', { name: '保存模板' }) as HTMLButtonElement
+const isDetailGet = (method: string, url: string) => method === 'GET' && url.endsWith('/notify/templates/login_sms')
+const detailGets = (calls: RecordedCall[]) => calls.filter((c) => isDetailGet(c.method, c.url))
+const patches = (calls: RecordedCall[]) => calls.filter((c) => c.method === 'PATCH')
+
+/**
+ * holdResponses 在已经 stubApi 的 fetch 外面再包一层：hold() 之后发出的、满足 match 的请求，
+ * 响应一直挂着，直到 release()。stubApi 的路由只能立即应答，而"请求在途时界面是什么样"正是要钉住的行为。
+ */
+function holdResponses(match: (method: string, url: string) => boolean) {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  let holding = false
+  const respond = globalThis.fetch
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    const res = respond(url, init)
+    return holding && match(init?.method ?? 'GET', url) ? gate.then(() => res) : res
+  })
+  return {
+    hold: () => {
+      holding = true
+    },
+    release,
+  }
+}
+
+/**
+ * statefulServer 是会记住 PATCH 的假服务端：保存之后再 GET，拿到的是保存后的内容，updatedAt 递增。
+ * 它还模拟了真实服务端会做的两件事：规整备注（去首尾空白）；别处的变化随重新拉取一起到来（第一个供应商被改了名）——
+ * 后者让测试在表单显示的是用户自己编辑的时候，也能确认"重新拉取已经落地"。
+ */
+function statefulServer() {
+  let cur: Detail = smsDetail
+  return stubApi({
+    'GET /notify/providers': providers,
+    'GET /notify/templates/login_sms': () => cur,
+    'PATCH /notify/templates/login_sms': (c: RecordedCall) => {
+      const b = c.body as { content: NotifyContent; description: string; enabled: boolean }
+      cur = {
+        ...cur,
+        ...b,
+        description: b.description.trim(),
+        updatedAt: cur.updatedAt + 1,
+        providers: [{ ...cur.providers[0], providerDescription: '阿里云-主账号（已改名）' }, cur.providers[1]],
+      }
+      return cur
+    },
+  })
+}
 
 test('显示关联的供应商：各自的供应商侧模板 ID、优先级与启停', async () => {
   stubApi(routes())
@@ -292,4 +342,226 @@ test('telegram 模板：已关联一个供应商后隐藏添加入口，测试�
   await screen.findByLabelText('id')
   expect(screen.queryByLabelText('手机号')).toBeNull()
   expect(screen.queryByLabelText('邮箱')).toBeNull()
+})
+
+// 代码里是数字越大越先试、默认 0；按"1 = 首选"的直觉去配，主备会颠倒。
+test('说明优先级的方向：数字越大越先试，默认 0', async () => {
+  stubApi(routes())
+  renderPage()
+  expect(await screen.findByText(/数字越大越先试，默认 0/)).toBeTruthy()
+  expect(screen.getByLabelText('阿里云-主账号 的优先级').getAttribute('title')).toBe('数字越大越先试，默认 0')
+})
+
+// 供应商列表有三种状态，选项文案要分得清：失败时说"没有可关联"是误导，人会去建一个已经存在的供应商。
+test('添加供应商：供应商列表加载失败时，选项里写明原因，不说"没有可关联"', async () => {
+  stubApi({ 'GET /notify/templates/login_sms': smsDetail, 'GET /notify/providers': apiError(500, 'INTERNAL', '服务器内部错误') })
+  renderPage()
+  const select = (await screen.findByLabelText('添加供应商')) as HTMLSelectElement
+  await waitFor(() => expect(select.options[0].text).toContain('服务器内部错误'))
+  expect(screen.queryByText('没有可关联的同渠道供应商')).toBeNull()
+})
+
+test('添加供应商：列表加载中显示"加载中…"，加载完才轮到"请选择"', async () => {
+  stubApi(routes())
+  const gate = holdResponses((method, url) => method === 'GET' && url.endsWith('/notify/providers'))
+  gate.hold()
+  renderPage()
+  const select = (await screen.findByLabelText('添加供应商')) as HTMLSelectElement
+  expect(select.options[0].text).toBe('加载中…')
+  gate.release()
+  await waitFor(() => expect(select.options[0].text).toBe('请选择'))
+})
+
+test('添加供应商：同渠道的供应商都已关联时，才说"没有可关联的同渠道供应商"', async () => {
+  stubApi({ ...routes(), 'GET /notify/providers': providers.filter((p) => p.id !== 'p3') })
+  renderPage()
+  const select = (await screen.findByLabelText('添加供应商')) as HTMLSelectElement
+  await waitFor(() => expect(select.options[0].text).toBe('没有可关联的同渠道供应商'))
+})
+
+// 保存成功后，重新拉取的请求发出时那次渲染已经提交；它还挂着，表单只能显示刚保存的内容，而不是闪回保存前的旧内容。
+test('保存成功后、重新拉取返回之前，表单显示刚保存的内容，不闪回旧内容', async () => {
+  const calls = statefulServer()
+  const gate = holdResponses(isDetailGet)
+  renderPage()
+  fireEvent.change(await screen.findByLabelText(/供应商模板原文/), { target: { value: '验证码 ${code}，5 分钟内有效' } })
+  fireEvent.change(screen.getByLabelText('备注'), { target: { value: '新备注  ' } })
+  gate.hold()
+  fireEvent.click(saveButton())
+  await waitFor(() => expect(detailGets(calls)).toHaveLength(2))
+  expect((screen.getByLabelText(/供应商模板原文/) as HTMLTextAreaElement).value).toBe('验证码 ${code}，5 分钟内有效')
+  expect((screen.getByLabelText('备注') as HTMLInputElement).value).toBe('新备注  ')
+  expect(saveButton().disabled).toBe(true)
+
+  gate.release()
+  // 返回之后以服务端为准（它去掉了备注的首尾空白）。
+  await waitFor(() => expect((screen.getByLabelText('备注') as HTMLInputElement).value).toBe('新备注'))
+  expect((screen.getByLabelText(/供应商模板原文/) as HTMLTextAreaElement).value).toBe('验证码 ${code}，5 分钟内有效')
+})
+
+// 保存成功之后的任何新编辑都不能被丢：重新拉取返回时 updatedAt 变了，不能因此把草稿当成过期的。
+test('保存成功后、重新拉取返回之前的新编辑不会被丢掉', async () => {
+  const calls = statefulServer()
+  const gate = holdResponses(isDetailGet)
+  renderPage()
+  fireEvent.change(await screen.findByLabelText('备注'), { target: { value: 'A' } })
+  gate.hold()
+  fireEvent.click(saveButton())
+  await waitFor(() => expect(detailGets(calls)).toHaveLength(2))
+  fireEvent.change(screen.getByLabelText('备注'), { target: { value: 'B' } })
+  expect(saveButton().disabled).toBe(false)
+
+  gate.release()
+  await screen.findByText('阿里云-主账号（已改名）') // 重新拉取已经落地
+  // 再让 React 把落地之后的副作用跑完：重置草稿的 bug 往往晚一拍才生效，落地那一刻看一眼发现不了。
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+  expect((screen.getByLabelText('备注') as HTMLInputElement).value).toBe('B')
+  expect(saveButton().disabled).toBe(false)
+
+  fireEvent.click(saveButton())
+  await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(2))
+  expect(patches(calls).map((c) => (c.body as { description: string }).description)).toEqual(['A', 'B'])
+})
+
+test('保存请求在途时又改了内容：成功后这次新编辑还在，按钮仍可点', async () => {
+  const calls = statefulServer()
+  const gate = holdResponses((method) => method === 'PATCH')
+  renderPage()
+  fireEvent.change(await screen.findByLabelText('备注'), { target: { value: 'A' } })
+  gate.hold()
+  fireEvent.click(saveButton())
+  await waitFor(() => expect(patches(calls)).toHaveLength(1)) // 请求在途
+  fireEvent.change(screen.getByLabelText('备注'), { target: { value: 'B' } })
+
+  gate.release()
+  await screen.findByText('阿里云-主账号（已改名）') // 保存成功，重新拉取已经落地
+  expect((screen.getByLabelText('备注') as HTMLInputElement).value).toBe('B')
+  expect(saveButton().disabled).toBe(false)
+})
+
+test('保存模板：请求在途时按钮禁用、再点不会重复提交；失败后按钮恢复，编辑还在', async () => {
+  let attempt = 0
+  const calls = stubApi({
+    ...routes(),
+    'PATCH /notify/templates/login_sms': () =>
+      ++attempt === 1 ? apiError(400, 'NOTIFY_TEMPLATE_INVALID', '模板内容不合法') : smsDetail,
+  })
+  const gate = holdResponses((method) => method === 'PATCH')
+  renderPage()
+  fireEvent.change(await screen.findByLabelText('备注'), { target: { value: '新备注' } })
+  gate.hold()
+  fireEvent.click(saveButton())
+  await waitFor(() => expect(patches(calls)).toHaveLength(1))
+  expect(saveButton().disabled).toBe(true)
+  fireEvent.click(saveButton())
+
+  gate.release()
+  await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('模板内容不合法'))
+  expect(patches(calls)).toHaveLength(1)
+  await waitFor(() => expect(saveButton().disabled).toBe(false))
+  expect((screen.getByLabelText('备注') as HTMLInputElement).value).toBe('新备注')
+})
+
+// 整页只剩一行红字只该发生在"还没有数据"的时候；有数据时重新拉取失败，页面照常能用。
+test('详情加载失败（还没有数据）：整页只显示错误原因', async () => {
+  stubApi({ 'GET /notify/templates/login_sms': apiError(404, 'NOTIFY_TEMPLATE_NOT_FOUND', '通知模板 "login_sms" 不存在') })
+  renderPage()
+  expect(await screen.findByText('通知模板 "login_sms" 不存在')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '保存模板' })).toBeNull()
+})
+
+test('已经有数据时重新拉取失败：错误显示在页内，页面照常可用', async () => {
+  let gets = 0
+  stubApi({
+    'GET /notify/providers': providers,
+    'GET /notify/templates/login_sms': () => (++gets === 1 ? smsDetail : apiError(500, 'INTERNAL', '服务器内部错误')),
+    'PUT /notify/templates/login_sms/providers/p1': undefined,
+  })
+  renderPage()
+  fireEvent.click(await screen.findByRole('switch', { name: '启用 阿里云-主账号' }))
+  expect(await screen.findByText('服务器内部错误')).toBeTruthy()
+  // 页面没有被错误顶替：表单还在，能继续编辑。
+  fireEvent.change(screen.getByLabelText('备注'), { target: { value: '新备注' } })
+  expect(saveButton().disabled).toBe(false)
+})
+
+// 失败要退回服务端已确认的值。第一次保存成功后、重新拉取返回前，link 这个 prop 还是旧值：
+// 此时第二次保存失败，若退回 link.enabled，开关会显示"启用"，而服务端已经是"停用"。
+test('拨启用开关：第二次保存失败时退回第一次保存成功的值，而不是过期的 prop', async () => {
+  let puts = 0
+  stubApi({
+    ...routes(),
+    'PUT /notify/templates/login_sms/providers/p1': () =>
+      ++puts === 1 ? undefined : apiError(500, 'INTERNAL', '服务器内部错误'),
+  })
+  const gate = holdResponses(isDetailGet)
+  renderPage()
+  const sw = await screen.findByRole('switch', { name: '启用 阿里云-主账号' })
+  gate.hold() // 第一次保存之后的重新拉取挂起：link 保持旧值
+  fireEvent.click(sw) // 启用 → 停用，保存成功
+  await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('已保存'))
+  await waitFor(() => expect(sw.getAttribute('aria-disabled')).not.toBe('true')) // 这一行不再忙
+  expect(sw.getAttribute('aria-checked')).toBe('false')
+
+  fireEvent.click(sw) // 停用 → 启用，保存失败
+  await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('服务器内部错误'))
+  await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('false'))
+  gate.release()
+})
+
+// 请求在途时这一行不能再操作：双击"移除"第二个 DELETE 会 404，用户先看到成功、又看到失败。
+test('移除关联：请求在途时这一行的开关、保存、移除都禁用，双击只发一个 DELETE', async () => {
+  const calls = stubApi({ ...routes(), 'DELETE /notify/templates/login_sms/providers/p2': undefined })
+  const gate = holdResponses((method) => method === 'DELETE')
+  renderPage()
+  const row = (await screen.findByLabelText('阿里云-备用 的优先级')).closest('tr')!
+  const other = screen.getByLabelText('阿里云-主账号 的优先级').closest('tr')!
+  const button = (r: HTMLElement, name: string) => within(r).getByRole('button', { name }) as HTMLButtonElement
+  const deletes = () => calls.filter((c) => c.method === 'DELETE')
+
+  gate.hold()
+  fireEvent.click(button(row, '移除'))
+  await waitFor(() => expect(deletes()).toHaveLength(1)) // 请求在途
+  expect(button(row, '移除').disabled).toBe(true)
+  expect(button(row, '保存').disabled).toBe(true)
+  expect(within(row).getByRole('switch').getAttribute('aria-disabled')).toBe('true')
+  fireEvent.click(button(row, '移除')) // 双击的第二下
+  // 别的行不受影响。
+  expect(button(other, '移除').disabled).toBe(false)
+
+  gate.release()
+  await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('已解除关联'))
+  expect(deletes()).toHaveLength(1)
+  expect(toasts.success).toHaveBeenCalledTimes(1)
+})
+
+// 回滚目标还要跟着 link.enabled 的变化走：别处（另一位管理员）停用了这一行，随一次重新拉取到来之后，
+// 本行的保存失败时要退回服务端当前的值，而不是页面最初加载时的值。
+test('拨启用开关保存失败：退回重新拉取带来的最新值', async () => {
+  let gets = 0
+  stubApi({
+    'GET /notify/providers': providers,
+    // 第二次起主账号这一行已被别处停用，并改了名（让测试能确认重新拉取已经落地）。
+    'GET /notify/templates/login_sms': () =>
+      ++gets === 1
+        ? smsDetail
+        : {
+            ...smsDetail,
+            providers: [{ ...smsDetail.providers[0], providerDescription: '阿里云-主账号（已改名）', enabled: false }, smsDetail.providers[1]],
+          },
+    'PUT /notify/templates/login_sms/providers/p2': undefined,
+    'PUT /notify/templates/login_sms/providers/p1': apiError(500, 'INTERNAL', '服务器内部错误'),
+  })
+  renderPage()
+  const backup = (await screen.findByLabelText('阿里云-备用 的优先级')).closest('tr')!
+  fireEvent.click(within(backup).getByRole('button', { name: '保存' })) // 触发一次重新拉取
+  await screen.findByText('阿里云-主账号（已改名）')
+
+  const sw = screen.getByRole('switch', { name: '启用 阿里云-主账号（已改名）' })
+  fireEvent.click(sw)
+  await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('服务器内部错误'))
+  await waitFor(() => expect(sw.getAttribute('aria-disabled')).not.toBe('true')) // 这一行不再忙，回滚已经落地
+  expect(sw.getAttribute('aria-checked')).toBe('false')
 })

@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { Controller, useForm } from 'react-hook-form'
+import { Controller, useForm, useWatch } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -9,6 +9,9 @@ import { toastFormErrors } from '@/lib/formErrors'
 import type { Field } from '@/lib/types'
 
 type Values = Record<string, unknown>
+
+// 与后端 domain.SecretMask 一致：读取时 secret 被脱敏成它，写回时原样传回才表示"保持原值"。
+const SECRET_MASK = '********'
 
 interface Props {
   /** 后端 ConfigSchema() 声明的字段。 */
@@ -70,6 +73,8 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
   for (const f of fields) defaults[f.key] = initialValue(f, values)
 
   const { register, control, handleSubmit, formState } = useForm<Values>({ defaultValues: defaults })
+  const current = useWatch({ control })
+  const isMasked = (f: Field) => f.type === 'secret' && current[f.key] === SECRET_MASK
 
   function buildPayload(raw: Values): Values {
     const out: Values = {}
@@ -134,10 +139,20 @@ export function DynamicForm({ fields, values, onSubmit, submitLabel = '保存' }
               <Input
                 id={domId(f.key)}
                 type={inputType(f.type)}
+                // secret：框里是掩码，后端只认"完全等于掩码"才保持原值，所以点进去粘贴不能变成"掩码+新值"，
+                // 聚焦即全选；autoComplete 防止密码管理器把管理员口令填进"文本框 + 密码框"这种登录框形状。
+                autoComplete={f.type === 'secret' ? 'new-password' : undefined}
+                onFocus={f.type === 'secret' ? (e) => e.currentTarget.select() : undefined}
+                aria-describedby={isMasked(f) ? `${domId(f.key)}-hint` : undefined}
                 {...register(f.key, {
                   required: f.required ? `${f.label}不能为空` : false,
                 })}
               />
+              {isMasked(f) && (
+                <p id={`${domId(f.key)}-hint`} className="text-xs text-muted-foreground">
+                  已设置；不改动即保持原值，更换请整段替换
+                </p>
+              )}
             </>
           )}
         </div>

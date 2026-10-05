@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -13,16 +13,29 @@ import { useResource } from '@/lib/useResource'
 import type { NotifyChannel, NotifyLog } from '@/lib/types'
 
 export default function NotifyLogs() {
+  // codeInput 是输入框里的字，code 才是用来查询的值。后端按 code 精确匹配，敲到一半的 code 一定匹配不到，
+  // 每个字符发一次请求只会让表格在"没有记录"与结果之间来回跳，所以停顿一下再一起生效。
+  const [codeInput, setCodeInput] = useState('')
   const [code, setCode] = useState('')
   const [success, setSuccess] = useState('')
   const [page, setPage] = useState(1)
 
   const logs = useResource(() => {
     const q = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String((page - 1) * PAGE_SIZE) })
-    if (code.trim()) q.set('code', code.trim())
+    if (code) q.set('code', code)
     if (success) q.set('success', success)
     return api.get<{ items: NotifyLog[]; total: number }>(`/notify/logs?${q.toString()}`)
   }, [code, success, page])
+
+  useEffect(() => {
+    const next = codeInput.trim()
+    if (next === code) return
+    const t = setTimeout(() => {
+      setCode(next)
+      setPage(1)
+    }, 300)
+    return () => clearTimeout(t)
+  }, [codeInput, code])
 
   return (
     <div className="space-y-4">
@@ -31,12 +44,9 @@ export default function NotifyLogs() {
         <Input
           aria-label="按模板 code 筛选"
           className="w-64"
-          placeholder="按模板 code 筛选"
-          value={code}
-          onChange={(e) => {
-            setCode(e.target.value)
-            setPage(1)
-          }}
+          placeholder="模板 code（精确匹配）"
+          value={codeInput}
+          onChange={(e) => setCodeInput(e.target.value)}
         />
         <NativeSelect
           aria-label="按结果筛选"

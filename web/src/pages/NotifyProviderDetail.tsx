@@ -21,8 +21,15 @@ export default function NotifyProviderDetail() {
   const usages = useResource(() => api.get<NotifyProviderUsage[]>(`/notify/providers/${id}/templates`), [id])
   const [description, setDescription] = useState<string | null>(null)
 
-  if (provider.error) return <p className="text-sm text-destructive">{provider.error}</p>
-  if (!provider.data || !types.data) return <p className="text-sm text-muted-foreground">加载中…</p>
+  // 整页错误只在还没有数据时出现；有数据时重新拉取失败，错误显示在页内，页面照常可用。
+  const err = provider.error || types.error
+  if (!provider.data || !types.data) {
+    return err ? (
+      <p className="text-sm text-destructive">{err}</p>
+    ) : (
+      <p className="text-sm text-muted-foreground">加载中…</p>
+    )
+  }
 
   const p = provider.data
   const spec = types.data.find((t) => t.type === p.type)
@@ -46,21 +53,31 @@ export default function NotifyProviderDetail() {
           {p.channel ? `，渠道 ${notifyChannelLabels[p.channel]}` : ''}
         </p>
       </div>
+      {err && <p className="text-sm text-destructive">{err}</p>}
 
       <div className="space-y-4">
         <div className="space-y-2">
           <Label htmlFor="npd-desc">备注</Label>
-          <Input id="npd-desc" value={description ?? p.description} onChange={(e) => setDescription(e.target.value)} />
+          {/* 类型已不在注册表里时没有保存按钮，备注能改却存不了，所以一并禁用。 */}
+          <Input
+            id="npd-desc"
+            value={description ?? p.description}
+            disabled={!spec}
+            onChange={(e) => setDescription(e.target.value)}
+          />
         </div>
         {spec ? (
           <DynamicForm key={p.updatedAt} fields={spec.fields} values={p.config} onSubmit={save} submitLabel="保存" />
         ) : (
-          <p className="text-sm text-destructive">这个供应商的类型 {p.type} 已不受支持，只能删除。</p>
+          <p className="text-sm text-destructive">
+            这个供应商的类型 {p.type} 已不受支持，所以无法编辑；只能回到供应商列表删除它。
+          </p>
         )}
       </div>
 
       <div className="space-y-2">
         <h2 className="text-base font-medium">被这些模板引用</h2>
+        {usages.error && <p className="text-sm text-destructive">{usages.error}</p>}
         {usages.data && usages.data.length === 0 && <p className="text-sm text-muted-foreground">还没有模板引用它。</p>}
         {usages.data && usages.data.length > 0 && (
           <Table>
@@ -79,6 +96,7 @@ export default function NotifyProviderDetail() {
                     <Link to={`/notify/templates/${encodeURIComponent(u.code)}`} className="underline-offset-4 hover:underline">
                       {u.code}
                     </Link>
+                    {!u.templateEnabled && <span className="ml-2 text-xs text-muted-foreground">（模板已停用）</span>}
                   </TableCell>
                   <TableCell className="font-mono text-xs">{u.providerTemplateId || '-'}</TableCell>
                   <TableCell>{u.priority}</TableCell>

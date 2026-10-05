@@ -10,7 +10,6 @@ import { cn } from '@/lib/utils'
 import type { ConfigSnapshot, SaveConfigResponse } from '@/lib/types'
 
 const PLACEHOLDER = [
-  'env: dev                # dev / prod',
   'log:',
   '  level: info',
   'http:',
@@ -58,7 +57,7 @@ export default function SystemConfig() {
       </div>
 
       <p className="text-sm text-muted-foreground">
-        fp 进程自身的启动配置——env、监听地址、首次启动的管理员账号。保存后需要重启 fp 才会生效。
+        fp 进程自身的启动配置——监听地址、首次启动的管理员账号。保存后需要重启 fp 才会生效。
       </p>
 
       {snapshot.data === null && snapshot.loading && <p className="text-sm text-muted-foreground">加载中…</p>}

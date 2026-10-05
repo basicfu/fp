@@ -16,10 +16,13 @@ export const notifyModeLabels: Record<NotifyMode, string> = {
 
 export const notifyChannels = Object.keys(notifyChannelLabels) as NotifyChannel[]
 
-/** 各渠道允许的模板模式，与后端 domain.NotifyChannel.AllowsMode 一致。 */
+/**
+ * 各渠道允许的模板模式，与后端 domain.NotifyChannel.AllowsMode 的集合一致。
+ * 新建模板默认取第一个：邮件放 custom 在前，因为内置的邮件类型只有 smtp，它只能发自定义模板。
+ */
 export const allowedModes: Record<NotifyChannel, NotifyMode[]> = {
   sms: ['vendor'],
-  email: ['vendor', 'custom'],
+  email: ['custom', 'vendor'],
   telegram: ['custom'],
   wecom_bot: ['custom'],
   dingtalk_bot: ['custom'],

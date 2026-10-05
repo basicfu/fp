@@ -14,9 +14,13 @@
 // 用这个 setup 文件手动补上同等效果：每个 test 结束后调用 cleanup()。
 import { afterEach } from 'vitest'
 import { cleanup } from '@testing-library/react'
+import { takeUnmatched } from '@/lib/testApi'
 
 afterEach(() => {
   cleanup()
+  // stubApi 没登记的请求会被 api.ts 包成普通的连接错误、测试照样绿；在这里统一判失败。
+  const missed = takeUnmatched()
+  if (missed.length > 0) throw new Error(`测试发出了没登记路由的请求：${missed.join('、')}`)
 })
 
 // jsdom 没有实现 window.matchMedia：shadcn 的 useIsMobile（sidebar 区块
