@@ -491,6 +491,40 @@ func TestChangeAccountAllowsPipeInUsername(t *testing.T) {
 	}
 }
 
+// 改成已被另一行占用的名字：唯一约束冲突要翻译成 400 而不是 500；失败的修改既不动纪元，
+// 也不签发会话，原账号保持不变。
+func TestChangeAccountRejectsUsernameTakenByAnotherRow(t *testing.T) {
+	e := newAdminTestEnv(t)
+	ctx := context.Background()
+	e.bootstrap(t, "admin", "secret123456")
+	_, id := e.loginAs(t, "admin", "secret123456")
+	e.insertAdminRow(t, "other", "other-password", "ACTIVE", time.Now())
+	epochBefore := e.epoch(t)
+
+	_, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "other", OldPassword: "secret123456"})
+	if !errors.Is(err, domain.ErrInvalidArgument) || adminErrCode(err) != domain.CodeInvalidArgument || err.Error() != "登录名已被占用" {
+		t.Fatalf("err = %v (code %q), want ErrInvalidArgument / INVALID_ARGUMENT / 登录名已被占用", err, adminErrCode(err))
+	}
+	if got := e.epoch(t); got != epochBefore {
+		t.Errorf("纪元 %d -> %d，失败的修改不该作废会话", epochBefore, got)
+	}
+	if n := e.tokenKeys(t); n != 1 {
+		t.Errorf("会话数 = %d, want 1（只有登录时签发的那个）", n)
+	}
+	if _, err := e.svc.Login(ctx, "admin", "secret123456"); err != nil {
+		t.Errorf("改名失败后原账号应保持不变: %v", err)
+	}
+}
+
+// 会话指向的管理员行已不存在（库被清、行被删）：按登录过期处理，让前端回登录页，不是 500。
+func TestChangeAccountForUnknownAdminIsSessionInvalid(t *testing.T) {
+	e := newAdminTestEnv(t)
+	_, _, err := e.svc.ChangeAccount(context.Background(), uuid.New(), service.ChangeAccountInput{Username: "boss", OldPassword: "secret123456"})
+	if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
+		t.Fatalf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
+	}
+}
+
 // 校验旧密码到写库之间隔着一次 bcrypt，其间另一次改密或重置若已提交，无条件的
 // UPDATE 会用开头读到的旧哈希把它盖回去：重置白做，发起人还拿着刚签发的有效会话。
 //
@@ -573,9 +607,11 @@ func TestChangeAccountDoesNotOverwriteConcurrentPasswordChange(t *testing.T) {
 			if _, err := e.svc.Login(ctx, "admin", otherPassword); err != nil {
 				t.Errorf("另一个事务写入的密码应原样保留: %v", err)
 			}
+			// 必须用 ChangeAccount 想改成的登录名：保护被去掉时 UPDATE 会落库，新名字加新密码
+			// 才登得进去。仍用 admin 的话，名字已被改走，保护在不在都是 ErrInvalidCredential。
 			if c.in.NewPassword != "" {
-				if _, err := e.svc.Login(ctx, "admin", c.in.NewPassword); !errors.Is(err, domain.ErrInvalidCredential) {
-					t.Errorf("ChangeAccount 想设的新密码不该生效, err = %v", err)
+				if _, err := e.svc.Login(ctx, c.in.Username, c.in.NewPassword); !errors.Is(err, domain.ErrInvalidCredential) {
+					t.Errorf("ChangeAccount 想设的新账号不该生效, err = %v", err)
 				}
 			}
 		})
@@ -590,6 +626,10 @@ func TestChangeAccountDoesNotOverwriteConcurrentPasswordChange(t *testing.T) {
 // 密码哈希，再 INCR 纪元（与服务里"先提交、后 INCR"同序）——之后才放行这条 GET。
 // 顺序正确时 GET 先于 SELECT，SELECT 读到新哈希，旧密码被拒；写反时校验早已用旧哈希
 // 通过，随后的 GET 读到被 INCR 过的纪元，签出的 token 在重置之后依然有效。
+//
+// 另外数纪元 GET 的次数，被拒的与成功的登录都必须恰好一次：只有被 hook 扰动的头一次读
+// 取"在栅栏之前"，"先探读一次、签发前再读一次"的写法能让上面的断言照样通过，而后一次读到
+// 的恰是已被 INCR 过的值。被拒的那次走不到签发，所以成功登录要单独再跑一遍。
 func TestLoginReadsEpochBeforeCheckingCredentials(t *testing.T) {
 	const (
 		oldPassword   = "secret123456"
@@ -604,9 +644,14 @@ func TestLoginReadsEpochBeforeCheckingCredentials(t *testing.T) {
 	}
 
 	var fired, reset atomic.Bool
+	var epochGets atomic.Int32
 	svc := service.NewAdminService(pool, hookedRedis(t, &redisCmdHook{
 		before: func(ctx context.Context, cmd redis.Cmder) {
-			if !isEpochCmd(cmd, "get") || !fired.CompareAndSwap(false, true) {
+			if !isEpochCmd(cmd, "get") {
+				return
+			}
+			epochGets.Add(1)
+			if !fired.CompareAndSwap(false, true) {
 				return
 			}
 			if _, err := pool.Exec(ctx, `UPDATE admin SET password_hash = $1`, string(otherHash)); err != nil {
@@ -629,6 +674,9 @@ func TestLoginReadsEpochBeforeCheckingCredentials(t *testing.T) {
 	if !reset.Load() {
 		t.Fatal("hook 没有执行模拟的重置：Login 没有读纪元？")
 	}
+	if n := epochGets.Load(); n != 1 {
+		t.Fatalf("被拒的登录读了 %d 次纪元, want 1", n)
+	}
 	switch {
 	case err == nil:
 		// 若签出了 token，它必须已被那次重置作废。
@@ -637,6 +685,19 @@ func TestLoginReadsEpochBeforeCheckingCredentials(t *testing.T) {
 		}
 	case !errors.Is(err, domain.ErrInvalidCredential):
 		t.Fatalf("Login err = %v, want ErrInvalidCredential（SELECT 应已读到新哈希）", err)
+	}
+
+	// 用重置后的密码再登录一次：这条路径会走到签发，同样只能读一次纪元。
+	epochGets.Store(0)
+	token, err = svc.Login(ctx, "admin", otherPassword)
+	if err != nil {
+		t.Fatalf("重置后的新密码应能登录: %v", err)
+	}
+	if n := epochGets.Load(); n != 1 {
+		t.Fatalf("成功的登录读了 %d 次纪元, want 1", n)
+	}
+	if _, _, err := svc.Authenticate(ctx, token); err != nil {
+		t.Fatalf("重置之后签发的 token 应有效: %v", err)
 	}
 }
 
@@ -792,6 +853,48 @@ func TestResetPasswordCreatesAdminWhenTableEmpty(t *testing.T) {
 	}
 	if _, err := e.svc.Login(context.Background(), "admin", password); err != nil {
 		t.Fatalf("Login: %v", err)
+	}
+}
+
+// ResetPassword 与 ChangeAccount 一样必须"先提交、后 INCR"：INCR 若先于提交，读到新纪元的
+// 登录仍可能读到旧哈希（READ COMMITTED），Login"先读纪元再查库"的栅栏就破了。ChangeAccount
+// 的顺序有"失败的修改不动纪元"的断言钉着，ResetPassword 的这里钉。
+//
+// hook 在纪元 INCR 发出之前，用另一条连接读管理员行：此刻重置必须已经提交。
+func TestResetPasswordCommitsBeforeBumpingEpoch(t *testing.T) {
+	ctx := context.Background()
+	pool := testsupport.NewTestDB(t)
+	base := testsupport.NewTestRedis(t)
+
+	var hashBeforeReset string
+	var fired, committed atomic.Bool
+	hook := &redisCmdHook{
+		before: func(ctx context.Context, cmd redis.Cmder) {
+			if !isEpochCmd(cmd, "incr") || !fired.CompareAndSwap(false, true) {
+				return
+			}
+			var h string
+			if err := pool.QueryRow(ctx, `SELECT password_hash FROM admin`).Scan(&h); err != nil {
+				t.Errorf("INCR 之前读管理员行: %v", err)
+				return
+			}
+			committed.Store(h != hashBeforeReset)
+		},
+	}
+	e := adminTestEnv{svc: service.NewAdminService(pool, hookedRedis(t, hook)), pool: pool, rdb: base}
+	e.bootstrap(t, "admin", "secret123456")
+	if err := pool.QueryRow(ctx, `SELECT password_hash FROM admin`).Scan(&hashBeforeReset); err != nil {
+		t.Fatalf("读重置前的哈希: %v", err)
+	}
+
+	if _, _, _, err := e.svc.ResetPassword(ctx); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if !fired.Load() {
+		t.Fatal("hook 没有触发：ResetPassword 没有 INCR 纪元？")
+	}
+	if !committed.Load() {
+		t.Fatal("纪元 INCR 发出时重置还没有提交：读到新纪元的登录仍可能读到旧哈希")
 	}
 }
 

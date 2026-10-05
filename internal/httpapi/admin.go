@@ -87,6 +87,13 @@ type adminChangeAccountRequest struct {
 	NewPassword string `json:"newPassword"`
 }
 
+// adminChangeAccountResponse 不复用 adminLoginResponse：defaultPassword 只对登录有意义，
+// 放进改账号的响应里恒为 false，新密码恰好设成 admin 时还是错的。
+type adminChangeAccountResponse struct {
+	Token    string `json:"token"`
+	Username string `json:"username"`
+}
+
 func (h *adminHandler) changeAccount(w http.ResponseWriter, r *http.Request) {
 	var req adminChangeAccountRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -101,5 +108,5 @@ func (h *adminHandler) changeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, h.sessionCookie(token, 0))
-	writeJSON(w, http.StatusOK, adminLoginResponse{Token: token, Username: username})
+	writeJSON(w, http.StatusOK, adminChangeAccountResponse{Token: token, Username: username})
 }

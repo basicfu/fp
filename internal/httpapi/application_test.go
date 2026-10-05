@@ -332,6 +332,8 @@ func TestAdminAPIRequiresAuth(t *testing.T) {
 	const someUUID = "00000000-0000-0000-0000-000000000001"
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/admin/api/me"},
+		// body 是 {}：路由若被挪出鉴权组，空登录名得到的是 400 而不是 401。
+		{http.MethodPut, "/admin/api/me"},
 		{http.MethodPost, "/admin/api/logout"},
 		{http.MethodGet, "/admin/api/connectors"},
 		{http.MethodGet, "/admin/api/applications"},

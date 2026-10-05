@@ -43,7 +43,7 @@ func main() {
 // 竞态），这个默认值只在"库里还没有任何管理员"时才真正生效。
 func resolveBootstrapAdmin(cfg config.BootstrapAdmin) config.BootstrapAdmin {
 	if cfg.User == "" && cfg.Password == "" {
-		return config.BootstrapAdmin{User: "admin", Password: "admin"}
+		return config.BootstrapAdmin{User: service.DefaultAdminUsername, Password: service.DefaultAdminPassword}
 	}
 	return cfg
 }

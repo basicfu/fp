@@ -178,6 +178,10 @@ func TestChangeAccountKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
 	if out.Username != "boss" || out.Token == "" {
 		t.Fatalf("响应 = %+v", out)
 	}
+	// defaultPassword 只属于登录响应：这里恒为 false，新密码设成 admin 时还是错的。
+	if strings.Contains(rec.Body.String(), "defaultPassword") {
+		t.Fatalf("改账号的响应不该带 defaultPassword: %s", rec.Body.String())
+	}
 	var cookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == "fp_admin" {
@@ -214,10 +218,17 @@ func TestChangeAccountWrongOldPasswordIs400AndKeepsSession(t *testing.T) {
 
 func TestChangeAccountRequiresAuthAndRejectsUnknownFields(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
-	if rec := do(t, h, "", http.MethodPut, "/admin/api/me", `{"username":"a","oldPassword":"b"}`); rec.Code != http.StatusUnauthorized {
+	// 未登录的 body 用 {}：路由若被挪出鉴权组，空登录名只会得到 400 而不是 401，才分得出来。
+	if rec := do(t, h, "", http.MethodPut, "/admin/api/me", `{}`); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("未登录 status = %d, want 401", rec.Code)
 	}
-	if rec := do(t, h, token, http.MethodPut, "/admin/api/me", `{"username":"a","oldPassword":"b","extra":1}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("未知字段 status = %d, want 400", rec.Code)
+	// 旧密码给对：解析若被放宽，这次修改会成功（200）并让该 token 失效；
+	// 只有严格解析才会在到达服务层之前就 400。旧密码给错的话，放宽后同样是 400，分不出来。
+	if rec := do(t, h, token, http.MethodPut, "/admin/api/me", `{"username":"a","oldPassword":"secret123456","extra":1}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("未知字段 status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+	me := do(t, h, token, http.MethodGet, "/admin/api/me", "")
+	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"username":"admin"`) {
+		t.Fatalf("被拒绝的请求不该改动账号或让会话失效: %d %s", me.Code, me.Body.String())
 	}
 }

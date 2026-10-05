@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"net"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/basicfu/fp/internal/config"
 	"github.com/basicfu/fp/internal/domain"
@@ -157,6 +161,66 @@ func TestRunSubcommandResetPasswordFailureHintsSafeRerun(t *testing.T) {
 	}
 }
 
+// 连接阶段必须有期限：Postgres 对端黑洞（TCP 连得上、却永不回应）时，没有期限就要等操作系统
+// 的 TCP 超时，而 docker exec 不带 -t 时没法 Ctrl-C。本机起一个只 accept、不回应的监听当黑洞，
+// 把期限缩到毫秒级，全程不碰真实的库。
+//
+// 不用"立刻拒绝连接的端口"：那条路径无论有没有期限都会立刻失败，测不出期限在不在。
+func TestRunSubcommandResetPasswordGivesUpWhenPostgresHangs(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听本机端口: %v", err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+
+	t.Setenv("FP_POSTGRES_URL", "postgres://u:p@"+ln.Addr().String()+"/db?sslmode=disable")
+	// 到不了这里：Postgres 先失败。写成一个必然连不上的本机端口，万一到了也不会碰到真实的库。
+	t.Setenv("FP_REDIS_URL", "redis://127.0.0.1:1/0")
+	oldConnect := connectTimeout
+	connectTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { connectTimeout = oldConnect })
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() { done <- runSubcommand([]string{"reset-password"}, &stdout, &stderr) }()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("退出码 = %d, want 1（stderr = %q）", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("连接阶段没有期限：Postgres 对端黑洞时 CLI 没有在期限内返回")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("失败时 stdout 必须为空，得到 %q", stdout.String())
+	}
+	for _, want := range []string{"deadline exceeded", "可安全重跑"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr 缺少 %q：%q", want, stderr.String())
+		}
+	}
+}
+
 // 登录名被改过的实例：重置必须把用户名一并恢复，打印出来的账号密码必须真的能登录。
 func TestResetPasswordPrintsCredentialsThatWork(t *testing.T) {
 	pool := testsupport.NewTestDB(t)
@@ -206,6 +270,36 @@ func TestResetPasswordReportsRetiredLegacyAccounts(t *testing.T) {
 	}
 	if !regexp.MustCompile(`用户名：admin\n\s*密码：k7Qd3mXz9RtVw2Pb\n`).MatchString(got) {
 		t.Fatalf("用户名/密码两行的格式变了: %q", got)
+	}
+}
+
+// hangingResetter 模拟库在重置途中失去响应：只有期限到了才返回。
+type hangingResetter struct{}
+
+func (hangingResetter) ResetPassword(ctx context.Context) (string, string, int, error) {
+	<-ctx.Done()
+	return "", "", 0, ctx.Err()
+}
+
+// 期限不只管连接阶段，重置本身也要有：库在中途失去响应时，CLI 不能一直挂着。
+func TestResetPasswordGivesUpWhenTheServiceHangs(t *testing.T) {
+	oldReset := resetTimeout
+	resetTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { resetTimeout = oldReset })
+
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- resetPassword(context.Background(), hangingResetter{}, &out) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("重置没有期限：服务层卡住时 resetPassword 没有在期限内返回")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("失败时不该输出任何东西（尤其是密码），得到 %q", out.String())
 	}
 }
 

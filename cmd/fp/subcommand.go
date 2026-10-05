@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/basicfu/fp/internal/config"
 	"github.com/basicfu/fp/internal/service"
@@ -36,6 +37,16 @@ func runSubcommand(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// 期限做成变量只为让测试能缩到毫秒级，生产值不变。没有期限的话，对端黑洞时要等操作系统的
+// TCP 超时（约两分钟），而 docker exec 不带 -t 时没法 Ctrl-C。
+var (
+	// connectTimeout 管连 Postgres 与连 Redis，两者共用。
+	connectTimeout = 15 * time.Second
+	// resetTimeout 管重置本身。超时若落在提交之后、INCR 之前，runSubcommand 的"可安全重跑"
+	// 提示已经覆盖。
+	resetTimeout = 30 * time.Second
+)
+
 // runResetPassword 只依赖 Postgres 与 Redis（与服务进程同一组环境变量），不读系统配置：
 // 系统配置 YAML 写坏了也不该妨碍找回账号。先 Migrate，保证新版本二进制对旧库也能跑。
 func runResetPassword(ctx context.Context, out io.Writer) error {
@@ -47,28 +58,35 @@ func runResetPassword(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pool, err := store.OpenPostgres(ctx, pgURL)
+	// 两个连接都先建好再 Migrate：Redis 不通时，不该先在库上把迁移跑完。
+	connCtx, cancelConn := context.WithTimeout(ctx, connectTimeout)
+	defer cancelConn()
+	pool, err := store.OpenPostgres(connCtx, pgURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	if err := store.Migrate(ctx, pool); err != nil {
-		return err
-	}
-	rdb, err := store.OpenRedis(ctx, redisURL)
+	rdb, err := store.OpenRedis(connCtx, redisURL)
 	if err != nil {
 		return err
 	}
 	defer rdb.Close()
+
+	// Migrate 不设期限：旧库上的迁移可能很久，中途取消会让每次重跑都卡在同一处。
+	if err := store.Migrate(ctx, pool); err != nil {
+		return err
+	}
 	return resetPassword(ctx, service.NewAdminService(pool, rdb), out)
 }
 
-// passwordResetter 是 resetPassword 对服务层的全部依赖，拆出来让输出格式不连库也能测。
+// passwordResetter 是 resetPassword 对服务层的全部依赖，拆出来让输出格式与期限不连库也能测。
 type passwordResetter interface {
 	ResetPassword(ctx context.Context) (username, password string, disabled int, err error)
 }
 
 func resetPassword(ctx context.Context, svc passwordResetter, out io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, resetTimeout)
+	defer cancel()
 	username, password, disabled, err := svc.ResetPassword(ctx)
 	if err != nil {
 		return err

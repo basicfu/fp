@@ -142,7 +142,7 @@ const (
 //
 // 它是**唯一**的映射来源：httpapi 与 grpcapi 都从哨兵推导状态码，
 // 而哨兵从这里取。此前两个传输层各写一份 switch、靠注释约定对齐，
-// 没有任何测试守住；现在由 TestCodeRegistryMatchesTransports 断言一致。
+// 没有任何测试守住；现在由 TestTransportsAgreeOnEveryCode 断言一致。
 var codeSentinels = map[string]error{
 	CodeCredentialInvalid:  ErrInvalidCredential,
 	CodeAccountFrozen:      ErrForbidden,

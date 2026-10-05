@@ -25,8 +25,9 @@
 
 ## 前置条件
 
-- fp 能跑起来：局域网 PostgreSQL / Redis 可达，仓库根目录有 `config.yaml`
-  （从 `config.example.yaml` 复制、按注释填好 PG/Redis 那两条连接串）。
+- fp 能跑起来：局域网 PostgreSQL / Redis 可达，`FP_POSTGRES_URL` / `FP_REDIS_URL`
+  两条连接串已设好（本机可以写进 git-ignored 的 `.env.local`），见
+  [docs/console.md](../../docs/console.md)。
 - 本机没有 Docker、没有 make：全部用 bash 脚本 + `go run`，`./scripts/*.sh`
   在 Git Bash 里执行。
 
@@ -42,9 +43,9 @@
 `FP_APP_ID` / `FP_APP_SECRET` 是凭据，和 PG/Redis 密码一样只能进
 git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
 `. scripts/env.sh` 从 `.env.local` 载入这两个变量再起 demo（`scripts/run.sh`
-不再走这条路——fp 自己的配置已经全在 `config.yaml` 里）；`FP_ADDR` 在
-`scripts/demo.sh` 里给了本地开发的默认值（`grpc://127.0.0.1:9090`），不用
-额外配置。
+自己也读 `.env.local`，但 fp 只要求 `FP_POSTGRES_URL` / `FP_REDIS_URL` 两个
+环境变量，不读 `config.yaml`）；`FP_ADDR` 在 `scripts/demo.sh` 里给了本地开发的
+默认值（`grpc://127.0.0.1:9090`），不用额外配置。
 
 SDK 走明文还是 TLS 由 `FP_ADDR` 的 scheme 决定：`grpc://` 明文、`grpcs://`
 TLS，两者都是 fpsdk 原生支持，不需要额外配置项。
@@ -57,8 +58,8 @@ TLS，两者都是 fpsdk 原生支持，不需要额外配置项。
 
 > 从第三阶段起，下面这些准备步骤都可以在管理控制台里点完，不必用 curl：
 > 先 `./scripts/build-web.sh` 构建前端，再照下面一样 `./scripts/run.sh` 起服务，
-> 浏览器打开 http://localhost:8080/ 即是控制台（账号取自 `config.yaml` 的
-> `bootstrap_admin`，`config.example.yaml` 给的是 `admin` / `admin`）。
+> 浏览器打开 http://localhost:8080/ 即是控制台（全新库首次启动，`admin` 表为空时
+> 创建 `admin` / `admin`）。
 > 详见 [docs/console.md](../../docs/console.md)。
 > curl 的写法保留在这里，供脚本化和排障使用。
 
@@ -67,8 +68,8 @@ TLS，两者都是 fpsdk 原生支持，不需要额外配置项。
 ```
 
 看到日志里的 `"fp 启动"`（带 `http`/`grpc` 两个监听地址）即成功。
-首次启动建的平台管理员来自 `config.yaml` 的 `bootstrap_admin.user` /
-`bootstrap_admin.password`；`config.example.yaml` 给的是 `admin` / `admin`。
+全新库首次启动（`admin` 表为空时）会创建平台管理员 `admin` / `admin`，见
+[docs/console.md](../../docs/console.md)。
 
 另开一个终端，用管理员账号登录管理 API、建一个应用、启用 `password`、建一个测试用户：
 
@@ -80,7 +81,8 @@ curl -s -X POST http://localhost:8080/admin/api/login \
 ```
 
 **该看到**：`200`，响应体形如
-`{"token":"<管理端 token>","username":"admin"}`。把 `token` 存进变量：
+`{"token":"<管理端 token>","username":"admin","defaultPassword":true}`
+（这里用的就是默认密码，所以 `defaultPassword` 为 `true`）。把 `token` 存进变量：
 
 ```bash
 ADMIN_TOKEN=<上面拿到的 token>
