@@ -5,6 +5,7 @@ import {
   Bell,
   Key,
   KeyRound,
+  Lock,
   LogOut,
   Server,
   Settings,
@@ -22,6 +23,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -46,6 +48,7 @@ import {
 import ThemeColorSwitcher from '@/components/ThemeColorSwitcher'
 import ThemeModeToggle from '@/components/ThemeModeToggle'
 import AppSwitcher from '@/components/AppSwitcher'
+import { ChangeAccountDialog } from '@/components/ChangeAccountDialog'
 import { useAuth } from '@/lib/auth'
 import { buildBreadcrumb } from '@/lib/breadcrumb'
 
@@ -61,7 +64,7 @@ const nav: { to: string; label: string; icon: LucideIcon }[] = [
 ]
 
 export default function Layout() {
-  const { username, logout } = useAuth()
+  const { username, logout, setAccountDialogOpen } = useAuth()
   const location = useLocation()
   const segments = buildBreadcrumb(location.pathname)
 
@@ -124,8 +127,14 @@ export default function Layout() {
                 <span className="text-sm">{username}</span>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuLabel>{username}</DropdownMenuLabel>
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>{username}</DropdownMenuLabel>
+                </DropdownMenuGroup>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => setAccountDialogOpen(true)}>
+                  <Lock />
+                  修改密码
+                </DropdownMenuItem>
                 <DropdownMenuItem variant="destructive" onClick={() => void logout()}>
                   <LogOut />
                   退出
@@ -136,6 +145,7 @@ export default function Layout() {
         </header>
         <Content />
       </SidebarInset>
+      <ChangeAccountDialog />
     </SidebarProvider>
   )
 }

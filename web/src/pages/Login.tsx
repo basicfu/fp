@@ -16,7 +16,7 @@ const schema = z.object({
 type Values = z.infer<typeof schema>
 
 export default function Login() {
-  const { login } = useAuth()
+  const { login, setAccountDialogOpen } = useAuth()
   const { register, handleSubmit, formState } = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: { username: '', password: '' },
@@ -24,7 +24,13 @@ export default function Login() {
 
   async function onSubmit(v: Values) {
     try {
-      await login(v.username, v.password)
+      const { defaultPassword } = await login(v.username, v.password)
+      if (defaultPassword) {
+        toast.warning('当前仍在使用默认密码，建议修改', {
+          duration: 15000,
+          action: { label: '去修改', onClick: () => setAccountDialogOpen(true) },
+        })
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '登录失败')
     }

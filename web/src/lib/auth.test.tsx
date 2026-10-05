@@ -100,3 +100,27 @@ test('后端 logout 返回 401 时，状态仍回到 anon，且 logout() 本身�
   await expect(holder.logout!()).resolves.toBeUndefined()
   await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('anon:-'))
 })
+
+function LoginProbe({ holder }: { holder: { login?: (u: string, p: string) => Promise<{ defaultPassword: boolean }> } }) {
+  const { status, username, login } = useAuth()
+  useEffect(() => {
+    holder.login = login
+  }, [holder, login])
+  return <div data-testid="probe">{status}:{username ?? '-'}</div>
+}
+
+test('login 返回后端给的 defaultPassword 并进入 authed', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ msg: '未登录' }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 't', username: 'admin', defaultPassword: true }), { status: 200 })),
+  )
+  const holder: { login?: (u: string, p: string) => Promise<{ defaultPassword: boolean }> } = {}
+  render(<AuthProvider><LoginProbe holder={holder} /></AuthProvider>)
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('anon:-'))
+
+  await expect(holder.login!('admin', 'admin')).resolves.toEqual({ defaultPassword: true })
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('authed:admin'))
+})

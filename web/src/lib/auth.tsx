@@ -12,8 +12,14 @@ interface MeResponse {
 interface AuthValue {
   status: Status
   username: string | null
-  login: (username: string, password: string) => Promise<void>
+  /** resolve 后端给的 defaultPassword：这次登录用的是否仍是内置默认密码。 */
+  login: (username: string, password: string) => Promise<{ defaultPassword: boolean }>
   logout: () => Promise<void>
+  /** 改账号成功后同步顶栏显示的登录名；会话本身由后端在响应里换新。 */
+  renameUser: (username: string) => void
+  /** 「修改密码」对话框的开关放在这里：登录页的默认密码提示要能从别处把它打开。 */
+  accountDialogOpen: boolean
+  setAccountDialogOpen: (open: boolean) => void
 }
 
 const AuthContext = createContext<AuthValue | null>(null)
@@ -27,6 +33,7 @@ export function useAuth(): AuthValue {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status>('loading')
   const [username, setUsername] = useState<string | null>(null)
+  const [accountDialogOpen, setAccountDialogOpen] = useState(false)
 
   // 任何一次请求拿到 401 都直接把状态打回未登录：管理端会话有效期两小时，
   // 用户很可能在某个页面上停留到过期，这时不该等他点到下一个按钮才发现。
@@ -34,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUnauthorizedHandler(() => {
       setStatus('anon')
       setUsername(null)
+      setAccountDialogOpen(false)
     })
     return () => setUnauthorizedHandler(() => {})
   }, [])
@@ -62,10 +70,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const login = useCallback(async (u: string, p: string) => {
-    const res = await api.post<{ username: string }>('/login', { username: u, password: p })
+    const res = await api.post<{ username: string; defaultPassword: boolean }>('/login', { username: u, password: p })
     setUsername(res.username)
     setStatus('authed')
+    return { defaultPassword: res.defaultPassword }
   }, [])
+
+  const renameUser = useCallback((u: string) => setUsername(u), [])
 
   const logout = useCallback(async () => {
     try {
@@ -83,12 +94,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // 留在"已登录"状态只会让用户在每个页面上撞 401。
       setUsername(null)
       setStatus('anon')
+      setAccountDialogOpen(false)
     }
   }, [])
 
   const value = useMemo<AuthValue>(
-    () => ({ status, username, login, logout }),
-    [status, username, login, logout],
+    () => ({ status, username, login, logout, renameUser, accountDialogOpen, setAccountDialogOpen }),
+    [status, username, login, logout, renameUser, accountDialogOpen],
   )
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

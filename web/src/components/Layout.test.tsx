@@ -6,9 +6,14 @@ import Layout from './Layout'
 import { CurrentAppProvider, useCurrentApp } from '@/lib/current-app'
 import type { Application } from '@/lib/types'
 
-vi.mock('@/lib/auth', () => ({
-  useAuth: () => ({ username: 'alice', logout: vi.fn() }),
+const authMock = vi.hoisted(() => ({
+  username: 'alice',
+  logout: vi.fn(),
+  accountDialogOpen: false,
+  setAccountDialogOpen: vi.fn(),
+  renameUser: vi.fn(),
 }))
+vi.mock('@/lib/auth', () => ({ useAuth: () => authMock }))
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -120,4 +125,24 @@ test('在切换器里选另一个应用后，路由子页面跟着显示新的�
   fireEvent.click(option)
 
   await waitFor(() => expect(screen.getByText('当前：B应用')).toBeTruthy())
+})
+
+test('用户菜单里有「修改密码」，点它会打开改密对话框', async () => {
+  authMock.setAccountDialogOpen.mockClear()
+  renderLayout(['/applications'])
+  const trigger = screen.getByText('alice').closest('button')!
+  fireEvent.pointerDown(trigger)
+  fireEvent.click(trigger)
+  fireEvent.click(await screen.findByRole('menuitem', { name: /修改密码/ }))
+  expect(authMock.setAccountDialogOpen).toHaveBeenCalledWith(true)
+})
+
+test('accountDialogOpen 为 true 时渲染改密对话框', async () => {
+  authMock.accountDialogOpen = true
+  try {
+    renderLayout(['/applications'])
+    expect(await screen.findByRole('dialog', { name: '修改账号' })).toBeTruthy()
+  } finally {
+    authMock.accountDialogOpen = false
+  }
 })
