@@ -29,7 +29,7 @@ type SendRequest struct {
 	To string `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
 	// params 是模板变量的取值，键集合必须与模板声明的变量完全一致。
 	Params map[string]string `protobuf:"bytes,3,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// idempotency_key 可选。相同 code + key 在 24 小时内只会真正发送一次。
+	// idempotency_key 可选，最长 128 字节。同一应用内相同 code + key 在 24 小时内只会真正发送一次。
 	// SDK 会自动生成并在重试时复用；直接调用 gRPC 的调用方需要自己保证。
 	IdempotencyKey string `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields

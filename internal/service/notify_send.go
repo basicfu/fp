@@ -18,29 +18,39 @@ import (
 )
 
 const (
-	// 幂等键的两个状态。"处理中"的值是 "1:" 加持有者的随机令牌：续期与收尾都要核对令牌，
-	// 键过期后被同键的新请求重新占上，旧请求才认得出它已不归自己、不会再动它。"已完成"的值固定为 "2"，留 24 小时。
+	// 幂等键的两个状态。"处理中"的值是 "1:" 加持有者的随机令牌：续期与失败收尾都要核对令牌，
+	// 键过期后被同键的新请求重新占上，旧请求才认得出它已不归自己、不会删它或给它续期。
+	// "已完成"的值固定为 "2"，留 24 小时。
 	//
-	// "处理中"的 TTL 只需大于单次尝试的最长耗时（每家 30s 超时）：每次尝试前都会续期，
-	// 逐家降级跑得再久也不会过期。进程在发送中途崩掉时它自己过期，重试就能重发。
+	// "处理中"的 TTL 只需大于两次续期之间的最长间隔：一次尝试（每家最多 30s）加一次记录写入（最多 5s）
+	// 与一次续期（最多 2s）。每次尝试前都会续期，逐家降级跑得再久也不会过期。进程在发送中途崩掉时它自己过期，重试就能重发。
 	notifyIdemProcessingPrefix = "1:"
 	notifyIdemDone             = "2"
 	notifyIdemProcessingTTL    = 60 * time.Second
 	notifyIdemDoneTTL          = 24 * time.Hour
 
 	notifyAttemptTimeout = 30 * time.Second
-	notifyMaxErrorRunes  = 500
+	// 收尾与记录脱离了调用方的取消，就得自带上限：Redis 或数据库卡住时 Send 不能一直挂着，
+	// 两次续期的间隔也不能因此超过"处理中"的 TTL。
+	notifyIdemOpTimeout   = 2 * time.Second
+	notifyLogWriteTimeout = 5 * time.Second
+
+	notifyMaxErrorRunes = 500
+	// 幂等键要在 Redis 里留 24 小时，不设上限，一个请求就能塞进几 MB 的键。
+	notifyMaxIdemKeyBytes = 128
+	// 邮箱地址最长 254 字节；收件人原样进 notify_log。
+	notifyMaxRecipientBytes = 254
 )
 
 // NotifySendInput 是一次发送请求。
 type NotifySendInput struct {
-	// AppID 是调用方应用；控制台测试发送为空。只进发送记录。
+	// AppID 是调用方应用；控制台测试发送为空。进发送记录，也是幂等键的作用域。
 	AppID string
 	Code  string
 	// To 是收件人：sms 是手机号，email 是邮箱；IM 与 webhook 必须为空。
 	To     string
 	Params map[string]string
-	// IdempotencyKey 非空时，相同 code + key 在 24 小时内只会真正发送一次。
+	// IdempotencyKey 非空时，同一应用内相同 code + key 在 24 小时内只会真正发送一次。最长 128 字节。
 	IdempotencyKey string
 }
 
@@ -75,6 +85,13 @@ func (s *NotifyService) Send(ctx context.Context, in NotifySendInput) error {
 	if err := notify.ValidateParams(tpl.Content.Variables, in.Params); err != nil {
 		return err
 	}
+	// 校验一律在占键之前：失败的请求若留下"处理中"，同一个键改正之后的请求会被挡成 NOTIFY_IN_PROGRESS。
+	if len(in.IdempotencyKey) > notifyMaxIdemKeyBytes {
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "幂等键不能超过 %d 字节", notifyMaxIdemKeyBytes)
+	}
+	if len(in.To) > notifyMaxRecipientBytes {
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeNotifyRecipientInvalid, "收件人不能超过 %d 字节", notifyMaxRecipientBytes)
+	}
 
 	lease, done, err := s.acquireIdem(ctx, in)
 	if err != nil {
@@ -88,11 +105,15 @@ func (s *NotifyService) Send(ctx context.Context, in NotifySendInput) error {
 	return sendErr
 }
 
-func notifyIdemKey(code, key string) string { return "fp:notify:idem:" + code + ":" + key }
+// app_id 由服务端生成、只含字母数字，code 不含冒号，调用方给的键放最后：三段拼接无歧义。
+// 带上 app_id：模板全局共享，不同应用拿同一个业务 ID 当键，不能互相把对方去重掉。
+func notifyIdemKey(appID, code, key string) string {
+	return "fp:notify:idem:" + appID + ":" + code + ":" + key
+}
 
 // idemLease 是请求对幂等键"处理中"标记的所有权凭证。慢请求的标记可能在它结束前过期、
-// 被同键的新请求重新占上；此后它的续期与收尾都要认出"这已经不是我的了"，
-// 否则会删掉或盖掉新请求的标记，放行本该被挡住的重复发送。
+// 被同键的新请求重新占上；此后它的续期与失败收尾都要认出"这已经不是我的了"：删掉新请求的标记、
+// 或把别人记下的"已完成"续成 60 秒，都会放行本该被挡住的重复发送。成功收尾例外，见 settleIdem。
 type idemLease struct {
 	key   string
 	token string
@@ -102,7 +123,8 @@ type idemLease struct {
 // mark 是持有者写进键里的"处理中"值。
 func (l *idemLease) mark() string { return notifyIdemProcessingPrefix + l.token }
 
-// 三个脚本都只碰一个键（Cluster 下合法），并且只在键里仍是持有者自己的"处理中"标记时才改它。
+// 两个脚本都只碰一个键（Cluster 下合法），并且只在键里仍是持有者自己的"处理中"标记时才改它。
+// 成功收尾不需要脚本：消息已经送达，见 settleIdem。
 var (
 	// 续期。ARGV：持有者的标记、TTL 秒数。返回 1 表示续上了。
 	idemRenewScript = redis.NewScript(`
@@ -111,17 +133,7 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0`)
 
-	// 成功收尾。键是持有者的、或已经过期消失，就记下"已完成"——消失时不记，同键的重试会把已发出的消息再发一遍；
-	// 别的请求新占的"处理中"则不能盖。ARGV：持有者的标记、"已完成"的值、TTL 秒数。返回 1 表示写入了。
-	idemDoneScript = redis.NewScript(`
-local v = redis.call('GET', KEYS[1])
-if v == false or v == ARGV[1] then
-  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
-  return 1
-end
-return 0`)
-
-	// 失败收尾，只删持有者自己的标记。键已归别的请求（或已被它记成"已完成"）时删掉它，
+	// 失败收尾，只删持有者自己的标记。键已归别的请求（或已被记成"已完成"）时删掉它，
 	// 会让同键的重试被放行而重复发送。ARGV：持有者的标记。返回 1 表示删掉了。
 	idemReleaseScript = redis.NewScript(`
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -136,7 +148,7 @@ func (s *NotifyService) acquireIdem(ctx context.Context, in NotifySendInput) (*i
 	if in.IdempotencyKey == "" {
 		return nil, false, nil
 	}
-	l := &idemLease{key: notifyIdemKey(in.Code, in.IdempotencyKey), token: uuid.NewString(), code: in.Code}
+	l := &idemLease{key: notifyIdemKey(in.AppID, in.Code, in.IdempotencyKey), token: uuid.NewString(), code: in.Code}
 	inProgress := domain.Fail(domain.ErrConflict, domain.CodeNotifyInProgress, "相同幂等键的通知正在发送中，请稍后重试")
 	for range 2 {
 		ok, err := s.rdb.SetNX(ctx, l.key, l.mark(), notifyIdemProcessingTTL).Result()
@@ -167,8 +179,10 @@ func (s *NotifyService) renewIdem(ctx context.Context, l *idemLease) {
 	if l == nil {
 		return
 	}
-	// 脱离调用方的取消：调用方断开后发送仍在继续，键也得继续护着它。
-	ctx = context.WithoutCancel(ctx)
+	// 续期护的是马上要开始的这次尝试，不随调用方的取消或所剩无几的截止时间失败；
+	// 但要自带上限，否则 Redis 卡住时每次尝试之前都要先等上十几秒。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyIdemOpTimeout)
+	defer cancel()
 	owned, err := idemRenewScript.Run(ctx, s.rdb, []string{l.key}, l.mark(), int(notifyIdemProcessingTTL.Seconds())).Int()
 	switch {
 	case err != nil:
@@ -178,27 +192,29 @@ func (s *NotifyService) renewIdem(ctx context.Context, l *idemLease) {
 	}
 }
 
-// settleIdem 把幂等键置为"已完成"，发送失败时删掉它——让重试真的能重发。两种收尾都先确认键还归我们。
-// 用脱离取消的 ctx：调用方断开连接不该让"已发送"这件事没记上，否则它的重试会重发。
+// settleIdem 收尾：发送成功记下"已完成"，失败时删掉自己的"处理中"——让重试真的能重发。
+// 脱离调用方的取消：调用方断开不该让"已发送"这件事没记上，否则它的重试会重发；但要自带上限，
+// Redis 卡住时 Send 不能一直挂着。
 func (s *NotifyService) settleIdem(ctx context.Context, l *idemLease, sendErr error) {
 	if l == nil {
 		return
 	}
-	ctx = context.WithoutCancel(ctx)
-	var (
-		owned int
-		err   error
-	)
-	if sendErr != nil {
-		owned, err = idemReleaseScript.Run(ctx, s.rdb, []string{l.key}, l.mark()).Int()
-	} else {
-		owned, err = idemDoneScript.Run(ctx, s.rdb, []string{l.key}, l.mark(), notifyIdemDone, int(notifyIdemDoneTTL.Seconds())).Int()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyIdemOpTimeout)
+	defer cancel()
+	if sendErr == nil {
+		// 无条件写：消息已经送达，"已完成"就是事实。键即使已过期、被同键的新请求占上，也要盖掉它的"处理中"——
+		// 否则那个请求失败收尾删掉键之后，同键的重试会把这条已送达的消息再发一遍。
+		if err := s.rdb.Set(ctx, l.key, notifyIdemDone, notifyIdemDoneTTL).Err(); err != nil {
+			slog.Warn("notify: 记下幂等键已完成失败", "code", l.code, "err", err)
+		}
+		return
 	}
+	owned, err := idemReleaseScript.Run(ctx, s.rdb, []string{l.key}, l.mark()).Int()
 	switch {
 	case err != nil:
-		slog.Warn("notify: 更新幂等键失败", "code", l.code, "err", err)
+		slog.Warn("notify: 释放幂等键失败", "code", l.code, "err", err)
 	case owned == 0:
-		slog.Warn("notify: 幂等键已不归本次请求所有，未更新", "code", l.code)
+		slog.Warn("notify: 幂等键已不归本次请求所有，未释放", "code", l.code)
 	}
 }
 
@@ -257,12 +273,20 @@ func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate
 		cands = cands[:1] // IM 与 webhook 一对一，不降级
 	}
 
+	sendFailed := domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "通知发送失败，请稍后重试")
 	var lastErr error
-	for _, c := range cands {
+	for i, c := range cands {
+		if ctx.Err() != nil {
+			// 调用方已放弃（断开或到了截止时间）：剩下的不再试，每家都只会立刻失败、白写一行记录，
+			// 不认 ctx 的供应商甚至会在调用方收到错误之后真把消息发出去。这不是供应商全挂了，不报 ERROR；
+			// 按失败收尾会释放幂等键，SDK 带同一个键重试时从头再来。
+			slog.Warn("notify: 调用方已放弃，停止降级", "code", tpl.Code)
+			return sendFailed
+		}
 		// 逐家降级的总耗时可能超过"处理中"的 TTL：每次尝试前都续满，同键的重试才抢不到还在发送中的键。
 		s.renewIdem(ctx, lease)
 		d.ProviderTemplateID = c.providerTemplateID
-		err := s.sendVia(ctx, c, d)
+		err := s.sendVia(ctx, c, d, len(cands)-i)
 		s.writeNotifyLog(ctx, tpl, in, c, err)
 		if err == nil {
 			return nil
@@ -271,17 +295,30 @@ func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate
 		slog.Warn("notify: 供应商发送失败", "code", tpl.Code, "provider", c.typ, "providerId", c.providerID, "err", err)
 	}
 	slog.Error("notify: 全部供应商发送失败", "code", tpl.Code, "err", lastErr)
-	return domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "通知发送失败，请稍后重试")
+	return sendFailed
 }
 
-func (s *NotifyService) sendVia(ctx context.Context, c notifyCandidate, d notify.Delivery) error {
+// sendVia 用 c 发一次。remaining 是包括这一家在内还没试的候选数。
+func (s *NotifyService) sendVia(ctx context.Context, c notifyCandidate, d notify.Delivery, remaining int) error {
 	p, err := s.providerFor(c)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, notifyAttemptTimeout)
+	ctx, cancel := context.WithTimeout(ctx, attemptTimeout(ctx, remaining))
 	defer cancel()
 	return p.Send(ctx, d)
+}
+
+// attemptTimeout 把调用方剩下的时间平分给还没试的每一家（上限 30s）：一家挂住吃满整个预算的话，
+// 降级永远轮不到下一家——SDK 的截止时间会随 gRPC 一路传到这里。
+func attemptTimeout(ctx context.Context, remaining int) time.Duration {
+	t := notifyAttemptTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if share := time.Until(dl) / time.Duration(remaining); share < t {
+			t = share
+		}
+	}
+	return t
 }
 
 // providerFor 按 id@updated_at 缓存已构造的供应商：改配置后 updated_at 变化，天然换新，
@@ -318,7 +355,11 @@ func (s *NotifyService) writeNotifyLog(ctx context.Context, tpl *domain.NotifyTe
 	if sendErr != nil {
 		errText = truncateRunes(sendErr.Error(), notifyMaxErrorRunes)
 	}
-	_, err := s.pool.Exec(context.WithoutCancel(ctx), `
+	// 脱离调用方的取消：调用方断开了，这次尝试也得留痕。上限防的是连接池占满时无限等——
+	// pgx 没有默认的语句超时，而这一步夹在两次续期之间。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyLogWriteTimeout)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `
 		INSERT INTO notify_log (channel, target, code, provider, provider_id, app_id, success, error)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		string(tpl.Channel), in.To, tpl.Code, c.typ, c.providerID, in.AppID, sendErr == nil, errText)

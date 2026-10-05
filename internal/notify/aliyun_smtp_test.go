@@ -8,6 +8,8 @@ import (
 	"io"
 	"mime"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/mail"
 	"strings"
 	"testing"
@@ -142,12 +144,24 @@ func TestBuildEmail(t *testing.T) {
 }
 
 // 【辨别力】收件人来自业务方：换行符不能注入新的邮件头（比如偷偷加一个 Bcc）。
+// 带引号的本地部分会被 ParseAddress 去掉引号、原样进 RCPT 命令：空格与尖括号能往信封里塞 ESMTP 参数，
+// 多出来的 @ 能让收件域与业务方按后缀校验过的那个不一样。
 func TestBuildEmailRejectsHeaderInjectionInRecipient(t *testing.T) {
 	from := &mail.Address{Address: "noreply@example.com"}
-	for _, bad := range []string{"a@b.com\r\nBcc: evil@example.com", "a@b.com\nBcc: evil@example.com", "not an address", ""} {
+	for _, bad := range []string{
+		"a@b.com\r\nBcc: evil@example.com", "a@b.com\nBcc: evil@example.com", "not an address", "",
+		`"x> NOTIFY=NEVER"@example.com`,
+		`"a@evil.com> ORCPT=rfc822;x"@corp.com`,
+		`"a@evil.com"@corp.com`,
+	} {
 		if _, _, err := buildEmail(from, bad, "s", "text/plain", "x", time.Now()); err == nil {
 			t.Errorf("收件人 %q 应被拒绝", bad)
 		}
+	}
+	// 引号里没有特殊字符的本地部分照常接受，信封里用去掉引号后的地址。
+	to, _, err := buildEmail(from, `"john.doe"@example.com`, "s", "text/plain", "x", time.Now())
+	if err != nil || to != "john.doe@example.com" {
+		t.Errorf(`"john.doe"@example.com: to = %q, err = %v`, to, err)
 	}
 }
 
@@ -292,6 +306,84 @@ func TestAliyunSendDoesNotExposePhoneOrCredentialsInError(t *testing.T) {
 		if strings.Contains(errStr, secret) {
 			t.Errorf("错误信息不应包含 %q，实际: %s", secret, errStr)
 		}
+	}
+}
+
+// aliyunAgainst 让阿里云客户端改走明文 HTTP，打到按给定状态码与响应体回应的本地服务器上。
+func aliyunAgainst(t *testing.T, status int, body string) Provider {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	p, err := aliyunSpec.New(Config{
+		"accessKeyId": "test_ak_123", "accessKeySecret": "test_sk_456", "signName": "示例签名",
+		"endpoint": strings.TrimPrefix(srv.URL, "http://"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p.(*aliyunProvider).client.Protocol = tea.String("http")
+	return p
+}
+
+// sendAliyunExpectingSafeError 发一条带验证码的短信，要求失败，且错误里没有请求里的敏感值：
+// 这段文本会进 notify_log（控制台可见）与服务端日志。
+func sendAliyunExpectingSafeError(t *testing.T, p Provider) string {
+	t.Helper()
+	err := p.Send(context.Background(), Delivery{To: "13800138000", ProviderTemplateID: "SMS_1", Params: map[string]string{"code": "654321"}})
+	if err == nil {
+		t.Fatal("应报错")
+	}
+	for _, secret := range []string{"13800138000", "654321", "test_ak_123", "test_sk_456"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("错误里带了 %q: %s", secret, err)
+		}
+	}
+	return err.Error()
+}
+
+// 签名不符（AK Secret 填错，最常见的配置错误）时，阿里云在 4xx 回包的 Message 里回显完整的待签串：
+// AccessKeyId、手机号、验证码都在里面。错误里只能留状态码、错误码与请求 ID。
+func TestAliyunSendDropsEchoedRequestFrom4xx(t *testing.T) {
+	p := aliyunAgainst(t, http.StatusBadRequest, `{"Code":"SignatureDoesNotMatch",`+
+		`"Message":"Specified signature is not matched with our calculation. server string to sign is:POST&%2F&AccessKeyId%3Dtest_ak_123%26PhoneNumbers%3D13800138000%26TemplateParam%3D%257B%2522code%2522%253A%2522654321%2522%257D",`+
+		`"RequestId":"RID-1","Recommend":"https://api.aliyun.com/troubleshoot?q=SignatureDoesNotMatch"}`)
+	msg := sendAliyunExpectingSafeError(t, p)
+	for _, want := range []string{"400", "SignatureDoesNotMatch", "RID-1"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("错误里应有 %q，便于排障: %s", want, msg)
+		}
+	}
+}
+
+// 200 但业务失败：Message 是供应商写的说明，不保证不回显请求内容，只留错误码与请求 ID。
+func TestAliyunSendReportsBusinessFailureWithoutMessage(t *testing.T) {
+	p := aliyunAgainst(t, http.StatusOK, `{"Code":"isv.BUSINESS_LIMIT_CONTROL","Message":"触发流控 13800138000 654321","RequestId":"RID-2"}`)
+	msg := sendAliyunExpectingSafeError(t, p)
+	if !strings.Contains(msg, "isv.BUSINESS_LIMIT_CONTROL") || !strings.Contains(msg, "RID-2") {
+		t.Errorf("错误里应有错误码与请求 ID: %s", msg)
+	}
+}
+
+// 响应体不是 JSON 对象时 SDK 会直接 panic，panic 的值里有响应体原文；gRPC 不替 handler 兜底，
+// 一条坏响应就能带走整个进程。必须变成一个普通的发送失败，且不带响应内容。
+func TestAliyunSendRejectsUnparseableResponses(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+	}{
+		{http.StatusOK, ""},
+		{http.StatusOK, "null"},
+		{http.StatusOK, "<html>13800138000</html>"},
+		{http.StatusBadRequest, `["13800138000","654321"]`},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%d %s", c.status, c.body), func(t *testing.T) {
+			sendAliyunExpectingSafeError(t, aliyunAgainst(t, c.status, c.body))
+		})
 	}
 }
 

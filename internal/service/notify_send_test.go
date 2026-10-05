@@ -285,11 +285,37 @@ func TestNotifySendIdempotencyKeyIsReleasedOnFailure(t *testing.T) {
 	}
 }
 
+// 模板是全局共享的：两个应用拿同一个业务 ID 当幂等键，各自都得真正发送，不能互相把对方去重掉。
+func TestNotifySendIdempotencyIsScopedPerApplication(t *testing.T) {
+	e := newNotifyEnv(t)
+	threeSMSProviders(t, e, 10, 0, 0)
+	send := func(appID string) {
+		t.Helper()
+		in := notifySMSInput("login_sms")
+		in.AppID, in.IdempotencyKey = appID, "order-42"
+		if err := notifySend(e, in); err != nil {
+			t.Fatalf("%s: %v", appID, err)
+		}
+	}
+
+	send("app-a")
+	send("app-b")
+	if got := e.fake("a").callCount(); got != 2 {
+		t.Fatalf("两个应用用同一个键各发一次，calls = %d, want 2", got)
+	}
+	// 各自重复一次：仍在自己的键下去重。
+	send("app-a")
+	send("app-b")
+	if got := e.fake("a").callCount(); got != 2 {
+		t.Fatalf("各自重复之后 calls = %d, want 仍是 2", got)
+	}
+}
+
 func TestNotifySendIdempotencyInProgress(t *testing.T) {
 	e := newNotifyEnv(t)
 	threeSMSProviders(t, e, 0, 0, 0)
 	// 模拟"另一个请求正在处理同一个幂等键"。
-	if err := e.rdb.Set(context.Background(), "fp:notify:idem:login_sms:evt-1", "1", time.Minute).Err(); err != nil {
+	if err := e.rdb.Set(context.Background(), idemRedisKey, "1", time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
 	in := notifySMSInput("login_sms")
@@ -357,8 +383,8 @@ func TestNotifySendUsesNewProviderAfterConfigUpdate(t *testing.T) {
 // 幂等键的续期与归属
 // ---------------------------------------------------------------------------
 
-// 下面几个测试用的幂等键 evt-1（模板 login_sms）在 Redis 里的键名。
-const idemRedisKey = "fp:notify:idem:login_sms:evt-1"
+// 幂等键 evt-1（模板 login_sms，AppID 为空）在 Redis 里的键名。
+const idemRedisKey = "fp:notify:idem::login_sms:evt-1"
 
 // idemValue 读幂等键当前的值；键不存在时是空串。
 func idemValue(e *notifyEnv) string {
@@ -525,9 +551,9 @@ func TestNotifySendStaleFailureDoesNotTouchNewerRequestsDoneMark(t *testing.T) {
 	}
 }
 
-// 慢请求 A 收尾时，同键的 B 已重新占位、还在发送：A 即使成功，
-// 也不能把 B 的"处理中"盖成"已完成"，否则 B 还没发完，同键的第三个请求就被当成已发送而丢掉。
-func TestNotifySendStaleSuccessDoesNotOverwriteNewerRequestsProcessingMark(t *testing.T) {
+// 慢请求 A 的标记过期、同键的 B 重新占位还在发送时，A 成功了：消息已经送达，A 必须照样记下"已完成"，
+// 盖掉 B 的"处理中"。否则 B 随后失败、删掉键，同键的第三个请求就会把 A 已送达的消息再发一遍。
+func TestNotifySendStaleSuccessRecordsDoneOverNewerRequestsProcessingMark(t *testing.T) {
 	e := newNotifyEnv(t)
 	ctx := context.Background()
 	e.smsTemplate(t, "login_sms")
@@ -535,6 +561,7 @@ func TestNotifySendStaleSuccessDoesNotOverwriteNewerRequestsProcessingMark(t *te
 	in := notifySMSInput("login_sms")
 	in.IdempotencyKey = "evt-1"
 
+	// 第 1 次调用是 A：卡住后成功；第 2 次是 B：卡住后失败。
 	gA, gB := newGate(), newGate()
 	e.fake("a").setHook(func(_ context.Context, n int) error {
 		switch n {
@@ -542,6 +569,7 @@ func TestNotifySendStaleSuccessDoesNotOverwriteNewerRequestsProcessingMark(t *te
 			gA.hold()
 		case 2:
 			gB.hold()
+			return errors.New("a down")
 		}
 		return nil
 	})
@@ -554,8 +582,7 @@ func TestNotifySendStaleSuccessDoesNotOverwriteNewerRequestsProcessingMark(t *te
 	}
 	b := sendAsync(t, e, in, gB.open)
 	waitClosed(t, gB.entered, "B 进入供应商")
-	processing := idemValue(e)
-	if processing == "" || processing == "2" {
+	if processing := idemValue(e); processing == "" || processing == "2" {
 		t.Fatalf("B 在发送途中，键应是它的处理中标记，实际 %q", processing)
 	}
 
@@ -563,20 +590,23 @@ func TestNotifySendStaleSuccessDoesNotOverwriteNewerRequestsProcessingMark(t *te
 	if err := a.wait(t); err != nil {
 		t.Fatalf("A: %v", err)
 	}
-	if got := idemValue(e); got != processing {
-		t.Fatalf("A 成功收尾后键 = %q, want 仍是 B 的处理中标记 %q（A 不该盖掉别人的标记）", got, processing)
-	}
-	if err := notifySend(e, in); notifyErrCode(err) != domain.CodeNotifyInProgress {
-		t.Fatalf("B 还在发送时，同键的新请求 err = %v, want NOTIFY_IN_PROGRESS", err)
+	if got := idemValue(e); got != "2" {
+		t.Fatalf("A 成功收尾后键 = %q, want 2（已送达就是已完成）", got)
 	}
 
-	// B 收尾时键仍归它：照常记下"已完成"。
+	// B 失败收尾时键已不是它的标记：不能删。
 	gB.open()
-	if err := b.wait(t); err != nil {
-		t.Fatalf("B: %v", err)
+	if err := b.wait(t); notifyErrCode(err) != domain.CodeNotifySendFailed {
+		t.Fatalf("B: err = %v, want NOTIFY_SEND_FAILED", err)
 	}
 	if got := idemValue(e); got != "2" {
-		t.Fatalf("B 成功收尾后键 = %q, want 2", got)
+		t.Fatalf("B 失败收尾后键 = %q, want 仍是 2", got)
+	}
+	if err := notifySend(e, in); err != nil {
+		t.Fatalf("第三个同键请求: %v", err)
+	}
+	if got := e.fake("a").callCount(); got != 2 {
+		t.Fatalf("a 的调用数 = %d, want 2（A 与 B 各一次，第三个请求不再发送）", got)
 	}
 }
 
@@ -615,6 +645,159 @@ func TestNotifySendRecordsDoneWhenProcessingMarkExpiredMeanwhile(t *testing.T) {
 	}
 	if got := e.fake("a").callCount(); got != 1 {
 		t.Fatalf("a 的调用数 = %d, want 1（重试不再发送）", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 调用方的截止时间与取消
+// ---------------------------------------------------------------------------
+
+// a 优先、b 其次，两家都挂在 login_sms 下；洗牌不打乱顺序。
+func twoSMSProvidersAThenB(t *testing.T) *notifyEnv {
+	t.Helper()
+	e := newNotifyEnv(t, service.WithNotifyShuffle(func(int, func(i, j int)) {}))
+	e.smsTemplate(t, "login_sms")
+	e.link(t, "login_sms", e.provider(t, "fake_sms", "a"), "SMS_A", 10)
+	e.link(t, "login_sms", e.provider(t, "fake_sms", "b"), "SMS_B", 0)
+	return e
+}
+
+// 调用方的截止时间要平分给还没试的每一家：优先的那家挂住时只能吃掉自己那一份，降级才轮得到下一家。
+// 否则 SDK 的截止时间随 gRPC 传过来，第一家挂到截止，第二家拿到的是已经过期的 ctx。
+func TestNotifySendSplitsCallerDeadlineAcrossCandidates(t *testing.T) {
+	e := twoSMSProvidersAThenB(t)
+	// a 挂到这次尝试的截止时间为止；b 像真的供应商一样，拿到已经过期的 ctx 就立刻失败。
+	e.fake("a").setHook(func(ctx context.Context, _ int) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	e.fake("b").setHook(func(ctx context.Context, _ int) error { return ctx.Err() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := e.svc.Send(ctx, notifySMSInput("login_sms")); err != nil {
+		t.Fatalf("Send: %v（a 挂住时应降级到 b）", err)
+	}
+	if got := e.fake("b").callCount(); got != 1 {
+		t.Fatalf("b 的调用数 = %d, want 1", got)
+	}
+	logs, _, err := e.svc.ListLogs(context.Background(), service.NotifyLogFilter{Code: "login_sms"})
+	if err != nil || len(logs) != 2 {
+		t.Fatalf("logs = %+v, err = %v", logs, err)
+	}
+	// 最新的在前：b 成功、a 超时失败。
+	if !logs[0].Success || logs[1].Success || !strings.Contains(logs[1].Error, "deadline") {
+		t.Fatalf("应是 a 超时失败、b 成功: %+v", logs)
+	}
+}
+
+// 调用方放弃之后剩下的供应商不再尝试：每家都只会立刻失败、白写一行记录；
+// 阿里云这类不认 ctx 的，甚至会在调用方已经收到错误之后真把短信发出去。
+func TestNotifySendStopsFailingOverOnceCallerGivesUp(t *testing.T) {
+	e := twoSMSProvidersAThenB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.fake("a").setHook(func(context.Context, int) error {
+		cancel() // 调用方在 a 发送途中断开
+		return errors.New("a down")
+	})
+
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = "evt-1"
+	if err := e.svc.Send(ctx, in); notifyErrCode(err) != domain.CodeNotifySendFailed {
+		t.Fatalf("err = %v, want NOTIFY_SEND_FAILED", err)
+	}
+	if got := e.fake("b").callCount(); got != 0 {
+		t.Fatalf("调用方已放弃，b 不该再被尝试: calls = %d", got)
+	}
+	if _, total, _ := e.svc.ListLogs(context.Background(), service.NotifyLogFilter{}); total != 1 {
+		t.Fatalf("发送记录 = %d 条, want 1（只有 a 的那一行）", total)
+	}
+	if got := idemValue(e); got != "" {
+		t.Fatalf("按失败收尾，幂等键应已释放, got %q", got)
+	}
+}
+
+// 调用方在供应商已经发出之后才断开：收尾与记录都脱离了调用方的取消，"已完成"与成功记录照样要落下。
+// 否则同键的重试会把已发出的消息再发一遍，控制台也看不到这次发送。
+func TestNotifySendSettlesAndLogsAfterCallerCancels(t *testing.T) {
+	e := newNotifyEnv(t)
+	e.smsTemplate(t, "login_sms")
+	e.link(t, "login_sms", e.provider(t, "fake_sms", "a"), "SMS_A", 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.fake("a").setHook(func(context.Context, int) error {
+		cancel()
+		return nil
+	})
+
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = "evt-1"
+	if err := e.svc.Send(ctx, in); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := idemValue(e); got != "2" {
+		t.Fatalf("幂等键 = %q, want 2", got)
+	}
+	logs, total, err := e.svc.ListLogs(context.Background(), service.NotifyLogFilter{Code: "login_sms"})
+	if err != nil || total != 1 || !logs[0].Success {
+		t.Fatalf("logs = %+v, total = %d, err = %v, want 一行成功记录", logs, total, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 入参上限与校验顺序
+// ---------------------------------------------------------------------------
+
+func TestNotifySendCapsIdempotencyKeyAndRecipientLength(t *testing.T) {
+	e := newNotifyEnv(t)
+	threeSMSProviders(t, e, 10, 0, 0)
+
+	in := notifySMSInput("login_sms")
+	in.IdempotencyKey = strings.Repeat("k", 129)
+	if err := notifySend(e, in); !errors.Is(err, domain.ErrInvalidArgument) || notifyErrCode(err) != domain.CodeInvalidArgument {
+		t.Errorf("129 字节的幂等键: err = %v (code %q), want INVALID_ARGUMENT", err, notifyErrCode(err))
+	}
+	in = notifySMSInput("login_sms")
+	in.To = strings.Repeat("1", 255)
+	if err := notifySend(e, in); !errors.Is(err, domain.ErrInvalidArgument) || notifyErrCode(err) != domain.CodeNotifyRecipientInvalid {
+		t.Errorf("255 字节的收件人: err = %v (code %q), want NOTIFY_RECIPIENT_INVALID", err, notifyErrCode(err))
+	}
+	if got := e.fake("a").callCount(); got != 0 {
+		t.Fatalf("超长的请求不该到达供应商: calls = %d", got)
+	}
+
+	// 边界上的值照常发送。
+	in = notifySMSInput("login_sms")
+	in.IdempotencyKey, in.To = strings.Repeat("k", 128), strings.Repeat("1", 254)
+	if err := notifySend(e, in); err != nil {
+		t.Fatalf("128 字节的键、254 字节的收件人应能发送: %v", err)
+	}
+}
+
+// 校验失败的请求从不占键：它若留下"处理中"，同一个键改正之后的请求会被挡成 NOTIFY_IN_PROGRESS。
+func TestNotifySendValidationFailuresNeverHoldTheIdempotencyKey(t *testing.T) {
+	e := newNotifyEnv(t)
+	threeSMSProviders(t, e, 10, 0, 0)
+
+	bad := notifySMSInput("login_sms")
+	bad.IdempotencyKey, bad.Params = "evt-1", map[string]string{"wrong": "1"}
+	if err := notifySend(e, bad); notifyErrCode(err) != domain.CodeNotifyParamsInvalid {
+		t.Fatalf("变量不匹配: err = %v", err)
+	}
+	bad = notifySMSInput("login_sms")
+	bad.IdempotencyKey, bad.To = "evt-1", strings.Repeat("1", 255)
+	if err := notifySend(e, bad); notifyErrCode(err) != domain.CodeNotifyRecipientInvalid {
+		t.Fatalf("收件人超长: err = %v", err)
+	}
+
+	good := notifySMSInput("login_sms")
+	good.IdempotencyKey = "evt-1"
+	if err := notifySend(e, good); err != nil {
+		t.Fatalf("改正之后的同键请求应真正发送: %v", err)
+	}
+	if got := e.fake("a").callCount(); got != 1 {
+		t.Fatalf("a 的调用数 = %d, want 1", got)
 	}
 }
 

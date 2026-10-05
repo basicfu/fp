@@ -170,8 +170,9 @@ func TestNotifySendEndToEnd(t *testing.T) {
 
 		first := make(chan error, 1)
 		go func() {
+			// 带上与 SDK 相同的应用：幂等键按应用隔离，不同应用的同名键互不相干。
 			first <- notifySvc.Send(ctx, service.NotifySendInput{
-				Code: "login_sms", To: "13800138000", Params: params, IdempotencyKey: "evt-2",
+				AppID: app.AppID, Code: "login_sms", To: "13800138000", Params: params, IdempotencyKey: "evt-2",
 			})
 		}()
 		select {
