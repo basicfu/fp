@@ -28,6 +28,8 @@ export default function Login() {
       if (defaultPassword) {
         toast.warning('当前仍在使用默认密码，建议修改', {
           duration: 15000,
+          // 全局 Toaster 没开 closeButton，这条提示得自己带 ×，否则只能等它自己消失。
+          closeButton: true,
           action: { label: '去修改', onClick: () => setAccountDialogOpen(true) },
         })
       }

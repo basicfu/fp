@@ -70,6 +70,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const login = useCallback(async (u: string, p: string) => {
+    // 未登录时登录页上遗留的"去修改"提示能把开关置 true；不清掉，
+    // 这次登录一成功 Layout 里的对话框就会自己弹出来。放在最前：
+    // 本次登录自己的提示在 login 返回后才弹，不受影响。
+    setAccountDialogOpen(false)
     const res = await api.post<{ username: string; defaultPassword: boolean }>('/login', { username: u, password: p })
     setUsername(res.username)
     setStatus('authed')

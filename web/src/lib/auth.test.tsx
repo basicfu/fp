@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { api } from './api'
 import { AuthProvider, useAuth } from './auth'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -123,4 +124,96 @@ test('login 返回后端给的 defaultPassword 并进入 authed', async () => {
 
   await expect(holder.login!('admin', 'admin')).resolves.toEqual({ defaultPassword: true })
   await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('authed:admin'))
+})
+
+// 下面几条用真实的 AuthProvider 钉 Provider 自己的状态转换（组件测试里的 useAuth 都是
+// mock，覆盖不到这里）。探针不往外塞 holder：往 props 里的对象赋值会被 oxlint 的
+// react(immutability) 报警，所以值靠渲染读、动作靠点按钮触发。
+function StateProbe() {
+  const { status, username, accountDialogOpen, setAccountDialogOpen, renameUser, login, logout } = useAuth()
+  return (
+    <div>
+      <div data-testid="probe">{status}:{username ?? '-'}</div>
+      <div data-testid="dialog">{accountDialogOpen ? 'open' : 'closed'}</div>
+      <button onClick={() => setAccountDialogOpen(true)}>open-dialog</button>
+      <button onClick={() => renameUser('boss')}>rename</button>
+      <button onClick={() => void login('admin', 'pw')}>login</button>
+      <button onClick={() => void logout()}>logout</button>
+    </div>
+  )
+}
+
+// 【辨别力】会话过期时开关必须随状态一起复位：否则下次登录一成功，Layout 里的对话框
+// 就会自己弹出来。先断言开关确实是开着的，免得"本来就是关的"让末尾的断言空过。
+test('任意请求返回 401：状态回到 anon，且「修改密码」对话框开关被复位', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: '1', username: 'admin' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ msg: '管理端登录已过期' }), { status: 401 })),
+  )
+  render(<AuthProvider><StateProbe /></AuthProvider>)
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('authed:admin'))
+
+  fireEvent.click(screen.getByRole('button', { name: 'open-dialog' }))
+  expect(screen.getByTestId('dialog').textContent).toBe('open')
+
+  // 任何一个经由 api 发出的请求答 401，走的都是 Provider 注册的那个全局回调。
+  await act(async () => {
+    await expect(api.get('/anything')).rejects.toMatchObject({ status: 401 })
+  })
+  expect(screen.getByTestId('probe').textContent).toBe('anon:-')
+  expect(screen.getByTestId('dialog').textContent).toBe('closed')
+})
+
+// 【辨别力】/logout 这里回 204，碰不到全局 401 回调——能把开关复位的只有 logout()
+// 自己的 finally，所以这条钉的就是那一行。
+test('logout 之后「修改密码」对话框开关被复位', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: '1', username: 'admin' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 })),
+  )
+  render(<AuthProvider><StateProbe /></AuthProvider>)
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('authed:admin'))
+
+  fireEvent.click(screen.getByRole('button', { name: 'open-dialog' }))
+  expect(screen.getByTestId('dialog').textContent).toBe('open')
+
+  fireEvent.click(screen.getByRole('button', { name: 'logout' }))
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('anon:-'))
+  expect(screen.getByTestId('dialog').textContent).toBe('closed')
+})
+
+test('renameUser 只改显示的登录名，会话仍是 authed', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ id: '1', username: 'admin' }), { status: 200 })))
+  render(<AuthProvider><StateProbe /></AuthProvider>)
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('authed:admin'))
+
+  fireEvent.click(screen.getByRole('button', { name: 'rename' }))
+  expect(screen.getByTestId('probe').textContent).toBe('authed:boss')
+})
+
+// 【辨别力】未登录时登录页上遗留的"去修改"提示还能把开关置 true；这次登录成功后它若
+// 还开着，Layout 一挂载对话框就会自己弹出来。
+test('login 会复位遗留的「修改密码」对话框开关', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ msg: '未登录' }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 't', username: 'admin', defaultPassword: false }), { status: 200 })),
+  )
+  render(<AuthProvider><StateProbe /></AuthProvider>)
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('anon:-'))
+
+  fireEvent.click(screen.getByRole('button', { name: 'open-dialog' }))
+  expect(screen.getByTestId('dialog').textContent).toBe('open')
+
+  fireEvent.click(screen.getByRole('button', { name: 'login' }))
+  await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('authed:admin'))
+  expect(screen.getByTestId('dialog').textContent).toBe('closed')
 })

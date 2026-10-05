@@ -1,5 +1,6 @@
 import { test, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { setUnauthorizedHandler } from '@/lib/api'
 import { ChangeAccountDialog } from './ChangeAccountDialog'
 
 const mocks = vi.hoisted(() => ({
@@ -19,7 +20,11 @@ vi.mock('@/lib/auth', () => ({
 vi.mock('sonner', () => ({ toast: { success: mocks.success, error: mocks.error } }))
 
 beforeEach(() => vi.clearAllMocks())
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  // 还原 api.ts 的默认回调（空函数），免得用例里换上的 spy 漏给后面的用例。
+  setUnauthorizedHandler(() => {})
+})
 
 function fill(label: string, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } })
@@ -75,8 +80,12 @@ test('新密码留空时只改登录名', async () => {
   expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({ username: 'root', oldPassword: 'admin', newPassword: '' })
 })
 
-// 旧密码错是 400，对话框必须留着让人重填；若被当成 401 全局处理会被踢回登录页。
-test('旧密码错误时提示原因并保持对话框打开', async () => {
+// 旧密码错是 400，对话框必须留着让人重填。useAuth 在本文件里是 mock，没有真 Provider，
+// 所以靠 spy 顶住 api.ts 的全局 401 回调（真实应用里它会把用户踢回登录页）：
+// 400 不该触发它，响应一旦变成 401 这条就会红。
+test('旧密码错误时提示原因并保持对话框打开，且不触发全局 401 回调', async () => {
+  const onUnauthorized = vi.fn()
+  setUnauthorizedHandler(onUnauthorized)
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ code: 'ADMIN_OLD_PASSWORD_WRONG', msg: '旧密码不正确' }), { status: 400 }),
   ))
@@ -85,6 +94,7 @@ test('旧密码错误时提示原因并保持对话框打开', async () => {
   fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
   await waitFor(() => expect(mocks.error).toHaveBeenCalledWith('旧密码不正确'))
+  expect(onUnauthorized).not.toHaveBeenCalled()
   expect(mocks.renameUser).not.toHaveBeenCalled()
   expect(mocks.setAccountDialogOpen).not.toHaveBeenCalledWith(false)
 })
