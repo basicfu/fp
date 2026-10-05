@@ -3,9 +3,11 @@ package service_test
 import (
 	"context"
 	"errors"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
 )
 
@@ -229,6 +232,52 @@ func waitUntilBlockedBy(t *testing.T, pool *pgxpool.Pool, pid int32) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// redisCmdHook 在每条单命令前后各调一次回调（after 只在命令成功后调），拨号与管道原样放行。
+// 回调自己判断是不是要拦的那条命令，并负责只触发一次。
+type redisCmdHook struct {
+	before, after func(ctx context.Context, cmd redis.Cmder)
+}
+
+func (h *redisCmdHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *redisCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if h.before != nil {
+			h.before(ctx, cmd)
+		}
+		err := next(ctx, cmd)
+		if err == nil && h.after != nil {
+			h.after(ctx, cmd)
+		}
+		return err
+	}
+}
+
+func (h *redisCmdHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// isEpochCmd 判断 cmd 是不是对纪元键执行的 name 命令（name 为小写，如 "get"、"incr"）。
+func isEpochCmd(cmd redis.Cmder, name string) bool {
+	args := cmd.Args()
+	return cmd.Name() == name && len(args) == 2 && args[1] == "fp:admin:epoch"
+}
+
+// hookedRedis 返回一个连着同一个 Redis、但挂了 h 的新客户端，测试结束时关闭。
+// 不能直接对 testsupport.NewTestRedis 返回的客户端 AddHook：它是整个测试进程共用的
+// 单例，go-redis 又没有摘除 hook 的办法，hook 会漏进之后所有的用例。也不从它的
+// Options() 复制：选项里带着它的推送处理器，新客户端会与它共用。
+func hookedRedis(t *testing.T, h redis.Hook) *redis.Client {
+	t.Helper()
+	c, err := store.OpenRedis(context.Background(), os.Getenv("FP_TEST_REDIS_URL"))
+	if err != nil {
+		t.Fatalf("连接测试 Redis: %v", err)
+	}
+	c.AddHook(h)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
 
 // 登录名可改之后，"用户名冲突"不再能代表"管理员已存在"：改名后重启，
@@ -453,6 +502,107 @@ func TestChangeAccountDoesNotOverwriteConcurrentPasswordChange(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// 登录必须先读纪元、再查库校验凭据：读到新纪元，就保证随后的 SELECT 已看得见新哈希。
+// 顺序写反（先校验、后读纪元）时，bcrypt 期间提交的重置拦不住这个在途登录：它拿旧密码
+// 通过校验，再领一个新纪元的 token，而 Authenticate 每次访问都会顺延它。
+//
+// 用 Redis hook 把时序钉死：登录发出"读纪元"之前，先模拟一次并发重置——提交一个别的
+// 密码哈希，再 INCR 纪元（与服务里"先提交、后 INCR"同序）——之后才放行这条 GET。
+// 顺序正确时 GET 先于 SELECT，SELECT 读到新哈希，旧密码被拒；写反时校验早已用旧哈希
+// 通过，随后的 GET 读到被 INCR 过的纪元，签出的 token 在重置之后依然有效。
+func TestLoginReadsEpochBeforeCheckingCredentials(t *testing.T) {
+	const (
+		oldPassword   = "secret123456"
+		otherPassword = "reset-by-someone-else"
+	)
+	ctx := context.Background()
+	pool := testsupport.NewTestDB(t)
+	base := testsupport.NewTestRedis(t)
+	otherHash, err := bcrypt.GenerateFromPassword([]byte(otherPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+
+	var fired, reset atomic.Bool
+	svc := service.NewAdminService(pool, hookedRedis(t, &redisCmdHook{
+		before: func(ctx context.Context, cmd redis.Cmder) {
+			if !isEpochCmd(cmd, "get") || !fired.CompareAndSwap(false, true) {
+				return
+			}
+			if _, err := pool.Exec(ctx, `UPDATE admin SET password_hash = $1`, string(otherHash)); err != nil {
+				t.Errorf("模拟重置，写库: %v", err)
+				return
+			}
+			// INCR 走没挂 hook 的 base，免得递归进同一个 hook。
+			if err := base.Incr(ctx, "fp:admin:epoch").Err(); err != nil {
+				t.Errorf("模拟重置，INCR: %v", err)
+				return
+			}
+			reset.Store(true)
+		},
+	}))
+	if err := svc.EnsureBootstrap(ctx, "admin", oldPassword); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+
+	token, err := svc.Login(ctx, "admin", oldPassword)
+	if !reset.Load() {
+		t.Fatal("hook 没有执行模拟的重置：Login 没有读纪元？")
+	}
+	switch {
+	case err == nil:
+		// 若签出了 token，它必须已被那次重置作废。
+		if _, _, aerr := svc.Authenticate(ctx, token); aerr == nil {
+			t.Fatal("旧密码的登录在重置提交之后拿到了有效会话：纪元读得太晚")
+		}
+	case !errors.Is(err, domain.ErrInvalidCredential):
+		t.Fatalf("Login err = %v, want ErrInvalidCredential（SELECT 应已读到新哈希）", err)
+	}
+}
+
+// 改账号签发的 token 必须带自己那次 INCR 的返回值，不能事后再读计数器：两步之间若又有
+// 别处的作废落地（另一次改密或重置），读回来的是对方的纪元，token 会越过那次作废。
+//
+// hook 在 ChangeAccount 的 INCR 返回之后立刻再 INCR 一次，模拟这次作废：此时纪元是
+// E+2，而 ChangeAccount 签发的 token 带的是 E+1，必须已经失效。
+func TestChangeAccountSignsTokenWithItsOwnEpochBump(t *testing.T) {
+	const oldPassword = "secret123456"
+	ctx := context.Background()
+	pool := testsupport.NewTestDB(t)
+	base := testsupport.NewTestRedis(t)
+
+	var fired atomic.Bool
+	hook := &redisCmdHook{
+		after: func(ctx context.Context, cmd redis.Cmder) {
+			if !isEpochCmd(cmd, "incr") || !fired.CompareAndSwap(false, true) {
+				return
+			}
+			// 走没挂 hook 的 base，免得递归进同一个 hook。
+			if err := base.Incr(ctx, "fp:admin:epoch").Err(); err != nil {
+				t.Errorf("模拟并发作废，INCR: %v", err)
+			}
+		},
+	}
+	e := adminTestEnv{svc: service.NewAdminService(pool, hookedRedis(t, hook)), pool: pool, rdb: base}
+	e.bootstrap(t, "admin", oldPassword)
+	_, id := e.loginAs(t, "admin", oldPassword)
+	epochBefore := e.epoch(t)
+
+	token, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "boss", OldPassword: oldPassword})
+	if err != nil {
+		t.Fatalf("ChangeAccount: %v", err)
+	}
+	if !fired.Load() {
+		t.Fatal("hook 没有触发：ChangeAccount 没有 INCR 纪元？")
+	}
+	if got := e.epoch(t); got != epochBefore+2 {
+		t.Fatalf("纪元 %d -> %d, want +2（ChangeAccount 自己那次加上模拟的并发作废）", epochBefore, got)
+	}
+	if _, _, err := e.svc.Authenticate(ctx, token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("Authenticate err = %v, want ErrUnauthorized：token 应带本次 INCR 的纪元，已被后来的作废盖掉", err)
 	}
 }
 
