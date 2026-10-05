@@ -90,7 +90,8 @@ func run() error {
 	}
 	pgCfg, err := pgxpool.ParseConfig(pgURL)
 	if err != nil {
-		return fmt.Errorf("解析 FP_POSTGRES_URL: %w", err)
+		// 不带原错误：pgx 的解析错误会回显连接串里的密码片段（同 store.OpenPostgres），而这条错误会打到 stderr。
+		return errors.New("解析 FP_POSTGRES_URL: 格式不正确（URL 形如 postgres://用户:密码@主机:端口/库名；密码里的特殊字符要百分号编码）")
 	}
 	conn := pgCfg.ConnConfig
 	dbName := conn.Database

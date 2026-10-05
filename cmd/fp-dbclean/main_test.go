@@ -7,9 +7,43 @@ import (
 	"testing"
 )
 
+// 两个连接串都在解析阶段就被检查，早于确认提示与任何拨号，所以被测的那个之外，另一个只需要"看起来
+// 合法"；都指向 127.0.0.1:1：万一将来流程改成先连库，也只会被拒绝连接，清不掉任何库。
+const (
+	okPostgresURL = "postgres://u:p@127.0.0.1:1/db"
+	okRedisURL    = "redis://127.0.0.1:1/0"
+)
+
+// callRun 在不碰任何库、不读 stdin 的前提下调用 run，返回它的错误。run 直接用全局的 flag 与
+// os.Args：每次换一套全新的并在结束时还原，既不会重复注册 -y/-no-redis，也不污染测试二进制自己的 flag。
+func callRun(t *testing.T, postgresURL, redisURL string) error {
+	t.Helper()
+	oldArgs, oldFlags := os.Args, flag.CommandLine
+	t.Cleanup(func() { os.Args, flag.CommandLine = oldArgs, oldFlags })
+	flag.CommandLine = flag.NewFlagSet("fp-dbclean", flag.ContinueOnError)
+	os.Args = []string{"fp-dbclean", "truncate"}
+	t.Setenv("FP_POSTGRES_URL", postgresURL)
+	t.Setenv("FP_REDIS_URL", redisURL)
+	return run()
+}
+
+func assertScrubbed(t *testing.T, err error, envName, format string, secrets []string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("坏的 %s 应当报错", envName)
+	}
+	for _, secret := range secrets {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("错误里带出了密码片段 %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), envName) || !strings.Contains(err.Error(), format) {
+		t.Errorf("错误应点名 %s 并给出整体格式 %s...: %v", envName, format, err)
+	}
+}
+
 // redis.ParseURL 失败时的错误会把 URL 片段（含没做百分号编码的密码）原样带出来，run 的错误会打到
-// stderr，不能带出密码。解析发生在确认提示与任何拨号之前，所以这个用例不碰库、也不读 stdin；
-// FP_POSTGRES_URL 只需能被解析，指向 127.0.0.1:1：万一将来流程改成先连库，也只会被拒绝连接，清不掉任何库。
+// stderr，不能带出密码。
 func TestRunRedisURLParseErrorDoesNotLeakPassword(t *testing.T) {
 	cases := []struct {
 		name, url string
@@ -20,27 +54,24 @@ func TestRunRedisURLParseErrorDoesNotLeakPassword(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			// run 直接用全局的 flag 与 os.Args：每个用例换一套全新的并在结束时还原，
-			// 既不会重复注册 -y/-no-redis，也不污染测试二进制自己的 flag。
-			oldArgs, oldFlags := os.Args, flag.CommandLine
-			t.Cleanup(func() { os.Args, flag.CommandLine = oldArgs, oldFlags })
-			flag.CommandLine = flag.NewFlagSet("fp-dbclean", flag.ContinueOnError)
-			os.Args = []string{"fp-dbclean", "truncate"}
-			t.Setenv("FP_POSTGRES_URL", "postgres://u:p@127.0.0.1:1/db")
-			t.Setenv("FP_REDIS_URL", c.url)
+			assertScrubbed(t, callRun(t, okPostgresURL, c.url), "FP_REDIS_URL", "redis://", c.secrets)
+		})
+	}
+}
 
-			err := run()
-			if err == nil {
-				t.Fatal("坏的 FP_REDIS_URL 应当报错")
-			}
-			for _, secret := range c.secrets {
-				if strings.Contains(err.Error(), secret) {
-					t.Errorf("错误里带出了密码片段 %q: %v", secret, err)
-				}
-			}
-			if !strings.Contains(err.Error(), "FP_REDIS_URL") || !strings.Contains(err.Error(), "redis://") {
-				t.Errorf("错误应点名 FP_REDIS_URL 并给出整体格式 redis://...: %v", err)
-			}
+// pgx 的解析错误同样会回显连接串：没编码的 % # 让密码片段落进内部错误，写在查询参数里的 password=
+// 则原样出现在回显的 URL 里。
+func TestRunPostgresURLParseErrorDoesNotLeakPassword(t *testing.T) {
+	cases := []struct {
+		name, url string
+		secrets   []string
+	}{
+		{"密码里有坏的百分号转义", "postgres://u:Pw%zzZq9@127.0.0.1:5432/db", []string{"Pw", "%zz", "Zq9"}},
+		{"密码写在查询参数里，别的参数写错", "postgres://u@127.0.0.1:5432/db?password=Zq9secret&sslmode=bogus", []string{"Zq9secret"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assertScrubbed(t, callRun(t, c.url, okRedisURL), "FP_POSTGRES_URL", "postgres://", c.secrets)
 		})
 	}
 }

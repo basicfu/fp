@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,7 +17,10 @@ import (
 func OpenPostgres(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		return nil, fmt.Errorf("store: 解析 postgres url: %w", err)
+		// 不带原错误、不回显输入：pgx 只抹掉用户信息段里的密码——没编码的 # % 会让密码前缀落进
+		// 内部错误，写在查询参数里的 password= 则原样回显——而这条错误会进服务端日志与 CLI 的
+		// stderr（同 OpenRedis）。只擦解析这一步：拨号阶段的错误只含用户名、库名与地址。
+		return nil, errors.New("store: 解析 postgres url: 格式不正确（URL 形如 postgres://用户:密码@主机:端口/库名；密码里的特殊字符要百分号编码）")
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
