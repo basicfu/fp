@@ -30,6 +30,8 @@ type Deps struct {
 	IMCreds *service.IMCredentialService
 	// AccessKeys 管理控制台的访问密钥增删改查。为 nil 时整组路由不挂载。
 	AccessKeys *service.AccessKeyService
+	// Notify 管理通知的供应商、模板与发送记录。为 nil 时整组路由不挂载。
+	Notify *service.NotifyService
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -67,6 +69,7 @@ func NewRouter(d Deps) http.Handler {
 	sysCfgH := &systemConfigHandler{svc: d.SystemConfigs}
 	imCredH := &imCredentialHandler{svc: d.IMCreds}
 	akH := &accessKeyHandler{svc: d.AccessKeys, authz: d.Authz}
+	nH := &notifyHandler{svc: d.Notify}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -163,6 +166,27 @@ func NewRouter(d Deps) http.Handler {
 				r.Patch("/access-keys/{id}", akH.update)
 				r.Patch("/access-keys/{id}/status", akH.setStatus)
 				r.Delete("/access-keys/{id}", akH.remove)
+			}
+
+			// 通知中心。供应商与模板全局共享，不带应用 id。Notify 为 nil 时整组不挂载。
+			// PATCH：provider 与 template 的更新都是局部更新；关联的 PUT 是全量替换。
+			if d.Notify != nil {
+				r.Get("/notify/provider-types", nH.providerTypes)
+				r.Get("/notify/providers", nH.listProviders)
+				r.Post("/notify/providers", nH.createProvider)
+				r.Get("/notify/providers/{id}", nH.getProvider)
+				r.Patch("/notify/providers/{id}", nH.updateProvider)
+				r.Delete("/notify/providers/{id}", nH.deleteProvider)
+				r.Get("/notify/providers/{id}/templates", nH.providerTemplates)
+				r.Get("/notify/templates", nH.listTemplates)
+				r.Post("/notify/templates", nH.createTemplate)
+				r.Get("/notify/templates/{code}", nH.getTemplate)
+				r.Patch("/notify/templates/{code}", nH.updateTemplate)
+				r.Delete("/notify/templates/{code}", nH.deleteTemplate)
+				r.Put("/notify/templates/{code}/providers/{providerId}", nH.setLink)
+				r.Delete("/notify/templates/{code}/providers/{providerId}", nH.removeLink)
+				r.Post("/notify/templates/{code}/test", nH.testSend)
+				r.Get("/notify/logs", nH.listLogs)
 			}
 
 			r.Get("/users", userH.list)
