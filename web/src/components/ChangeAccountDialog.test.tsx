@@ -143,6 +143,11 @@ test('打开时先取当前登录名：回填新名，只改密码也不会把�
   expect(putCalls(calls)).toEqual([
     { method: 'PUT', url: '/me', body: { username: 'boss', oldPassword: 'admin', newPassword: 'n3w-pass' } },
   ])
+
+  // 同步到新名字之后不能再多取一次 /me：登录名若进了同步 effect 的依赖，名字每变一次就会
+  // 再请求一次，effect 就成了"取名字 → 改名字 → 再取名字"的环，只是靠名字相同才收住。
+  await flush()
+  expect(calls.filter((c) => c.method === 'GET')).toHaveLength(1)
 })
 
 test('打开时取登录名失败（500）：静默忽略，不改登录名、不弹错误，表单照常可提交', async () => {
