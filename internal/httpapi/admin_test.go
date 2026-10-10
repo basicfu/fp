@@ -158,47 +158,88 @@ func TestAdminLoginDoesNotReportDefaultPasswordForCustomPassword(t *testing.T) {
 	}
 }
 
-func TestChangeAccountKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
-	h, token, deps := newAdminEnv(t)
-	other, err := deps.Admin.Login(context.Background(), "admin", "secret123456")
-	if err != nil {
-		t.Fatalf("Login: %v", err)
-	}
+// 改账号成功后所有会话作废（含发起修改的这一个），响应不再换发 token，并清掉 fp_admin cookie：
+// 前端据此回登录页，用新凭据重新登录。清除用的 cookie 要与登录写入的属性一致，两种 Secure 取值
+// 都跑一遍，免得清除时的属性写歪，生产里清不掉登录时设下的 Secure cookie。
+func TestChangeAccountRevokesAllSessionsAndClearsCookie(t *testing.T) {
+	for _, secure := range []bool{true, false} {
+		label := "Secure"
+		if !secure {
+			label = "非 Secure"
+		}
+		t.Run(label, func(t *testing.T) {
+			_, token, deps := newAdminEnv(t)
+			deps.SecureCookies = secure
+			h := httpapi.NewRouter(deps)
+			other, err := deps.Admin.Login(context.Background(), "admin", "secret123456")
+			if err != nil {
+				t.Fatalf("Login: %v", err)
+			}
 
+			rec := do(t, h, token, http.MethodPut, "/admin/api/me",
+				`{"username":"boss","oldPassword":"secret123456","newPassword":"brand-new-pass"}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			// 只回显登录名：没有 token（不换发），也没有 defaultPassword（只属于登录响应）。
+			var out map[string]any
+			decode(t, rec, &out)
+			if len(out) != 1 || out["username"] != "boss" {
+				t.Fatalf("响应 = %s, want 只有 username", rec.Body.String())
+			}
+
+			var cookies []*http.Cookie
+			for _, c := range rec.Result().Cookies() {
+				if c.Name == "fp_admin" {
+					cookies = append(cookies, c)
+				}
+			}
+			if len(cookies) != 1 {
+				t.Fatalf("fp_admin cookie 有 %d 个, want 1（清除用的那个）", len(cookies))
+			}
+			c := cookies[0]
+			if c.Value != "" || c.MaxAge >= 0 {
+				t.Fatalf("应清除 fp_admin cookie（空值且 MaxAge < 0）, got %+v", c)
+			}
+			if c.Path != "/" || !c.HttpOnly || c.Secure != secure || c.SameSite != http.SameSiteLaxMode {
+				t.Fatalf("清除用的 cookie 属性要与登录时一致（Path=/、HttpOnly、Secure=%v、SameSite=Lax）, got %+v", secure, c)
+			}
+
+			for name, old := range map[string]string{"发起修改的会话": token, "其他会话": other} {
+				if rec := do(t, h, old, http.MethodGet, "/admin/api/me", ""); rec.Code != http.StatusUnauthorized {
+					t.Fatalf("%s 应已失效, status = %d", name, rec.Code)
+				}
+			}
+
+			// 用新凭据重新登录：拿到的是一个能用的新会话；defaultPassword 在登录响应里报。
+			login := do(t, h, "", http.MethodPost, "/admin/api/login", `{"username":"boss","password":"brand-new-pass"}`)
+			if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"defaultPassword":false`) {
+				t.Fatalf("新凭据登录 status = %d, body = %s", login.Code, login.Body.String())
+			}
+			var relogin struct {
+				Token string `json:"token"`
+			}
+			decode(t, login, &relogin)
+			if me := do(t, h, relogin.Token, http.MethodGet, "/admin/api/me", ""); me.Code != http.StatusOK ||
+				!strings.Contains(me.Body.String(), `"username":"boss"`) {
+				t.Fatalf("重新登录后的 /me: %d %s", me.Code, me.Body.String())
+			}
+		})
+	}
+}
+
+// 只有成功才清 cookie：旧密码错（400）时会话还在，浏览器得继续带着它重试，清掉的话
+// 下一次请求就是 401，前端会把用户踢回登录页。
+func TestChangeAccountFailureLeavesCookieAlone(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
 	rec := do(t, h, token, http.MethodPut, "/admin/api/me",
-		`{"username":"boss","oldPassword":"secret123456","newPassword":"brand-new-pass"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		`{"username":"boss","oldPassword":"nope","newPassword":"brand-new-pass"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Token    string `json:"token"`
-		Username string `json:"username"`
-	}
-	decode(t, rec, &out)
-	if out.Username != "boss" || out.Token == "" {
-		t.Fatalf("响应 = %+v", out)
-	}
-	// defaultPassword 只属于登录响应：这里恒为 false，新密码设成 admin 时还是错的。
-	if strings.Contains(rec.Body.String(), "defaultPassword") {
-		t.Fatalf("改账号的响应不该带 defaultPassword: %s", rec.Body.String())
-	}
-	var cookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == "fp_admin" {
-			cookie = c
-		}
-	}
-	if cookie == nil || cookie.Value != out.Token {
-		t.Fatalf("应写入换新后的 fp_admin cookie, got %+v", cookie)
-	}
-
-	if me := do(t, h, out.Token, http.MethodGet, "/admin/api/me", ""); me.Code != http.StatusOK ||
-		!strings.Contains(me.Body.String(), `"username":"boss"`) {
-		t.Fatalf("新会话 /me: %d %s", me.Code, me.Body.String())
-	}
-	for name, old := range map[string]string{"发起修改的旧会话": token, "其他会话": other} {
-		if rec := do(t, h, old, http.MethodGet, "/admin/api/me", ""); rec.Code != http.StatusUnauthorized {
-			t.Fatalf("%s 应已失效, status = %d", name, rec.Code)
+			t.Fatalf("失败的修改不该动 fp_admin cookie, got %+v", c)
 		}
 	}
 }

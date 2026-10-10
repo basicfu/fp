@@ -137,8 +137,7 @@ func (s *AdminService) Login(ctx context.Context, username, password string) (st
 }
 
 // issueToken 签发一个带指定纪元的会话 token。纪元由调用方传入、这里不读：
-// 登录要用查库之前读到的值，改账号要用自己那次 INCR 的返回值，
-// 签发时再读一遍就把这两处刻意安排的先后冲掉了。
+// 登录要用查库之前读到的值，签发时再读一遍就把"先读纪元再查库"的先后冲掉了。
 func (s *AdminService) issueToken(ctx context.Context, id uuid.UUID, username string, epoch int64) (string, error) {
 	token, err := randomToken()
 	if err != nil {
@@ -220,14 +219,14 @@ type ChangeAccountInput struct {
 	NewPassword string
 }
 
-// ChangeAccount 修改登录名与（可选的）密码。旧密码必须匹配。
+// ChangeAccount 修改登录名与（可选的）密码。旧密码必须匹配。返回去掉首尾空白后的登录名。
 //
-// 成功后作废全部管理端会话（含发起修改的这一个），并为调用方重新签发一个
-// 带新纪元与新登录名的 token——其他浏览器被踢下线，当前浏览器保持登录。
-func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in ChangeAccountInput) (token, username string, err error) {
+// 成功后作废全部管理端会话（含发起修改的这一个），调用方必须用新凭据重新登录。不重发 token：
+// 重发的 token 要和并发的另一次改账号或重置抢纪元，窗口堵不死；不发就没有这个问题。
+func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in ChangeAccountInput) (username string, err error) {
 	username = strings.TrimSpace(in.Username)
 	if n := utf8.RuneCountInString(username); n < 1 || n > maxAdminUsernameRunes {
-		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
+		return "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"登录名需为 1–%d 个字符", maxAdminUsernameRunes)
 	}
 	// NUL 与非法 UTF-8 会让 PG 报 22021 而变成 500；换行、零宽字符、行/段分隔符、私用区这类
@@ -238,11 +237,11 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 	if !utf8.ValidString(username) || strings.IndexFunc(username, func(r rune) bool {
 		return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Co, unicode.Cs)
 	}) >= 0 {
-		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
+		return "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
 			"登录名不能包含控制字符或不可见字符")
 	}
 	if len(in.NewPassword) > maxPasswordBytes {
-		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodePasswordTooLong,
+		return "", domain.Failf(domain.ErrInvalidArgument, domain.CodePasswordTooLong,
 			"新密码过长（超过 %d 字节，约 %d 个汉字）", maxPasswordBytes, maxPasswordBytes/3)
 	}
 
@@ -253,26 +252,26 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 	var hash, status string
 	err = s.pool.QueryRow(ctx, `SELECT password_hash, status FROM admin WHERE id = $1`, id).Scan(&hash, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", sessionInvalid()
+		return "", sessionInvalid()
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("service: 查询管理员: %w", err)
+		return "", fmt.Errorf("service: 查询管理员: %w", err)
 	}
-	// 已停用的行与"行不存在"同样处理，且在校验旧密码之前。reset-password 对旧库里非保留的行
-	// 只改 status、不动哈希，下面所有只比哈希的检查都看不见这次停用；这里不拦，持着旧会话、
-	// 在途的 PUT /me 就能撑过重置。
+	// 已停用的行与"行不存在"同样处理，且在校验旧密码之前：账号已停用，旧密码对不对都不重要，
+	// 回会话失效让前端回登录页，也省掉一次 bcrypt。reset-password 对旧库里非保留的行只改 status、
+	// 不动哈希，所以只比哈希的检查看不出这次停用。
 	if status != "ACTIVE" {
-		return "", "", sessionInvalid()
+		return "", sessionInvalid()
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.OldPassword)) != nil {
-		return "", "", domain.Fail(domain.ErrInvalidArgument, domain.CodeAdminOldPasswordWrong, "旧密码不正确")
+		return "", domain.Fail(domain.ErrInvalidArgument, domain.CodeAdminOldPasswordWrong, "旧密码不正确")
 	}
 
 	newHash := hash
 	if in.NewPassword != "" {
 		h, err := bcrypt.GenerateFromPassword([]byte(in.NewPassword), bcryptCost)
 		if err != nil {
-			return "", "", fmt.Errorf("service: 计算管理员密码哈希: %w", err)
+			return "", fmt.Errorf("service: 计算管理员密码哈希: %w", err)
 		}
 		newHash = string(h)
 	}
@@ -284,10 +283,10 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 		UPDATE admin SET username = $2, password_hash = $3, display_name = $2, updated_at = now()
 		WHERE id = $1 AND password_hash = $4 AND status = 'ACTIVE'`, id, username, newHash, hash)
 	if isUniqueViolation(err) {
-		return "", "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "登录名已被占用")
+		return "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "登录名已被占用")
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("service: 更新管理员: %w", err)
+		return "", fmt.Errorf("service: 更新管理员: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		// 落空有两种成因，必须分清：行在这期间被停用（或删除），会话已失效；否则是密码被
@@ -295,39 +294,18 @@ func (s *AdminService) ChangeAccount(ctx context.Context, id uuid.UUID, in Chang
 		var current string
 		err = s.pool.QueryRow(ctx, `SELECT status FROM admin WHERE id = $1`, id).Scan(&current)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && current != "ACTIVE") {
-			return "", "", sessionInvalid()
+			return "", sessionInvalid()
 		}
 		if err != nil {
-			return "", "", fmt.Errorf("service: 复核管理员状态: %w", err)
+			return "", fmt.Errorf("service: 复核管理员状态: %w", err)
 		}
-		return "", "", domain.Fail(domain.ErrInvalidArgument, domain.CodeAdminOldPasswordWrong, "旧密码不正确")
+		return "", domain.Fail(domain.ErrInvalidArgument, domain.CodeAdminOldPasswordWrong, "旧密码不正确")
 	}
-	// 先提交、后 INCR，顺序见 bumpEpoch。用本次 INCR 的返回值签发，不再读一遍计数器：
-	// 读回来的可能已是别处新一轮 INCR 的结果，会把这个会话错放进新纪元。
-	epoch, err := s.bumpEpoch(ctx)
-	if err != nil {
-		return "", "", err
+	// 先提交、后 INCR，顺序见 bumpEpoch。
+	if err := s.bumpEpoch(ctx); err != nil {
+		return "", err
 	}
-	// 提交与 INCR 之间若夹进另一次凭据变更 X 的提交和 INCR（C_A < C_X < I_X < I_A），上面
-	// 的纪元盖不住 X，签出的 token 会撑过它：只改登录名时写回的是原哈希，并发改密的条件
-	// UPDATE 照样命中；重置的 UPDATE 本来就不带条件。重读发生在本次 INCR 之后：此前提交
-	// 的变更都看得见，哈希对不上就不签发；此后才提交的变更自带更晚的 INCR，token 本来就会
-	// 失效。返回 401 是因为本会话已被自己的 INCR 作废，让前端回登录页。
-	// status 要一起读：reset-password 对旧库里非保留的行只停用、不动哈希，停用后的哈希与本次
-	// 写入的一模一样，只比哈希看不见它，签出的 token 就撑过了重置。
-	var current, currentStatus string
-	err = s.pool.QueryRow(ctx, `SELECT password_hash, status FROM admin WHERE id = $1`, id).Scan(&current, &currentStatus)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (current != newHash || currentStatus != "ACTIVE")) {
-		return "", "", sessionInvalid()
-	}
-	if err != nil {
-		return "", "", fmt.Errorf("service: 复核管理员账号: %w", err)
-	}
-	token, err = s.issueToken(ctx, id, username, epoch)
-	if err != nil {
-		return "", "", err
-	}
-	return token, username, nil
+	return username, nil
 }
 
 // ResetPassword 把管理员账号恢复成用户名 admin + 随机密码，并作废全部会话。
@@ -378,7 +356,7 @@ func (s *AdminService) ResetPassword(ctx context.Context) (username, password st
 		return "", "", 0, fmt.Errorf("service: 提交重置: %w", err)
 	}
 	// 先提交、后 INCR，顺序见 bumpEpoch。
-	if _, err := s.bumpEpoch(ctx); err != nil {
+	if err := s.bumpEpoch(ctx); err != nil {
 		return "", "", 0, err
 	}
 	return DefaultAdminUsername, password, disabled, nil
@@ -413,15 +391,14 @@ func (s *AdminService) currentEpoch(ctx context.Context) (int64, error) {
 	return v, nil
 }
 
-// bumpEpoch 递增纪元以作废全部管理端会话，返回递增后的值。必须在数据库写入提交
-// 之后调用：INCR 若先于提交，读到新纪元的登录仍可能读到旧哈希（READ COMMITTED），
-// Login "先读纪元再查库"的栅栏就破了。
-func (s *AdminService) bumpEpoch(ctx context.Context) (int64, error) {
-	v, err := s.rdb.Incr(ctx, adminEpochKey).Result()
-	if err != nil {
-		return 0, fmt.Errorf("service: 作废管理端会话: %w", err)
+// bumpEpoch 递增纪元以作废全部管理端会话。必须在数据库写入提交之后调用：INCR 若先于
+// 提交，读到新纪元的登录仍可能读到旧哈希（READ COMMITTED），Login "先读纪元再查库"的
+// 栅栏就破了。
+func (s *AdminService) bumpEpoch(ctx context.Context) error {
+	if err := s.rdb.Incr(ctx, adminEpochKey).Err(); err != nil {
+		return fmt.Errorf("service: 作废管理端会话: %w", err)
 	}
-	return v, nil
+	return nil
 }
 
 // randomToken 生成 32 字节的密码学随机 token，base64url 编码后为 43 字符。

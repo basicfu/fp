@@ -46,7 +46,7 @@ ON CONFLICT (username) DO NOTHING
 
 - `oldPassword` 必填且必须匹配；`username` 去空白后 1–64 字符；`newPassword` 非空时 ≤ 72 字节，空表示不改密码。
 - 同一条 `UPDATE` 写 `username`、`password_hash`、`display_name`（跟随 `username`）、`updated_at`。
-- 成功后 `INCR` epoch，并为**当前请求**重新签发 token（写 cookie）——其他会话全部失效，当前浏览器保持登录。
+- 成功后 `INCR` epoch 作废**全部**会话（含当前请求这个），不重新签发 token，响应里清掉 cookie；前端回到登录页，用新凭据重新登录。（不换发是因为换发的 token 要和并发的凭据变更抢纪元，窗口堵不死；不发就没有这个问题。）
 - 旧密码错误返回新增的 `ADMIN_OLD_PASSWORD_WRONG`，映射 `ErrInvalidArgument`（400）。**不能复用** `ADMIN_CREDENTIAL_INVALID`：它映射 401，前端 `api.ts` 对任何 401 都会清登录态并跳登录页，输错旧密码会被踢出去。
 - 新错误码登记在 `internal/domain/codes.go` 的常量与 `codeSentinels` 里，HTTP 与 gRPC 的状态都从哨兵推导，不用另写映射；`TestTransportsAgreeOnEveryCode` 校验两个传输层对每个码一致。
 
@@ -82,7 +82,7 @@ docker exec <容器名> ./bootstrap reset-password
 
 - `Layout.tsx` 右上角下拉菜单在"退出"上方加「修改密码」，打开 `ChangeAccountDialog`（shadcn `Dialog`，仓库里已有）；新密码两次一致由前端校验。
 - `auth.tsx` 的 `login()` 返回 `{ defaultPassword }`；`Login.tsx` 成功后若为 true，弹 sonner toast（"当前仍在使用默认密码，建议修改"，带"去修改"，关闭即忽略），"去修改"打开同一个对话框。
-- 改成功：toast 提示，对话框关闭，用户菜单里的登录名立即更新。
+- 改成功：toast 提示，退出登录，回到登录页。
 
 ## 八、明确不做
 

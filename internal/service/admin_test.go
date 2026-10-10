@@ -362,10 +362,10 @@ func waitUntilBlockedBy(t *testing.T, pool *pgxpool.Pool, pid int32) {
 	}
 }
 
-// redisCmdHook 在每条单命令前后各调一次回调（after 只在命令成功后调），拨号与管道原样放行。
+// redisCmdHook 在每条单命令发出之前调一次回调，拨号与管道原样放行。
 // 回调自己判断是不是要拦的那条命令，并负责只触发一次。
 type redisCmdHook struct {
-	before, after func(ctx context.Context, cmd redis.Cmder)
+	before func(ctx context.Context, cmd redis.Cmder)
 }
 
 func (h *redisCmdHook) DialHook(next redis.DialHook) redis.DialHook { return next }
@@ -375,11 +375,7 @@ func (h *redisCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 		if h.before != nil {
 			h.before(ctx, cmd)
 		}
-		err := next(ctx, cmd)
-		if err == nil && h.after != nil {
-			h.after(ctx, cmd)
-		}
-		return err
+		return next(ctx, cmd)
 	}
 }
 
@@ -415,7 +411,7 @@ func TestEnsureBootstrapDoesNotRecreateDefaultAdminAfterRename(t *testing.T) {
 	ctx := context.Background()
 	e.bootstrap(t, "admin", "admin")
 	_, id := e.loginAs(t, "admin", "admin")
-	if _, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "root", OldPassword: "admin"}); err != nil {
+	if _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "root", OldPassword: "admin"}); err != nil {
 		t.Fatalf("ChangeAccount: %v", err)
 	}
 
@@ -447,7 +443,7 @@ func TestChangeAccountRejectsWrongOldPassword(t *testing.T) {
 	e.bootstrap(t, "admin", "secret123456")
 	_, id := e.loginAs(t, "admin", "secret123456")
 
-	_, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{
+	_, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{
 		Username: "admin", OldPassword: "nope", NewPassword: "new-password",
 	})
 	if !errors.Is(err, domain.ErrInvalidArgument) || adminErrCode(err) != domain.CodeAdminOldPasswordWrong {
@@ -458,14 +454,15 @@ func TestChangeAccountRejectsWrongOldPassword(t *testing.T) {
 	}
 }
 
-func TestChangeAccountChangesPasswordAndRevokesOtherSessions(t *testing.T) {
+// 改账号成功后全部会话作废，包括发起修改的这一个：不为调用方换发 token，得用新凭据重新登录。
+func TestChangeAccountChangesPasswordAndRevokesAllSessions(t *testing.T) {
 	e := newAdminTestEnv(t)
 	ctx := context.Background()
 	e.bootstrap(t, "admin", "secret123456")
 	other, id := e.loginAs(t, "admin", "secret123456")
 	current, _ := e.loginAs(t, "admin", "secret123456")
 
-	newToken, username, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{
+	username, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{
 		Username: "  boss ", OldPassword: "secret123456", NewPassword: "brand-new-pass",
 	})
 	if err != nil {
@@ -475,13 +472,14 @@ func TestChangeAccountChangesPasswordAndRevokesOtherSessions(t *testing.T) {
 		t.Fatalf("username = %q, want boss（应去掉首尾空白）", username)
 	}
 
-	for name, tok := range map[string]string{"其他会话": other, "发起修改的旧会话": current} {
+	for name, tok := range map[string]string{"其他会话": other, "发起修改的会话": current} {
 		if _, _, err := e.svc.Authenticate(ctx, tok); !errors.Is(err, domain.ErrUnauthorized) {
 			t.Fatalf("%s 应已失效, err = %v", name, err)
 		}
 	}
-	if _, name, err := e.svc.Authenticate(ctx, newToken); err != nil || name != "boss" {
-		t.Fatalf("新签发的 token: name = %q, err = %v", name, err)
+	// 要在下面重新登录之前数：此刻只该剩改之前登录的那两个，不能悄悄为调用方换发一个。
+	if n := e.tokenKeys(t); n != 2 {
+		t.Errorf("会话数 = %d, want 2（改之前登录的两个，不该换发新会话）", n)
 	}
 	if _, err := e.svc.Login(ctx, "boss", "brand-new-pass"); err != nil {
 		t.Fatalf("新账号密码应能登录: %v", err)
@@ -499,7 +497,7 @@ func TestChangeAccountWithoutNewPasswordOnlyRenames(t *testing.T) {
 	e.bootstrap(t, "admin", "secret123456")
 	_, id := e.loginAs(t, "admin", "secret123456")
 
-	if _, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "root", OldPassword: "secret123456"}); err != nil {
+	if _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "root", OldPassword: "secret123456"}); err != nil {
 		t.Fatalf("ChangeAccount: %v", err)
 	}
 	if _, err := e.svc.Login(ctx, "root", "secret123456"); err != nil {
@@ -530,7 +528,7 @@ func TestChangeAccountValidatesInput(t *testing.T) {
 		{"登录名含私用区字符", service.ChangeAccountInput{Username: "a\ue000b", OldPassword: "secret123456"}},
 	}
 	for _, c := range cases {
-		if _, _, err := e.svc.ChangeAccount(context.Background(), id, c.in); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := e.svc.ChangeAccount(context.Background(), id, c.in); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: err = %v, want ErrInvalidArgument", c.name, err)
 		}
 	}
@@ -546,22 +544,23 @@ func TestChangeAccountAcceptsOrdinaryUsernames(t *testing.T) {
 	_, id := e.loginAs(t, "admin", "secret123456")
 
 	for _, name := range []string{"管理员", "ops team", "e\u0301", "a-b_c.d@e", "\U0002EBF0"} {
-		if _, got, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: name, OldPassword: "secret123456"}); err != nil || got != name {
+		if got, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: name, OldPassword: "secret123456"}); err != nil || got != name {
 			t.Errorf("ChangeAccount(%q) = (%q, %v)，应当照常通过", name, got, err)
 		}
 	}
 }
 
-// 会话 payload 是 id|username|epoch，登录名里的 | 不能把它切歪。
+// 会话 payload 是 id|username|epoch，登录名里的 | 不能把它切歪。改账号不再签发会话，
+// 会话由用新名字重新登录得到。
 func TestChangeAccountAllowsPipeInUsername(t *testing.T) {
 	e := newAdminTestEnv(t)
 	e.bootstrap(t, "admin", "secret123456")
 	_, id := e.loginAs(t, "admin", "secret123456")
 
-	token, _, err := e.svc.ChangeAccount(context.Background(), id, service.ChangeAccountInput{Username: "a|b", OldPassword: "secret123456"})
-	if err != nil {
+	if _, err := e.svc.ChangeAccount(context.Background(), id, service.ChangeAccountInput{Username: "a|b", OldPassword: "secret123456"}); err != nil {
 		t.Fatalf("ChangeAccount: %v", err)
 	}
+	token, _ := e.loginAs(t, "a|b", "secret123456")
 	if _, name, err := e.svc.Authenticate(context.Background(), token); err != nil || name != "a|b" {
 		t.Fatalf("name = %q, err = %v, want a|b", name, err)
 	}
@@ -577,7 +576,7 @@ func TestChangeAccountRejectsUsernameTakenByAnotherRow(t *testing.T) {
 	e.insertAdminRow(t, "other", "other-password", "ACTIVE", time.Now())
 	epochBefore := e.epoch(t)
 
-	_, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "other", OldPassword: "secret123456"})
+	_, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "other", OldPassword: "secret123456"})
 	if !errors.Is(err, domain.ErrInvalidArgument) || adminErrCode(err) != domain.CodeInvalidArgument || err.Error() != "登录名已被占用" {
 		t.Fatalf("err = %v (code %q), want ErrInvalidArgument / INVALID_ARGUMENT / 登录名已被占用", err, adminErrCode(err))
 	}
@@ -595,14 +594,14 @@ func TestChangeAccountRejectsUsernameTakenByAnotherRow(t *testing.T) {
 // 会话指向的管理员行已不存在（库被清、行被删）：按登录过期处理，让前端回登录页，不是 500。
 func TestChangeAccountForUnknownAdminIsSessionInvalid(t *testing.T) {
 	e := newAdminTestEnv(t)
-	_, _, err := e.svc.ChangeAccount(context.Background(), uuid.New(), service.ChangeAccountInput{Username: "boss", OldPassword: "secret123456"})
+	_, err := e.svc.ChangeAccount(context.Background(), uuid.New(), service.ChangeAccountInput{Username: "boss", OldPassword: "secret123456"})
 	if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
 		t.Fatalf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
 	}
 }
 
 // 校验旧密码到写库之间隔着一次 bcrypt，其间另一次改密或重置若已提交，无条件的
-// UPDATE 会用开头读到的旧哈希把它盖回去：重置白做，发起人还拿着刚签发的有效会话。
+// UPDATE 会用开头读到的旧哈希把它盖回去：那次改密或重置白做了。
 //
 // 时序用第二个事务的行锁钉死，不靠 sleep：先锁住管理员行，ChangeAccount 开头的
 // 普通 SELECT 不受影响、读到旧哈希，随后它的 UPDATE 确定地卡在锁上；确认卡住后
@@ -657,7 +656,7 @@ func TestChangeAccountDoesNotOverwriteConcurrentPasswordChange(t *testing.T) {
 				defer wg.Done()
 				callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 				defer cancel()
-				_, _, changeErr = e.svc.ChangeAccount(callCtx, id, c.in)
+				_, changeErr = e.svc.ChangeAccount(callCtx, id, c.in)
 			}()
 			waitUntilBlockedBy(t, e.pool, holderPID)
 
@@ -777,109 +776,57 @@ func TestLoginReadsEpochBeforeCheckingCredentials(t *testing.T) {
 	}
 }
 
-// 改账号签发的 token 必须带自己那次 INCR 的返回值，不能事后再读计数器：两步之间若又有
-// 别处的作废落地（另一次改密或重置），读回来的是对方的纪元，token 会越过那次作废。
+// ChangeAccount 与 ResetPassword 一样必须"先提交、后 INCR"，理由见
+// TestResetPasswordCommitsBeforeBumpingEpoch；这里直接钉成功路径上的先后。
 //
-// hook 在 ChangeAccount 的 INCR 返回之后立刻再 INCR 一次，模拟这次作废：此时纪元是
-// E+2，而 ChangeAccount 签发的 token 带的是 E+1，必须已经失效。
-func TestChangeAccountSignsTokenWithItsOwnEpochBump(t *testing.T) {
+// hook 在纪元 INCR 发出之前，用另一条连接读管理员行：此刻改账号必须已经提交。要连密码一起改：
+// 只改登录名时哈希不变，看不出提交与否。
+func TestChangeAccountCommitsBeforeBumpingEpoch(t *testing.T) {
 	const oldPassword = "secret123456"
 	ctx := context.Background()
 	pool := testsupport.NewTestDB(t)
 	base := testsupport.NewTestRedis(t)
 
-	var fired atomic.Bool
-	hook := &redisCmdHook{
-		after: func(ctx context.Context, cmd redis.Cmder) {
-			if !isEpochCmd(cmd, "incr") || !fired.CompareAndSwap(false, true) {
-				return
-			}
-			// 走没挂 hook 的 base，免得递归进同一个 hook。
-			if err := base.Incr(ctx, "fp:admin:epoch").Err(); err != nil {
-				t.Errorf("模拟并发作废，INCR: %v", err)
-			}
-		},
-	}
-	e := adminTestEnv{svc: service.NewAdminService(pool, hookedRedis(t, hook)), pool: pool, rdb: base}
-	e.bootstrap(t, "admin", oldPassword)
-	_, id := e.loginAs(t, "admin", oldPassword)
-	epochBefore := e.epoch(t)
-
-	token, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "boss", OldPassword: oldPassword})
-	if err != nil {
-		t.Fatalf("ChangeAccount: %v", err)
-	}
-	if !fired.Load() {
-		t.Fatal("hook 没有触发：ChangeAccount 没有 INCR 纪元？")
-	}
-	if got := e.epoch(t); got != epochBefore+2 {
-		t.Fatalf("纪元 %d -> %d, want +2（ChangeAccount 自己那次加上模拟的并发作废）", epochBefore, got)
-	}
-	if _, _, err := e.svc.Authenticate(ctx, token); !errors.Is(err, domain.ErrUnauthorized) {
-		t.Fatalf("Authenticate err = %v, want ErrUnauthorized：token 应带本次 INCR 的纪元，已被后来的作废盖掉", err)
-	}
-}
-
-// 改账号"先提交、后 INCR"，两步之间若夹进另一次凭据变更 X 的提交与 INCR（C_A < C_X <
-// I_X < I_A），A 用自己那次 INCR 签出的 token 带着最终纪元，会撑过 X：只改登录名时 A 写回
-// 的是原哈希，并发改密的条件 UPDATE 照样命中；重置的 UPDATE 本来就不带条件。INCR 之后重读
-// 哈希，对不上就不能签发。
-//
-// hook 在 A 的 INCR 发出之前模拟 X：提交另一个哈希，再经没挂 hook 的 base 做一次 INCR。
-func TestChangeAccountRefusesTokenWhenCredentialsChangedBeforeItsIncr(t *testing.T) {
-	const oldPassword = "secret123456"
-	ctx := context.Background()
-	pool := testsupport.NewTestDB(t)
-	base := testsupport.NewTestRedis(t)
-	otherHash, err := bcrypt.GenerateFromPassword([]byte("written-by-other-change"), bcrypt.MinCost)
-	if err != nil {
-		t.Fatalf("bcrypt: %v", err)
-	}
-
-	var fired atomic.Bool
+	var hashBeforeChange string
+	var fired, committed atomic.Bool
 	hook := &redisCmdHook{
 		before: func(ctx context.Context, cmd redis.Cmder) {
 			if !isEpochCmd(cmd, "incr") || !fired.CompareAndSwap(false, true) {
 				return
 			}
-			if _, err := pool.Exec(ctx, `UPDATE admin SET password_hash = $1`, string(otherHash)); err != nil {
-				t.Errorf("模拟并发改密，写库: %v", err)
+			var h string
+			if err := pool.QueryRow(ctx, `SELECT password_hash FROM admin`).Scan(&h); err != nil {
+				t.Errorf("INCR 之前读管理员行: %v", err)
 				return
 			}
-			if err := base.Incr(ctx, "fp:admin:epoch").Err(); err != nil {
-				t.Errorf("模拟并发改密，INCR: %v", err)
-			}
+			committed.Store(h != hashBeforeChange)
 		},
 	}
 	e := adminTestEnv{svc: service.NewAdminService(pool, hookedRedis(t, hook)), pool: pool, rdb: base}
 	e.bootstrap(t, "admin", oldPassword)
 	_, id := e.loginAs(t, "admin", oldPassword)
-	epochBefore := e.epoch(t)
+	if err := pool.QueryRow(ctx, `SELECT password_hash FROM admin`).Scan(&hashBeforeChange); err != nil {
+		t.Fatalf("读改账号前的哈希: %v", err)
+	}
 
-	// 只改登录名：UPDATE 写回的恰是原哈希，条件 UPDATE 拦不住的就是这种。
-	token, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "boss", OldPassword: oldPassword})
+	if _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{
+		Username: "boss", OldPassword: oldPassword, NewPassword: "brand-new-pass",
+	}); err != nil {
+		t.Fatalf("ChangeAccount: %v", err)
+	}
 	if !fired.Load() {
 		t.Fatal("hook 没有触发：ChangeAccount 没有 INCR 纪元？")
 	}
-	if err == nil {
-		_, _, aerr := e.svc.Authenticate(ctx, token)
-		t.Fatalf("凭据已被另一次变更换掉，ChangeAccount 仍签发了 token（Authenticate err = %v，nil 即它是有效会话）", aerr)
-	}
-	if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
-		t.Fatalf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
-	}
-	if n := e.tokenKeys(t); n != 1 {
-		t.Errorf("会话数 = %d, want 1（只有登录时签发的那个，不该多出新的）", n)
-	}
-	if got := e.epoch(t); got != epochBefore+2 {
-		t.Errorf("纪元 %d -> %d, want +2（ChangeAccount 自己那次加上模拟的并发变更）", epochBefore, got)
+	if !committed.Load() {
+		t.Fatal("纪元 INCR 发出时改账号还没有提交：读到新纪元的登录仍可能读到旧哈希")
 	}
 }
 
 // reset-password 对旧库里非保留的行只置 DISABLED、不动哈希。ChangeAccount 若只比哈希，就看不见
-// 这次停用：旧库里的 admin/admin 靠一个在途的 PUT /me（在重置的 INCR 之前通过鉴权）撑过重置，
-// 拿到有效会话。已停用的行与"行不存在"走同一条路：回会话失效，不必先付一次 bcrypt，
-// 旧密码错也一样（所以下面要有"旧密码错误"这一条，它才钉得住"在校验旧密码之前"）。
+// 这次停用：旧库里的 admin/admin 靠一个在途的 PUT /me（在重置的 INCR 之前通过鉴权）照样改得动
+// 已被停用的行，它的 INCR 还会作废运维刚签发的新会话。已停用的行与"行不存在"走同一条路：回会话
+// 失效，不必先付一次 bcrypt，旧密码错也一样（所以下面要有"旧密码错误"这一条，它才钉得住
+// "在校验旧密码之前"）。
 func TestChangeAccountRefusesDisabledAdmin(t *testing.T) {
 	cases := []struct{ name, oldPassword string }{
 		{"旧密码正确", "admin"},
@@ -896,7 +843,7 @@ func TestChangeAccountRefusesDisabledAdmin(t *testing.T) {
 			}
 			epochBefore := e.epoch(t)
 
-			_, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: c.oldPassword})
+			_, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: c.oldPassword})
 			if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
 				t.Errorf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
 			}
@@ -914,57 +861,6 @@ func TestChangeAccountRefusesDisabledAdmin(t *testing.T) {
 				t.Errorf("登录名 = %q，被停用的行不该被改名", name)
 			}
 		})
-	}
-}
-
-// 停用发生在 ChangeAccount 的 UPDATE 提交之后、INCR 之前：reset-password 先提交（停用非保留行，
-// 哈希不动），它的 INCR 也先于 A 的 INCR 落地。A 签出的 token 带着最终纪元，只比哈希的重读
-// 看到的仍是本次写入的哈希，于是 token 在重置之后依然有效。重读要连 status 一起读。
-//
-// hook 在 A 的 INCR 发出之前模拟这次重置：停用该行，再经没挂 hook 的 base 做一次 INCR。
-func TestChangeAccountRefusesTokenWhenAdminDisabledBeforeItsIncr(t *testing.T) {
-	const oldPassword = "admin"
-	ctx := context.Background()
-	pool := testsupport.NewTestDB(t)
-	base := testsupport.NewTestRedis(t)
-	e := adminTestEnv{pool: pool, rdb: base}
-	id := e.insertLegacyAdmins(t)
-
-	var fired atomic.Bool
-	e.svc = service.NewAdminService(pool, hookedRedis(t, &redisCmdHook{
-		before: func(ctx context.Context, cmd redis.Cmder) {
-			if !isEpochCmd(cmd, "incr") || !fired.CompareAndSwap(false, true) {
-				return
-			}
-			if _, err := pool.Exec(ctx, `UPDATE admin SET status = 'DISABLED' WHERE id = $1`, id); err != nil {
-				t.Errorf("模拟重置，停用该行: %v", err)
-				return
-			}
-			if err := base.Incr(ctx, "fp:admin:epoch").Err(); err != nil {
-				t.Errorf("模拟重置，INCR: %v", err)
-			}
-		},
-	}))
-	e.loginAs(t, "admin", oldPassword)
-	epochBefore := e.epoch(t)
-
-	// 只改登录名：停用不动哈希，只比哈希的重读拦不住的就是这种。
-	token, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: oldPassword})
-	if !fired.Load() {
-		t.Fatal("hook 没有触发：ChangeAccount 没有 INCR 纪元？")
-	}
-	if err == nil {
-		_, _, aerr := e.svc.Authenticate(ctx, token)
-		t.Fatalf("该行已被停用，ChangeAccount 仍签发了 token（Authenticate err = %v，nil 即它是有效会话）", aerr)
-	}
-	if !errors.Is(err, domain.ErrUnauthorized) || adminErrCode(err) != domain.CodeAdminSessionInvalid {
-		t.Fatalf("err = %v (code %q), want ErrUnauthorized / ADMIN_SESSION_INVALID", err, adminErrCode(err))
-	}
-	if n := e.tokenKeys(t); n != 1 {
-		t.Errorf("会话数 = %d, want 1（只有登录时签发的那个，不该多出新的）", n)
-	}
-	if got := e.epoch(t); got != epochBefore+2 {
-		t.Errorf("纪元 %d -> %d, want +2（ChangeAccount 自己那次加上模拟的重置）", epochBefore, got)
 	}
 }
 
@@ -1005,7 +901,7 @@ func TestChangeAccountDoesNotUpdateAdminDisabledWhileBlocked(t *testing.T) {
 		defer wg.Done()
 		callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		_, _, changeErr = e.svc.ChangeAccount(callCtx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: "admin"})
+		_, changeErr = e.svc.ChangeAccount(callCtx, id, service.ChangeAccountInput{Username: "renamed", OldPassword: "admin"})
 	}()
 	waitUntilBlockedBy(t, e.pool, holderPID)
 
@@ -1043,7 +939,7 @@ func TestResetPasswordRestoresAdminWithRandomPassword(t *testing.T) {
 	ctx := context.Background()
 	e.bootstrap(t, "admin", "secret123456")
 	_, id := e.loginAs(t, "admin", "secret123456")
-	if _, _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "root", OldPassword: "secret123456"}); err != nil {
+	if _, err := e.svc.ChangeAccount(ctx, id, service.ChangeAccountInput{Username: "root", OldPassword: "secret123456"}); err != nil {
 		t.Fatalf("ChangeAccount: %v", err)
 	}
 	staleToken, _ := e.loginAs(t, "root", "secret123456") // 重置前签发的会话，重置后必须失效
@@ -1094,7 +990,7 @@ func TestResetPasswordCreatesAdminWhenTableEmpty(t *testing.T) {
 
 // ResetPassword 与 ChangeAccount 一样必须"先提交、后 INCR"：INCR 若先于提交，读到新纪元的
 // 登录仍可能读到旧哈希（READ COMMITTED），Login"先读纪元再查库"的栅栏就破了。ChangeAccount
-// 的顺序有"失败的修改不动纪元"的断言钉着，ResetPassword 的这里钉。
+// 的那条见 TestChangeAccountCommitsBeforeBumpingEpoch。
 //
 // hook 在纪元 INCR 发出之前，用另一条连接读管理员行：此刻重置必须已经提交。
 func TestResetPasswordCommitsBeforeBumpingEpoch(t *testing.T) {

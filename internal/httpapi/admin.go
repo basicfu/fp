@@ -87,10 +87,9 @@ type adminChangeAccountRequest struct {
 	NewPassword string `json:"newPassword"`
 }
 
-// adminChangeAccountResponse 不复用 adminLoginResponse：defaultPassword 只对登录有意义，
-// 放进改账号的响应里恒为 false，新密码恰好设成 admin 时还是错的。
+// adminChangeAccountResponse 只回显去掉空白后的登录名。不复用 adminLoginResponse，也不带 token：
+// 全部会话已作废、不重发，用户要重新登录；defaultPassword 只对登录有意义，留给登录响应去报。
 type adminChangeAccountResponse struct {
-	Token    string `json:"token"`
 	Username string `json:"username"`
 }
 
@@ -100,13 +99,14 @@ func (h *adminHandler) changeAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	token, username, err := h.svc.ChangeAccount(r.Context(), adminIDFrom(r.Context()), service.ChangeAccountInput{
+	username, err := h.svc.ChangeAccount(r.Context(), adminIDFrom(r.Context()), service.ChangeAccountInput{
 		Username: req.Username, OldPassword: req.OldPassword, NewPassword: req.NewPassword,
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	http.SetCookie(w, h.sessionCookie(token, 0))
-	writeJSON(w, http.StatusOK, adminChangeAccountResponse{Token: token, Username: username})
+	// 凭据一改所有会话都已作废，清掉 cookie，免得浏览器带着必然 401 的 cookie 继续发请求。
+	http.SetCookie(w, h.sessionCookie("", -1))
+	writeJSON(w, http.StatusOK, adminChangeAccountResponse{Username: username})
 }
