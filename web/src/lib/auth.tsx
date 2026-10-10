@@ -15,8 +15,8 @@ interface AuthValue {
   /** resolve 后端给的 defaultPassword：这次登录用的是否仍是内置默认密码。 */
   login: (username: string, password: string) => Promise<{ defaultPassword: boolean }>
   logout: () => Promise<void>
-  /** 改账号成功后同步顶栏显示的登录名；会话本身由后端在响应里换新。 */
-  renameUser: (username: string) => void
+  /** 本地结束会话：后端已经让它失效（改账号成功、401），这里只把状态收回登录页，不发请求。 */
+  endSession: () => void
   /** 「修改密码」对话框的开关放在这里：登录页的默认密码提示要能从别处把它打开。 */
   accountDialogOpen: boolean
   setAccountDialogOpen: (open: boolean) => void
@@ -35,16 +35,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsername] = useState<string | null>(null)
   const [accountDialogOpen, setAccountDialogOpen] = useState(false)
 
+  // 会话已被后端作废时不走 logout()：它的 POST /logout 此时必然 401，是白发的请求。
+  const endSession = useCallback(() => {
+    setStatus('anon')
+    setUsername(null)
+    setAccountDialogOpen(false)
+  }, [])
+
   // 任何一次请求拿到 401 都直接把状态打回未登录：管理端会话有效期两小时，
   // 用户很可能在某个页面上停留到过期，这时不该等他点到下一个按钮才发现。
   useEffect(() => {
-    setUnauthorizedHandler(() => {
-      setStatus('anon')
-      setUsername(null)
-      setAccountDialogOpen(false)
-    })
+    setUnauthorizedHandler(endSession)
     return () => setUnauthorizedHandler(() => {})
-  }, [])
+  }, [endSession])
 
   // 首次挂载探测当前会话。
   //
@@ -80,8 +83,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { defaultPassword: res.defaultPassword }
   }, [])
 
-  const renameUser = useCallback((u: string) => setUsername(u), [])
-
   const logout = useCallback(async () => {
     try {
       await api.post('/logout')
@@ -103,8 +104,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo<AuthValue>(
-    () => ({ status, username, login, logout, renameUser, accountDialogOpen, setAccountDialogOpen }),
-    [status, username, login, logout, renameUser, accountDialogOpen],
+    () => ({ status, username, login, logout, endSession, accountDialogOpen, setAccountDialogOpen }),
+    [status, username, login, logout, endSession, accountDialogOpen],
   )
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

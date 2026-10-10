@@ -130,13 +130,13 @@ test('login 返回后端给的 defaultPassword 并进入 authed', async () => {
 // mock，覆盖不到这里）。探针不往外塞 holder：往 props 里的对象赋值会被 oxlint 的
 // react(immutability) 报警，所以值靠渲染读、动作靠点按钮触发。
 function StateProbe() {
-  const { status, username, accountDialogOpen, setAccountDialogOpen, renameUser, login, logout } = useAuth()
+  const { status, username, accountDialogOpen, setAccountDialogOpen, endSession, login, logout } = useAuth()
   return (
     <div>
       <div data-testid="probe">{status}:{username ?? '-'}</div>
       <div data-testid="dialog">{accountDialogOpen ? 'open' : 'closed'}</div>
       <button onClick={() => setAccountDialogOpen(true)}>open-dialog</button>
-      <button onClick={() => renameUser('boss')}>rename</button>
+      <button onClick={() => endSession()}>end-session</button>
       <button onClick={() => void login('admin', 'pw')}>login</button>
       <button onClick={() => void logout()}>logout</button>
     </div>
@@ -188,13 +188,23 @@ test('logout 之后「修改密码」对话框开关被复位', async () => {
   expect(screen.getByTestId('dialog').textContent).toBe('closed')
 })
 
-test('renameUser 只改显示的登录名，会话仍是 authed', async () => {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ id: '1', username: 'admin' }), { status: 200 })))
+// 【辨别力】改账号成功后后端已作废会话，endSession 只收回本地状态。fetch 只许有挂载时的那次 /me：
+// 实现若偷懒走 logout()，就会多出一个必然 401 的 POST /logout。
+test('endSession：状态回到 anon、对话框开关复位，且不发任何请求', async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ id: '1', username: 'admin' }), { status: 200 }))
+  vi.stubGlobal('fetch', fetchMock)
   render(<AuthProvider><StateProbe /></AuthProvider>)
   await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('authed:admin'))
 
-  fireEvent.click(screen.getByRole('button', { name: 'rename' }))
-  expect(screen.getByTestId('probe').textContent).toBe('authed:boss')
+  fireEvent.click(screen.getByRole('button', { name: 'open-dialog' }))
+  expect(screen.getByTestId('dialog').textContent).toBe('open')
+
+  fireEvent.click(screen.getByRole('button', { name: 'end-session' }))
+  expect(screen.getByTestId('probe').textContent).toBe('anon:-')
+  expect(screen.getByTestId('dialog').textContent).toBe('closed')
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/admin/api/me'])
 })
 
 // 【辨别力】未登录时登录页上遗留的"去修改"提示还能把开关置 true；这次登录成功后它若

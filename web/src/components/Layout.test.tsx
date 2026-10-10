@@ -12,15 +12,14 @@ const authMock = vi.hoisted(() => ({
   logout: vi.fn(),
   accountDialogOpen: false,
   setAccountDialogOpen: vi.fn(),
-  renameUser: vi.fn(),
+  endSession: vi.fn(),
 }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => authMock }))
 
 afterEach(() => vi.unstubAllGlobals())
 
 function stubEmptyApplications() {
-  // 改密对话框一打开还会 GET /me：各路由各给各的响应，别让它和应用列表抢同一个 Response 的 body。
-  stubApi({ 'GET /applications': [], 'GET /me': { id: '1', username: 'alice' } })
+  stubApi({ 'GET /applications': [] })
 }
 
 function renderLayout(initialEntries: string[]) {
