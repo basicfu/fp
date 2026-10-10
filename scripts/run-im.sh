@@ -16,4 +16,4 @@ if [ -z "${FP_IM_REDIS_URL:-}" ] || [ -z "${FP_IM_FPSDK_ADDR:-}" ] || [ -z "${FP
   echo "缺少 FP_IM_REDIS_URL / FP_IM_FPSDK_ADDR / FP_IM_FPSDK_SECRET 其中一个。写进 $ROOT/.env.local，或在环境变量里传。" >&2
   exit 1
 fi
-exec go run ./cmd/fp-im "$@"
+exec go run ./cmd/fpim "$@"

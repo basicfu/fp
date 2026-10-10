@@ -13,3 +13,6 @@
 *.gif binary
 *.ico binary
 *.pdf binary
+
+# .cmd 必须 CRLF：cmd.exe 解析 LF 行尾的批处理有已知的错位 bug
+*.cmd text eol=crlf
