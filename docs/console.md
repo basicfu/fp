@@ -145,9 +145,14 @@ Vite 把 `/admin/api` 代理到 `localhost:8080`，浏览器看到的仍是同�
   默认角色决定"新用户零配置能干什么"，与权限点是一件事的两面。
 - **给用户分配角色**在用户详情里，因为那是这个用户的属性。
 
-GUEST 是内置角色——未登录请求和所有登录用户都拥有它，访问密钥不拥有；不能删除、不能设父角色、只能配「允许」。
+内置角色有两个，都不能删除、不能设父角色，fp 每次启动时补齐（`store.EnsureBuiltinRoles`，已存在的不动）：
 
-**升级前检查**：迁移 `00011_access_key.sql` 用 `INSERT ... ON CONFLICT (key) DO NOTHING` 建这个角色——如果目标 fp 实例的数据库里已经存在一个 key 为 `GUEST` 的角色（不管什么原因建的），迁移不会覆盖它，它现有的全部授权会在迁移跑完的瞬间立刻对所有匿名请求（allow）和所有登录用户（deny）生效，没有任何提示。升级前建议先查一遍：
+- **GUEST**——未登录请求和所有登录用户都拥有它，访问密钥不拥有；只能配「允许」。
+- **ADMIN**——持有它的用户或访问密钥跳过权限检查，任何权限点都放行（其他角色的「拒绝」也盖不过它）；不能配置授权，也不能被别的角色继承。
+
+**升级前检查 ADMIN**：库里若已有 code 为 `ADMIN` 的角色，启动时不会覆盖它，持有它的用户和访问密钥会在升级后立刻获得全部权限。升级前先确认 `SELECT * FROM user_role WHERE roles @> ARRAY['ADMIN']` 与 `SELECT * FROM access_key WHERE role_key = 'ADMIN'` 的结果符合预期。
+
+**升级前检查 GUEST**：迁移 `00011_access_key.sql` 用 `INSERT ... ON CONFLICT (key) DO NOTHING` 建这个角色——如果目标 fp 实例的数据库里已经存在一个 key 为 `GUEST` 的角色（不管什么原因建的），迁移不会覆盖它，它现有的全部授权会在迁移跑完的瞬间立刻对所有匿名请求（allow）和所有登录用户（deny）生效，没有任何提示。升级前建议先查一遍：
 
 ```sql
 SELECT r.key, rp.effect, count(*) FROM role r

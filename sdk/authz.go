@@ -54,6 +54,10 @@ func (a *Authz) Allow(ctx context.Context, method, pattern string) (bool, error)
 		// 回 403 会让调用方以为是权限配置问题，而真实原因是中间件没挂对。
 		return false, ErrNoIdentity
 	}
+	// ADMIN 跳过权限检查，所以也不需要等策略就绪。
+	if authzcore.HasAdmin(id.Roles) {
+		return true, nil
+	}
 	a.mu.RLock()
 	snap, ready := a.compiled, a.ready
 	a.mu.RUnlock()
@@ -72,6 +76,9 @@ func (a *Authz) Allow(ctx context.Context, method, pattern string) (bool, error)
 // 不会自动并入 GUEST——GUEST 的并入只发生在 Allow（从 context 里的身份判断
 // 是否匿名/访问密钥）；直接传角色时，角色表示什么就是什么。
 func (a *Authz) AllowRoles(roles []string, method, pattern string) (bool, error) {
+	if authzcore.HasAdmin(roles) {
+		return true, nil
+	}
 	a.mu.RLock()
 	snap, ready := a.compiled, a.ready
 	a.mu.RUnlock()

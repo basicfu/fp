@@ -282,6 +282,10 @@ _ = client.ReportPermissions(context.Background(), a.Collect(r)) // 传顶层路
 
 没带任何凭据的请求会被认证中间件放行为匿名身份（`id.IsAnonymous()` 为 true），鉴权时只有内置角色 `GUEST`；登录用户判定时也自动拥有 `GUEST`。控制台给 GUEST 授权的接口未登录也能调，其余接口匿名请求回 401。带了 token 但无效的请求仍然是 401，不会被当成匿名。**所有路由都要挂鉴权**（`fpchi` 在顶层 `r.Use(a.Middleware())` 即可）。
 
+### ADMIN
+
+内置角色 `ADMIN` 跳过权限检查：身份（登录用户或访问密钥）的角色里有它，`Allow` / `AllowRoles` 对任何权限点都直接返回 true，不看策略内容、不受其他角色的「拒绝」影响，策略尚未就绪时也一样。
+
 ### 访问密钥（第三方程序调用）
 
 第三方程序用控制台发放的 AccessKey 签名调用，认证中间件自动校验，不需要额外配置：身份里 `id.IsAccessKey()` 为 true，鉴权只按 key 绑定的角色判定、不拥有 GUEST。来源 IP 取 `X-Forwarded-For` 的第一个地址，部署时最外层代理必须覆盖这个头。签名规则、测试向量与错误码见 [`docs/access-key.md`](../docs/access-key.md)。

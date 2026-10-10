@@ -126,10 +126,18 @@ func TestAccessKeyLastUsedReportedOnClose(t *testing.T) {
 func TestGuestAndAccessKeyBoundaries(t *testing.T) {
 	e := newPhase2Env(t)
 	ctx := context.Background()
-	// 测试库每次清空，迁移插入的 GUEST 不在，需要自己建。
-	guest, err := e.authz.CreateRole(ctx, authzcore.GuestRoleKey, "访客", nil)
+	roles, err := e.authz.ListRoles(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var guest *domain.Role
+	for i := range roles {
+		if roles[i].Code == authzcore.GuestRoleKey {
+			guest = &roles[i]
+		}
+	}
+	if guest == nil {
+		t.Fatal("内置角色 GUEST 应已由 testsupport 补齐")
 	}
 	view, err := e.authz.CreatePermission(ctx, e.app.ID, "GET:/orders/{id}", "查看订单", domain.PermissionKindAPI)
 	if err != nil {

@@ -47,3 +47,22 @@ func TestIdentityKinds(t *testing.T) {
 		t.Fatal("IsAccessKey 判断不对")
 	}
 }
+
+func TestAllowAdminSkipsCheck(t *testing.T) {
+	// 没有 setPolicy：ADMIN 不依赖策略就绪。
+	a := &Authz{}
+	for _, id := range []*Identity{
+		{UserID: "u1", Roles: []string{authzcore.AdminRoleKey}},
+		{AccessKeyID: "FPAK1", Roles: []string{authzcore.AdminRoleKey}},
+	} {
+		if ok, err := a.Allow(WithIdentity(context.Background(), id), "DELETE", "/anything"); err != nil || !ok {
+			t.Errorf("%+v: got %v err %v, want 放行", id, ok, err)
+		}
+	}
+	if ok, err := a.AllowRoles([]string{authzcore.AdminRoleKey}, "DELETE", "/anything"); err != nil || !ok {
+		t.Errorf("AllowRoles: got %v err %v, want 放行", ok, err)
+	}
+	if _, err := a.Allow(WithIdentity(context.Background(), &Identity{UserID: "u2", Roles: []string{"user"}}), "GET", "/x"); err != ErrPolicyUnavailable {
+		t.Errorf("非 ADMIN 在策略未就绪时应返回 ErrPolicyUnavailable，got %v", err)
+	}
+}

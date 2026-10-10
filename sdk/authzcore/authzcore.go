@@ -20,6 +20,33 @@ type RolePolicy struct {
 // GuestRoleKey 是内置访客角色：匿名请求只有它，登录用户判定时并入它，访问密钥不拥有它。
 const GuestRoleKey = "GUEST"
 
+// AdminRoleKey 是内置超级管理员角色：持有它就跳过权限检查，任何权限点都放行。
+const AdminRoleKey = "ADMIN"
+
+// BuiltinRole 是一个内置角色的 code 与默认显示名。
+type BuiltinRole struct{ Code, Name string }
+
+// BuiltinRoles 是服务端启动时要保证存在的角色。
+var BuiltinRoles = []BuiltinRole{
+	{Code: GuestRoleKey, Name: "访客"},
+	{Code: AdminRoleKey, Name: "超级管理员"},
+}
+
+// IsBuiltinRole 报告 code 是否为内置角色。
+func IsBuiltinRole(code string) bool {
+	return code == GuestRoleKey || code == AdminRoleKey
+}
+
+// HasAdmin 报告角色里是否有 ADMIN。
+func HasAdmin(roleKeys []string) bool {
+	for _, k := range roleKeys {
+		if k == AdminRoleKey {
+			return true
+		}
+	}
+	return false
+}
+
 // PermissionKey 拼出权限点的 key。
 //
 // 上报、服务端存储、SDK 判定三处必须用同一个函数而不是各自拼字符串：格式
@@ -79,6 +106,11 @@ func Compile(roles []RolePolicy) *Snapshot {
 // AllowWith 与 Allow 规则相同，但把 extraRole 也当作持有的角色（空串表示没有）。
 // 用它并入 GUEST，不必为每个请求分配新的角色切片。
 func (s *Snapshot) AllowWith(roleKeys []string, extraRole, permissionKey string) bool {
+	// 排在 nil 判断与 deny 之前：ADMIN 是跳过检查，不是"拥有全部 allow"，
+	// 所以不依赖策略是否就绪，也不被其他角色的 deny 盖过。
+	if HasAdmin(roleKeys) {
+		return true
+	}
 	if s == nil {
 		return false
 	}
@@ -110,7 +142,7 @@ func (s *Snapshot) AllowWith(roleKeys []string, extraRole, permissionKey string)
 // Allow 判定持有 roleKeys 的用户能否使用 permissionKey。
 //
 // 规则与 Compile 之前完全一致：**有 deny 即拒，有 allow 即过，都没有则拒**。
-// nil 快照一律拒绝——调用方应当在此之前就用"策略未就绪"把请求拦下，
+// nil 快照一律拒绝（ADMIN 除外）——调用方应当在此之前就用"策略未就绪"把请求拦下，
 // 这里兜底成默认拒绝而不是放行。
 func (s *Snapshot) Allow(roleKeys []string, permissionKey string) bool {
 	return s.AllowWith(roleKeys, "", permissionKey)

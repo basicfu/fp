@@ -153,3 +153,24 @@ func TestAllowWithExtraRole(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminSkipsCheck(t *testing.T) {
+	snap := authzcore.Compile([]authzcore.RolePolicy{
+		{RoleKey: "blocked", Deny: []string{"GET:/x"}},
+	})
+	admin := []string{"user", authzcore.AdminRoleKey}
+	if !snap.Allow(admin, "GET:/nowhere") {
+		t.Error("ADMIN 应放行策略里不存在的权限点")
+	}
+	// 【辨别力】跳过检查不等于"拥有全部 allow"：其他角色的 deny 也盖不过它。
+	if !snap.Allow(append(admin, "blocked"), "GET:/x") {
+		t.Error("ADMIN 不应被其他角色的 deny 拒绝")
+	}
+	var nilSnap *authzcore.Snapshot
+	if !nilSnap.Allow(admin, "GET:/x") {
+		t.Error("策略未就绪时 ADMIN 也应放行")
+	}
+	if snap.AllowWith([]string{"user"}, authzcore.AdminRoleKey, "GET:/nowhere") {
+		t.Error("只有显式持有 ADMIN 才跳过检查")
+	}
+}

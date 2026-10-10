@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { MultiSelect } from '@/components/ui/multi-select'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
-import { GUEST_ROLE_KEY } from '@/lib/roles'
+import { ADMIN_ROLE_KEY, GUEST_ROLE_KEY } from '@/lib/roles'
 import type { Application, PermissionPoint, Role, RoleGrant } from '@/lib/types'
 
 /**
@@ -49,6 +49,12 @@ export default function RoleDetail() {
         </p>
       )}
 
+      {r.code === ADMIN_ROLE_KEY && (
+        <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+          ADMIN 是内置角色：持有它的用户或访问密钥跳过权限检查，任何权限点都放行，不需要配置授权。
+        </p>
+      )}
+
       {parent && (
         <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
           这里只列出<strong>本角色自己</strong>的授权。从「{parent.code}」继承来的权限不在下面的下拉里，
@@ -56,28 +62,30 @@ export default function RoleDetail() {
         </p>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">授权</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {apps.error && <p className="text-sm text-destructive">{apps.error}</p>}
-          {grants.error && <p className="text-sm text-destructive">{grants.error}</p>}
-          {apps.loading && !apps.data && <p className="text-sm text-muted-foreground">加载中…</p>}
-          {apps.data?.length === 0 && (
-            <p className="text-sm text-muted-foreground">还没有应用，请先在「应用列表」创建一个。</p>
-          )}
-          {apps.data?.map((app) => (
-            <AppPermissionSelect
-              key={app.id}
-              app={app}
-              roleId={id}
-              grants={grants.data?.grants ?? []}
-              onChanged={grants.reload}
-            />
-          ))}
-        </CardContent>
-      </Card>
+      {r.code !== ADMIN_ROLE_KEY && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">授权</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {apps.error && <p className="text-sm text-destructive">{apps.error}</p>}
+            {grants.error && <p className="text-sm text-destructive">{grants.error}</p>}
+            {apps.loading && !apps.data && <p className="text-sm text-muted-foreground">加载中…</p>}
+            {apps.data?.length === 0 && (
+              <p className="text-sm text-muted-foreground">还没有应用，请先在「应用列表」创建一个。</p>
+            )}
+            {apps.data?.map((app) => (
+              <AppPermissionSelect
+                key={app.id}
+                app={app}
+                roleId={id}
+                grants={grants.data?.grants ?? []}
+                onChanged={grants.reload}
+              />
+            ))}
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

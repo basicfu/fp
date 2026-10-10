@@ -213,12 +213,15 @@ func (s *AuthzService) ListPermissions(ctx context.Context, appID uuid.UUID) ([]
 
 // SetRolePermission 给角色授予或收回一个权限点。effect 为空表示收回。
 func (s *AuthzService) SetRolePermission(ctx context.Context, roleID, permissionID uuid.UUID, effect string) error {
-	if effect == domain.EffectDeny {
+	if effect != "" {
 		code, err := s.roleCodeByID(ctx, roleID)
 		if err != nil {
 			return err
 		}
-		if code == authzcore.GuestRoleKey {
+		if code == authzcore.AdminRoleKey {
+			return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "ADMIN 跳过权限检查，不需要也不能配置授权")
+		}
+		if code == authzcore.GuestRoleKey && effect == domain.EffectDeny {
 			return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "GUEST 只能配置「允许」")
 		}
 	}

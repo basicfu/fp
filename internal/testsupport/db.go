@@ -54,6 +54,10 @@ func NewTestDB(t *testing.T) *pgxpool.Pool {
 	}
 
 	truncateAll(t, dbPool)
+	// 与 fp 启动后的状态保持一致；测试库同时是开发库，不补的话跑完测试内置角色就没了。
+	if err := store.EnsureBuiltinRoles(context.Background(), dbPool); err != nil {
+		t.Fatalf("testsupport: %v", err)
+	}
 	return dbPool
 }
 

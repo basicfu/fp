@@ -11,6 +11,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/basicfu/fp/internal/store/migrations"
+	"github.com/basicfu/fp/sdk/authzcore"
 )
 
 // OpenPostgres 建立连接池并验证连通性。
@@ -31,6 +32,21 @@ func OpenPostgres(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("store: ping postgres: %w", err)
 	}
 	return pool, nil
+}
+
+// EnsureBuiltinRoles 补齐内置角色，已存在的不动。
+//
+// 不放在迁移里：迁移只跑一次，而 role 表会被整表清空（fp-dbclean truncate、
+// 测试每次 TRUNCATE），清完之后内置角色就再也回不来了。
+func EnsureBuiltinRoles(ctx context.Context, pool *pgxpool.Pool) error {
+	for _, r := range authzcore.BuiltinRoles {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO role (code, name) VALUES ($1, $2) ON CONFLICT (code) DO NOTHING`,
+			r.Code, r.Name); err != nil {
+			return fmt.Errorf("store: 写入内置角色 %s: %w", r.Code, err)
+		}
+	}
+	return nil
 }
 
 // Migrate 把数据库升级到嵌入迁移的最新版本。可重复调用。

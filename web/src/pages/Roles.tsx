@@ -18,11 +18,14 @@ import { useResource, errorMessage } from '@/lib/useResource'
 import { useCurrentApp } from '@/lib/current-app'
 import { formatTime } from '@/lib/format'
 import { toastFormErrors } from '@/lib/formErrors'
-import { GUEST_ROLE_KEY } from '@/lib/roles'
+import { ADMIN_ROLE_KEY, isBuiltinRole } from '@/lib/roles'
 import type { Role } from '@/lib/types'
 
 /** 「无父角色」在 Select 里的占位值。base-ui 的 SelectItem 不接受空串。 */
 const NO_PARENT = '__none__'
+
+// ADMIN 的"全部放行"来自持有它本身，继承它什么也拿不到，所以不出现在父角色下拉里（后端同样拒绝）。
+const inheritable = (r: Role) => r.code !== ADMIN_ROLE_KEY
 
 // parentId 不进表单校验：它是个 Select，没有任何校验规则。为了读回一个
 // 受控值而走 react-hook-form 的 watch()，除了多一层间接，还会让 React
@@ -112,7 +115,7 @@ export default function Roles() {
                 <TableCell className="p-0 px-2 text-muted-foreground">{i + 1}</TableCell>
                 <TableCell className="whitespace-normal break-all p-0 px-2">
                   <span className="font-medium">{r.code}</span>
-                  {r.code === GUEST_ROLE_KEY && (
+                  {isBuiltinRole(r.code) && (
                     <Badge variant="secondary" className="ml-2">
                       内置
                     </Badge>
@@ -142,7 +145,7 @@ export default function Roles() {
                     <Button
                       variant="destructive"
                       size="sm"
-                      disabled={r.code === GUEST_ROLE_KEY}
+                      disabled={isBuiltinRole(r.code)}
                       onClick={(e) => {
                         e.stopPropagation()
                         setDeleting(r)
@@ -265,7 +268,7 @@ function CreateDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_PARENT}>不继承</SelectItem>
-                {roles.map((r) => (
+                {roles.filter(inheritable).map((r) => (
                   <SelectItem key={r.id} value={r.id}>
                     {r.code}
                   </SelectItem>
@@ -334,7 +337,7 @@ function EditDialog({
             <Label htmlFor="edit-parent">继承自</Label>
             <Select
               value={parentId || NO_PARENT}
-              disabled={role.code === GUEST_ROLE_KEY}
+              disabled={isBuiltinRole(role.code)}
               onValueChange={(v) => setParentId(v === NO_PARENT || v === null ? '' : v)}
             >
               <SelectTrigger id="edit-parent">
@@ -344,7 +347,7 @@ function EditDialog({
                 <SelectItem value={NO_PARENT}>不继承</SelectItem>
                 {/* 自己不能当自己的父角色。更长的环（A→B→A）由后端在写入时拒绝。 */}
                 {roles
-                  .filter((r) => r.id !== role.id)
+                  .filter((r) => r.id !== role.id && inheritable(r))
                   .map((r) => (
                     <SelectItem key={r.id} value={r.id}>
                       {r.code}
@@ -352,8 +355,8 @@ function EditDialog({
                   ))}
               </SelectContent>
             </Select>
-            {role.code === GUEST_ROLE_KEY && (
-              <p className="text-xs text-muted-foreground">内置角色 GUEST 不能设置父角色。</p>
+            {isBuiltinRole(role.code) && (
+              <p className="text-xs text-muted-foreground">内置角色 {role.code} 不能设置父角色。</p>
             )}
           </div>
           <DialogFooter>

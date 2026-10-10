@@ -63,6 +63,20 @@ func (s *AuthzService) roleCodeByID(ctx context.Context, id uuid.UUID) (string, 
 	return code, nil
 }
 
+// checkParent 拒绝继承 ADMIN。ADMIN 的"全部放行"靠的是持有它本身，不是它名下的
+// 授权，继承展开后子角色什么也拿不到——放行这种配置只会让人误以为子角色也是管理员。
+func (s *AuthzService) checkParent(ctx context.Context, parentID uuid.UUID) error {
+	var code string
+	err := s.pool.QueryRow(ctx, `SELECT code FROM role WHERE id = $1`, parentID).Scan(&code)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("service: 查询父角色: %w", err)
+	}
+	if code == authzcore.AdminRoleKey {
+		return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 ADMIN 不能被继承")
+	}
+	return nil
+}
+
 // pgForeignKeyViolation 是 PostgreSQL 外键约束冲突的 SQLSTATE。
 const pgForeignKeyViolation = "23503"
 
@@ -79,6 +93,11 @@ func isForeignKeyViolation(err error) bool {
 func (s *AuthzService) CreateRole(ctx context.Context, code, name string, parentID *uuid.UUID) (*domain.Role, error) {
 	if code == "" || name == "" {
 		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "角色 code 与 name 不能为空")
+	}
+	if parentID != nil {
+		if err := s.checkParent(ctx, *parentID); err != nil {
+			return nil, err
+		}
 	}
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO role (code, name, parent_id) VALUES ($1, $2, $3)
@@ -111,8 +130,11 @@ func (s *AuthzService) UpdateRole(ctx context.Context, id uuid.UUID, name string
 		if err != nil {
 			return nil, err
 		}
-		if code == authzcore.GuestRoleKey {
-			return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 GUEST 不能设置父角色")
+		if authzcore.IsBuiltinRole(code) {
+			return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 %s 不能设置父角色", code)
+		}
+		if err := s.checkParent(ctx, *parentID); err != nil {
+			return nil, err
 		}
 		cyclic, err := s.wouldCycle(ctx, id, *parentID)
 		if err != nil {
@@ -184,8 +206,8 @@ func (s *AuthzService) DeleteRole(ctx context.Context, id uuid.UUID) error {
 		}
 		return fmt.Errorf("service: 查询角色: %w", err)
 	}
-	if code == authzcore.GuestRoleKey {
-		return domain.Fail(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 GUEST 不能删除")
+	if authzcore.IsBuiltinRole(code) {
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeRoleBuiltin, "内置角色 %s 不能删除", code)
 	}
 	var bound int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM access_key WHERE role_key = $1`, code).Scan(&bound); err != nil {

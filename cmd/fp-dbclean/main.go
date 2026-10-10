@@ -149,6 +149,12 @@ func run() error {
 	if _, err := pool.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("清理 Postgres: %w", err)
 	}
+	// truncate 后 fp 可能还在跑、不会重启，内置角色要当场补回；reset 没有表，留给下次启动。
+	if mode == "truncate" {
+		if err := store.EnsureBuiltinRoles(ctx, pool); err != nil {
+			return err
+		}
+	}
 	var tables int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public'`).Scan(&tables); err != nil {

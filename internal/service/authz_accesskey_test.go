@@ -18,7 +18,7 @@ import (
 func TestGuestRoleRestrictions(t *testing.T) {
 	e := newAuthzEnv(t)
 	ctx := context.Background()
-	guest := e.mustRole(t, authzcore.GuestRoleKey, nil)
+	guest := e.builtinRole(t, authzcore.GuestRoleKey)
 	normal := e.mustRole(t, "普通用户", nil)
 	perm := e.mustPerm(t, "GET:/pub")
 
@@ -31,6 +31,28 @@ func TestGuestRoleRestrictions(t *testing.T) {
 	wantDomainCode(t, e.svc.DeleteRole(ctx, guest.ID), domain.CodeRoleBuiltin)
 	if _, err := e.svc.UpdateRole(ctx, normal.ID, "普通用户", &guest.ID); err != nil {
 		t.Fatalf("普通角色继承 GUEST 不受限制: %v", err)
+	}
+}
+
+func TestAdminRoleRestrictions(t *testing.T) {
+	e := newAuthzEnv(t)
+	ctx := context.Background()
+	admin := e.builtinRole(t, authzcore.AdminRoleKey)
+	normal := e.mustRole(t, "普通用户", nil)
+	perm := e.mustPerm(t, "GET:/pub")
+
+	wantDomainCode(t, e.svc.DeleteRole(ctx, admin.ID), domain.CodeRoleBuiltin)
+	_, err := e.svc.UpdateRole(ctx, admin.ID, "超级管理员", &normal.ID)
+	wantDomainCode(t, err, domain.CodeRoleBuiltin)
+	wantDomainCode(t, e.svc.SetRolePermission(ctx, admin.ID, perm.ID, domain.EffectAllow), domain.CodeRoleBuiltin)
+	wantDomainCode(t, e.svc.SetRolePermission(ctx, admin.ID, perm.ID, domain.EffectDeny), domain.CodeRoleBuiltin)
+	// 【辨别力】继承 ADMIN 拿不到"全部放行"，创建和修改两条路都要拦。
+	_, err = e.svc.UpdateRole(ctx, normal.ID, "普通用户", &admin.ID)
+	wantDomainCode(t, err, domain.CodeRoleBuiltin)
+	_, err = e.svc.CreateRole(ctx, "子管理员", "子管理员", &admin.ID)
+	wantDomainCode(t, err, domain.CodeRoleBuiltin)
+	if _, err := e.svc.UpdateRole(ctx, admin.ID, "改个名", nil); err != nil {
+		t.Fatalf("ADMIN 改显示名应当成功: %v", err)
 	}
 }
 

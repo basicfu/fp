@@ -93,6 +93,9 @@ func run() error {
 	if err := store.Migrate(ctx, pool); err != nil {
 		return err
 	}
+	if err := store.EnsureBuiltinRoles(ctx, pool); err != nil {
+		return err
+	}
 
 	rdb, err := store.OpenRedis(ctx, redisURL)
 	if err != nil {

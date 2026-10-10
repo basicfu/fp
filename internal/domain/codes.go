@@ -97,7 +97,7 @@ const (
 	CodeAccessKeyNotFound = "ACCESS_KEY_NOT_FOUND"
 	// CodeRoleInUse：删除仍被访问密钥绑定的角色。
 	CodeRoleInUse = "ROLE_IN_USE"
-	// CodeRoleBuiltin：对内置 GUEST 做了不允许的操作。
+	// CodeRoleBuiltin：对内置角色（GUEST / ADMIN）做了不允许的操作。
 	CodeRoleBuiltin = "ROLE_BUILTIN"
 
 	// 资源不存在。

@@ -43,6 +43,22 @@ func (e *authzEnv) mustRole(t *testing.T, key string, parent *uuid.UUID) *domain
 	return r
 }
 
+// builtinRole 取一个内置角色——testsupport.NewTestDB 已经补齐，不能再建。
+func (e *authzEnv) builtinRole(t *testing.T, code string) *domain.Role {
+	t.Helper()
+	roles, err := e.svc.ListRoles(context.Background())
+	if err != nil {
+		t.Fatalf("列出角色: %v", err)
+	}
+	for i := range roles {
+		if roles[i].Code == code {
+			return &roles[i]
+		}
+	}
+	t.Fatalf("内置角色 %s 不存在", code)
+	return nil
+}
+
 // mustPerm 手动建一个权限点。
 func (e *authzEnv) mustPerm(t *testing.T, key string) *domain.Permission {
 	t.Helper()
