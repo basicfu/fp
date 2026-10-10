@@ -110,6 +110,11 @@ export default function Layout() {
                         // 高亮交给命中的子项；子项都没命中（如刚到 /notify、重定向还没生效）时才由父行兜底。
                         isActive={inGroup && !hitChild}
                         tooltip={n.label}
+                        // 图标收起模式下子菜单被隐藏、看不到命中的子项，高亮改由父图标承担。
+                        className={cn(
+                          hitChild &&
+                            'group-data-[collapsible=icon]:bg-sidebar-accent group-data-[collapsible=icon]:text-sidebar-accent-foreground',
+                        )}
                       >
                         <n.icon />
                         <span>{n.label}</span>
