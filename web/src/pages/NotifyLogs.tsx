@@ -3,7 +3,6 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { NativeSelect } from '@/components/NativeSelect'
-import NotifyTabs from '@/components/NotifyTabs'
 import Pagination from '@/components/Pagination'
 import { api } from '@/lib/api'
 import { formatTime } from '@/lib/format'
@@ -39,7 +38,6 @@ export default function NotifyLogs() {
 
   return (
     <div className="space-y-4">
-      <NotifyTabs />
       <div className="flex flex-wrap items-center gap-2">
         <Input
           aria-label="按模板 code 筛选"

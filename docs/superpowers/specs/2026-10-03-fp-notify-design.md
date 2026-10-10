@@ -169,7 +169,7 @@ message SendResponse {}
 
 ## 七、控制台
 
-侧边栏新增「通知中心」，页内三个 tab：
+侧边栏新增「通知中心」，下设三个子菜单：
 
 - **模板** `/notify/templates`：列表；新建流程"选 channel → 填 code → 选模式 → 写模板"；详情页上半是模板内容，下半是关联供应商子列表（每行：供应商备注、`provider_template_id`、优先级、启停开关），另有「测试发送」。
 - **供应商** `/notify/providers`：列表（类型 / 备注 / 启停 / 被引用数）；新建先选 type 再按 `ConfigSchema` 渲染表单；详情页反向列出被哪些模板引用。

@@ -10,7 +10,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { DynamicForm } from '@/components/DynamicForm'
 import { NativeSelect } from '@/components/NativeSelect'
-import NotifyTabs from '@/components/NotifyTabs'
 import { api } from '@/lib/api'
 import { notifyChannelLabels } from '@/lib/notify'
 import { errorMessage, useResource } from '@/lib/useResource'
@@ -106,7 +105,6 @@ export default function NotifyProviders() {
 
   return (
     <div className="space-y-4">
-      <NotifyTabs />
       <div className="flex items-center gap-2">
         <Button onClick={() => setCreating(true)} disabled={!types.data}>
           新建供应商

@@ -10,7 +10,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { NativeSelect } from '@/components/NativeSelect'
 import NotifyContentFields from '@/components/NotifyContentFields'
-import NotifyTabs from '@/components/NotifyTabs'
 import { api } from '@/lib/api'
 import { formatTime } from '@/lib/format'
 import {
@@ -129,7 +128,6 @@ export default function NotifyTemplates() {
 
   return (
     <div className="space-y-4">
-      <NotifyTabs />
       <div className="flex items-center gap-2">
         <Button onClick={() => setCreating(true)}>新建模板</Button>
         <p className="text-sm text-muted-foreground">业务代码只传 code、收件人和变量；渠道、供应商、内容都在这里配置。</p>

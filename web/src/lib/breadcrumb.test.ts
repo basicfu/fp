@@ -40,7 +40,7 @@ test('访问密钥的面包屑', () => {
   expect(buildBreadcrumb('/access-keys')).toEqual([{ label: '访问密钥' }])
 })
 
-test('通知中心：三个页内标签，详情页带回对应列表', () => {
+test('通知中心：三个子菜单，详情页带回对应列表', () => {
   expect(buildBreadcrumb('/notify/templates')).toEqual([{ label: '通知中心' }, { label: '模板' }])
   expect(buildBreadcrumb('/notify/providers')).toEqual([{ label: '通知中心' }, { label: '供应商' }])
   expect(buildBreadcrumb('/notify/logs')).toEqual([{ label: '通知中心' }, { label: '发送记录' }])

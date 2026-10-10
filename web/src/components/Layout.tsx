@@ -3,6 +3,7 @@ import type { LucideIcon } from 'lucide-react'
 import {
   AppWindow,
   Bell,
+  ChevronRight,
   Key,
   KeyRound,
   Lock,
@@ -41,6 +42,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarProvider,
   SidebarTrigger,
   useSidebar,
@@ -51,15 +55,33 @@ import AppSwitcher from '@/components/AppSwitcher'
 import { ChangeAccountDialog } from '@/components/ChangeAccountDialog'
 import { useAuth } from '@/lib/auth'
 import { buildBreadcrumb } from '@/lib/breadcrumb'
+import { cn } from '@/lib/utils'
 
-const nav: { to: string; label: string; icon: LucideIcon }[] = [
+interface NavItem {
+  to: string
+  label: string
+  icon: LucideIcon
+  /** 有子项的条目：当前路径落在它名下时才展开，展开与否完全由路由决定。 */
+  children?: { to: string; label: string }[]
+}
+
+const nav: NavItem[] = [
   { to: '/applications', label: '应用列表', icon: AppWindow },
   { to: '/users', label: '用户管理', icon: UsersIcon },
   { to: '/access-keys', label: '访问密钥', icon: Key },
   { to: '/roles', label: '角色管理', icon: ShieldCheck },
   { to: '/permissions', label: '权限管理', icon: KeyRound },
   { to: '/config', label: '配置中心', icon: Settings },
-  { to: '/notify', label: '通知中心', icon: Bell },
+  {
+    to: '/notify',
+    label: '通知中心',
+    icon: Bell,
+    children: [
+      { to: '/notify/templates', label: '模板' },
+      { to: '/notify/providers', label: '供应商' },
+      { to: '/notify/logs', label: '发送记录' },
+    ],
+  },
   { to: '/system-config', label: '系统配置', icon: Server },
 ]
 
@@ -78,18 +100,45 @@ export default function Layout() {
           <SidebarGroup>
             <SidebarGroupContent>
               <SidebarMenu>
-                {nav.map((n) => (
-                  <SidebarMenuItem key={n.to}>
-                    <SidebarMenuButton
-                      render={<NavLink to={n.to} />}
-                      isActive={location.pathname.startsWith(n.to)}
-                      tooltip={n.label}
-                    >
-                      <n.icon />
-                      <span>{n.label}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
+                {nav.map((n) => {
+                  const inGroup = location.pathname.startsWith(n.to)
+                  const hitChild = n.children?.some((c) => location.pathname.startsWith(c.to))
+                  return (
+                    <SidebarMenuItem key={n.to}>
+                      <SidebarMenuButton
+                        render={<NavLink to={n.to} />}
+                        // 高亮交给命中的子项；子项都没命中（如刚到 /notify、重定向还没生效）时才由父行兜底。
+                        isActive={inGroup && !hitChild}
+                        tooltip={n.label}
+                      >
+                        <n.icon />
+                        <span>{n.label}</span>
+                        {n.children && (
+                          <ChevronRight
+                            className={cn(
+                              'ml-auto transition-transform group-data-[collapsible=icon]:hidden',
+                              inGroup && 'rotate-90',
+                            )}
+                          />
+                        )}
+                      </SidebarMenuButton>
+                      {n.children && inGroup && (
+                        <SidebarMenuSub>
+                          {n.children.map((c) => (
+                            <SidebarMenuSubItem key={c.to}>
+                              <SidebarMenuSubButton
+                                render={<NavLink to={c.to} />}
+                                isActive={location.pathname.startsWith(c.to)}
+                              >
+                                <span>{c.label}</span>
+                              </SidebarMenuSubButton>
+                            </SidebarMenuSubItem>
+                          ))}
+                        </SidebarMenuSub>
+                      )}
+                    </SidebarMenuItem>
+                  )
+                })}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

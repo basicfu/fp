@@ -31,6 +31,7 @@ function renderLayout(initialEntries: string[]) {
           <Route element={<Layout />}>
             <Route path="/applications" element={<div>应用页内容</div>} />
             <Route path="/users" element={<div>用户页内容</div>} />
+            <Route path="/notify/*" element={<div>通知页内容</div>} />
           </Route>
         </Routes>
       </CurrentAppProvider>
@@ -146,4 +147,72 @@ test('accountDialogOpen 为 true 时渲染改密对话框', async () => {
   } finally {
     authMock.accountDialogOpen = false
   }
+})
+
+// 「通知中心」的子菜单。查询一律限定在侧栏导航列表里：面包屑里也有同名的「模板」等文案，
+// 列表为什么要这样限定见最上面"渲染全部导航项"那条用例的注释。
+const sidebarNav = () => document.querySelector('[data-sidebar="content"] [data-sidebar="menu"]') as HTMLElement
+const notifyParent = () => within(sidebarNav()).getByRole('link', { name: '通知中心' })
+// 父行里依次是图标和展开提示，展开提示（ChevronRight）是最后一个 svg。
+const chevronOf = (row: HTMLElement) => Array.from(row.querySelectorAll('svg')).at(-1)!
+
+function subMenuLinks() {
+  const sub = sidebarNav().querySelector<HTMLElement>('[data-sidebar="menu-sub"]')
+  if (!sub) throw new Error('侧栏里没有渲染子菜单')
+  return within(sub)
+    .getAllByRole('link')
+    .map((a) => ({ name: a.textContent, href: a.getAttribute('href'), active: a.hasAttribute('data-active') }))
+}
+
+test('不在通知中心时：只有指向 /notify 的「通知中心」一行，不渲染子菜单，展开提示不旋转', () => {
+  renderLayout(['/applications'])
+  const nav = sidebarNav()
+
+  expect(notifyParent().getAttribute('href')).toBe('/notify')
+  expect(chevronOf(notifyParent()).classList.contains('rotate-90')).toBe(false)
+  expect(nav.querySelector('[data-sidebar="menu-sub"]')).toBeNull()
+  for (const name of ['模板', '供应商', '发送记录']) {
+    expect(within(nav).queryByRole('link', { name })).toBeNull()
+  }
+  // 没有子项的条目保持原样：只有图标，没有展开提示。
+  expect(within(nav).getByRole('link', { name: '应用列表' }).querySelectorAll('svg')).toHaveLength(1)
+})
+
+test('在 /notify/templates：子菜单依次是模板 / 供应商 / 发送记录，只有「模板」高亮，父行不抢高亮', () => {
+  renderLayout(['/notify/templates'])
+
+  expect(subMenuLinks()).toEqual([
+    { name: '模板', href: '/notify/templates', active: true },
+    { name: '供应商', href: '/notify/providers', active: false },
+    { name: '发送记录', href: '/notify/logs', active: false },
+  ])
+  expect(notifyParent().getAttribute('href')).toBe('/notify')
+  expect(notifyParent().hasAttribute('data-active')).toBe(false)
+  expect(chevronOf(notifyParent()).classList.contains('rotate-90')).toBe(true)
+})
+
+test('在 /notify/providers：高亮落在「供应商」', () => {
+  renderLayout(['/notify/providers'])
+  expect(subMenuLinks().map((l) => [l.name, l.active])).toEqual([
+    ['模板', false],
+    ['供应商', true],
+    ['发送记录', false],
+  ])
+})
+
+test('在模板详情页 /notify/templates/login_sms：「模板」仍保持高亮', () => {
+  renderLayout(['/notify/templates/login_sms'])
+  expect(subMenuLinks().map((l) => [l.name, l.active])).toEqual([
+    ['模板', true],
+    ['供应商', false],
+    ['发送记录', false],
+  ])
+})
+
+// 真实路由里 /notify 会立刻重定向到 /notify/templates；这里的占位路由不重定向，
+// 钉的是"在分组内但没有子项命中"时由父行兜底高亮，免得整个侧栏没有任何高亮。
+test('在 /notify 本身：子菜单照常展开，没有子项命中，父行自己高亮', () => {
+  renderLayout(['/notify'])
+  expect(notifyParent().hasAttribute('data-active')).toBe(true)
+  expect(subMenuLinks().map((l) => l.active)).toEqual([false, false, false])
 })
