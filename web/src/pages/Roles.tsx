@@ -106,57 +106,62 @@ export default function Roles() {
                 </TableCell>
               </TableRow>
             )}
-            {list.map((r, i) => (
-              <TableRow
-                key={r.id}
-                className="h-12 cursor-pointer"
-                onClick={() => navigate(`/roles/${r.id}`)}
-              >
-                <TableCell className="p-0 px-2 text-muted-foreground">{i + 1}</TableCell>
-                <TableCell className="whitespace-normal break-all p-0 px-2">
-                  <span className="font-medium">{r.code}</span>
-                  {isBuiltinRole(r.code) && (
-                    <Badge variant="secondary" className="ml-2">
-                      内置
-                    </Badge>
-                  )}
-                </TableCell>
-                <TableCell className="whitespace-normal break-words p-0 px-2 text-muted-foreground">
-                  {r.name}
-                </TableCell>
-                <TableCell className="whitespace-normal break-all p-0 px-2 text-muted-foreground">
-                  {r.parentId ? (nameOf.get(r.parentId) ?? r.parentId) : '-'}
-                </TableCell>
-                <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
-                  {formatTime(r.createdAt)}
-                </TableCell>
-                <TableCell className="p-0 px-2">
-                  <div className="flex w-[120px] gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setEditing(r)
-                      }}
-                    >
-                      编辑
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={isBuiltinRole(r.code)}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setDeleting(r)
-                      }}
-                    >
-                      删除
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
+            {list.map((r, i) => {
+              // ADMIN 跳过权限检查，没有任何可配置的东西：整行置灰，不进详情、不能编辑删除。
+              const locked = r.code === ADMIN_ROLE_KEY
+              return (
+                <TableRow
+                  key={r.id}
+                  className={locked ? 'h-12 opacity-50 hover:bg-transparent' : 'h-12 cursor-pointer'}
+                  onClick={locked ? undefined : () => navigate(`/roles/${r.id}`)}
+                >
+                  <TableCell className="p-0 px-2 text-muted-foreground">{i + 1}</TableCell>
+                  <TableCell className="whitespace-normal break-all p-0 px-2">
+                    <span className="font-medium">{r.code}</span>
+                    {isBuiltinRole(r.code) && (
+                      <Badge variant="secondary" className="ml-2">
+                        内置
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="whitespace-normal break-words p-0 px-2 text-muted-foreground">
+                    {r.name}
+                  </TableCell>
+                  <TableCell className="whitespace-normal break-all p-0 px-2 text-muted-foreground">
+                    {r.parentId ? (nameOf.get(r.parentId) ?? r.parentId) : '-'}
+                  </TableCell>
+                  <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
+                    {formatTime(r.createdAt)}
+                  </TableCell>
+                  <TableCell className="p-0 px-2">
+                    <div className="flex w-[120px] gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={locked}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setEditing(r)
+                        }}
+                      >
+                        编辑
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={isBuiltinRole(r.code)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setDeleting(r)
+                        }}
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              )
+            })}
           </TableBody>
         </Table>
       )}

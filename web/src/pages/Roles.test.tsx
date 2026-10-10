@@ -181,13 +181,16 @@ test('GUEST 标「内置」且删除按钮不可用', async () => {
   expect(del.disabled).toBe(true)
 })
 
-test('ADMIN 标「内置」且删除按钮不可用', async () => {
+test('ADMIN 行置灰：标「内置」，编辑删除都不可用', async () => {
   stubFetch([...roles, { id: 'a', code: 'ADMIN', name: '超级管理员', parentId: '', createdAt: 1700000000000 }])
   renderRoles()
   const row = (await waitFor(() => screen.getByText('ADMIN', { selector: 'span.font-medium' }))).closest('tr')!
   expect(row.textContent).toContain('内置')
-  const del = Array.from(row.querySelectorAll('button')).find((b) => b.textContent === '删除') as HTMLButtonElement
-  expect(del.disabled).toBe(true)
+  expect(row.className).toContain('opacity-50')
+  expect(row.className).not.toContain('cursor-pointer')
+  const buttons = Array.from(row.querySelectorAll('button')) as HTMLButtonElement[]
+  expect(buttons.map((b) => b.textContent)).toEqual(['编辑', '删除'])
+  expect(buttons.every((b) => b.disabled)).toBe(true)
 })
 
 test('删除被访问密钥绑定的角色时提示绑定数量', async () => {
