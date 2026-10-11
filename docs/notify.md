@@ -73,6 +73,7 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 | 类型 | 渠道 | 配置项（🔒 = 密钥，控制台读取时显示为 `********`） |
 |---|---|---|
 | `aliyun` | sms | `accessKeyId`、`accessKeySecret`🔒、`signName`、`endpoint`（默认 `dysmsapi.aliyuncs.com`） |
+| `zhutong` | sms | `username`、`password`🔒、`signature`（要带【】）、`endpoint`（默认 `https://api-shss.zthysms.com`，按账号所在节点改）。模板变量值不能含英文符号，否则被助通拒绝 |
 | `smtp` | email | `host`、`port`（默认 465）、`username`、`password`🔒、`from`、`tls`（默认 `ssl`；`ssl` / `starttls` / `none`）。仅支持 AUTH PLAIN。只能发自定义（fp 渲染）模板：关联时不检查与模板模式是否相容，关联了供应商模板的 smtp 实例，发送时会报错并按优先级降级到下一个 |
 | `telegram` | telegram | `botToken`🔒、`chatId` |
 | `wecom_bot` | wecom_bot | `key`🔒（Webhook 地址里 `key=` 后面那段） |
