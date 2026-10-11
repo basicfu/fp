@@ -20,7 +20,14 @@ const (
 // 而 3xx 本来就不是这些接口的成功响应。
 var httpClient = &http.Client{
 	Timeout:       httpTimeout,
+	Transport:     httpTransport(),
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+func httpTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = proxyFunc
+	return t
 }
 
 // doHTTP 发请求，返回状态码与响应体（最多 64KB）。

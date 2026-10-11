@@ -83,6 +83,8 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 
 **`log` 与 `FP_ENV`**：`log` 会把收件人、变量和渲染后的内容都写进服务端日志，绝不能出现在有真实数据的环境里。`FP_ENV` 等于 `prod`（不分大小写）时，它在类型列表里不出现、不能新建；库里已有的 `log` 实例不能再关联，已经关联的在发送时按失败的一次尝试处理、不会被调用。`FP_ENV` 不设时缺省是 `DEV`，写成 `production`、`staging` 之类也算非 prod——生产类部署必须显式设 `FP_ENV=prod`。
 
+**开发环境的出口代理**：`FP_ENV` 为 `DEV`（缺省值）时，通知模块发起的全部连接（各家 HTTP 接口、SMTP、阿里云 SDK）都走写死在代码里的 `socks5://10.1.1.4:41282`（`notify.DevProxy`）——运营商与短信供应商按出口 IP 做白名单，开发机的出口不在名单里。域名交给代理解析，所以这时 webhook 的 `url` 填 `localhost` 指的是代理那台机器。其它环境直连。
+
 **webhook 的请求形状**由模板定义：POST 时 body 是渲染后的内容，`Content-Type` 取模板设置；GET 时渲染出的内容作为 query 追加到 `url` 后面。配了 `secret` 时请求头带 `X-Fp-Signature: sha256=<hex>`，值是 `HMAC-SHA256(secret, 被签内容)`，POST 签 body，GET 只签模板渲染出的那段 query，不含 `url` 里原有的参数（`url` 自带参数时，接收方按整条 query 验签会每次失败，要只取追加的那段）。2xx 视为成功，超时 10 秒，不跟随重定向。
 
 ## 6. 已知限制

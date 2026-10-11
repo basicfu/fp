@@ -141,20 +141,22 @@ func messageID(fromAddress string) string {
 
 func (p *smtpProvider) deliver(ctx context.Context, to string, msg []byte) error {
 	addr := net.JoinHostPort(p.host, strconv.Itoa(p.port))
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	var (
-		conn net.Conn
-		err  error
-	)
-	if p.tlsMode == "ssl" {
-		conn, err = (&tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: p.host}}).DialContext(ctx, "tcp", addr)
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-	}
+	conn, err := dialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("连接 SMTP 服务器: %w", err)
 	}
 	defer conn.Close()
+	if p.tlsMode == "ssl" {
+		// 握手与拨号共用一个上限，和原先 tls.Dialer 的行为一致。
+		hctx, cancel := context.WithTimeout(ctx, dialTimeout)
+		tc := tls.Client(conn, &tls.Config{ServerName: p.host})
+		err := tc.HandshakeContext(hctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("连接 SMTP 服务器: %w", err)
+		}
+		conn = tc
+	}
 	// 连上之后 net/smtp 不看 ctx，只认连接上的截止时间：ctx 一取消就关掉连接，卡在读写里的命令立刻返回。
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()

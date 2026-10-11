@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -163,6 +164,13 @@ func run() error {
 	configSvc := service.NewConfigService(pool, configPub)
 
 	// 供应商类型写死在代码里；log 类型只在非 prod 环境可建，本机不用真实凭据就能走通整条通知链路。
+	// 只认 DEV：staging 之类的非 prod 环境未必连得到这台代理。
+	if strings.EqualFold(cfg.Env, "dev") {
+		if err := notify.UseProxy(notify.DevProxy); err != nil {
+			return err
+		}
+		log.Info("通知模块走开发代理", "proxy", notify.DevProxy)
+	}
 	notifySvc := service.NewNotifyService(pool, rdb, notify.DefaultRegistry(), service.WithNotifyProd(cfg.IsProd()))
 
 	authSvc := service.NewAuthService(service.AuthDeps{

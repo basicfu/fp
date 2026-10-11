@@ -64,13 +64,20 @@ func newAliyun(cfg Config) (Provider, error) {
 	if c.endpoint == "" {
 		c.endpoint = defaultAliyunEndpoint
 	}
-	client, err := dysmsapi.NewClient(&openapi.Config{
+	oc := &openapi.Config{
 		AccessKeyId:     tea.String(c.accessKeyID),
 		AccessKeySecret: tea.String(c.accessKeySecret),
 		Endpoint:        tea.String(c.endpoint),
 		ConnectTimeout:  tea.Int(aliyunConnectTimeoutSec),
 		ReadTimeout:     tea.Int(aliyunReadTimeoutMS),
-	})
+	}
+	if egressProxy != nil {
+		oc.Socks5Proxy = tea.String(egressProxy.String())
+		oc.Socks5NetWork = tea.String("tcp")
+		// 走 SOCKS5 时 SDK 改按毫秒读 ConnectTimeout，见上面常量的注释。
+		oc.ConnectTimeout = tea.Int(aliyunConnectTimeoutSec * 1000)
+	}
+	client, err := dysmsapi.NewClient(oc)
 	if err != nil {
 		return nil, fmt.Errorf("创建阿里云短信客户端: %w", err)
 	}
