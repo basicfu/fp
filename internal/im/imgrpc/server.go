@@ -12,7 +12,9 @@ import (
 	"github.com/basicfu/fp/internal/im/hub"
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 // KeepaliveMinTime 与 fpim.KeepaliveTime(30s) 配对：客户端 ping 间隔必须大于这里，否则被 GOAWAY。
@@ -21,6 +23,8 @@ const KeepaliveMinTime = 10 * time.Second
 
 // defaultWorkers 是 Deps.Workers 为 0 时每条流并发处理请求的上限。
 const defaultWorkers = 64
+
+var errStopping = status.Error(codes.Unavailable, "节点正在关闭")
 
 type Deps struct {
 	Hub *hub.Hub
@@ -38,13 +42,16 @@ type Server struct {
 	fpimv1.UnimplementedImServiceServer
 	deps Deps
 	grpc *grpc.Server
+	// stopping 在 Stop 时关闭，让每条 Connect 长流自己返回。
+	stopping chan struct{}
+	stopOnce sync.Once
 }
 
 func New(d Deps) *Server {
 	if d.Workers <= 0 {
 		d.Workers = defaultWorkers
 	}
-	s := &Server{deps: d}
+	s := &Server{deps: d, stopping: make(chan struct{})}
 	s.grpc = grpc.NewServer(
 		// 只装流拦截器：这个服务只有一个双向流方法 Connect，没有一元方法，
 		// 一元拦截器装了也永远不会被触发。
@@ -58,9 +65,13 @@ func New(d Deps) *Server {
 func (s *Server) Serve(lis net.Listener) error { return s.grpc.Serve(lis) }
 
 // Stop 先优雅停，超时就硬停。
+//
+// GracefulStop 只发 GOAWAY、等在途 RPC 自己结束，而 Connect 是长流，业务 server
+// 不会因为 GOAWAY 就收掉它——不主动让它们返回的话，每次关闭都要干等到 ctx 超时。
 func (s *Server) Stop(ctx context.Context) {
 	done := make(chan struct{})
 	go func() { s.grpc.GracefulStop(); close(done) }()
+	s.stopOnce.Do(func() { close(s.stopping) })
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -74,6 +85,12 @@ func (s *Server) Connect(stream fpimv1.ImService_ConnectServer) error {
 	ctx := stream.Context()
 	app := appFrom(ctx)
 	snd := &sender{s: stream}
+	// GOAWAY 到达业务 server 之前它可能已经在原连接上重建了流，不能再接进来。
+	select {
+	case <-s.stopping:
+		return errStopping
+	default:
+	}
 	// 先发 Ready，再注册进路由器——顺序不能反。AddStream 一返回，这条流就能
 	// 被路由器的其它协程（比如别的连接触发的事件、别的请求处理协程）通过
 	// h.streams[app] 找到并调用 Send；如果先注册再发 Ready，注册完成到这里
@@ -96,22 +113,57 @@ func (s *Server) Connect(stream fpimv1.ImService_ConnectServer) error {
 	// wg 保证 Connect 返回前，所有已经 sem<-struct{}{} 成功、正在处理请求的
 	// 协程都已经跑完——否则 Connect 返回、defer remove() 之后这些协程还在
 	// 用已经失效的 snd 往流里写，属于向已关闭的流泄漏写入。
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	for {
-		req, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
+	//
+	// closed 与 wg.Add 在同一把锁下：读循环跑在独立协程里，没有这把锁的话它可能
+	// 在 wg.Wait 已经开始之后才 Add。
+	var (
+		mu     sync.Mutex
+		closed bool
+		wg     sync.WaitGroup
+	)
+	defer func() {
+		mu.Lock()
+		closed = true
+		mu.Unlock()
+		wg.Wait()
+	}()
+	// 读循环放进独立协程：Recv 没法被打断，而节点关闭时这个函数必须能自己返回。
+	// 函数返回后流的 ctx 被取消，卡在 Recv 或 sem 上的读循环随之退出。
+	recvErr := make(chan error, 1)
+	go func() {
+		for {
+			req, err := stream.Recv()
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					err = nil
+				}
+				recvErr <- err
+				return
 			}
-			return err
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				recvErr <- ctx.Err()
+				return
+			}
+			mu.Lock()
+			if closed {
+				mu.Unlock()
+				return
+			}
+			wg.Add(1)
+			mu.Unlock()
+			go func(req *fpimv1.ConnectRequest) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				_ = snd.Send(handle(ctx, s.deps.Hub, app, req))
+			}(req)
 		}
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(req *fpimv1.ConnectRequest) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			_ = snd.Send(handle(ctx, s.deps.Hub, app, req))
-		}(req)
+	}()
+	select {
+	case err := <-recvErr:
+		return err
+	case <-s.stopping:
+		return errStopping
 	}
 }

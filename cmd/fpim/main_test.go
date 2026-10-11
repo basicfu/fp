@@ -547,7 +547,13 @@ func TestServeGracefulShutdownClosesWebSockets(t *testing.T) {
 		t.Fatalf("关闭之前注册表里应有 1 条连接，实际 %d", n)
 	}
 
+	stopStart := time.Now()
 	stop() // 触发优雅关闭，并等 serve 真正返回
+	// 业务 server 的 Connect 长流不会自己结束：停 gRPC 时不主动收掉它的话，
+	// 每次关闭都要干等满一个 shutdownBudget。
+	if d := time.Since(stopStart); d > shutdownBudget/2 {
+		t.Fatalf("优雅关闭耗时 %v：还挂着业务 server 的长流时不该等到预算用完", d)
+	}
 
 	select {
 	case code := <-codes:
