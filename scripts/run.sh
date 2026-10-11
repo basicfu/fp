@@ -17,4 +17,19 @@ if [ -z "${FP_POSTGRES_URL:-}" ] || [ -z "${FP_REDIS_URL:-}" ]; then
   echo "缺少 FP_POSTGRES_URL 或 FP_REDIS_URL。写进 $ROOT/.env.local，或在环境变量里传。" >&2
   exit 1
 fi
+# 顺带起前端开发服务器（http://localhost:5173，改前端代码即时生效）：8080 上的
+# 控制台是编译时嵌进二进制的 web/dist，不重新构建就看不到前端改动。
+# 带参数时是子命令（如 reset-password），不起。
+if [ $# -eq 0 ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "未找到 node，跳过前端开发服务器（装好 Node.js 后重开终端）。" >&2
+  else
+    [ -d web/node_modules ] || (cd web && npm ci)
+    # 直接用 node 跑 vite 而不是 npm run dev：npm 在 Windows 上是 cmd 包装，
+    # 退出时 kill 只杀得掉外层，vite 会变成占着 5173 的孤儿进程。
+    (cd web && exec node node_modules/vite/bin/vite.js) &
+    VITE_PID=$!
+    trap 'kill "$VITE_PID" 2>/dev/null || true' EXIT
+  fi
+fi
 go run ./cmd/fp "$@"
