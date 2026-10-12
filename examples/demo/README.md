@@ -14,7 +14,8 @@
 
 | 路由 | 说明 |
 |---|---|
-| `POST /api/login` | 用账号 + 密码换 token。body: `{"account":"...","password":"..."}`。成功后响应体带 `token`，并顺手把它写进一个 cookie |
+| `POST /api/login/code` | 给手机号发登录验证码（可选，见第 2 步末尾）。body: `{"phone":"13800138000"}` |
+| `POST /api/login` | 换 token：账号 + 密码 `{"account":"...","password":"..."}`，或手机号 + 验证码 `{"phone":"...","code":"..."}`。成功后响应体带 `token`，并顺手把它写进一个 cookie |
 | `GET /api/me` | 受保护路由，`auth.Middleware` 一行接入。返回 `{"userId","sessionId","stale"}` |
 | `GET /api/partner/ping` | 第三方签名调用示例。返回 `{"accessKeyId","remark"}` |
 | `GET /healthz` | 暴露 `client.StreamHealthy()`——撤销推送流是否健康，手工验收第 4 步要看它 |
@@ -159,6 +160,35 @@ curl -is -X POST http://localhost:8090/api/login \
 ```bash
 TOKEN=<上面拿到的 token>
 ```
+
+**可选：用短信验证码登录。** 验证码经 fp 的通知中心发出，所以先在控制台配好（详见
+[docs/notify.md](../../docs/notify.md#6-登录验证码)）：
+
+1. 「通知中心 → 供应商」新建一个 `log` 类型的供应商，`channel` 填 `sms`（只把消息打进 fp 的日志、
+   不真发，仅开发环境可用；要真发短信就建 `aliyun` / `zhutong` 供应商）。
+2. 「通知中心 → 模板」新建短信模板，code 填 `login_code`，变量只有 `code`；进模板详情页关联上一步的供应商
+   （供应商侧模板 ID 随便填，`log` 供应商不看它）。
+3. 「应用 → 登录方式」里启用 `sms_code`（或把第 1c 步的 `password` 换成 `sms_code` 再跑一遍）。
+
+然后发码：
+
+```bash
+curl -s -X POST http://localhost:8090/api/login/code \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"13800138000"}'
+```
+
+**该看到**：`{"ok":true}`。验证码不会发到手机上，而是打在 **fp 自己的进程日志**里（不是 demo 的日志），
+形如 `notify[log]: 只记录、不真发……  code=login_code to=13800138000 params=map[code:123456]`。
+把 6 位验证码抄出来登录；手机号没注册过会自动建号：
+
+```bash
+curl -is -X POST http://localhost:8090/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"13800138000","code":"<上面抄的验证码>"}'
+```
+
+**该看到**：与账号密码登录一样的 `200` 和 `token`。同一手机号 30 秒内再发一次得到 `429`。
 
 ### 第 3 步：带 token 与不带 token 访问受保护路由
 

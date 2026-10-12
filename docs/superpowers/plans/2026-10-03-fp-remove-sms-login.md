@@ -1,5 +1,7 @@
 # 移除验证码登录体系 Implementation Plan
 
+> **已部分回退（2026-10-12）：** 本计划删掉的应用侧短信验证码登录（`sms_code`、`SendLoginCode`、验证码服务）已恢复，发码改走通知中心，见 [通知设计 §八 的更正](../specs/2026-10-03-fp-notify-design.md)。其余清理（旧发送器、阿里云直发、迁移 00015）保持不变。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 删掉短信验证码登录（`sms_code` connector、`CodeService`、`SendLoginCode` 整条链路）和旧的 `internal/notify` 发送器，让 `internal/notify` 包腾空，给通知模块（`2026-10-03-fp-notify.md`）让路。

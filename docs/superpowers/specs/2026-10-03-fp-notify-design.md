@@ -202,6 +202,13 @@ GET  /logs
 - **示例与文档**：`examples/demo`、`examples/im-demo` 的登录方式从 `sms_code` 改为 `password`；`docs/console.md` 等引用同步。
 - **保留**：`notify_log` 表、`store.RateLimiter`。阿里云的调用方式在新框架下重建为 `aliyun` type（旧的发送器随 `internal/notify` 整个删除）。
 
+> **更正（2026-10-12）：** 本节把应用侧的短信验证码登录一并删了，是对"现有验证码体系全部移除"的过度解读——要删的只是控制台后台自己的短信登录（控制台本来就只有账号密码），应用通过 SDK 用手机号验证码登录必须支持，通知中心的短信渠道正是为它服务的。已恢复，决策如下：
+>
+> - **发码走通知中心**：固定模板 code `login_code`、变量只有 `code`（`service.LoginCodeTemplate`），由 `AuthDeps.Notifier`（`*NotifyService`）发送；旧的 `Sender` / `AliyunConfig.Templates` 不回来。
+> - **复活 `CODE_INVALID`**（语义不变）；`SMS_TEMPLATE_MISSING` 仍停用。发送环节的任何失败（模板缺失 / 停用 / 变量不符 / 供应商全挂）对调用方统一是 `NOTIFY_SEND_FAILED`、原因进日志：透传的话 NotFound / PermissionDenied 会被 SDK 归成 `ErrUnauthorized`，登录页显示"未授权"。
+> - **发码限流恢复**（同一手机号 30 秒 1 条 / 1 小时 5 条 / 1 天 10 条），放进 `LoginCodeService.AllowSend`，先于签发调用；`Issue` 改成 Lua 原子的"有则复用、无则写入"，并发发码只产生一个码。验证码服务从 `internal/notify` 挪到 `internal/service`，去掉用不上的 `purpose` 参数。
+> - **迁移 `00015` 不动**：已应用的迁移不能改，各应用的 `sms_code` 启用记录要在控制台重新启用；旧 `sms:` 系统配置继续被忽略。
+
 ## 九、测试
 
 - 路由：优先级分组、同组随机、禁用跳过（模板 / 关联 / 实例三层）、全部失败、IM 不降级。

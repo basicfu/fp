@@ -50,7 +50,7 @@ mux.Handle("GET /api/me", auth.Middleware(http.HandlerFunc(func(w http.ResponseW
 log.Fatal(http.ListenAndServe(":8090", mux))
 ```
 
-一个可以直接跑起来的完整版本（含登录、健康检查）见
+一个可以直接跑起来的完整版本（含登录、发验证码、健康检查）见
 [`examples/demo`](../examples/demo)。
 
 ## 目录
@@ -93,7 +93,7 @@ client, err := fpsdk.New(fpsdk.Options{ /* ... */ })
 
 > **`CallerType` 是给 fp-im 网关自己用的，业务方不要设。** 设成
 > `fpsdk.CallerTypeIM` 之后 fp 开放的是一组**收窄过**的接口：`Login` /
-> `Logout` / `GetPolicy` / `ReportPermissions` /
+> `Logout` / `SendLoginCode` / `GetPolicy` / `ReportPermissions` /
 > `GetConfig` / `Notify().Send` 一律 `PermissionDenied`，只剩下 `Auth().Validate` 和网关专用
 > 的 `IMGateway()`；作用域也不再钉在连接上，`AppID` 允许留空，改由
 > `fpsdk.WithAppID(ctx, app)` 逐调用附上。业务方设了它只会得到一堆
@@ -181,19 +181,34 @@ id, err := auth.Validate(ctx, token)
 ### 登录 / 登出
 
 ```go
+// 短信验证码登录：先发码，用户收到后拿码登录；首次登录自动注册。
+if err := auth.SendLoginCode(ctx, phone); err != nil { ... }
+
 res, err := auth.Login(ctx, fpsdk.LoginInput{
-    ConnectorType: "password",
-    Credentials:   map[string]string{"account": account, "password": password},
+    ConnectorType: "sms_code",
+    Credentials:   map[string]string{"phone": phone, "code": code},
     IP:            r.RemoteAddr,
     UserAgent:     r.UserAgent(),
 })
 // res.Token / res.SessionID / res.User
 
+// 密码登录：账号必须已经存在。
+res, err = auth.Login(ctx, fpsdk.LoginInput{
+    ConnectorType: "password",
+    Credentials:   map[string]string{"account": account, "password": password},
+})
+
 err = auth.Logout(ctx, token)
 ```
 
 `ConnectorType` 与 `Credentials` 的取值由控制台里给该应用启用的登录方式
-决定（如 `password` 需要 `account` + `password`）。
+决定（`sms_code` 需要 `phone` + `code`，`password` 需要 `account` + `password`）。
+
+`SendLoginCode` 的验证码经 fp 的通知中心发出：控制台里要先建好 code 为
+`login_code` 的短信模板并关联供应商，见 [通知文档](../docs/notify.md#6-登录验证码)。
+同一手机号 30 秒 1 条、1 小时 5 条、1 天 10 条，超出得到 `ErrRateLimited`；
+手机号格式不对得到 `ErrInvalidArgument`；通知中心没配好、供应商全挂得到
+带 `NOTIFY_SEND_FAILED` 码的 `*fpsdk.Error`（具体原因只在 fp 的日志里）。
 
 ### 访客模式
 
@@ -223,8 +238,8 @@ if errors.Is(err, fpsdk.ErrUnauthorized) { ... } // 哨兵判断依然有效
 |---|---|---|
 | `ErrNoToken` / `ErrUnauthorized` | 401 | 未登录 / token 无效过期 |
 | `ErrUnavailable` | 503 | **fp 不可达，不是鉴权失败**。回 401 会让客户端清掉一个其实有效的 token，把一次 fp 抖动放大成全体用户被迫重新登录 |
-| `ErrInvalidArgument` | 400 | 参数不合法（比如 account 或 password 没填），不是凭据问题 |
-| `ErrRateLimited` | 429 | 被限流，凭据本身没问题 |
+| `ErrInvalidArgument` | 400 | 参数不合法（手机号格式等），不是凭据问题 |
+| `ErrRateLimited` | 429 | 被限流（验证码发送过频），凭据本身没问题 |
 
 ## 3. 鉴权（Authz / RBAC）
 
@@ -466,7 +481,7 @@ err = client.Notify().Send(ctx, "order_alert", "", map[string]string{"orderNo": 
 
 `params` 的键必须与模板声明的变量**完全一致**，多了少了都会被拒绝。
 
-**幂等与重试**：`Send` 每次调用自动生成一个幂等键。fp 不可达、超时、或上一次相同请求还在处理，这类瞬时失败最多重试两次（200ms 起指数退避，单次尝试 30 秒超时），整个调用复用同一个键，服务端据此避免同一条通知因为重试而发出两次（例外见 [已知限制](../docs/notify.md#6-已知限制)）。想让业务自己的重试（重跑任务、重放消息）也不重复发送，用业务事件的 ID 当键：
+**幂等与重试**：`Send` 每次调用自动生成一个幂等键。fp 不可达、超时、或上一次相同请求还在处理，这类瞬时失败最多重试两次（200ms 起指数退避，单次尝试 30 秒超时），整个调用复用同一个键，服务端据此避免同一条通知因为重试而发出两次（例外见 [已知限制](../docs/notify.md#7-已知限制)）。想让业务自己的重试（重跑任务、重放消息）也不重复发送，用业务事件的 ID 当键：
 
 ```go
 err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotencyKey("order-A1001-shipped"))
