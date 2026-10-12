@@ -42,6 +42,7 @@ type grpcEnv struct {
 	sessions *service.SessionService
 	accounts *service.AccountService
 	users    *service.UserService
+	sms      *testsupport.FakeLoginSMS
 
 	// apps 用于创建/操纵应用（newApplication、setRotateInterval）；pool 用于绕过
 	// service 层直接改库（disableApplication——第一阶段没有停用应用的管理接口，
@@ -100,9 +101,16 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		store.NewSessionStore(rdb), revokePub, epochs, clk.Now)
 	logs := service.NewLoginLogService(pool)
 
+	// 显式关闭发码频率限制：多个用例需要对同一个手机号连发验证码。
+	codes := service.NewLoginCodeService(rdb, service.WithLoginCodeRateRules())
+	sms := &testsupport.FakeLoginSMS{}
+
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
 	}
 	// configPub 提前到这里构造：apps 也要用它广播 IM 接入配置变更。
 	configPub := store.NewConfigPublisher(rdb)
@@ -115,6 +123,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 
 	authSvc := service.NewAuthService(service.AuthDeps{
 		Apps: apps, Users: users, Sessions: sessions, Logs: logs, Registry: reg,
+		Codes: codes, Notifier: sms,
 	})
 
 	env := &grpcEnv{
@@ -122,6 +131,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		sessions: sessions,
 		accounts: service.NewAccountService(users, sessions, epochs, logs),
 		users:    users,
+		sms:      sms,
 		apps:     apps,
 		pool:     pool,
 		clock:    clk,
@@ -138,7 +148,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		env.imSecret = secret
 	}
 
-	// 创建一个启用了 password 登录方式的应用，
+	// 创建一个启用了 password 与 sms_code 两种登录方式的应用，
 	// 记下它的 appID 与明文 secret（ApplicationService.Create 的第二个返回值）。
 	primary := env.newApplication(t)
 	env.app, env.appID, env.secret = primary.app, primary.appID, primary.secret
@@ -202,7 +212,7 @@ func (e *grpcEnv) imAuthed(ctx context.Context, appID string) context.Context {
 		mdAppID, appID, mdAppSecret, e.imSecret, MDCallerType, CallerTypeIM)
 }
 
-// testApplication 是一个已创建、已启用 password 登录方式的应用，
+// testApplication 是一个已创建、已启用 password 与 sms_code 登录方式的应用，
 // 及其仅创建时可见一次的明文 secret。
 type testApplication struct {
 	app    *domain.Application
@@ -230,8 +240,10 @@ func (e *grpcEnv) newApplication(t *testing.T) *testApplication {
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}
-	if err := e.apps.SetConnector(ctx, app.ID, connector.TypePassword, true, nil); err != nil {
-		t.Fatalf("启用 password: %v", err)
+	for _, typ := range []string{connector.TypePassword, connector.TypeSMSCode} {
+		if err := e.apps.SetConnector(ctx, app.ID, typ, true, nil); err != nil {
+			t.Fatalf("启用 %s: %v", typ, err)
+		}
 	}
 	return &testApplication{app: app, appID: app.AppID, secret: secret}
 }

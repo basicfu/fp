@@ -23,15 +23,19 @@ type authEnv struct {
 	accounts *service.AccountService
 	sess     *service.SessionService
 	logs     *service.LoginLogService
+	sms      *testsupport.FakeLoginSMS
+	codes    *service.LoginCodeService
 	app      *domain.Application
 	// pool 用于少数需要绕过 service 层直接改库的用例（例如制造"应用已停用"这种
 	// 第一阶段还没有管理接口可以到达的状态）。
 	pool *pgxpool.Pool
 }
 
-func newAuthEnv(t *testing.T) *authEnv {
+// newAuthEnv 默认不限制发码频率：好几个用例要对同一个手机号连发验证码。
+// 要测限制本身的用例传 WithLoginCodeRateRules 进来。
+func newAuthEnv(t *testing.T, codeOpts ...service.LoginCodeOption) *authEnv {
 	t.Helper()
-	return newAuthEnvWithClock(t, func() int64 { return time.Now().UnixMilli() })
+	return newAuthEnvWithClock(t, func() int64 { return time.Now().UnixMilli() }, codeOpts...)
 }
 
 // newAuthEnvWithClock 用给定的时钟构造 SessionService。
@@ -39,7 +43,7 @@ func newAuthEnv(t *testing.T) *authEnv {
 // 时钟是这套代码里唯一一个"能精确插在某个内部步骤上"的可注入依赖，
 // 用它当同步点可以确定地复现并发交错，不必去赌真实 goroutine 的时序——
 // session_revoke_test.go 的 TestRevokeAnnounceSurvivesCtxCancellation 是同一手法。
-func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
+func newAuthEnvWithClock(t *testing.T, now func() int64, codeOpts ...service.LoginCodeOption) *authEnv {
 	t.Helper()
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
@@ -49,10 +53,15 @@ func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
 	sessions := service.NewSessionServiceWithClock(
 		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, now)
 	logs := service.NewLoginLogService(pool)
+	codes := service.NewLoginCodeService(rdb, append([]service.LoginCodeOption{service.WithLoginCodeRateRules()}, codeOpts...)...)
+	sms := &testsupport.FakeLoginSMS{}
 
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
 	}
 	apps := service.NewApplicationService(pool, reg)
 
@@ -61,17 +70,20 @@ func newAuthEnvWithClock(t *testing.T, now func() int64) *authEnv {
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}
-	if err := apps.SetConnector(ctx, app.ID, connector.TypePassword, true, nil); err != nil {
-		t.Fatalf("启用 password: %v", err)
+	for _, typ := range []string{connector.TypePassword, connector.TypeSMSCode} {
+		if err := apps.SetConnector(ctx, app.ID, typ, true, nil); err != nil {
+			t.Fatalf("启用 %s: %v", typ, err)
+		}
 	}
 
 	return &authEnv{
 		auth: service.NewAuthService(service.AuthDeps{
 			Apps: apps, Users: users, Sessions: sessions, Logs: logs, Registry: reg,
+			Codes: codes, Notifier: sms,
 		}),
 		apps: apps, users: users, sess: sessions, logs: logs,
 		accounts: service.NewAccountService(users, sessions, epochs, logs),
-		app:      app, pool: pool,
+		sms:      sms, codes: codes, app: app, pool: pool,
 	}
 }
 
@@ -622,8 +634,8 @@ func TestLogoutWritesAuditLog(t *testing.T) {
 	}
 }
 
-// 应用被停用后，登录、token 校验两条入口必须同时失效。
-// 直接改库而不调管理端的停用接口（ApplicationService.SetStatus）：要钉住的是这两条入口自己会查应用状态；
+// 应用被停用后，登录、发码、token 校验三条入口必须同时失效。
+// 直接改库而不调管理端的停用接口（ApplicationService.SetStatus）：要钉住的是这三条入口自己会查应用状态；
 // 日后停用接口若顺带吊销会话，"已签发的 token 立刻失效"就分不清是哪一层起的作用。
 func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
 	e := newAuthEnv(t)
@@ -639,6 +651,12 @@ func TestDisabledApplicationBlocksAllAuthEntryPoints(t *testing.T) {
 		t.Fatalf("停用应用: %v", err)
 	}
 
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); !errors.Is(err, domain.ErrForbidden) {
+		t.Errorf("SendLoginCode err = %v, want ErrForbidden", err)
+	}
+	if n := len(e.sms.Sent()); n != 0 {
+		t.Errorf("应用停用后不该发短信, 发送次数 = %d", n)
+	}
 	if _, err := e.auth.Login(ctx, in); !errors.Is(err, domain.ErrForbidden) {
 		t.Errorf("Login err = %v, want ErrForbidden", err)
 	}

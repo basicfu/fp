@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	AuthService_SendLoginCode_FullMethodName        = "/fp.v1.AuthService/SendLoginCode"
 	AuthService_Login_FullMethodName                = "/fp.v1.AuthService/Login"
 	AuthService_Logout_FullMethodName               = "/fp.v1.AuthService/Logout"
 	AuthService_ValidateToken_FullMethodName        = "/fp.v1.AuthService/ValidateToken"
@@ -38,6 +39,8 @@ const (
 // 认证方式：每个 RPC 的 metadata 必须带 fp-app-id 与 fp-app-secret，
 // 由服务端拦截器校验（见 internal/grpcapi/auth_interceptor.go）。
 type AuthServiceClient interface {
+	// SendLoginCode 给手机号发送登录验证码。
+	SendLoginCode(ctx context.Context, in *SendLoginCodeRequest, opts ...grpc.CallOption) (*SendLoginCodeResponse, error)
 	// Login 用某种登录方式的凭据换取会话 token。
 	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error)
 	// Logout 撤销一个 token。
@@ -68,6 +71,16 @@ type authServiceClient struct {
 
 func NewAuthServiceClient(cc grpc.ClientConnInterface) AuthServiceClient {
 	return &authServiceClient{cc}
+}
+
+func (c *authServiceClient) SendLoginCode(ctx context.Context, in *SendLoginCodeRequest, opts ...grpc.CallOption) (*SendLoginCodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendLoginCodeResponse)
+	err := c.cc.Invoke(ctx, AuthService_SendLoginCode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *authServiceClient) Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error) {
@@ -162,6 +175,8 @@ func (c *authServiceClient) ReportAccessKeyUsage(ctx context.Context, in *Report
 // 认证方式：每个 RPC 的 metadata 必须带 fp-app-id 与 fp-app-secret，
 // 由服务端拦截器校验（见 internal/grpcapi/auth_interceptor.go）。
 type AuthServiceServer interface {
+	// SendLoginCode 给手机号发送登录验证码。
+	SendLoginCode(context.Context, *SendLoginCodeRequest) (*SendLoginCodeResponse, error)
 	// Login 用某种登录方式的凭据换取会话 token。
 	Login(context.Context, *LoginRequest) (*LoginResponse, error)
 	// Logout 撤销一个 token。
@@ -194,6 +209,9 @@ type AuthServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAuthServiceServer struct{}
 
+func (UnimplementedAuthServiceServer) SendLoginCode(context.Context, *SendLoginCodeRequest) (*SendLoginCodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SendLoginCode not implemented")
+}
 func (UnimplementedAuthServiceServer) Login(context.Context, *LoginRequest) (*LoginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Login not implemented")
 }
@@ -237,6 +255,24 @@ func RegisterAuthServiceServer(s grpc.ServiceRegistrar, srv AuthServiceServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&AuthService_ServiceDesc, srv)
+}
+
+func _AuthService_SendLoginCode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendLoginCodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).SendLoginCode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_SendLoginCode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).SendLoginCode(ctx, req.(*SendLoginCodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _AuthService_Login_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -379,6 +415,10 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "fp.v1.AuthService",
 	HandlerType: (*AuthServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SendLoginCode",
+			Handler:    _AuthService_SendLoginCode_Handler,
+		},
 		{
 			MethodName: "Login",
 			Handler:    _AuthService_Login_Handler,

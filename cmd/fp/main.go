@@ -140,9 +140,13 @@ func run() error {
 	configPub := store.NewConfigPublisher(rdb)
 
 	userSvc := service.NewUserService(pool)
+	loginCodes := service.NewLoginCodeService(rdb)
 
 	registry := connector.NewRegistry()
 	if err := registry.Register(connector.NewPassword(userSvc)); err != nil {
+		return err
+	}
+	if err := registry.Register(connector.NewSMSCode(loginCodes)); err != nil {
 		return err
 	}
 
@@ -179,6 +183,8 @@ func run() error {
 		Sessions: sessionSvc,
 		Logs:     logSvc,
 		Registry: registry,
+		Codes:    loginCodes,
+		Notifier: notifySvc,
 		Authz:    authzSvc,
 	})
 

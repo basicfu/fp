@@ -584,8 +584,9 @@ func TestLoginInvalidArgumentReturnsErrInvalidArgument(t *testing.T) {
 // translate 是纯粹按 gRPC status code 分类的函数，不关心具体是哪个 RPC
 // 触发的——用 Login 覆盖这一分支，与 TestLoginUnavailableReturnsErrUnavailable
 // /TestLoginInvalidArgumentReturnsErrInvalidArgument 保持同一种装配方式。
-// 只要 gRPC 返回 ResourceExhausted，无论出现在哪条 RPC 上，都必须落到
-// ErrRateLimited 而不是 ErrUnauthorized。
+// 限流在真实系统里最常见于 SendLoginCode（验证码发送过于频繁），但那不
+// 影响这里要验证的东西：只要 gRPC 返回 ResourceExhausted，无论出现在
+// 哪条 RPC 上，都必须落到 ErrRateLimited 而不是 ErrUnauthorized。
 func TestLoginRateLimitedReturnsErrRateLimited(t *testing.T) {
 	env := newStubEnvFull(t, &stubServer{
 		validate: okValidate("u1", 1000),
@@ -600,6 +601,49 @@ func TestLoginRateLimitedReturnsErrRateLimited(t *testing.T) {
 	}
 	if errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("ErrRateLimited 不该同时满足 errors.Is(err, ErrUnauthorized)：%v", err)
+	}
+}
+
+// TestSendLoginCodePassesPhoneAndTranslatesErrors 钉住 SendLoginCode 把手机号原样交给服务端，
+// 并且限流、参数错误分别落到各自的哨兵上，不被当成鉴权失败。
+//
+// 发码发生在登录之前，调用方还没有任何会话：把 ResourceExhausted / InvalidArgument 落进
+// ErrUnauthorized，业务方的登录页会把"发得太频繁"和"手机号打错"都显示成"未授权"。
+func TestSendLoginCodePassesPhoneAndTranslatesErrors(t *testing.T) {
+	var gotPhone string
+	var failWith error
+	env := newStubEnvFull(t, &stubServer{
+		validate: okValidate("u1", 1000),
+		sendCode: func(req *fpv1.SendLoginCodeRequest) (*fpv1.SendLoginCodeResponse, error) {
+			gotPhone = req.GetPhone()
+			return &fpv1.SendLoginCodeResponse{}, failWith
+		},
+	})
+
+	if err := env.auth.SendLoginCode(context.Background(), "13800138000"); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	if gotPhone != "13800138000" {
+		t.Fatalf("服务端收到的手机号 = %q", gotPhone)
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"限流", status.Error(codes.ResourceExhausted, "发送过于频繁"), ErrRateLimited},
+		{"手机号格式错", status.Error(codes.InvalidArgument, "手机号格式不正确"), ErrInvalidArgument},
+		{"fp 不可达", status.Error(codes.Unavailable, "fp 挂了"), ErrUnavailable},
+	} {
+		failWith = tc.err
+		err := env.auth.SendLoginCode(context.Background(), "13800138000")
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.want)
+		}
+		if errors.Is(err, ErrUnauthorized) {
+			t.Errorf("%s: 不该满足 errors.Is(err, ErrUnauthorized): %v", tc.name, err)
+		}
 	}
 }
 

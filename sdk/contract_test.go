@@ -79,6 +79,7 @@ func TestAuthServiceSurface(t *testing.T) {
 		serverStream bool
 	}
 	expected := map[protoreflect.Name]want{
+		"SendLoginCode": {false, false},
 		"Login":         {false, false},
 		"Logout":        {false, false},
 		"ValidateToken": {false, false},

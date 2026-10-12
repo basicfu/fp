@@ -23,6 +23,7 @@ type stubServer struct {
 	validate   func(*fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error)
 	login      func(*fpv1.LoginRequest) (*fpv1.LoginResponse, error)
 	logout     func(*fpv1.LogoutRequest) (*fpv1.LogoutResponse, error)
+	sendCode   func(*fpv1.SendLoginCodeRequest) (*fpv1.SendLoginCodeResponse, error)
 	watchReady chan struct{}            // 每次有流建立就发一个信号
 	events     chan *fpv1.WatchResponse // 测试往这里塞事件
 
@@ -51,6 +52,14 @@ func (s *stubServer) Login(_ context.Context, req *fpv1.LoginRequest) (*fpv1.Log
 		return s.UnimplementedAuthServiceServer.Login(context.Background(), req)
 	}
 	return s.login(req)
+}
+
+// SendLoginCode 与 Login/Logout 同一约定：未赋值时按 Unimplemented 处理。
+func (s *stubServer) SendLoginCode(_ context.Context, req *fpv1.SendLoginCodeRequest) (*fpv1.SendLoginCodeResponse, error) {
+	if s.sendCode == nil {
+		return s.UnimplementedAuthServiceServer.SendLoginCode(context.Background(), req)
+	}
+	return s.sendCode(req)
 }
 
 func (s *stubServer) Logout(_ context.Context, req *fpv1.LogoutRequest) (*fpv1.LogoutResponse, error) {

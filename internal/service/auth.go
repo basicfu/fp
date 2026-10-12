@@ -11,6 +11,16 @@ import (
 	"github.com/basicfu/fp/internal/domain"
 )
 
+// LoginCodeTemplate 是登录验证码使用的通知模板 code。
+//
+// 控制台「通知中心」里必须有一条同名的 sms 模板，变量只有 code，见 docs/notify.md。
+const LoginCodeTemplate = "login_code"
+
+// LoginCodeSender 是 SendLoginCode 需要的最小发送能力，*NotifyService 满足它。
+type LoginCodeSender interface {
+	Send(ctx context.Context, in NotifySendInput) error
+}
+
 // AuthDeps 是 AuthService 的依赖集合。
 type AuthDeps struct {
 	Apps     *ApplicationService
@@ -18,6 +28,9 @@ type AuthDeps struct {
 	Sessions *SessionService
 	Logs     *LoginLogService
 	Registry *connector.Registry
+	// Codes、Notifier 只有 SendLoginCode 用得到；没有启用 sms_code 的部署（含大部分测试）可以不给。
+	Codes    *LoginCodeService
+	Notifier LoginCodeSender
 	// Authz 解析用户在本应用的有效角色，签发会话时刻进去。
 	// 可为 nil——授权模块未启用时会话不带角色，判定一律拒绝（默认拒绝）。
 	Authz *AuthzService
@@ -49,6 +62,45 @@ type LoginInput struct {
 type LoginResult struct {
 	User    *domain.User
 	Session *domain.Session
+}
+
+// SendLoginCode 给手机号发送登录验证码。
+//
+// 校验顺序：应用 → 登录方式是否启用 → 手机号格式 → 频率限制 → 发送。
+// 格式校验必须早于限流和验证码生成，否则畸形号码也会消耗一次发送额度。
+func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) error {
+	app, err := s.activeApp(ctx, appID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.enabledConnector(ctx, app, connector.TypeSMSCode); err != nil {
+		return err
+	}
+	if connector.DetectIdentityType(phone) != domain.IdentityTypePhone {
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodePhoneInvalid, "手机号格式不正确")
+	}
+
+	if err := s.deps.Codes.AllowSend(ctx, phone); err != nil {
+		return err
+	}
+	code, err := s.deps.Codes.Issue(ctx, phone)
+	if err != nil {
+		return err
+	}
+	if err := s.deps.Notifier.Send(ctx, NotifySendInput{
+		AppID:  appID,
+		Code:   LoginCodeTemplate,
+		To:     phone,
+		Params: map[string]string{"code": code},
+	}); err != nil {
+		// 走到这里的失败都是平台侧的：模板没建、被停用、变量对不上、供应商全挂——手机号和
+		// 参数前面已经校验过。具体原因只进日志，调用方拿通用错误。直接透传的话，模板缺失
+		// 以 NotFound、被停用以 PermissionDenied 出去，SDK 会把它们归成 ErrUnauthorized，
+		// 业务方的登录页就把"通知中心没配好"显示成了"未授权"。
+		slog.Error("登录验证码发送失败", "template", LoginCodeTemplate, "appId", appID, "err", err)
+		return domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "验证码发送失败，请稍后重试")
+	}
+	return nil
 }
 
 // Login 执行一次完整登录。
@@ -96,9 +148,9 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 
 	// 认证之后的每一步失败，都必须照样留下审计记录。
 	//
-	// 这些恰恰是"凭据已经验过"的那些尝试——出事故时最想查的就是它们。
-	// 只在凭据校验失败时记录，等于把成功通过认证却没能建立会话的那批
-	// 请求全部丢进黑洞。
+	// 这些恰恰是"凭据已经验过、一次性验证码已经被消费掉"的那些尝试——
+	// 出事故时最想查的就是它们。只在凭据校验失败时记录，等于把成功通过
+	// 认证却没能建立会话的那批请求全部丢进黑洞。
 	if err := s.deps.Users.EnsureRegistration(ctx, user.ID, app.ID); err != nil {
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
@@ -178,9 +230,9 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 // **别把它"优化"成比较 updated_at 之类的时间戳**：那既会被其他更新列的操作
 // 误触发，又依赖数据库时钟精度，两头都不如直接比哈希准。
 //
-// 这一条对**每一种登录方式**都成立，不论它碰没碰过密码：
+// 这一条对**每一种登录方式**都成立，包括压根没碰过密码的 sms_code：
 // ResetPassword 的语义是"把这个账号现有的会话全部作废"，一次恰好在
-// RevokeUser 枚举之后落地的登录同样绕过了它，没有理由放行。
+// RevokeUser 枚举之后落地的短信登录同样绕过了它，没有理由放行。
 //
 // 读不到用户时按不可登录处理：宁可让一次合法登录失败，也不放行一个
 // 可能已经被冻结、或凭据已经换掉的会话。
@@ -189,8 +241,8 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 // 快照读取严格早于管理动作提交，**并且** RevokeUser 的枚举严格早于 Issue 的写入。
 // 两个条件同时成立的窗口仍然存在。另外还剩一小段它够不着的区间：密码登录时，
 // connector 自己校验口令发生在 resolveUser 读快照**之前**，改密若恰好落在这两步
-// 之间，快照拿到的已经是新哈希，比对就看不出差异了（凭据校验与
-// password_hash 无关的登录方式没有这一段）。真正的栅栏需要把校验和会话写入放进
+// 之间，快照拿到的已经是新哈希，比对就看不出差异了（短信登录没有这一段，
+// 因为它的凭据校验与 password_hash 无关）。真正的栅栏需要把校验和会话写入放进
 // 同一个事务边界里——例如给用户加一个撤销版本号，随状态和密码一起递增，
 // 签发时带上、校验时比对——那是计划二的事。这里做的只是把"静默失守好几天"
 // 换成一个窄得多的竞态，而且它自愈：管理员下一次操作、或任何一次后续撤销都会清掉它。
@@ -389,7 +441,7 @@ func (s *AuthService) writeLog(ctx context.Context, e domain.LoginLog) {
 // "已冻结"**——那种谎报会让用户和客服都往错的方向排查。
 //
 // 安全前提：这个错误只在 conn.Authenticate() 成功之后才可能返回，也就是
-// 调用方已经证明了自己持有有效凭据，所以暴露"账号被冻结"
+// 调用方已经证明了自己知道密码或持有有效验证码，所以暴露"账号被冻结"
 // 不构成账号枚举泄露。不要把这个判断挪到凭据校验之前。
 func accountUnavailableError(u *domain.User) *domain.Error {
 	if u.Status == domain.UserStatusFrozen {

@@ -31,22 +31,45 @@ func main() {
 	auth := client.Auth()
 	mux := http.NewServeMux()
 
-	// 公开路由：登录。
-	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+	// 公开路由：发验证码、登录。
+	mux.HandleFunc("POST /api/login/code", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Account  string `json:"account"`
-			Password string `json:"password"`
+			Phone string `json:"phone"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		res, err := auth.Login(r.Context(), fpsdk.LoginInput{
+		if err := auth.SendLoginCode(r.Context(), req.Phone); err != nil {
+			fpsdk.WriteError(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	})
+
+	// 同一个登录路由接两种登录方式：body 里带 phone 就是短信验证码登录，否则是账号密码登录。
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Account  string `json:"account"`
+			Password string `json:"password"`
+			Phone    string `json:"phone"`
+			Code     string `json:"code"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		in := fpsdk.LoginInput{
 			ConnectorType: "password",
 			Credentials:   map[string]string{"account": req.Account, "password": req.Password},
 			IP:            r.RemoteAddr,
 			UserAgent:     r.UserAgent(),
-		})
+		}
+		if req.Phone != "" {
+			in.ConnectorType = "sms_code"
+			in.Credentials = map[string]string{"phone": req.Phone, "code": req.Code}
+		}
+		res, err := auth.Login(r.Context(), in)
 		if err != nil {
 			fpsdk.WriteError(w, err)
 			return

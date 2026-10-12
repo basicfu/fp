@@ -130,7 +130,10 @@ export default function NotifyTemplates() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Button onClick={() => setCreating(true)}>新建模板</Button>
-        <p className="text-sm text-muted-foreground">业务代码只传 code、收件人和变量；渠道、供应商、内容都在这里配置。</p>
+        <p className="text-sm text-muted-foreground">
+          业务代码只传 code、收件人和变量；渠道、供应商、内容都在这里配置。短信验证码登录固定使用 code 为
+          login_code、变量只有 code 的短信模板。
+        </p>
       </div>
 
       {rows.loading && !rows.data && <p className="text-sm text-muted-foreground">加载中…</p>}

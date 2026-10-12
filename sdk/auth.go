@@ -20,11 +20,11 @@ var (
 	ErrUnauthorized = errors.New("fpsdk: token 无效或已过期")
 	// ErrUnavailable fp 不可达，且本地没有可用的缓存结果。
 	ErrUnavailable = errors.New("fpsdk: fp 不可达且无可用缓存")
-	// ErrInvalidArgument 调用方给的参数不合法（比如 account 或 password 没填）。
+	// ErrInvalidArgument 调用方给的参数不合法（手机号格式、验证码格式、account 或 password 没填等）。
 	// 与 ErrUnauthorized 的区别是：这不是"凭据不对"，是"请求本身就没法处理"，
 	// 客户端不该因此清掉会话或跳登录页。
 	ErrInvalidArgument = errors.New("fpsdk: 参数不合法")
-	// ErrRateLimited 被服务端限流。
+	// ErrRateLimited 被服务端限流（例如验证码发送过于频繁）。
 	// 同样不该被当成鉴权失败——用户的凭据没有任何问题。
 	ErrRateLimited = errors.New("fpsdk: 请求过于频繁")
 	// ErrForbidden 凭据有效但不被允许：访问密钥已停用、已过期，或来源 IP 不在白名单。
@@ -277,6 +277,15 @@ type LoginResult struct {
 	User      *fpv1.UserInfo
 }
 
+// SendLoginCode 给手机号发送登录验证码，之后用 ConnectorType "sms_code" 登录。
+//
+// 验证码经 fp 的通知中心发出，控制台里要先配好 code 为 login_code 的短信模板，
+// 见 docs/notify.md。同一手机号 30 秒内只能发 1 条、1 小时 5 条、1 天 10 条，超出得到 ErrRateLimited。
+func (a *Auth) SendLoginCode(ctx context.Context, phone string) error {
+	_, err := a.c.rpc.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: phone})
+	return translate(err)
+}
+
 // Login 用凭据换取会话 token。
 func (a *Auth) Login(ctx context.Context, in LoginInput) (*LoginResult, error) {
 	res, err := a.c.rpc.Login(ctx, &fpv1.LoginRequest{
@@ -307,9 +316,10 @@ func (a *Auth) Logout(ctx context.Context, token string) error {
 //
 // codes.NotFound 归进 ErrUnauthorized，与 Validate 那侧的判断保持一致
 // （见其注释）：它是 fp 给出的确定答案，不是"够不着"。codes.InvalidArgument
-// 与 codes.ResourceExhausted 归进各自专属的哨兵——这两个码只会经 Login 之类
-// 带凭据的调用出现，且都不是"凭据不对"，不能落进 ErrUnauthorized（会让客户端
-// 清会话/跳登录页）也不能落进 ErrUnavailable（fp 明明健康地给出了判定）。
+// 与 codes.ResourceExhausted 归进各自专属的哨兵——这两个码只会经
+// SendLoginCode/Login 出现（畸形手机号/验证码格式、短信发送被限流），
+// 且都不是"凭据不对"，不能落进 ErrUnauthorized（会让客户端清会话/跳
+// 登录页）也不能落进 ErrUnavailable（fp 明明健康地给出了判定）。
 func translate(err error) error {
 	if err == nil {
 		return nil

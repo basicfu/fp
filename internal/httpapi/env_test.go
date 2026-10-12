@@ -22,9 +22,13 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 	rdb := testsupport.NewTestRedis(t)
 
 	users := service.NewUserService(pool)
+	codes := service.NewLoginCodeService(rdb)
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(users)); err != nil {
 		t.Fatalf("注册 password: %v", err)
+	}
+	if err := reg.Register(connector.NewSMSCode(codes)); err != nil {
+		t.Fatalf("注册 sms_code: %v", err)
 	}
 
 	epochs := store.NewEpochStore(rdb)

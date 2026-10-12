@@ -8,14 +8,18 @@ package domain
 //
 // **一经发布不得更名，也不得复用于其他语义。**
 //
-// 已停用、码值不得再用：CODE_INVALID、SMS_TEMPLATE_MISSING——随短信验证码
-// 登录一并移除。
+// 已停用、码值不得再用：SMS_TEMPLATE_MISSING——旧短信发送器随之移除，
+// 模板缺失现在由通知中心的 NOTIFY_* 码表达。
+// CODE_INVALID 随短信验证码登录回归而恢复，语义不变。
 const (
 	// 登录与认证。这一组的 Msg 会被接入方直接展示给终端用户。
 
 	// CodeCredentialInvalid 同时覆盖账号不存在、账号类型未开放、密码错误
 	// 三种情况，**刻意不拆**——拆开等于给攻击者一个账号枚举预言机。
 	CodeCredentialInvalid = "CREDENTIAL_INVALID"
+	// CodeCodeInvalid 合并"验证码错误"与"验证码已过期"，同样刻意不拆：
+	// 拆开会泄露某个手机号有没有被发过验证码。
+	CodeCodeInvalid = "CODE_INVALID"
 	// CodeAccountFrozen 只在 user.Status == FROZEN 时使用。
 	//
 	// 能看到这个码的调用方已经先通过了 Authenticate（凭据校验在
@@ -145,6 +149,7 @@ const (
 // 没有任何测试守住；现在由 TestTransportsAgreeOnEveryCode 断言一致。
 var codeSentinels = map[string]error{
 	CodeCredentialInvalid:  ErrInvalidCredential,
+	CodeCodeInvalid:        ErrInvalidCredential,
 	CodeAccountFrozen:      ErrForbidden,
 	CodeAccountUnavailable: ErrForbidden,
 	CodeTokenInvalid:       ErrUnauthorized,

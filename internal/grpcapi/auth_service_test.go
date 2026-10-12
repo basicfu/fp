@@ -113,6 +113,10 @@ func TestRPCsRequireCredentials(t *testing.T) {
 	bare := context.Background()
 
 	calls := map[string]func() error{
+		"SendLoginCode": func() error {
+			_, err := env.client.SendLoginCode(bare, &fpv1.SendLoginCodeRequest{Phone: "13800138000"})
+			return err
+		},
 		"Login": func() error {
 			_, err := env.client.Login(bare, &fpv1.LoginRequest{ConnectorType: "password"})
 			return err
@@ -172,6 +176,59 @@ func TestPasswordLoginRoundTrip(t *testing.T) {
 	if res.GetSessionId() != login.GetSessionId() {
 		t.Fatalf("校验返回的 sessionId %q 与登录返回的 %q 不一致",
 			res.GetSessionId(), login.GetSessionId())
+	}
+}
+
+// TestSMSCodeLoginRoundTrip 走一遍发码→登录→校验：发码经 gRPC 到 AuthService，
+// 验证码落到通知中心（这里是假的），登录时用它换 token，首次登录自动建号。
+func TestSMSCodeLoginRoundTrip(t *testing.T) {
+	env := newGRPCEnv(t)
+	ctx := env.authed(context.Background())
+	const phone = "13800138000"
+
+	if _, err := env.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: phone}); err != nil {
+		t.Fatalf("SendLoginCode: %v", err)
+	}
+	code := env.sms.LastCode()
+	if code == "" {
+		t.Fatal("通知中心没有收到验证码")
+	}
+
+	login, err := env.client.Login(ctx, &fpv1.LoginRequest{
+		ConnectorType: "sms_code",
+		Credentials:   map[string]string{"phone": phone, "code": code},
+	})
+	if err != nil {
+		t.Fatalf("Login(sms_code): %v", err)
+	}
+	if login.GetToken() == "" || login.GetUser().GetId() == "" {
+		t.Fatalf("登录响应缺字段: %+v", login)
+	}
+	res, err := env.client.ValidateToken(ctx, &fpv1.ValidateTokenRequest{Token: login.GetToken()})
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if res.GetUserId() != login.GetUser().GetId() {
+		t.Fatalf("校验返回的 userId %q 与登录返回的 %q 不一致", res.GetUserId(), login.GetUser().GetId())
+	}
+}
+
+// 手机号格式错和平台侧发送失败，经 gRPC 分别是 InvalidArgument 和 Internal：
+// SDK 据此区分"用户打错了"与"稍后重试"，都不是 Unauthenticated / NotFound。
+func TestSendLoginCodeErrorsMapToGRPCStatus(t *testing.T) {
+	env := newGRPCEnv(t)
+	ctx := env.authed(context.Background())
+
+	if _, err := env.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: "12345"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("畸形手机号返回 %v，期望 InvalidArgument", status.Code(err))
+	}
+	if n := len(env.sms.Sent()); n != 0 {
+		t.Fatalf("畸形手机号不该发短信, 发送次数 = %d", n)
+	}
+
+	env.sms.FailWith(domain.Fail(domain.ErrNotFound, domain.CodeNotifyTemplateNotFound, "no template"))
+	if _, err := env.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: "13800138000"}); status.Code(err) != codes.Internal {
+		t.Fatalf("通知中心没配好返回 %v，期望 Internal", status.Code(err))
 	}
 }
 
@@ -318,6 +375,10 @@ func TestIMCallerCannotMintSessions(t *testing.T) {
 	}{
 		{"Login", func() error {
 			_, err := env.client.Login(ctx, &fpv1.LoginRequest{ConnectorType: "password"})
+			return err
+		}},
+		{"SendLoginCode", func() error {
+			_, err := env.client.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: "13800000000"})
 			return err
 		}},
 		{"Logout", func() error {
