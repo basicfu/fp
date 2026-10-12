@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"sync"
 	"testing"
@@ -46,7 +48,7 @@ func (c *smsCapture) snapshot() (notify.Delivery, int) {
 //
 // 单元测试各自守着自己那一层；这条守层与层之间的约定：通知模板 code 是 login_code、变量是 code，
 // 以及错误经 gRPC 到 SDK 之后归在正确的哨兵上——限流是 ErrRateLimited、手机号格式错是 ErrInvalidArgument，
-// 通知中心没配好不能变成 ErrUnauthorized（业务方的登录页会显示"未授权"）。
+// 通知中心没配好是 ErrUnavailable（WriteError 回 503），不能变成 ErrUnauthorized（业务方的登录页会显示"未授权"）。
 func TestSMSCodeLoginEndToEnd(t *testing.T) {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
@@ -120,8 +122,14 @@ func TestSMSCodeLoginEndToEnd(t *testing.T) {
 	if !errors.As(err, &fe) || fe.Code != domain.CodeNotifySendFailed {
 		t.Fatalf("没有模板时 err = %v, want 码 %s", err, domain.CodeNotifySendFailed)
 	}
-	if errors.Is(err, fpsdk.ErrUnauthorized) {
-		t.Fatalf("通知中心没配好被当成了鉴权失败: %v", err)
+	if errors.Is(err, fpsdk.ErrUnauthorized) || !errors.Is(err, fpsdk.ErrUnavailable) {
+		t.Fatalf("通知中心没配好应是 ErrUnavailable，不能被当成鉴权失败: %v", err)
+	}
+	// 业务方通常直接 fpsdk.WriteError(w, err)：这里必须是 503，不是 401。
+	rec := httptest.NewRecorder()
+	fpsdk.WriteError(rec, err)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("WriteError 状态码 = %d, want 503", rec.Code)
 	}
 
 	// 按文档配好：login_code 模板，变量只有 code，关联一个短信供应商。

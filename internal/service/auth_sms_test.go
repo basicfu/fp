@@ -180,6 +180,76 @@ func TestSendLoginCodeRejectsMalformedPhone(t *testing.T) {
 	}
 }
 
+// 应用停用、登录方式没启用都得先于限流判断：被拒绝的请求不占发码额度，
+// 也不会因为额度用完而换成另一种报错。
+func TestSendLoginCodeChecksAppAndConnectorBeforeRateLimit(t *testing.T) {
+	e := newAuthEnv(t, service.WithLoginCodeRateRules(service.DefaultLoginCodeRateRules()...))
+	ctx := context.Background()
+
+	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, false, nil); err != nil {
+		t.Fatalf("停用 sms_code: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); !errors.Is(err, domain.ErrForbidden) {
+			t.Fatalf("登录方式未启用，第 %d 次 err = %v, want ErrForbidden", i, err)
+		}
+	}
+	if err := e.apps.SetConnector(ctx, e.app.ID, connector.TypeSMSCode, true, nil); err != nil {
+		t.Fatalf("启用 sms_code: %v", err)
+	}
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13800138000"); err != nil {
+		t.Fatalf("被拒绝的请求占了发码额度: %v", err)
+	}
+
+	if _, err := e.pool.Exec(ctx, `UPDATE application SET status = $2 WHERE id = $1`,
+		e.app.ID, domain.ApplicationStatusDisabled); err != nil {
+		t.Fatalf("停用应用: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		if err := e.auth.SendLoginCode(ctx, e.app.AppID, "13900139000"); !errors.Is(err, domain.ErrForbidden) {
+			t.Fatalf("应用已停用，第 %d 次 err = %v, want ErrForbidden", i, err)
+		}
+	}
+	if n := len(e.sms.Sent()); n != 1 {
+		t.Fatalf("发送次数 = %d, want 1", n)
+	}
+}
+
+// 猜错到上限之后点重发，收到的必须是一个能用的新码，而不是同一个注定作废的码。
+func TestResendAfterAttemptsExhaustedDeliversUsableCode(t *testing.T) {
+	e := newAuthEnv(t)
+	ctx := context.Background()
+	const phone = "13800138000"
+	login := func(code string) error {
+		_, err := e.auth.Login(ctx, service.LoginInput{
+			AppID:         e.app.AppID,
+			ConnectorType: connector.TypeSMSCode,
+			Credentials:   connector.Credentials{"phone": phone, "code": code},
+		})
+		return err
+	}
+
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, phone); err != nil {
+		t.Fatalf("首次发送: %v", err)
+	}
+	wrong := "000000"
+	if e.sms.LastCode() == wrong {
+		wrong = "000001"
+	}
+	for i := 0; i < service.MaxVerifyAttempts; i++ {
+		if err := login(wrong); !errors.Is(err, domain.ErrInvalidCredential) {
+			t.Fatalf("第 %d 次猜错 err = %v", i+1, err)
+		}
+	}
+
+	if err := e.auth.SendLoginCode(ctx, e.app.AppID, phone); err != nil {
+		t.Fatalf("重发: %v", err)
+	}
+	if err := login(e.sms.LastCode()); err != nil {
+		t.Fatalf("猜错用满之后重发的验证码登录不了: %v", err)
+	}
+}
+
 // 钉住与通知中心之间的约定：模板 code 是 login_code，收件人是手机号，变量只有 code，
 // 不带幂等键（每次点"发送"都是一次新的尝试，由发码限流兜住重复）。
 func TestSendLoginCodeAsksNotifyCenterForTheLoginTemplate(t *testing.T) {

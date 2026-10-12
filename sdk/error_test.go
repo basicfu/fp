@@ -65,6 +65,8 @@ func TestStructuredErrorStillMatchesLegacySentinel(t *testing.T) {
 		{"参数非法", codes.InvalidArgument, ErrInvalidArgument},
 		{"限流", codes.ResourceExhausted, ErrRateLimited},
 		{"不可达", codes.Unavailable, ErrUnavailable},
+		// fp 自己出了问题不是凭据问题；没有哨兵的话 WriteError 会把它当成无法归类的错误回 401。
+		{"内部错误", codes.Internal, ErrUnavailable},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

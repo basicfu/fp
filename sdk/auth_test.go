@@ -3,6 +3,8 @@ package fpsdk
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -644,6 +646,31 @@ func TestSendLoginCodePassesPhoneAndTranslatesErrors(t *testing.T) {
 		if errors.Is(err, ErrUnauthorized) {
 			t.Errorf("%s: 不该满足 errors.Is(err, ErrUnauthorized): %v", tc.name, err)
 		}
+	}
+}
+
+// 发码失败是 fp 这边的问题（通知中心没配好、供应商全挂），经 WriteError 必须是 503 而不是 401：
+// 否则业务方的登录页把它显示成"未授权"，调用方还以为是凭据问题。码仍然能用 errors.As 取到。
+func TestSendLoginCodeInternalErrorIsUnavailableNotUnauthorized(t *testing.T) {
+	env := newStubEnvFull(t, &stubServer{
+		validate: okValidate("u1", 1000),
+		sendCode: func(*fpv1.SendLoginCodeRequest) (*fpv1.SendLoginCodeResponse, error) {
+			return nil, statusWithDetail(t, codes.Internal, "NOTIFY_SEND_FAILED", "验证码发送失败，请稍后重试", "")
+		},
+	})
+
+	err := env.auth.SendLoginCode(context.Background(), "13800138000")
+	if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnavailable 且不是 ErrUnauthorized", err)
+	}
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Code != "NOTIFY_SEND_FAILED" {
+		t.Fatalf("取不到带 NOTIFY_SEND_FAILED 的 *fpsdk.Error: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	WriteError(rec, err)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("WriteError 状态码 = %d, want 503", rec.Code)
 	}
 }
 

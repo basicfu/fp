@@ -40,12 +40,22 @@ func DefaultLoginCodeRateRules() []LoginCodeRateRule {
 	}
 }
 
-// issueScript 原子地「取现有的码，没有才存新的」。拆成 GET + SET 两步，并发的两次发码
-// 会各生成一个码、后写的顶掉先写的，先发出去的那条短信里的码就成了废码。
-// 存新码时一并清掉尝试计数，ARGV：新码、有效期毫秒。返回当前有效的码。
+// issueScript 原子地「还能用的码就复用并续期，否则存新的」。拆成 GET + SET 两步，并发的两次
+// 发码会各生成一个码、后写的顶掉先写的，先发出去的那条短信里的码就成了废码。
+//
+// 校验次数已经用满的码算废了（再校验一次就作废，哪怕码是对的）：这时复用只会让用户收到一条
+// 注定用不了的短信，所以换新码并清掉尝试计数。复用时连尝试计数一起续期，两个键的寿命保持一致，
+// 否则计数先过期、同一个码会重新获得校验次数。每个码的校验次数上限不变，发码频率另有限流管着。
+//
+// ARGV：新码、有效期毫秒、校验次数上限。返回当前有效的码。
 var issueScript = redis.NewScript(`
+local tries = tonumber(redis.call('GET', KEYS[2]) or '0')
 local existing = redis.call('GET', KEYS[1])
-if existing then
+if existing and tries < tonumber(ARGV[3]) then
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  if tries > 0 then
+    redis.call('PEXPIRE', KEYS[2], ARGV[2])
+  end
   return existing
 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
@@ -123,7 +133,7 @@ func (s *LoginCodeService) AllowSend(ctx context.Context, phone string) error {
 	return nil
 }
 
-// Issue 返回该手机号当前有效的验证码：已有未过期的就原样返回，否则生成新的并存储。
+// Issue 返回该手机号当前有效的验证码：还能用的就原样返回（并续期），否则生成新的并存储。
 //
 // 不能无条件覆盖。覆盖的话，频率限制窗口内的第二次"发送"会用新码顶掉用户手里
 // 已经收到的旧码，而这次发送又会被限流拒掉：新码从未送达、旧码已经作废，
@@ -139,7 +149,7 @@ func (s *LoginCodeService) Issue(ctx context.Context, phone string) (string, err
 		return "", err
 	}
 	code, err := issueScript.Run(ctx, s.rdb,
-		[]string{loginCodeKey(phone), loginCodeTryKey(phone)}, fresh, loginCodeTTL.Milliseconds()).Text()
+		[]string{loginCodeKey(phone), loginCodeTryKey(phone)}, fresh, loginCodeTTL.Milliseconds(), MaxVerifyAttempts).Text()
 	if err != nil {
 		return "", fmt.Errorf("service: 签发验证码: %w", err)
 	}

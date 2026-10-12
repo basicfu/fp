@@ -18,7 +18,8 @@ var (
 	ErrNoToken = errors.New("fpsdk: 缺少 token")
 	// ErrUnauthorized token 无效、已过期或已被撤销。
 	ErrUnauthorized = errors.New("fpsdk: token 无效或已过期")
-	// ErrUnavailable fp 不可达，且本地没有可用的缓存结果。
+	// ErrUnavailable fp 不可达，且本地没有可用的缓存结果；或 fp 自己报了内部错误
+	// （例如通知中心没配好、验证码发不出去）。两者都不是凭据问题。
 	ErrUnavailable = errors.New("fpsdk: fp 不可达且无可用缓存")
 	// ErrInvalidArgument 调用方给的参数不合法（手机号格式、验证码格式、account 或 password 没填等）。
 	// 与 ErrUnauthorized 的区别是：这不是"凭据不对"，是"请求本身就没法处理"，
@@ -320,6 +321,10 @@ func (a *Auth) Logout(ctx context.Context, token string) error {
 // SendLoginCode/Login 出现（畸形手机号/验证码格式、短信发送被限流），
 // 且都不是"凭据不对"，不能落进 ErrUnauthorized（会让客户端清会话/跳
 // 登录页）也不能落进 ErrUnavailable（fp 明明健康地给出了判定）。
+//
+// codes.Internal 归进 ErrUnavailable：fp 给了响应，但响应是"我这边出问题了"，
+// 与 Validate 对这类响应的处理一致。没有哨兵的话，WriteError 会把它当成无法归类的
+// 错误回 401——通知中心没配好、验证码发不出去，登录页就显示成了"未授权"。
 func translate(err error) error {
 	if err == nil {
 		return nil
@@ -328,7 +333,7 @@ func translate(err error) error {
 	switch status.Code(err) {
 	case codes.Unauthenticated, codes.PermissionDenied, codes.NotFound:
 		sentinel = ErrUnauthorized
-	case codes.Unavailable, codes.DeadlineExceeded:
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Internal:
 		sentinel = ErrUnavailable
 	case codes.InvalidArgument:
 		sentinel = ErrInvalidArgument

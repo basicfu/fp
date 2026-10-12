@@ -208,7 +208,8 @@ err = auth.Logout(ctx, token)
 `login_code` 的短信模板并关联供应商，见 [通知文档](../docs/notify.md#6-登录验证码)。
 同一手机号 30 秒 1 条、1 小时 5 条、1 天 10 条，超出得到 `ErrRateLimited`；
 手机号格式不对得到 `ErrInvalidArgument`；通知中心没配好、供应商全挂得到
-带 `NOTIFY_SEND_FAILED` 码的 `*fpsdk.Error`（具体原因只在 fp 的日志里）。
+`ErrUnavailable`（同时是带 `NOTIFY_SEND_FAILED` 码的 `*fpsdk.Error`，`WriteError` 回 503，
+具体原因只在 fp 的日志里）。应用没启用 `sms_code` 时得到带 `CONNECTOR_DISABLED` 码的错误。
 
 ### 访客模式
 
@@ -237,7 +238,7 @@ if errors.Is(err, fpsdk.ErrUnauthorized) { ... } // 哨兵判断依然有效
 | 哨兵错误 | HTTP 状态码 | 说明 |
 |---|---|---|
 | `ErrNoToken` / `ErrUnauthorized` | 401 | 未登录 / token 无效过期 |
-| `ErrUnavailable` | 503 | **fp 不可达，不是鉴权失败**。回 401 会让客户端清掉一个其实有效的 token，把一次 fp 抖动放大成全体用户被迫重新登录 |
+| `ErrUnavailable` | 503 | **fp 不可达（或 fp 自己报了内部错误，例如验证码发不出去），不是鉴权失败**。回 401 会让客户端清掉一个其实有效的 token，把一次 fp 抖动放大成全体用户被迫重新登录 |
 | `ErrInvalidArgument` | 400 | 参数不合法（手机号格式等），不是凭据问题 |
 | `ErrRateLimited` | 429 | 被限流（验证码发送过频），凭据本身没问题 |
 

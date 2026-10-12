@@ -3,6 +3,8 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -154,29 +156,33 @@ func TestLoginCodeConcurrentIssueYieldsOneCode(t *testing.T) {
 	svc := newCodes(t)
 	ctx := context.Background()
 
-	const n = 16
-	var (
-		wg    sync.WaitGroup
-		mu    sync.Mutex
-		codes = map[string]int{}
-	)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			code, err := svc.Issue(ctx, "13800138000")
-			if err != nil {
-				t.Errorf("Issue: %v", err)
-				return
-			}
-			mu.Lock()
-			codes[code]++
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-	if len(codes) != 1 {
-		t.Fatalf("并发发码得到 %d 个不同的码: %v", len(codes), codes)
+	// 多轮、每轮换一个号码：一轮里"先 GET 再 SET"的实现不一定撞上竞态，多轮才有把握。
+	const rounds, n = 30, 16
+	for r := 0; r < rounds; r++ {
+		phone := fmt.Sprintf("1380013%04d", r)
+		var (
+			wg    sync.WaitGroup
+			mu    sync.Mutex
+			codes = map[string]int{}
+		)
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				code, err := svc.Issue(ctx, phone)
+				if err != nil {
+					t.Errorf("Issue: %v", err)
+					return
+				}
+				mu.Lock()
+				codes[code]++
+				mu.Unlock()
+			}()
+		}
+		wg.Wait()
+		if len(codes) != 1 {
+			t.Fatalf("第 %d 轮并发发码得到 %d 个不同的码: %v", r+1, len(codes), codes)
+		}
 	}
 }
 
@@ -242,6 +248,88 @@ func TestLoginCodeReissueOfLiveCodeKeepsAttemptCounter(t *testing.T) {
 	_ = svc.Verify(ctx, "13800138000", "000000")
 	if err := svc.Verify(ctx, "13800138000", code); !errors.Is(err, domain.ErrInvalidCredential) {
 		t.Fatalf("重发把尝试计数清零了，爆破计数器可以被无限重置: err = %v", err)
+	}
+}
+
+// 校验次数用满的码再校验一次就作废（哪怕码是对的）。这时重发不能把它又发给用户：
+// 用户收到一条注定用不了的短信，还得再等一个限流窗口才能重发。
+func TestLoginCodeIssueAfterAttemptsExhaustedIssuesUsableCode(t *testing.T) {
+	svc := newCodes(t)
+	ctx := context.Background()
+
+	if _, err := svc.Issue(ctx, "13800138000"); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	for i := 0; i < service.MaxVerifyAttempts; i++ {
+		_ = svc.Verify(ctx, "13800138000", "000000")
+	}
+
+	code2, err := svc.Issue(ctx, "13800138000")
+	if err != nil {
+		t.Fatalf("重发: %v", err)
+	}
+	if err := svc.Verify(ctx, "13800138000", code2); err != nil {
+		t.Fatalf("校验次数用满之后重发的码必须是能用的新码: %v", err)
+	}
+}
+
+// 新码有 5 分钟寿命；复用已有的码时连同尝试计数一起续满。
+// 只续码不续计数的话，计数先过期，同一个码会重新获得校验次数，爆破预算就变大了；
+// 不续码的话，用户在第 4 分钟重发，收到的是一个再过一分钟就失效的码。
+func TestLoginCodeTTLs(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	svc := service.NewLoginCodeService(rdb, service.WithLoginCodeRateRules())
+	ctx := context.Background()
+	const codeKey, tryKey = "fp:code:login:13800138000", "fp:code:try:login:13800138000"
+	atLeast := 4*time.Minute + 50*time.Second
+
+	pttl := func(key string) time.Duration {
+		t.Helper()
+		d, err := rdb.PTTL(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("PTTL %s: %v", key, err)
+		}
+		return d
+	}
+
+	code, err := svc.Issue(ctx, "13800138000")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if d := pttl(codeKey); d < atLeast || d > 5*time.Minute {
+		t.Fatalf("新码寿命 = %v, want (4m50s, 5m]", d)
+	}
+
+	// 猜错一次让计数键出现，再把两个键都压到 2 秒，模拟"过了好一会儿"。
+	_ = svc.Verify(ctx, "13800138000", "000000")
+	if err := rdb.PExpire(ctx, codeKey, 2*time.Second).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.PExpire(ctx, tryKey, 2*time.Second).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := svc.Issue(ctx, "13800138000")
+	if err != nil || again != code {
+		t.Fatalf("重发应复用同一个码: %q, %v", again, err)
+	}
+	if d := pttl(codeKey); d < atLeast {
+		t.Errorf("复用后码的寿命 = %v, 应续满", d)
+	}
+	if d := pttl(tryKey); d < atLeast {
+		t.Errorf("复用后尝试计数的寿命 = %v, 应与码一起续满", d)
+	}
+}
+
+// 文档（docs/notify.md 第 6 节）和 SDK 注释里写的就是这三条，改数值要连文档一起改。
+func TestDefaultLoginCodeRateRules(t *testing.T) {
+	want := []service.LoginCodeRateRule{
+		{Name: "30s", Window: 30 * time.Second, Limit: 1},
+		{Name: "1h", Window: time.Hour, Limit: 5},
+		{Name: "1d", Window: 24 * time.Hour, Limit: 10},
+	}
+	if got := service.DefaultLoginCodeRateRules(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("默认发码规则 = %+v, want %+v", got, want)
 	}
 }
 
