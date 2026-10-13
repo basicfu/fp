@@ -236,6 +236,10 @@ func WriteError(w http.ResponseWriter, err error) {
 		// 403：凭据本身有效，但不被允许（访问密钥已停用/已过期、来源 IP
 		// 不在白名单）。不是"你是谁没验证"，是"你是谁我知道，但不让进"。
 		http.Error(w, "forbidden", http.StatusForbidden)
+	case errors.Is(err, ErrNotFound):
+		// 404：用户或头像不存在。落进 default 回 401 的话，一张被换掉的旧头像地址会让客户端
+		// 以为登录态失效。
+		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, ErrBodyTooLarge):
 		// 413：签名请求的 body 超过 Options.MaxSignedBodyBytes。
 		http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)

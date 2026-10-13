@@ -61,8 +61,9 @@ log.Fatal(http.ListenAndServe(":8090", mux))
 4. [配置中心](#4-配置中心)
 5. [WebSocket 网关（fp-im）](#5-websocket-网关fp-im)
 6. [通知（Notify）](#6-通知notify)
-7. [生产环境清单](#7-生产环境清单)
-8. [常见问题](#8-常见问题)
+7. [用户资料与头像（Users）](#7-用户资料与头像users)
+8. [生产环境清单](#8-生产环境清单)
+9. [常见问题](#9-常见问题)
 
 ## 1. 连接（Client）
 
@@ -190,7 +191,7 @@ res, err := auth.Login(ctx, fpsdk.LoginInput{
     IP:            r.RemoteAddr,
     UserAgent:     r.UserAgent(),
 })
-// res.Token / res.SessionID / res.User
+// res.Token / res.SessionID / res.User（含 GetAvatarHash()，取图见第 7 节）
 
 // 密码登录：账号必须已经存在。
 res, err = auth.Login(ctx, fpsdk.LoginInput{
@@ -241,6 +242,7 @@ if errors.Is(err, fpsdk.ErrUnauthorized) { ... } // 哨兵判断依然有效
 | `ErrUnavailable` | 503 | **fp 不可达（或 fp 自己报了内部错误，例如验证码发不出去），不是鉴权失败**。回 401 会让客户端清掉一个其实有效的 token，把一次 fp 抖动放大成全体用户被迫重新登录 |
 | `ErrInvalidArgument` | 400 | 参数不合法（手机号格式等），不是凭据问题 |
 | `ErrRateLimited` | 429 | 被限流（验证码发送过频），凭据本身没问题 |
+| `ErrNotFound` | 404 | 用户或头像不存在（只有 `Users()` 的方法会返回），不是凭据问题 |
 
 ## 3. 鉴权（Authz / RBAC）
 
@@ -492,7 +494,26 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 
 **错误**：按[错误处理](#错误处理)的方式取 `*fpsdk.Error`，用 `Code` 分支：`NOTIFY_TEMPLATE_NOT_FOUND`、`NOTIFY_TEMPLATE_DISABLED`、`NOTIFY_PARAMS_INVALID`（`Detail` 里有 `missing` / `unexpected`）、`NOTIFY_RECIPIENT_INVALID`、`NOTIFY_PROVIDER_MISSING`、`NOTIFY_IN_PROGRESS`（相同幂等键的请求仍在处理，SDK 已自动重试两次）、`NOTIFY_SEND_FAILED`（全部供应商都失败，原因在控制台「发送记录」，不会回给调用方）。完整列表见 [docs/notify.md](../docs/notify.md)。
 
-## 7. 生产环境清单
+## 7. 用户资料与头像（Users）
+
+按 `user_id` 查询、修改用户的个人信息与头像，完整说明见 [docs/user.md](../docs/user.md)。调用方必须是用 `AppID` / `AppSecret` 认证的应用，fp-im 网关的凭据会被拒绝。
+
+```go
+u := client.Users()
+
+p, err := u.Get(ctx, userID)                                       // 个人信息，含登录标识（手机号不脱敏）
+p, err  = u.Update(ctx, userID, fpsdk.UserUpdate{Nickname: &name}) // 改昵称 / 性别，nil 的字段不改
+p, err  = u.UpdateAvatar(ctx, userID, imageBytes)                  // 更新头像，返回的 p.AvatarHash 即新哈希；传 nil 清除
+img, contentType, err := u.Avatar(ctx, hash)                       // 按哈希下载头像
+```
+
+- **用户全局互通**：任何应用都能查、改任何用户，改了之后所有应用随之变化。"只让用户改自己的资料"由业务方在自己的入口把关。
+- **fp 对图片只存不处理**：不解码、不裁剪、不压缩。只接受 JPEG / PNG / WebP（按文件头识别），兜底上限 1 MB（`fpsdk.AvatarMaxBytes`）；规格与压缩由业务方在上传前处理。
+- **哈希即版本**：`AvatarHash` 换图即变，同一个哈希的内容永不变化。业务方开一个公开的 `GET /avatar/{hash}` 转发 `Avatar` 的结果，带 `Cache-Control: public, max-age=31536000, immutable`。`AvatarHash` 非空用它，否则用 `AvatarURL`，都空显示默认头像。
+
+**错误**：`USER_NOT_FOUND`、`AVATAR_NOT_FOUND`（哨兵 `ErrNotFound`，`WriteError` 回 404）；`NICKNAME_INVALID`、`AVATAR_INVALID`、`INVALID_ARGUMENT`（哨兵 `ErrInvalidArgument`）；应用已停用或用了 IM 凭据是 `ErrForbidden`。码有对应常量 `fpsdk.CodeUserNotFound` / `CodeAvatarNotFound` / `CodeNicknameInvalid` / `CodeAvatarInvalid`。
+
+## 8. 生产环境清单
 
 - `MiddlewareOptions.CookieSecure` 显式设 `true`。
 - `AllowGuest` 只在真的需要匿名访问时开启。
@@ -508,7 +529,7 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
   验证过的旧身份，不是重新鉴权）。
 - 用到通知的应用，先在控制台「通知中心」建好模板并关联可用的供应商；`log` 供应商只在非生产环境可用（以 fp 的 `FP_ENV=prod` 为准，缺省或写成 production 都算非生产），生产必须配真实供应商。
 
-## 8. 常见问题
+## 9. 常见问题
 
 **为什么受保护接口偶尔返回 503 而不是 401？**
 fp 短暂不可达且本地没有可用缓存。这是有意设计——见 [错误处理](#错误处理)。

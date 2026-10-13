@@ -275,6 +275,8 @@ func TestWriteErrorMapsSentinelsToStatusCodes(t *testing.T) {
 		{"ErrUnavailable", ErrUnavailable, http.StatusServiceUnavailable},
 		{"ErrInvalidArgument", ErrInvalidArgument, http.StatusBadRequest},
 		{"ErrRateLimited", ErrRateLimited, http.StatusTooManyRequests},
+		{"ErrNotFound", ErrNotFound, http.StatusNotFound},
+		{"带码的 ErrNotFound", &Error{Code: CodeAvatarNotFound, Msg: "头像不存在", sentinel: ErrNotFound}, http.StatusNotFound},
 		{"未识别错误落进default分支", errors.New("SDK 还不认识的某个错误"), http.StatusUnauthorized},
 	}
 	for _, c := range cases {
@@ -427,6 +429,7 @@ func TestWriteErrorNeverEchoesUnderlyingError(t *testing.T) {
 		{"ErrUnavailable", errors.Join(ErrUnavailable, fmt.Errorf("%s", marker))},
 		{"ErrInvalidArgument", errors.Join(ErrInvalidArgument, fmt.Errorf("%s", marker))},
 		{"ErrRateLimited", errors.Join(ErrRateLimited, fmt.Errorf("%s", marker))},
+		{"ErrNotFound", errors.Join(ErrNotFound, fmt.Errorf("%s", marker))},
 		{"未识别错误落进default分支", fmt.Errorf("%s", marker)},
 	}
 	for _, c := range cases {
