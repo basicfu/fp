@@ -68,7 +68,7 @@ func TestNotifySendEndToEnd(t *testing.T) {
 	}
 	configPub := store.NewConfigPublisher(rdb)
 	apps := service.NewApplicationService(pool, creg, service.WithIMConfigPublisher(configPub))
-	app, secret, err := apps.Create(ctx, "notify-e2e-"+uuid.NewString(), "ne-"+uuid.NewString())
+	app, secret, err := apps.Create(ctx, "notify-e2e-"+uuid.NewString(), "ne-"+uuid.NewString()[:8])
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}

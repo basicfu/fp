@@ -235,7 +235,7 @@ func (e *grpcEnv) newApplication(t *testing.T) *testApplication {
 	t.Helper()
 	ctx := context.Background()
 
-	suffix := uuid.NewString()
+	suffix := uuid.NewString()[:8]
 	app, secret, err := e.apps.Create(ctx, "测试应用-"+suffix, "test-app-"+suffix)
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)

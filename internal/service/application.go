@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -93,8 +94,19 @@ func (s *ApplicationService) Create(ctx context.Context, name, code string) (*do
 	if name == "" || code == "" {
 		return nil, "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "name 与 code 不能为空")
 	}
-
-	appID, err := randomAppID()
+	if utf8.RuneCountInString(code) > maxAppCodeLen {
+		return nil, "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "code 最长 %d 个字符", maxAppCodeLen)
+	}
+	// 对外标识按 app_id OR code 匹配，两列必须共用一个命名空间。眼下靠长度天然不相交
+	// （code ≤ 24，app_id 固定 32），这两条检查是长度上限将来放开后的兜底。
+	var taken bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM application WHERE app_id = $1)`, code).Scan(&taken); err != nil {
+		return nil, "", fmt.Errorf("service: 校验 code 是否与 appId 冲突: %w", err)
+	}
+	if taken {
+		return nil, "", domain.Failf(domain.ErrConflict, domain.CodeCodeTaken, "code %q 已被占用", code)
+	}
+	appID, err := s.unusedAppID(ctx)
 	if err != nil {
 		return nil, "", err
 	}
@@ -123,14 +135,34 @@ func (s *ApplicationService) Create(ctx context.Context, name, code string) (*do
 	return app, secret, nil
 }
 
+// maxAppCodeLen 是应用 code 的长度上限，刻意短于 app_id 的固定长度。
+const maxAppCodeLen = 24
+
+// unusedAppID 生成一个不与任何现存 code 相同的 app_id。
+func (s *ApplicationService) unusedAppID(ctx context.Context) (string, error) {
+	for range 5 {
+		appID, err := randomAppID()
+		if err != nil {
+			return "", err
+		}
+		var taken bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM application WHERE code = $1)`, appID).Scan(&taken); err != nil {
+			return "", fmt.Errorf("service: 校验 appId 是否与 code 冲突: %w", err)
+		}
+		if !taken {
+			return appID, nil
+		}
+	}
+	return "", errors.New("service: 连续生成的 appId 都与现存 code 冲突")
+}
+
 // appIDAlphabet 是 randomAppID 的字符集：大小写字母 + 数字，62 个字符，
 // 没有容易读错/打错的符号（不含 -、_、易混淆的 0/O、1/l 之类的问题这里不特意
 // 剔除——appId 从来不需要人手抄，跟阿里云 AccessKeyId 一样是复制粘贴用的）。
 const appIDAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
-// randomAppID 生成形如 FPID5t7wK7KsroScQDGek9hw 的应用 ID：固定前缀
-// "FPID" + 20 位随机字符，模仿阿里云 AccessKeyId（如 LTAI5t7wK7KsroScQDGek9hw）
-// 的长度和观感。
+// randomAppID 生成固定 32 位的应用 ID：前缀 "FPID" + 28 位随机字符，观感模仿阿里云
+// AccessKeyId。长度刻意大于 code 的上限（maxAppCodeLen），两者不可能撞名。
 //
 // appId 是公开标识符，不是密钥——真正的凭据是 appSecret（走 randomToken()，
 // 32 字节高强度随机）。所以这里不追求 randomToken() 那种加密强度，只求
@@ -141,7 +173,7 @@ const appIDAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234
 // 前几个字符出现的概率略高于后面的，对于要展示给人看的 ID 没必要留这个
 // 可以轻松避免的偏差。
 func randomAppID() (string, error) {
-	const length = 20
+	const length = 28
 	const maxByte = 256 - (256 % len(appIDAlphabet))
 
 	out := make([]byte, length)

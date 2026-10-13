@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -755,18 +756,19 @@ func TestAppIDOrCodeResolveToSameApplication(t *testing.T) {
 	}
 }
 
-// TestAppIDWinsOverCollidingCode：code 与别人的 app_id 撞名时，app_id 的主人赢——
-// 否则建一个 code 等于他人 app_id 的应用就能把对方的流量截走。
+// TestAppIDWinsOverCollidingCode：code 与别人的 app_id 撞名时，app_id 的主人赢。
+// Create 已经拦住这种数据，这里直接写库模拟存量/手改出来的撞名。
 func TestAppIDWinsOverCollidingCode(t *testing.T) {
-	svc := newAppService(t)
+	pool := testsupport.NewTestDB(t)
+	svc := service.NewApplicationService(pool, nil)
 	ctx := context.Background()
 
 	victim, _, err := svc.Create(ctx, "victim", "victim")
 	if err != nil {
 		t.Fatalf("Create victim: %v", err)
 	}
-	if _, _, err := svc.Create(ctx, "squatter", victim.AppID); err != nil {
-		t.Fatalf("Create squatter: %v", err)
+	if _, err := pool.Exec(ctx, `INSERT INTO application (name, code, app_id, app_secret_hash) VALUES ('squatter', $1, 'sq', 'x')`, victim.AppID); err != nil {
+		t.Fatalf("写入撞名应用: %v", err)
 	}
 	got, err := svc.GetByAppID(ctx, victim.AppID)
 	if err != nil {
@@ -774,5 +776,32 @@ func TestAppIDWinsOverCollidingCode(t *testing.T) {
 	}
 	if got.ID != victim.ID {
 		t.Fatalf("撞名时解析到了 %v，want app_id 的主人 %v", got.ID, victim.ID)
+	}
+}
+
+// TestCreateKeepsAppIDAndCodeDisjoint：app_id 固定 32 位、code 最长 24，
+// 且新 code 不能等于任何现存 app_id（长度上限将来放开后的兜底）。
+func TestCreateKeepsAppIDAndCodeDisjoint(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	svc := service.NewApplicationService(pool, nil)
+	ctx := context.Background()
+
+	app, _, err := svc.Create(ctx, "A", strings.Repeat("a", 24))
+	if err != nil {
+		t.Fatalf("24 位 code 应当可用: %v", err)
+	}
+	if len(app.AppID) != 32 {
+		t.Fatalf("app_id 长度 = %d, want 32", len(app.AppID))
+	}
+	if _, _, err := svc.Create(ctx, "B", strings.Repeat("a", 25)); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("25 位 code err = %v, want ErrInvalidArgument", err)
+	}
+
+	// 存量的短 app_id 仍然存在，用它验证撞名检查本身。
+	if _, err := pool.Exec(ctx, `INSERT INTO application (name, code, app_id, app_secret_hash) VALUES ('legacy', 'legacy', 'legacy-app-id', 'x')`); err != nil {
+		t.Fatalf("写入存量应用: %v", err)
+	}
+	if _, _, err := svc.Create(ctx, "C", "legacy-app-id"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("code 等于现存 app_id err = %v, want ErrConflict", err)
 	}
 }

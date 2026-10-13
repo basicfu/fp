@@ -70,7 +70,7 @@ func TestIMGatewayValidatesPerCallAppScope(t *testing.T) {
 
 	// 换一个作用域：另一个真实存在、也开了 IM 的应用。同一条连接，
 	// 只是 WithAppID 换了。
-	other, _, err := e.apps.Create(ctx, "im-other-"+uuid.NewString(), "im-other-"+uuid.NewString())
+	other, _, err := e.apps.Create(ctx, "im-other-"+uuid.NewString(), "im-other-"+uuid.NewString()[:8])
 	if err != nil {
 		t.Fatalf("创建第二个应用: %v", err)
 	}

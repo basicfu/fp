@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestConnectorSchemasExposed(t *testing.T) {
@@ -437,7 +439,7 @@ func TestPutIMConfigRoundTrip(t *testing.T) {
 func createAppID(t *testing.T, h http.Handler, token string) string {
 	t.Helper()
 	rec := do(t, h, token, http.MethodPost, "/admin/api/applications",
-		`{"name":"im-`+t.Name()+`","code":"im-`+strings.ToLower(t.Name())+`"}`)
+		`{"name":"im-`+t.Name()+`","code":"im-`+uuid.NewString()[:8]+`"}`)
 	var created struct {
 		Application struct {
 			ID string `json:"id"`

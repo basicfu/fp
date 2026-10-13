@@ -71,7 +71,7 @@ func TestCrossAppRevokeClosesConnectionsInAllApps(t *testing.T) {
 	enableIMOn(t, e, e.app.ID)
 
 	// 第二个应用，同样打开 IM。
-	appB, _, err := e.apps.Create(ctx, "im-prov-b-"+uuid.NewString(), "im-prov-b-"+uuid.NewString())
+	appB, _, err := e.apps.Create(ctx, "im-prov-b-"+uuid.NewString(), "im-prov-b-"+uuid.NewString()[:8])
 	if err != nil {
 		t.Fatalf("创建第二个应用: %v", err)
 	}

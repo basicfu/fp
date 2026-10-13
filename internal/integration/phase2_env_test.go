@@ -129,7 +129,7 @@ func newPhase2Env(t *testing.T, opts ...func(*fpsdk.Options)) *phase2Env {
 	}
 
 	ctx := context.Background()
-	app, secret, err := e.apps.Create(ctx, "phase2-集成测试-"+uuid.NewString(), "phase2-"+uuid.NewString())
+	app, secret, err := e.apps.Create(ctx, "phase2-集成测试-"+uuid.NewString(), "phase2-"+uuid.NewString()[:8])
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}

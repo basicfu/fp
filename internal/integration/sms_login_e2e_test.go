@@ -63,7 +63,7 @@ func TestSMSCodeLoginEndToEnd(t *testing.T) {
 	configPub := store.NewConfigPublisher(rdb)
 	revokePub := store.NewRevokePublisher(rdb)
 	apps := service.NewApplicationService(pool, creg, service.WithIMConfigPublisher(configPub))
-	app, secret, err := apps.Create(ctx, "sms-e2e-"+uuid.NewString(), "se-"+uuid.NewString())
+	app, secret, err := apps.Create(ctx, "sms-e2e-"+uuid.NewString(), "se-"+uuid.NewString()[:8])
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}

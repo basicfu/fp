@@ -31,6 +31,7 @@ const createSchema = z.object({
   code: z
     .string()
     .min(1, '请输入 code')
+    .max(24, 'code 最长 24 个字符')
     .regex(/^[a-z0-9][a-z0-9-]*$/, 'code 只能用小写字母、数字和连字符，且不能以连字符开头'),
   cookieDomain: z.string(),
 })

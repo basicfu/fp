@@ -81,7 +81,7 @@ func newNotifyGRPCEnv(t *testing.T) *notifyGRPCEnv {
 	}
 	notifySvc := service.NewNotifyService(pool, rdb, nreg)
 
-	app, secret, err := apps.Create(context.Background(), "通知测试-"+uuid.NewString(), "n-"+uuid.NewString())
+	app, secret, err := apps.Create(context.Background(), "通知测试-"+uuid.NewString(), "n-"+uuid.NewString()[:8])
 	if err != nil {
 		t.Fatalf("创建应用: %v", err)
 	}
