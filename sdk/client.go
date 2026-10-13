@@ -54,13 +54,16 @@ type Client struct {
 	imRPC fpv1.IMGatewayServiceClient
 	// notifyRPC 是通知服务的 RPC 客户端，供 Notify.Send 用。
 	notifyRPC fpv1.NotifyServiceClient
+	// userRPC 是用户资料服务的 RPC 客户端，供 Users 用。
+	userRPC fpv1.UserServiceClient
 
-	// auth / authz / imGateway / notify 在 New 里构造一次，之后不再替换，
+	// auth / authz / imGateway / notify / users 在 New 里构造一次，之后不再替换，
 	// 因此无需同步保护。
 	auth      *Auth
 	authz     *Authz
 	imGateway *IMGateway
 	notify    *Notify
+	users     *Users
 
 	// streamUp 是推送流的健康状态。它驱动缓存窗口的收紧，
 	// 是"流断开时把安全性拉回来"这条策略的唯一输入。
@@ -267,6 +270,7 @@ func New(opts Options) (*Client, error) {
 		cfgRPC:    fpv1.NewConfigServiceClient(conn),
 		imRPC:     fpv1.NewIMGatewayServiceClient(conn),
 		notifyRPC: fpv1.NewNotifyServiceClient(conn),
+		userRPC:   fpv1.NewUserServiceClient(conn),
 		cfgReload: make(chan struct{}, 1),
 		cancel:    cancel,
 	}
@@ -277,6 +281,7 @@ func New(opts Options) (*Client, error) {
 	c.authz = &Authz{}
 	c.imGateway = &IMGateway{c: c}
 	c.notify = &Notify{c: c}
+	c.users = &Users{c: c}
 	c.nonces = newNonceStore(opts.NonceCapacity)
 	c.usage = newUsageRecorder()
 

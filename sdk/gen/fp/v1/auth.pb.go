@@ -260,7 +260,10 @@ type UserInfo struct {
 	AvatarUrl string                 `protobuf:"bytes,3,opt,name=avatar_url,json=avatarUrl,proto3" json:"avatar_url,omitempty"`
 	Gender    string                 `protobuf:"bytes,4,opt,name=gender,proto3" json:"gender,omitempty"`
 	// status 取值见服务端 domain.UserStatus*。
-	Status        string `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	Status string `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	// avatar_hash 是存在 fp 里的头像的内容哈希，没有时为空。非空时以它为准，否则用 avatar_url。
+	// 取图见 UserService.GetAvatar。
+	AvatarHash    string `protobuf:"bytes,6,opt,name=avatar_hash,json=avatarHash,proto3" json:"avatar_hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -326,6 +329,13 @@ func (x *UserInfo) GetGender() string {
 func (x *UserInfo) GetStatus() string {
 	if x != nil {
 		return x.Status
+	}
+	return ""
+}
+
+func (x *UserInfo) GetAvatarHash() string {
+	if x != nil {
+		return x.AvatarHash
 	}
 	return ""
 }
@@ -1659,14 +1669,16 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12#\n" +
 	"\x04user\x18\x02 \x01(\v2\x0f.fp.v1.UserInfoR\x04user\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"\x85\x01\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\xa6\x01\n" +
 	"\bUserInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bnickname\x18\x02 \x01(\tR\bnickname\x12\x1d\n" +
 	"\n" +
 	"avatar_url\x18\x03 \x01(\tR\tavatarUrl\x12\x16\n" +
 	"\x06gender\x18\x04 \x01(\tR\x06gender\x12\x16\n" +
-	"\x06status\x18\x05 \x01(\tR\x06status\"%\n" +
+	"\x06status\x18\x05 \x01(\tR\x06status\x12\x1f\n" +
+	"\vavatar_hash\x18\x06 \x01(\tR\n" +
+	"avatarHash\"%\n" +
 	"\rLogoutRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\"\x10\n" +
 	"\x0eLogoutResponse\",\n" +

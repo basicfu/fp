@@ -239,6 +239,7 @@ func run() error {
 		ConfigPub:  configPub,
 		AccessKeys: accessKeySvc,
 		Notify:     notifySvc,
+		Users:      userSvc,
 	})
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPC.Addr)

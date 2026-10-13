@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package fp.v1;
+
+option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
+
+// UserService 让业务服务端查询、修改用户的个人信息与头像。
+//
+// 认证方式与 AuthService 相同：metadata 带 fp-app-id 与 fp-app-secret；fp-im 网关凭据不能调用。
+//
+// 用户全局互通、不与应用关联：任何应用都可以按 user_id 查询、修改任何用户，
+// 改了之后所有应用随之变化。接入同一个 fp 的应用彼此是互信的自家应用。
+service UserService {
+  // GetUser 按 user_id 返回该用户的全部个人信息。
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc GetUser(GetUserRequest) returns (UserProfile);
+  // UpdateUser 修改昵称、性别，返回改完的完整资料。
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc UpdateUser(UpdateUserRequest) returns (UserProfile);
+  // UpdateAvatar 存一张头像，返回改完的完整资料（其中 avatar_hash 即新头像的哈希）。
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc UpdateAvatar(UpdateAvatarRequest) returns (UserProfile);
+  // GetAvatar 按内容哈希取回头像。
+  rpc GetAvatar(GetAvatarRequest) returns (GetAvatarResponse);
+}
+
+// UserProfile 是一个用户的全部个人信息。
+//
+// 密码哈希与第三方凭据永不出现在这里，只给 has_password。
+message UserProfile {
+  string id = 1;
+  string nickname = 2;
+  // avatar_hash 是存在 fp 里的头像的内容哈希（图片原始字节 SHA-256 的前 16 字节，32 位十六进制），
+  // 没有头像时为空。换头像即换哈希，所以按哈希取到的内容永不变化，可以无限期缓存。
+  //
+  // 业务方的规则只有一条：avatar_hash 非空用它，否则用 avatar_url，都空就显示默认头像。
+  string avatar_hash = 3;
+  // avatar_url 留给三方登录带来的外部头像地址。
+  string avatar_url = 4;
+  // gender 取 MALE / FEMALE，空串表示未设置。
+  string gender = 5;
+  // status 取值见服务端 domain.UserStatus*。
+  string status = 6;
+  bool has_password = 7;
+  repeated UserIdentity identities = 8;
+  // created_at / updated_at 是 unix 毫秒。
+  int64 created_at = 9;
+  int64 updated_at = 10;
+  // registered_app_id 是注册来源应用的对外 app_id，仅供展示与统计。
+  // 管理员手动建的号、或来源应用已被删除时为空。
+  string registered_app_id = 11;
+}
+
+// UserIdentity 是用户的一个登录标识。
+message UserIdentity {
+  // type 取 phone / username / email / wechat_mp。
+  string type = 1;
+  // subject 是完整值，不脱敏：调用方是受信任的业务服务端，要不要对终端用户脱敏由业务方决定。
+  string subject = 2;
+  // last_login_at 是 unix 毫秒，0 表示从未用它登录。
+  int64 last_login_at = 3;
+}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+// UpdateUserRequest 里没带的字段不改。
+message UpdateUserRequest {
+  string user_id = 1;
+  // nickname 去首尾空白后须为 1–32 个字符，不含控制字符与换行，否则 NICKNAME_INVALID。
+  optional string nickname = 2;
+  // gender 取 MALE / FEMALE，空串表示清空，其余取值 INVALID_ARGUMENT。
+  optional string gender = 3;
+}
+
+message UpdateAvatarRequest {
+  string user_id = 1;
+  // image 是图片的原始字节，fp 只存不处理（不解码、不裁剪、不压缩）。
+  // 上限 1 MB，按文件头只接受 JPEG / PNG / WebP，否则 AVATAR_INVALID。为空表示清除头像。
+  bytes image = 2;
+}
+
+message GetAvatarRequest {
+  string hash = 1;
+}
+
+message GetAvatarResponse {
+  bytes image = 1;
+  // content_type 是存入时按文件头识别出的类型：image/jpeg、image/png 或 image/webp。
+  string content_type = 2;
+}

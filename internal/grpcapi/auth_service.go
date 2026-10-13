@@ -201,11 +201,12 @@ func userInfo(u *domain.User) *fpv1.UserInfo {
 		return nil
 	}
 	return &fpv1.UserInfo{
-		Id:        u.ID.String(),
-		Nickname:  u.Nickname,
-		AvatarUrl: u.AvatarURL,
-		Gender:    u.Gender,
-		Status:    u.Status,
+		Id:         u.ID.String(),
+		Nickname:   u.Nickname,
+		AvatarUrl:  u.AvatarURL,
+		Gender:     u.Gender,
+		Status:     u.Status,
+		AvatarHash: u.AvatarHash,
 	}
 }
 

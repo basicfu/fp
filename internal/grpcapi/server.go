@@ -43,6 +43,9 @@ type Deps struct {
 
 	// Notify 提供通知发送。为 nil 时 NotifyService 不注册（调用得到 Unimplemented）。
 	Notify *service.NotifyService
+
+	// Users 提供用户资料与头像的读写。为 nil 时 UserService 不注册（调用得到 Unimplemented）。
+	Users *service.UserService
 }
 
 // deniedIMCreds 在没有配置 IM 凭据校验器时拒绝一切 im 调用。
@@ -140,6 +143,9 @@ func New(d Deps) *Server {
 	fpv1.RegisterIMGatewayServiceServer(srv, newIMServer(d.Apps))
 	if d.Notify != nil {
 		fpv1.RegisterNotifyServiceServer(srv, newNotifyServer(d.Notify, d.Apps))
+	}
+	if d.Users != nil {
+		fpv1.RegisterUserServiceServer(srv, newUserServer(d.Users, d.Apps))
 	}
 
 	return &Server{grpc: srv, hub: hub, configHub: configHub}

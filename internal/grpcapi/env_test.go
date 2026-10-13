@@ -62,6 +62,8 @@ type grpcEnv struct {
 	configClient fpv1.ConfigServiceClient
 
 	imClient fpv1.IMGatewayServiceClient
+	// userClient 是 UserService 的 gRPC 客户端，跑在同一个 bufconn 服务端上。
+	userClient fpv1.UserServiceClient
 
 	// imCreds 与 imSecret 供 imAuthed 构造"fp-im 网关"身份的调用。
 	imCreds  *service.IMCredentialService
@@ -167,7 +169,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	t.Cleanup(cancelRun)
 
-	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub, IMCreds: imCreds})
+	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub, IMCreds: imCreds, Users: users})
 	env.server = srv
 
 	lis := bufconn.Listen(1 << 20)
@@ -197,6 +199,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	env.client = fpv1.NewAuthServiceClient(conn)
 	env.configClient = fpv1.NewConfigServiceClient(conn)
 	env.imClient = fpv1.NewIMGatewayServiceClient(conn)
+	env.userClient = fpv1.NewUserServiceClient(conn)
 	return env
 }
 

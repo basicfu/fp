@@ -88,6 +88,9 @@ message UserInfo {
   string gender = 4;
   // status 取值见服务端 domain.UserStatus*。
   string status = 5;
+  // avatar_hash 是存在 fp 里的头像的内容哈希，没有时为空。非空时以它为准，否则用 avatar_url。
+  // 取图见 UserService.GetAvatar。
+  string avatar_hash = 6;
 }
 
 // LogoutRequest 是一次登出请求。
