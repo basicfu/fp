@@ -61,11 +61,11 @@ type imNode struct {
 // imCreds 让业务 server 的凭据校验在 e2e 里不必回源到 fp。
 type imCreds map[string]string
 
-func (c imCreds) VerifyAppCredential(_ context.Context, app, secret string) error {
+func (c imCreds) VerifyAppCredential(_ context.Context, app, secret string) (string, error) {
 	if c[app] != secret {
-		return errors.New("凭据无效")
+		return "", errors.New("凭据无效")
 	}
-	return nil
+	return app, nil
 }
 
 func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSource, authn auth.Authenticator) *imNode {

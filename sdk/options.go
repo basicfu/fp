@@ -41,6 +41,7 @@ type Options struct {
 	// 按需要填 RootCAs/ServerName。
 	TLS *tls.Config
 	// AppID / AppSecret 是应用凭据，来自 fp 控制台。
+	// AppID 填控制台里的 app_id 或应用 code 都可以，fp 按两者之一匹配。
 	//
 	// CallerType 为 CallerTypeIM 时 AppID 可以为空：那种客户端的连接没有
 	// 固定 app，作用域逐调用附上（见 WithAppID）。

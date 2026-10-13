@@ -88,7 +88,7 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 		return err
 	}
 	if err := s.deps.Notifier.Send(ctx, NotifySendInput{
-		AppID:  appID,
+		AppID:  app.AppID,
 		Code:   LoginCodeTemplate,
 		To:     phone,
 		Params: map[string]string{"code": code},

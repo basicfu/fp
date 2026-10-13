@@ -124,11 +124,11 @@ var nodeIDCounter atomic.Int64
 // staticCreds 让业务 server 的凭据校验在测试里不必回源到 fp。
 type staticCreds map[string]string
 
-func (c staticCreds) VerifyAppCredential(_ context.Context, app, secret string) error {
+func (c staticCreds) VerifyAppCredential(_ context.Context, app, secret string) (string, error) {
 	if c[app] != secret {
-		return errors.New("凭据无效")
+		return "", errors.New("凭据无效")
 	}
-	return nil
+	return app, nil
 }
 
 func startTestNode(t *testing.T, cfg *config.Config, apps staticApps) (nodeID, wsURL, grpcAddr string, stop func()) {

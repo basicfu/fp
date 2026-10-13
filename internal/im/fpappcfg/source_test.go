@@ -167,3 +167,37 @@ func TestConcurrentLoadFetchesOnce(t *testing.T) {
 		t.Fatalf("并发 Load 回源了 %d 次，应当合并成 1 次", n)
 	}
 }
+
+// TestCodeAliasSharesCanonicalEntry：握手帧里传应用 code 时，缓存要同时能按规范
+// app_id 读到（Push 与撤销只认 app_id），且 Apps/onLoad/Invalidate 都按 app_id 算一个应用。
+func TestCodeAliasSharesCanonicalEntry(t *testing.T) {
+	cfg := model.AppConfig{AppID: "a1", ConnPolicy: model.PolicyReplace, ConnLimit: 5}
+	f := newFake(map[string]model.AppConfig{"a1": cfg, "shop": cfg})
+	var loaded []string
+	s := New(f, func(app string) { loaded = append(loaded, app) })
+	ctx := context.Background()
+
+	if err := s.Load(ctx, "shop"); err != nil {
+		t.Fatalf("Load(code): %v", err)
+	}
+	if c, ok := s.Get("a1"); !ok || c.AppID != "a1" {
+		t.Fatalf("按 code 加载后 Get(app_id) = %+v, %v", c, ok)
+	}
+	if err := s.Load(ctx, "a1"); err != nil {
+		t.Fatalf("Load(app_id): %v", err)
+	}
+	if f.count("a1") != 0 {
+		t.Fatalf("app_id 已随 code 入缓存，不该再回源，实际 %d 次", f.count("a1"))
+	}
+	if apps := s.Apps(); len(apps) != 1 || apps[0] != "a1" {
+		t.Fatalf("Apps() = %v, want [a1]", apps)
+	}
+	if len(loaded) != 1 || loaded[0] != "a1" {
+		t.Fatalf("onLoad 调用 = %v, want 仅一次 a1", loaded)
+	}
+
+	s.Invalidate("a1")
+	if _, ok := s.Get("shop"); ok {
+		t.Fatal("Invalidate(app_id) 之后 code 别名仍在缓存里，配置变更对用 code 的 client 不生效")
+	}
+}

@@ -723,3 +723,56 @@ func TestSetIMConfigRejectsInvalid(t *testing.T) {
 		t.Fatal("被拒的配置不能有任何一部分落库")
 	}
 }
+
+// TestAppIDOrCodeResolveToSameApplication：对外标识既能传 app_id 也能传 code，
+// 两条路都必须落到同一个应用，且返回值里的 AppID 恒为规范 app_id。
+func TestAppIDOrCodeResolveToSameApplication(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	app, secret, err := svc.Create(ctx, "A", "shop")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, id := range []string{app.AppID, "shop"} {
+		got, err := svc.GetActiveByAppID(ctx, id)
+		if err != nil {
+			t.Fatalf("GetActiveByAppID(%q): %v", id, err)
+		}
+		if got.ID != app.ID || got.AppID != app.AppID {
+			t.Fatalf("GetActiveByAppID(%q) = %v/%q, want %v/%q", id, got.ID, got.AppID, app.ID, app.AppID)
+		}
+		got, err = svc.VerifySecret(ctx, id, secret)
+		if err != nil {
+			t.Fatalf("VerifySecret(%q): %v", id, err)
+		}
+		if got.ID != app.ID {
+			t.Fatalf("VerifySecret(%q) ID = %v, want %v", id, got.ID, app.ID)
+		}
+	}
+	if _, err := svc.VerifySecret(ctx, "shop", "wrong"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("code + 错误 secret err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+// TestAppIDWinsOverCollidingCode：code 与别人的 app_id 撞名时，app_id 的主人赢——
+// 否则建一个 code 等于他人 app_id 的应用就能把对方的流量截走。
+func TestAppIDWinsOverCollidingCode(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+
+	victim, _, err := svc.Create(ctx, "victim", "victim")
+	if err != nil {
+		t.Fatalf("Create victim: %v", err)
+	}
+	if _, _, err := svc.Create(ctx, "squatter", victim.AppID); err != nil {
+		t.Fatalf("Create squatter: %v", err)
+	}
+	got, err := svc.GetByAppID(ctx, victim.AppID)
+	if err != nil {
+		t.Fatalf("GetByAppID: %v", err)
+	}
+	if got.ID != victim.ID {
+		t.Fatalf("撞名时解析到了 %v，want app_id 的主人 %v", got.ID, victim.ID)
+	}
+}

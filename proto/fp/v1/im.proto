@@ -43,6 +43,10 @@ message GetAppIMConfigResponse {
   // 用 message 而不是铺平三个字段：这是"整组有或整组没有"的东西，铺平之后
   // 就得靠"verify_url 是不是空串"这种间接判断。
   IMBizAuth biz_auth = 5;
+  // app_id 是该应用规范的 app_id。metadata 里的 fp-app-id 也可以传应用 code，
+  // fp-im 的连接表、路由、撤销都按 app 字符串做键，必须先归一成这一个值——
+  // 否则用 code 连上来的 client 与用 app_id 连上来的业务 server 互相找不到。
+  string app_id = 6;
 }
 
 message IMBizAuth {
@@ -58,4 +62,7 @@ message VerifyAppCredentialRequest {
   string secret = 1;
 }
 
-message VerifyAppCredentialResponse {}
+message VerifyAppCredentialResponse {
+  // app_id 是该应用规范的 app_id，理由同 GetAppIMConfigResponse.app_id。
+  string app_id = 1;
+}

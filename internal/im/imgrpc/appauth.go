@@ -31,9 +31,10 @@ func appFrom(ctx context.Context) string {
 }
 
 // CredentialVerifier 是 imgrpc 对"核实业务 server 凭据"的全部依赖。
+// app 可以是 app_id 或应用 code，成功时返回规范的 app_id。
 // *fpauth.Authenticator 满足它。
 type CredentialVerifier interface {
-	VerifyAppCredential(ctx context.Context, app, secret string) error
+	VerifyAppCredential(ctx context.Context, app, secret string) (string, error)
 }
 
 // DefaultCredCacheTTL 是凭据校验结果的缓存时长，与 fp 侧应用凭据缓存的
@@ -64,14 +65,21 @@ type credCache struct {
 	ttl time.Duration
 
 	mu    sync.RWMutex
-	cache map[string]int64 // app + ":" + sha256(secret) → 过期时刻（UnixMilli）
+	cache map[string]credEntry // 键是 app + ":" + sha256(secret)，app 为调用方原样递上来的标识
+}
+
+// credEntry 连规范 app_id 一起缓存：调用方递上来的可以是应用 code，而流的作用域
+// 必须是 app_id，命中缓存时没有第二次机会去问 fp。
+type credEntry struct {
+	appID     string
+	expiresAt int64 // UnixMilli
 }
 
 func newCredCache(v CredentialVerifier, ttl time.Duration) *credCache {
 	if ttl <= 0 {
 		ttl = DefaultCredCacheTTL
 	}
-	return &credCache{v: v, ttl: ttl, cache: make(map[string]int64)}
+	return &credCache{v: v, ttl: ttl, cache: make(map[string]credEntry)}
 }
 
 func credCacheKey(app, secret string) string {
@@ -79,35 +87,37 @@ func credCacheKey(app, secret string) string {
 	return app + ":" + hex.EncodeToString(sum[:])
 }
 
-func (c *credCache) verify(ctx context.Context, app, secret string) error {
+// verify 校验凭据，返回规范的 app_id。
+func (c *credCache) verify(ctx context.Context, app, secret string) (string, error) {
 	if app == "" || secret == "" {
-		return status.Error(codes.Unauthenticated, "应用凭据无效")
+		return "", status.Error(codes.Unauthenticated, "应用凭据无效")
 	}
 	key := credCacheKey(app, secret)
 	now := time.Now().UnixMilli()
 
 	c.mu.RLock()
-	expiresAt, ok := c.cache[key]
+	e, ok := c.cache[key]
 	c.mu.RUnlock()
-	if ok && expiresAt > now {
-		return nil
+	if ok && e.expiresAt > now {
+		return e.appID, nil
 	}
 
-	if err := c.v.VerifyAppCredential(ctx, app, secret); err != nil {
-		return err // 失败不入缓存
+	id, err := c.v.VerifyAppCredential(ctx, app, secret)
+	if err != nil {
+		return "", err // 失败不入缓存
 	}
 
 	c.mu.Lock()
 	if len(c.cache) >= maxCredCacheEntries {
-		for k, exp := range c.cache {
-			if exp <= now {
+		for k, e := range c.cache {
+			if e.expiresAt <= now {
 				delete(c.cache, k)
 			}
 		}
 	}
-	c.cache[key] = now + c.ttl.Milliseconds()
+	c.cache[key] = credEntry{appID: id, expiresAt: now + c.ttl.Milliseconds()}
 	c.mu.Unlock()
-	return nil
+	return id, nil
 }
 
 // streamAuth 校验业务 server 连入时递上来的凭据。
@@ -117,8 +127,8 @@ func (c *credCache) verify(ctx context.Context, app, secret string) error {
 func streamAuth(c *credCache) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		md, _ := metadata.FromIncomingContext(ss.Context())
-		id, secret := first(md, MDAppID), first(md, MDAppSecret)
-		if err := c.verify(ss.Context(), id, secret); err != nil {
+		id, err := c.verify(ss.Context(), first(md, MDAppID), first(md, MDAppSecret))
+		if err != nil {
 			// "凭据有效但这个应用没开 IM 接入"要单独告诉调用方：它已经证明
 			// 自己持有那份 appSecret，所以说真话不泄露任何东西；压成"凭据无效"
 			// 会让运维去查 secret，而实际要做的是去控制台翻一个开关。

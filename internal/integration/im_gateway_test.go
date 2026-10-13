@@ -111,7 +111,7 @@ func TestIMGatewayConfigAndCredential(t *testing.T) {
 	if _, err := im.IMGateway().GetAppIMConfig(ctx, e.appID); !errors.Is(err, fpsdk.ErrIMNotAvailable) {
 		t.Fatalf("未启用 IM 时 GetAppIMConfig 应返回 ErrIMNotAvailable，got %v", err)
 	}
-	if err := im.IMGateway().VerifyAppCredential(ctx, e.appID, e.appSecret); !errors.Is(err, fpsdk.ErrIMNotAvailable) {
+	if _, err := im.IMGateway().VerifyAppCredential(ctx, e.appID, e.appSecret); !errors.Is(err, fpsdk.ErrIMNotAvailable) {
 		t.Fatalf("未启用 IM 时 VerifyAppCredential 应返回 ErrIMNotAvailable，got %v", err)
 	}
 
@@ -124,10 +124,10 @@ func TestIMGatewayConfigAndCredential(t *testing.T) {
 	if !cfg.AllowGuest || cfg.GuestIPRate != 25 || cfg.ConnPolicy != domain.IMConnPolicyReplace {
 		t.Fatalf("配置没传对：%+v", cfg)
 	}
-	if err := im.IMGateway().VerifyAppCredential(ctx, e.appID, e.appSecret); err != nil {
+	if _, err := im.IMGateway().VerifyAppCredential(ctx, e.appID, e.appSecret); err != nil {
 		t.Fatalf("合法凭据被拒：%v", err)
 	}
-	if err := im.IMGateway().VerifyAppCredential(ctx, e.appID, "wrong"); !errors.Is(err, fpsdk.ErrUnauthorized) {
+	if _, err := im.IMGateway().VerifyAppCredential(ctx, e.appID, "wrong"); !errors.Is(err, fpsdk.ErrUnauthorized) {
 		t.Fatalf("错误凭据应返回 ErrUnauthorized，got %v", err)
 	}
 }

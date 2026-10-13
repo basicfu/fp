@@ -57,6 +57,7 @@ type ServerConfig struct {
 	// 用这份配置建 TLS 连接，原样交给 grpc-go，不做任何校验或改写——
 	// 语义与 sdk/options.go 的 Options.TLS 完全一致，见那边的注释。
 	TLS *tls.Config
+	// AppID 填 app_id 或应用 code 都可以。
 	// AppID / AppSecret 是应用凭据，与身份平台（fpsdk）用同一对——业务方
 	// 配一份凭据就能同时连身份平台和 fp-im 网关，metadata 键也完全相同
 	// （fp-app-id / fp-app-secret）。

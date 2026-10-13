@@ -105,6 +105,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close(websocket.StatusCode(model.ClosePolicyRejected), "unknown app")
 		return
 	}
+	// 握手帧里的 app 可以是应用 code；从这里起一律换成规范 app_id——连接表、路由、
+	// 撤销都按它做键，不归一的话 code 与 app_id 会变成两个互不相通的应用。
+	af.App = appCfg.AppID
 	sub, code := s.resolveSubject(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
 	if code != 0 {
 		_ = ws.Close(websocket.StatusCode(code), "auth")

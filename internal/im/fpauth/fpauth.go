@@ -114,7 +114,7 @@ func (a *Authenticator) Fetch(ctx context.Context, app string) (model.AppConfig,
 		return model.AppConfig{}, translate(err)
 	}
 	cfg := model.AppConfig{
-		AppID:       app,
+		AppID:       c.AppID,
 		ConnPolicy:  model.Policy(c.ConnPolicy),
 		ConnLimit:   int(c.ConnLimit),
 		AllowGuest:  c.AllowGuest,
@@ -140,8 +140,9 @@ func (a *Authenticator) Fetch(ctx context.Context, app string) (model.AppConfig,
 //
 // fp-im 没有数据库、也拿不到任何应用的 secret（fp 只存 bcrypt 哈希），
 // 只能转给 fp 核实。
-func (a *Authenticator) VerifyAppCredential(ctx context.Context, app, secret string) error {
-	return translateVerify(a.client.IMGateway().VerifyAppCredential(ctx, app, secret))
+func (a *Authenticator) VerifyAppCredential(ctx context.Context, app, secret string) (string, error) {
+	id, err := a.client.IMGateway().VerifyAppCredential(ctx, app, secret)
+	return id, translateVerify(err)
 }
 
 // translateVerify 是 VerifyAppCredential 专用的映射，**刻意不复用 translate**。

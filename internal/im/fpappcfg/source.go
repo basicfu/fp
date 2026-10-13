@@ -37,7 +37,9 @@ type Source struct {
 	// 不合并的话 fp 会被打上 N 次同样的请求。
 	sf singleflight.Group
 
-	mu   sync.RWMutex
+	mu sync.RWMutex
+	// apps 的键是调用方用过的标识：规范 app_id，外加握手帧里出现过的应用 code。
+	// 值里的 AppID 恒为规范 app_id，热路径（Push、撤销）只用它查。
 	apps map[string]model.AppConfig
 }
 
@@ -46,6 +48,9 @@ func New(f Fetcher, onLoad func(app string)) *Source {
 }
 
 // Load 确保 app 的配置已在缓存里。有网络 I/O，只在冷路径调用。
+//
+// app 可以是 app_id 或应用 code。两个键都会写进缓存：用 code 握手的 client 加载过
+// 之后，按 app_id 进来的 Push 也要能 Get 到。
 //
 // **失败不入缓存**：缓存键来自 client 的握手帧（未认证输入），缓存失败等于
 // 把这个 map 的大小交给攻击者——与 fp 的 appVerifier 同一条推理。副作用是
@@ -70,13 +75,15 @@ func (s *Source) Load(ctx context.Context, app string) error {
 			return nil, err
 		}
 		s.mu.Lock()
+		_, known := s.apps[cfg.AppID]
 		s.apps[app] = cfg
+		s.apps[cfg.AppID] = cfg
 		fn := s.onLoad
 		s.mu.Unlock()
 		// 回调在锁外调用：它是调用方给的任意代码，拿着 s.mu 调用它意味着
 		// 回调里任何一次 Get/Apps（都要 RLock）都会自锁死。
-		if fn != nil {
-			fn(app)
+		if fn != nil && !known {
+			fn(cfg.AppID)
 		}
 		return nil, nil
 	})
@@ -91,18 +98,21 @@ func (s *Source) Get(app string) (model.AppConfig, bool) {
 	return c, ok
 }
 
-// Apps 返回已缓存的 app 列表。
+// Apps 返回已缓存的 app 列表（规范 app_id，不含 code 别名）。
 func (s *Source) Apps() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]string, 0, len(s.apps))
-	for k := range s.apps {
-		out = append(out, k)
+	for k, c := range s.apps {
+		if k == c.AppID {
+			out = append(out, k)
+		}
 	}
 	return out
 }
 
-// Invalidate 丢掉某个 app 的缓存，下一次 Load 会重新回源。
+// Invalidate 丢掉某个 app 的缓存（连同它的 code 别名），下一次 Load 会重新回源。
+// app 是规范 app_id。
 // 由 fp 的 AppIMConfigChanged 推送触发。
 //
 // 丢弃而不是就地重拉：重拉要网络 I/O，而调用点在推送流的读循环里，一个慢
@@ -110,7 +120,11 @@ func (s *Source) Apps() []string {
 // 丢掉之后由下一次握手按需拉，代价只是那一次握手多一次往返。
 func (s *Source) Invalidate(app string) {
 	s.mu.Lock()
-	delete(s.apps, app)
+	for k, c := range s.apps {
+		if c.AppID == app {
+			delete(s.apps, k)
+		}
+	}
 	s.mu.Unlock()
 }
 

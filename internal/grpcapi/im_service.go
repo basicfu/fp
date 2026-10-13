@@ -60,6 +60,7 @@ func (s *imServer) GetAppIMConfig(ctx context.Context, _ *fpv1.GetAppIMConfigReq
 		return nil, err
 	}
 	resp := &fpv1.GetAppIMConfigResponse{
+		AppId:       app.AppID,
 		AllowGuest:  app.IM.AllowGuest,
 		ConnPolicy:  app.IM.ConnPolicy,
 		ConnLimit:   app.IM.ConnLimit,
@@ -102,5 +103,5 @@ func (s *imServer) VerifyAppCredential(ctx context.Context, req *fpv1.VerifyAppC
 	if !app.IM.Enabled {
 		return nil, status.Error(codes.FailedPrecondition, "该应用未启用 IM 接入")
 	}
-	return &fpv1.VerifyAppCredentialResponse{}, nil
+	return &fpv1.VerifyAppCredentialResponse{AppId: app.AppID}, nil
 }

@@ -68,7 +68,11 @@ type GetAppIMConfigResponse struct {
 	// biz_auth 不设表示这个应用不支持业务方令牌。
 	// 用 message 而不是铺平三个字段：这是"整组有或整组没有"的东西，铺平之后
 	// 就得靠"verify_url 是不是空串"这种间接判断。
-	BizAuth       *IMBizAuth `protobuf:"bytes,5,opt,name=biz_auth,json=bizAuth,proto3" json:"biz_auth,omitempty"`
+	BizAuth *IMBizAuth `protobuf:"bytes,5,opt,name=biz_auth,json=bizAuth,proto3" json:"biz_auth,omitempty"`
+	// app_id 是该应用规范的 app_id。metadata 里的 fp-app-id 也可以传应用 code，
+	// fp-im 的连接表、路由、撤销都按 app 字符串做键，必须先归一成这一个值——
+	// 否则用 code 连上来的 client 与用 app_id 连上来的业务 server 互相找不到。
+	AppId         string `protobuf:"bytes,6,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -136,6 +140,13 @@ func (x *GetAppIMConfigResponse) GetBizAuth() *IMBizAuth {
 		return x.BizAuth
 	}
 	return nil
+}
+
+func (x *GetAppIMConfigResponse) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
 }
 
 type IMBizAuth struct {
@@ -246,7 +257,9 @@ func (x *VerifyAppCredentialRequest) GetSecret() string {
 }
 
 type VerifyAppCredentialResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// app_id 是该应用规范的 app_id，理由同 GetAppIMConfigResponse.app_id。
+	AppId         string `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -281,12 +294,19 @@ func (*VerifyAppCredentialResponse) Descriptor() ([]byte, []int) {
 	return file_fp_v1_im_proto_rawDescGZIP(), []int{4}
 }
 
+func (x *VerifyAppCredentialResponse) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
 var File_fp_v1_im_proto protoreflect.FileDescriptor
 
 const file_fp_v1_im_proto_rawDesc = "" +
 	"\n" +
 	"\x0efp/v1/im.proto\x12\x05fp.v1\"\x17\n" +
-	"\x15GetAppIMConfigRequest\"\xca\x01\n" +
+	"\x15GetAppIMConfigRequest\"\xe1\x01\n" +
 	"\x16GetAppIMConfigResponse\x12\x1f\n" +
 	"\vallow_guest\x18\x01 \x01(\bR\n" +
 	"allowGuest\x12\x1f\n" +
@@ -295,7 +315,8 @@ const file_fp_v1_im_proto_rawDesc = "" +
 	"\n" +
 	"conn_limit\x18\x03 \x01(\x05R\tconnLimit\x12\"\n" +
 	"\rguest_ip_rate\x18\x04 \x01(\x05R\vguestIpRate\x12+\n" +
-	"\bbiz_auth\x18\x05 \x01(\v2\x10.fp.v1.IMBizAuthR\abizAuth\"h\n" +
+	"\bbiz_auth\x18\x05 \x01(\v2\x10.fp.v1.IMBizAuthR\abizAuth\x12\x15\n" +
+	"\x06app_id\x18\x06 \x01(\tR\x05appId\"h\n" +
 	"\tIMBizAuth\x12\x1d\n" +
 	"\n" +
 	"verify_url\x18\x01 \x01(\tR\tverifyUrl\x12\x1d\n" +
@@ -304,8 +325,9 @@ const file_fp_v1_im_proto_rawDesc = "" +
 	"\n" +
 	"cache_size\x18\x03 \x01(\x05R\tcacheSize\"4\n" +
 	"\x1aVerifyAppCredentialRequest\x12\x16\n" +
-	"\x06secret\x18\x01 \x01(\tR\x06secret\"\x1d\n" +
-	"\x1bVerifyAppCredentialResponse2\xbf\x01\n" +
+	"\x06secret\x18\x01 \x01(\tR\x06secret\"4\n" +
+	"\x1bVerifyAppCredentialResponse\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId2\xbf\x01\n" +
 	"\x10IMGatewayService\x12M\n" +
 	"\x0eGetAppIMConfig\x12\x1c.fp.v1.GetAppIMConfigRequest\x1a\x1d.fp.v1.GetAppIMConfigResponse\x12\\\n" +
 	"\x13VerifyAppCredential\x12!.fp.v1.VerifyAppCredentialRequest\x1a\".fp.v1.VerifyAppCredentialResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"

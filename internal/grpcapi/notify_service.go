@@ -29,11 +29,12 @@ func (s *notifyServer) Send(ctx context.Context, req *fpv1.SendRequest) (*fpv1.S
 		return nil, err
 	}
 	// 拦截器只校验 appSecret、不看应用状态；不在这里查一次，停用的应用凭据还能继续发短信/邮件。
-	if _, err := s.apps.GetActiveByAppID(ctx, appID); err != nil {
+	app, err := s.apps.GetActiveByAppID(ctx, appID)
+	if err != nil {
 		return nil, StatusFrom(err)
 	}
 	if err := s.svc.Send(ctx, service.NotifySendInput{
-		AppID:          appID,
+		AppID:          app.AppID,
 		Code:           req.GetCode(),
 		To:             req.GetTo(),
 		Params:         req.GetParams(),

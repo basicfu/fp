@@ -194,9 +194,18 @@ func (s *ApplicationService) GetByID(ctx context.Context, id uuid.UUID) (*domain
 	return app, nil
 }
 
-// GetByAppID 按对外的 appId 查应用。
+// appByExternalID 是"按对外标识定位应用"的唯一 WHERE 子句：$1 既可以是 app_id 也可以是 code。
+//
+// ORDER BY 让 app_id 命中优先：两列各自唯一、彼此之间却没有约束，万一某个应用的 code
+// 恰好等于另一个应用的 app_id，结果必须是确定的，且不能让 code 抢走别人的 app_id。
+const appByExternalID = ` WHERE app_id = $1 OR code = $1 ORDER BY (app_id = $1) DESC LIMIT 1`
+
+// GetByAppID 按对外标识查应用，appID 传 app_id 或 code 都可以。
+//
+// 返回值的 AppID 恒为规范的 app_id。调用方要把标识继续往下传（日志、缓存键、
+// 幂等键）时取返回值的 AppID，不要沿用入参——否则同一个应用会分裂成两个键。
 func (s *ApplicationService) GetByAppID(ctx context.Context, appID string) (*domain.Application, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+applicationColumns+` FROM application WHERE app_id = $1`, appID)
+	row := s.pool.QueryRow(ctx, `SELECT `+applicationColumns+` FROM application`+appByExternalID, appID)
 	app, err := scanApplication(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
@@ -231,11 +240,12 @@ func (s *ApplicationService) GetActiveByAppID(ctx context.Context, appID string)
 	return app, nil
 }
 
-// VerifySecret 校验 appId + appSecret，成功返回对应应用。
+// VerifySecret 校验 appId + appSecret，成功返回对应应用。appID 传 app_id 或 code 都可以。
 // appId 不存在与 secret 错误返回同一错误，避免 appId 枚举。
 func (s *ApplicationService) VerifySecret(ctx context.Context, appID, plainSecret string) (*domain.Application, error) {
+	var id uuid.UUID
 	var hash string
-	err := s.pool.QueryRow(ctx, `SELECT app_secret_hash FROM application WHERE app_id = $1`, appID).Scan(&hash)
+	err := s.pool.QueryRow(ctx, `SELECT id, app_secret_hash FROM application`+appByExternalID, appID).Scan(&id, &hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "appId 或 appSecret 不正确")
 	}
@@ -245,7 +255,7 @@ func (s *ApplicationService) VerifySecret(ctx context.Context, appID, plainSecre
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plainSecret)); err != nil {
 		return nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeAppCredentialInvalid, "appId 或 appSecret 不正确")
 	}
-	return s.GetByAppID(ctx, appID)
+	return s.GetByID(ctx, id)
 }
 
 // UpdateSessionPolicy 更新应用的会话策略。策略非法时不写库。

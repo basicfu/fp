@@ -1,6 +1,7 @@
 package fpsdk
 
 import (
+	"cmp"
 	"context"
 	"errors"
 
@@ -42,6 +43,8 @@ func (c *Client) IMGateway() *IMGateway { return c.imGateway }
 
 // AppIMConfig 是一个应用的 IM 接入配置。
 type AppIMConfig struct {
+	// AppID 是规范的 app_id：查询时传的可以是应用 code，网关内部一律按它做键。
+	AppID      string
 	AllowGuest bool
 	// ConnPolicy 取值 replace / reject / limit。
 	ConnPolicy  string
@@ -68,6 +71,7 @@ func (g *IMGateway) GetAppIMConfig(ctx context.Context, appID string) (*AppIMCon
 		return nil, translateIM(err)
 	}
 	cfg := &AppIMConfig{
+		AppID:       cmp.Or(resp.GetAppId(), appID),
 		AllowGuest:  resp.GetAllowGuest(),
 		ConnPolicy:  resp.GetConnPolicy(),
 		ConnLimit:   resp.GetConnLimit(),
@@ -83,14 +87,19 @@ func (g *IMGateway) GetAppIMConfig(ctx context.Context, appID string) (*AppIMCon
 	return cfg, nil
 }
 
-// VerifyAppCredential 核实 secret 是否为 appID 那个应用的 appSecret。
+// VerifyAppCredential 核实 secret 是否为 appID 那个应用的 appSecret，成功返回规范的
+// app_id（appID 传的可以是应用 code）。
 //
 // 凭据无效返回 ErrUnauthorized；凭据有效但该应用没开 IM 接入返回
 // ErrIMNotAvailable——运维需要这个区分才知道是去查凭据还是去翻开关。
-func (g *IMGateway) VerifyAppCredential(ctx context.Context, appID, secret string) error {
-	_, err := g.c.imRPC.VerifyAppCredential(WithAppID(ctx, appID),
+func (g *IMGateway) VerifyAppCredential(ctx context.Context, appID, secret string) (string, error) {
+	resp, err := g.c.imRPC.VerifyAppCredential(WithAppID(ctx, appID),
 		&fpv1.VerifyAppCredentialRequest{Secret: secret})
-	return translateIM(err)
+	if err != nil {
+		return "", translateIM(err)
+	}
+	// 旧版 fp 不回这个字段，那时入参只可能是 app_id 本身。
+	return cmp.Or(resp.GetAppId(), appID), nil
 }
 
 // translateIM 在 translate 之上多认一个 FailedPrecondition。

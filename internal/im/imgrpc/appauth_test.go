@@ -23,17 +23,17 @@ type fakeVerifier struct {
 	err   error             // 非 nil 时一律返回它（模拟 fp 不可达）
 }
 
-func (f *fakeVerifier) VerifyAppCredential(_ context.Context, app, secret string) error {
+func (f *fakeVerifier) VerifyAppCredential(_ context.Context, app, secret string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	if f.err != nil {
-		return f.err
+		return "", f.err
 	}
 	if f.ok[app] != secret {
-		return errors.New("凭据无效")
+		return "", errors.New("凭据无效")
 	}
-	return nil
+	return app, nil
 }
 
 func (f *fakeVerifier) count() int {
@@ -53,7 +53,7 @@ func TestCredCacheOnlyCachesSuccess(t *testing.T) {
 	c := newCredCache(v, time.Minute)
 
 	for i := 0; i < 3; i++ {
-		if err := c.verify(context.Background(), "a1", "s1"); err != nil {
+		if _, err := c.verify(context.Background(), "a1", "s1"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -65,7 +65,7 @@ func TestCredCacheOnlyCachesSuccess(t *testing.T) {
 	v.calls = 0
 	v.mu.Unlock()
 	for i := 0; i < 3; i++ {
-		if err := c.verify(context.Background(), "a1", "wrong"); err == nil {
+		if _, err := c.verify(context.Background(), "a1", "wrong"); err == nil {
 			t.Fatal("错误凭据必须被拒")
 		}
 	}
@@ -79,10 +79,10 @@ func TestCredCacheKeyIsAppScoped(t *testing.T) {
 	v := &fakeVerifier{ok: map[string]string{"a1": "s1", "a2": "s2"}}
 	c := newCredCache(v, time.Minute)
 
-	if err := c.verify(context.Background(), "a1", "s1"); err != nil {
+	if _, err := c.verify(context.Background(), "a1", "s1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.verify(context.Background(), "a2", "s1"); err == nil {
+	if _, err := c.verify(context.Background(), "a2", "s1"); err == nil {
 		t.Fatal("拿 a1 的 secret 冒充 a2 必须被拒")
 	}
 }
@@ -91,10 +91,10 @@ func TestCredCacheKeyIsAppScoped(t *testing.T) {
 func TestCredCacheRejectsEmpty(t *testing.T) {
 	v := &fakeVerifier{ok: map[string]string{"a1": "s1"}}
 	c := newCredCache(v, time.Minute)
-	if err := c.verify(context.Background(), "", "s1"); err == nil {
+	if _, err := c.verify(context.Background(), "", "s1"); err == nil {
 		t.Fatal("空 app 必须被拒")
 	}
-	if err := c.verify(context.Background(), "a1", ""); err == nil {
+	if _, err := c.verify(context.Background(), "a1", ""); err == nil {
 		t.Fatal("空 secret 必须被拒")
 	}
 	if n := v.count(); n != 0 {
@@ -107,17 +107,17 @@ func TestCredCacheRejectsEmpty(t *testing.T) {
 func TestCredCacheSurvivesFPOutage(t *testing.T) {
 	v := &fakeVerifier{ok: map[string]string{"a1": "s1"}}
 	c := newCredCache(v, time.Minute)
-	if err := c.verify(context.Background(), "a1", "s1"); err != nil {
+	if _, err := c.verify(context.Background(), "a1", "s1"); err != nil {
 		t.Fatal(err)
 	}
 	v.mu.Lock()
 	v.err = errors.New("fp 不可达")
 	v.mu.Unlock()
 
-	if err := c.verify(context.Background(), "a1", "s1"); err != nil {
+	if _, err := c.verify(context.Background(), "a1", "s1"); err != nil {
 		t.Fatalf("已缓存的凭据在 fp 不可达时仍应放行：%v", err)
 	}
-	if err := c.verify(context.Background(), "a2", "s2"); err == nil {
+	if _, err := c.verify(context.Background(), "a2", "s2"); err == nil {
 		t.Fatal("没缓存过的凭据在 fp 不可达时必须被拒")
 	}
 }
@@ -131,7 +131,7 @@ func TestCredCacheSurvivesFPOutage(t *testing.T) {
 func TestCredCachePropagatesIMNotEnabled(t *testing.T) {
 	v := &fakeVerifier{ok: map[string]string{}, err: auth.ErrIMNotEnabled}
 	c := newCredCache(v, time.Minute)
-	err := c.verify(context.Background(), "a1", "s1")
+	_, err := c.verify(context.Background(), "a1", "s1")
 	if !errors.Is(err, auth.ErrIMNotEnabled) {
 		t.Fatalf("err = %v，必须能被 errors.Is 认出是 ErrIMNotEnabled", err)
 	}
@@ -140,7 +140,7 @@ func TestCredCachePropagatesIMNotEnabled(t *testing.T) {
 	v.err = nil
 	v.ok["a1"] = "s1"
 	v.mu.Unlock()
-	if err := c.verify(context.Background(), "a1", "s1"); err != nil {
+	if _, err := c.verify(context.Background(), "a1", "s1"); err != nil {
 		t.Fatalf("开关打开之后应当立刻放行：%v", err)
 	}
 }
