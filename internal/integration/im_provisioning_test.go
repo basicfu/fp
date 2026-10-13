@@ -131,3 +131,42 @@ func TestIMDisabledAppRejectsHandshake(t *testing.T) {
 	}
 	defer cli.Close()
 }
+
+// TestPerAppRevokeClosesConnection：按应用的撤销（登出、控制台踢会话）必须
+// 关掉 fp-im 上持有该 token 的 ws。
+//
+// 上面那条只覆盖 AppID 为空的跨应用分支，而 SessionService 按应用切分事件
+// 之后，生产里的撤销**全部**带 AppID。fp 内部用 uuid 标识应用，fp-im 的连接
+// 表却按对外 app_id 分桶——两边标识对不上时后果同样是静默的：一条 ws 也
+// 关不掉，零报错零日志。
+func TestPerAppRevokeClosesConnection(t *testing.T) {
+	e := newPhase2Env(t)
+	ctx := context.Background()
+	enableIMOn(t, e, e.app.ID)
+	node := startIMAgainstFP(t, e)
+
+	token, _, _ := e.loginWithPhone(t, "13900000003")
+
+	cli, err := fpim.Dial(ctx, fpim.ClientConfig{URL: node.wsURL, App: e.appID, Token: token})
+	if err != nil {
+		t.Fatalf("client 连不上：%v", err)
+	}
+	defer cli.Close()
+
+	closed := make(chan int, 1)
+	cli.OnClose(func(code int) { closed <- code })
+
+	if err := e.sdk.Auth().Logout(ctx, token); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+
+	select {
+	case code := <-closed:
+		if code != fpim.CloseAuthFailed {
+			t.Fatalf("关闭码 = %d，期望 %d（revoked：去重新登录而不是重连）", code, fpim.CloseAuthFailed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("登出（按应用的撤销）之后 ws 必须被关闭——" +
+			"撤销事件里的应用标识与 fp-im 连接表的分桶键对不上时，一条也查不到")
+	}
+}

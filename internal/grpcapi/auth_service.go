@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,9 @@ import (
 // 满足它（方法名对得上）。
 type AppLookup interface {
 	GetActiveByAppID(ctx context.Context, appID string) (*domain.Application, error)
+	// GetByID 不要求启用状态：只用于把撤销事件里的内部 ID 换成对外 app_id，
+	// 停用应用上已建立的 ws 同样要能被撤销关掉。
+	GetByID(ctx context.Context, id uuid.UUID) (*domain.Application, error)
 }
 
 // AuthServerDeps 是 gRPC 认证服务的依赖。
@@ -274,6 +278,10 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	}
 	defer unsubscribeConfig()
 
+	// uuid → 对外 app_id。只在本流的 goroutine 里读写所以不加锁；app_id
+	// 创建后不可变，所以不需要失效。
+	imAppIDs := map[uuid.UUID]string{}
+
 	if err := stream.Send(&fpv1.WatchResponse{
 		Event: &fpv1.WatchResponse_Ready{Ready: &fpv1.WatchReady{}},
 	}); err != nil {
@@ -300,6 +308,9 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 				}
 			} else {
 				msg = eventMessage(ev.Revoke)
+				if rv := msg.GetRevoke(); isIM && rv != nil && rv.AppId != "" {
+					rv.AppId = s.externalAppID(ctx, imAppIDs, ev.Revoke.AppID)
+				}
 			}
 			if err := stream.Send(msg); err != nil {
 				return err
@@ -331,6 +342,28 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 			}
 		}
 	}
+}
+
+// externalAppID 把撤销事件的内部应用 ID 换成对外 app_id，供 IM 网关那条流用。
+//
+// fp-im 的连接表按握手帧里的对外 app_id 分桶，它从头到尾没见过内部 uuid——
+// 原样下发 uuid 的话按应用的撤销在 fp-im 上一条 ws 也关不掉，而且静默。
+// 这条流上的 AppIMConfigChanged 用的也是对外 app_id，两者保持一致。
+// 业务方 SDK 的流不走这里：它只订阅自己一个应用，看到的值维持原样。
+//
+// 查不到时返回空串（＝跨全部应用）而不是丢弃事件：token 全局唯一，fp-im
+// 多查几个桶无害，漏关一条已撤销的连接才是事故。失败不进缓存，下次重查。
+func (s *authServer) externalAppID(ctx context.Context, cache map[uuid.UUID]string, id uuid.UUID) string {
+	if v, ok := cache[id]; ok {
+		return v
+	}
+	app, err := s.apps.GetByID(ctx, id)
+	if err != nil {
+		slog.Warn("grpcapi: 撤销事件的应用查不到，按跨应用撤销下发给 IM 网关", "appId", id, "err", err)
+		return ""
+	}
+	cache[id] = app.AppID
+	return app.AppID
 }
 
 // revokeEvent 把领域事件转成传输对象。
