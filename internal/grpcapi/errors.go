@@ -2,6 +2,7 @@
 package grpcapi
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 
@@ -56,6 +57,17 @@ func StatusFrom(err error) error {
 
 	var de *domain.Error
 	if !errors.As(err, &de) {
+		// 调用方自己取消或等不及了（断开连接、SDK 超时、进程退出），查询半路被掐断。
+		// 这不是 fp 的故障：记成 ERROR 会让"某个客户端在反复重连"看起来像"fp 在反复出错"，
+		// 真正的内部错误反而被淹没。对方多半已经不在听了，状态码只是如实交代。
+		switch {
+		case errors.Is(err, context.Canceled):
+			slog.Debug("grpcapi: 调用方已取消", "err", err)
+			return status.Error(codes.Canceled, "请求已取消")
+		case errors.Is(err, context.DeadlineExceeded):
+			slog.Warn("grpcapi: 请求超时", "err", err)
+			return status.Error(codes.DeadlineExceeded, "请求超时")
+		}
 		slog.Error("grpcapi: 未处理的内部错误", "err", err)
 		return status.Error(codes.Internal, "服务器内部错误")
 	}

@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -58,6 +59,23 @@ func TestStatusFromHidesInternalDetail(t *testing.T) {
 	if strings.Contains(status.Convert(got).Message(), "hunter2") ||
 		strings.Contains(status.Convert(got).Message(), "10.9.1.2") {
 		t.Fatalf("内部错误细节泄露到了 gRPC 响应里: %q", status.Convert(got).Message())
+	}
+}
+
+// TestStatusFromSeparatesCallerAbort 确认调用方取消与超时不被归成 Internal。
+//
+// 线上出过一次：某个客户端反复重连，每次都在"按 appId 查询应用"半路取消，
+// fp 每秒打一条"未处理的内部错误"，看上去像 fp 自己坏了。
+func TestStatusFromSeparatesCallerAbort(t *testing.T) {
+	cases := map[codes.Code]error{
+		codes.Canceled:         context.Canceled,
+		codes.DeadlineExceeded: context.DeadlineExceeded,
+	}
+	for want, cause := range cases {
+		got := StatusFrom(fmt.Errorf("service: 按 appId 查询应用: %w", cause))
+		if status.Code(got) != want {
+			t.Errorf("%v 映射成 %v，期望 %v", cause, status.Code(got), want)
+		}
 	}
 }
 
