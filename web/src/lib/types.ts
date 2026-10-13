@@ -92,10 +92,15 @@ export interface User {
   id: string
   nickname: string
   avatarUrl: string
+  /** 存在 fp 里的头像的内容哈希，没有头像时为空串。图片经 /admin/api/avatars/{hash} 取。 */
+  avatarHash: string
+  gender: string
   status: UserStatus
   hasPassword: boolean
   identities: Identity[]
   createdAt: number
+  /** 注册来源应用。只有详情接口返回；管理员手动建的号、或来源应用已删除时没有。 */
+  registeredApp?: { appId: string; name: string }
 }
 
 export interface UserListResponse {

@@ -26,21 +26,31 @@ type identityDTO struct {
 }
 
 type userDTO struct {
-	ID          string        `json:"id"`
-	Nickname    string        `json:"nickname"`
-	AvatarURL   string        `json:"avatarUrl"`
+	ID        string `json:"id"`
+	Nickname  string `json:"nickname"`
+	AvatarURL string `json:"avatarUrl"`
+	// AvatarHash 非空时图片经 GET /admin/api/avatars/{hash} 取。
+	AvatarHash  string        `json:"avatarHash"`
+	Gender      string        `json:"gender"`
 	Status      string        `json:"status"`
 	HasPassword bool          `json:"hasPassword"`
 	Identities  []identityDTO `json:"identities"`
 	CreatedAt   int64         `json:"createdAt"`
+	// RegisteredApp 只在详情里给：列表里逐行查一次不值得。没有注册来源时同样不出现。
+	RegisteredApp *registeredAppDTO `json:"registeredApp,omitempty"`
+}
+
+type registeredAppDTO struct {
+	AppID string `json:"appId"`
+	Name  string `json:"name"`
 }
 
 // toUserDTO 组装对外的用户视图。
 // 注意：password_hash 绝不出现在响应里，只暴露"是否设过密码"。
 func toUserDTO(u domain.User, ids []domain.Identity) userDTO {
 	out := userDTO{
-		ID: u.ID.String(), Nickname: u.Nickname, AvatarURL: u.AvatarURL,
-		Status: u.Status, HasPassword: u.PasswordHash != "",
+		ID: u.ID.String(), Nickname: u.Nickname, AvatarURL: u.AvatarURL, AvatarHash: u.AvatarHash,
+		Gender: u.Gender, Status: u.Status, HasPassword: u.PasswordHash != "",
 		Identities: make([]identityDTO, 0, len(ids)),
 		CreatedAt:  u.CreatedAt,
 	}
@@ -48,6 +58,14 @@ func toUserDTO(u domain.User, ids []domain.Identity) userDTO {
 		out.Identities = append(out.Identities, identityDTO{
 			Type: i.Type, Subject: i.Subject, LastLoginAt: i.LastLoginAt,
 		})
+	}
+	return out
+}
+
+func toUserDetailDTO(p *service.UserProfile) userDTO {
+	out := toUserDTO(p.User, p.Identities)
+	if p.RegisteredAppID != "" {
+		out.RegisteredApp = &registeredAppDTO{AppID: p.RegisteredAppID, Name: p.RegisteredAppName}
 	}
 	return out
 }
@@ -137,17 +155,43 @@ func (h *userHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	u, err := h.users.GetByID(r.Context(), id)
+	p, err := h.users.GetProfile(r.Context(), id)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	ids, err := h.users.ListIdentities(r.Context(), id)
+	writeJSON(w, http.StatusOK, toUserDetailDTO(p))
+}
+
+// clearAvatar 清除用户头像，用于处理违规图片。返回清除后的用户详情。
+func (h *userHandler) clearAvatar(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toUserDTO(*u, ids))
+	p, err := h.users.UpdateAvatar(r.Context(), id, nil)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toUserDetailDTO(p))
+}
+
+// avatar 按内容哈希回图片，供控制台的用户详情页显示。
+func (h *userHandler) avatar(w http.ResponseWriter, r *http.Request) {
+	contentType, image, err := h.users.GetAvatar(r.Context(), chi.URLParam(r, "hash"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(image)))
+	// 内容是别人上传的原始字节，fp 只看过文件头：不许浏览器自己猜类型，把它当成别的东西执行。
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// 哈希即版本，同一个地址的内容永不变化。private：这个地址要管理员登录态，不该进共享缓存。
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	_, _ = w.Write(image)
 }
 
 type setStatusRequest struct {

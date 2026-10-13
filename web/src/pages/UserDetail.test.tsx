@@ -20,6 +20,8 @@ const sampleUser: User = {
   id: 'user-1',
   nickname: '张三',
   avatarUrl: '',
+  avatarHash: '',
+  gender: '',
   status: 'ACTIVE',
   hasPassword: true,
   identities: [{ type: 'phone', subject: '138****0000', lastLoginAt: 1700000000000 }],
@@ -342,4 +344,104 @@ test('全部下线弹窗点取消，不会真的下线任何设备', async () =>
   expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toBe(false)
   // 设备行还在——没有被误删。
   expect(screen.getByText('1.2.3.4')).toBeTruthy()
+})
+
+const avatarHash = '0123456789abcdef0123456789abcdef'
+const userWithAvatar: User = {
+  ...sampleUser,
+  avatarHash,
+  registeredApp: { appId: 'a1b2c3', name: '商城' },
+}
+
+test('有头像时显示图片与清除按钮，并显示注册来源应用', async () => {
+  stubFetchSequence(
+    new Response(JSON.stringify(userWithAvatar), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+  )
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('张三')).toBeTruthy())
+
+  // 地址里带哈希：换头像后地址跟着变，不会显示成浏览器缓存里的旧图。
+  const img = screen.getByAltText('头像') as HTMLImageElement
+  expect(img.getAttribute('src')).toBe(`/admin/api/avatars/${avatarHash}`)
+  expect(screen.getByRole('button', { name: '清除头像' })).toBeTruthy()
+  expect(screen.getByText('商城')).toBeTruthy()
+  expect(screen.getByText('（a1b2c3）')).toBeTruthy()
+})
+
+test('没有头像时不显示图片与清除按钮；没有注册来源时显示"无"', async () => {
+  stubFetchSequence(
+    new Response(JSON.stringify(sampleUser), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+  )
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByText('张三')).toBeTruthy())
+
+  expect(screen.queryByAltText('头像')).toBeNull()
+  expect(screen.queryByRole('button', { name: '清除头像' })).toBeNull()
+  expect(screen.getByText('无')).toBeTruthy()
+})
+
+test('清除头像：确认后调用删除接口并重新拉取用户，头像随之消失', async () => {
+  const fetchMock = stubFetchSequence(
+    new Response(JSON.stringify(userWithAvatar), { status: 200 }), // GET 用户详情
+    new Response(JSON.stringify([]), { status: 200 }), // GET 在线设备
+    new Response(JSON.stringify([]), { status: 200 }), // GET 登录日志
+    new Response(JSON.stringify({ ...userWithAvatar, avatarHash: '' }), { status: 200 }), // DELETE 头像
+    new Response(JSON.stringify({ ...userWithAvatar, avatarHash: '' }), { status: 200 }), // reload GET 用户详情
+  )
+  const success = vi.spyOn(toast, 'success')
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByAltText('头像')).toBeTruthy())
+
+  fireEvent.click(screen.getByRole('button', { name: '清除头像' }))
+  fireEvent.click(await waitFor(() => screen.getByRole('button', { name: '确认清除' })))
+
+  await waitFor(() => expect(screen.queryByAltText('头像')).toBeNull())
+  const deletes = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+  expect(deletes.map(([url]) => url)).toEqual(['/admin/api/users/user-1/avatar'])
+  expect(success).toHaveBeenCalledWith('已清除头像')
+  expect(screen.queryByRole('button', { name: '清除头像' })).toBeNull()
+})
+
+test('清除头像弹窗点取消，不会真的清除', async () => {
+  const fetchMock = stubFetchSequence(
+    new Response(JSON.stringify(userWithAvatar), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+  )
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByAltText('头像')).toBeTruthy())
+
+  fireEvent.click(screen.getByRole('button', { name: '清除头像' }))
+  fireEvent.click(await waitFor(() => screen.getByRole('button', { name: '取消' })))
+  await new Promise((r) => setTimeout(r, 50))
+
+  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toBe(false)
+  expect(screen.getByAltText('头像')).toBeTruthy()
+})
+
+test('清除头像失败时提示后端给的原因，头像保持不变', async () => {
+  stubFetchSequence(
+    new Response(JSON.stringify(userWithAvatar), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+    new Response(JSON.stringify({ code: 'USER_NOT_FOUND', msg: '用户不存在' }), { status: 404 }),
+  )
+  const error = vi.spyOn(toast, 'error')
+
+  renderDetail()
+  await waitFor(() => expect(screen.getByAltText('头像')).toBeTruthy())
+
+  fireEvent.click(screen.getByRole('button', { name: '清除头像' }))
+  fireEvent.click(await waitFor(() => screen.getByRole('button', { name: '确认清除' })))
+
+  await waitFor(() => expect(error).toHaveBeenCalledWith('用户不存在'))
+  expect(screen.getByAltText('头像')).toBeTruthy()
 })

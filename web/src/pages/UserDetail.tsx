@@ -27,6 +27,7 @@ export default function UserDetail() {
   // 是恢复访问，不是破坏性操作，直接执行。
   const [confirmingFreeze, setConfirmingFreeze] = useState(false)
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false)
+  const [confirmingClearAvatar, setConfirmingClearAvatar] = useState(false)
 
   // 只在真正首次加载（还没有任何数据）时整页显示"加载中…"——冻结/解冻、
   // 重置密码之后的 user.reload() 也会把 loading 短暂置回 true，这时候
@@ -65,6 +66,16 @@ export default function UserDetail() {
       const res = await api.del<{ revoked: number }>(`/users/${id}/sessions`)
       toast.success(`已下线 ${res.revoked} 个设备`)
       sessions.reload()
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  async function clearAvatar() {
+    try {
+      await api.del(`/users/${id}/avatar`)
+      toast.success('已清除头像')
+      user.reload()
     } catch (e) {
       toast.error(errorMessage(e))
     }
@@ -109,8 +120,27 @@ export default function UserDetail() {
       <Card>
         <CardHeader><CardTitle className="text-base">身份</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
+          {u.avatarHash && (
+            <div className="flex items-center gap-3 pb-2">
+              {/* 哈希即版本：换头像后地址跟着变，不会显示成缓存里的旧图 */}
+              <img
+                src={`/admin/api/avatars/${u.avatarHash}`}
+                alt="头像"
+                className="size-16 rounded-full border object-cover"
+              />
+              <Button variant="outline" size="sm" onClick={() => setConfirmingClearAvatar(true)}>清除头像</Button>
+            </div>
+          )}
           <div className="text-muted-foreground">用户 ID：<span className="font-mono">{u.id}</span></div>
           <div className="text-muted-foreground">注册时间：{formatTime(u.createdAt)}</div>
+          <div className="text-muted-foreground">
+            注册来源：
+            {u.registeredApp ? (
+              <><span>{u.registeredApp.name}</span><span className="ml-1 font-mono text-xs">（{u.registeredApp.appId}）</span></>
+            ) : (
+              <span title="管理员手动创建的用户，或来源应用已被删除">无</span>
+            )}
+          </div>
           <div className="text-muted-foreground">是否设过密码：{u.hasPassword ? '是' : '否'}</div>
           <Table>
             <TableHeader>
@@ -225,6 +255,18 @@ export default function UserDetail() {
           user.reload()
           // 重置密码会连带撤销全部会话（后端的安全耦合），设备列表必须刷新。
           sessions.reload()
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmingClearAvatar}
+        onOpenChange={setConfirmingClearAvatar}
+        title="清除头像"
+        description={`将删除「${u.nickname || u.id}」当前的头像，所有应用里都会变回默认头像。图片不会保留，无法恢复。`}
+        confirmLabel="确认清除"
+        onConfirm={() => {
+          setConfirmingClearAvatar(false)
+          void clearAvatar()
         }}
       />
 

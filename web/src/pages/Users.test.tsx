@@ -161,7 +161,7 @@ test('新建用户：填手机号/昵称/密码，提交后请求体正确、弹
   const writes: unknown[] = []
   stubFetch(emptyList(), (_u, _m, body) => {
     writes.push(body)
-    return { id: 'u1', nickname: '阿里斯', avatarUrl: '', status: 'ACTIVE', hasPassword: true, identities: [], createdAt: 1 }
+    return { id: 'u1', nickname: '阿里斯', avatarUrl: '', avatarHash: '', gender: '', status: 'ACTIVE', hasPassword: true, identities: [], createdAt: 1 }
   })
   renderUsers(['/users'])
 

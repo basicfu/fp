@@ -195,6 +195,8 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/users/{id}", userH.get)
 			r.Patch("/users/{id}/status", userH.setStatus)
 			r.Put("/users/{id}/password", userH.setPassword)
+			r.Delete("/users/{id}/avatar", userH.clearAvatar)
+			r.Get("/avatars/{hash}", userH.avatar)
 			r.Get("/users/{id}/sessions", userH.listSessions)
 			r.Delete("/users/{id}/sessions", userH.revokeAllSessions)
 			r.Delete("/users/{id}/sessions/{sid}", userH.revokeSession)

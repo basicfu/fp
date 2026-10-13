@@ -1,7 +1,9 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -485,5 +487,167 @@ func TestUserNotFound(t *testing.T) {
 		"/admin/api/users/00000000-0000-0000-0000-000000000000", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// 只有文件头是真的：fp 不解码图片。
+var adminTestPNG = append([]byte("\x89PNG\r\n\x1a\n"), []byte("console-avatar")...)
+
+func TestUserDetailShowsAvatarAndRegistrationSource(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+
+	type detail struct {
+		AvatarHash    string `json:"avatarHash"`
+		Gender        string `json:"gender"`
+		RegisteredApp *struct {
+			AppID string `json:"appId"`
+			Name  string `json:"name"`
+		} `json:"registeredApp"`
+	}
+	get := func() detail {
+		t.Helper()
+		rec := do(t, h, token, http.MethodGet, "/admin/api/users/"+u.ID.String(), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var d detail
+		decode(t, rec, &d)
+		return d
+	}
+
+	// 控制台手动建的号：没有头像，也没有注册来源。
+	if d := get(); d.AvatarHash != "" || d.RegisteredApp != nil {
+		t.Fatalf("手动建的号 detail = %+v, want 无头像、无注册来源", d)
+	}
+
+	app, _, err := deps.Apps.Create(ctx, "商城", "mall")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	if err := deps.Users.EnsureRegistration(ctx, u.ID, app.ID, true); err != nil {
+		t.Fatalf("EnsureRegistration: %v", err)
+	}
+	if _, err := deps.Users.UpdateAvatar(ctx, u.ID, adminTestPNG); err != nil {
+		t.Fatalf("UpdateAvatar: %v", err)
+	}
+	gender := domain.GenderFemale
+	if _, err := deps.Users.UpdateProfile(ctx, u.ID, service.UserProfileUpdate{Gender: &gender}); err != nil {
+		t.Fatalf("UpdateProfile: %v", err)
+	}
+
+	d := get()
+	if d.AvatarHash != domain.AvatarHash(adminTestPNG) || d.Gender != domain.GenderFemale {
+		t.Fatalf("detail = %+v", d)
+	}
+	if d.RegisteredApp == nil || d.RegisteredApp.AppID != app.AppID || d.RegisteredApp.Name != "商城" {
+		t.Fatalf("registeredApp = %+v, want %s / 商城", d.RegisteredApp, app.AppID)
+	}
+}
+
+func TestAdminAvatarDownload(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+	if _, err := deps.Users.UpdateAvatar(context.Background(), u.ID, adminTestPNG); err != nil {
+		t.Fatalf("UpdateAvatar: %v", err)
+	}
+	path := "/admin/api/avatars/" + domain.AvatarHash(adminTestPNG)
+
+	rec := do(t, h, token, http.MethodGet, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), adminTestPNG) {
+		t.Fatal("回的图片应与存入的逐字节相同")
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("Content-Type = %q, want image/png", got)
+	}
+	// 内容是别人上传的字节：必须禁止浏览器自己猜类型。
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") || strings.Contains(got, "public") {
+		t.Fatalf("Cache-Control = %q：哈希即版本可以长期缓存，但这个地址要登录态、不该进共享缓存", got)
+	}
+
+	// 头像不是公开资源：没登录拿不到。
+	if rec := do(t, h, "", http.MethodGet, path, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录 status = %d, want 401", rec.Code)
+	}
+
+	for _, hash := range []string{strings.Repeat("0", 32), "nope"} {
+		rec := do(t, h, token, http.MethodGet, "/admin/api/avatars/"+hash, "")
+		var e struct {
+			Code string `json:"code"`
+		}
+		decode(t, rec, &e)
+		if rec.Code != http.StatusNotFound || e.Code != domain.CodeAvatarNotFound {
+			t.Fatalf("哈希 %q: status = %d code = %q, want 404 / %s", hash, rec.Code, e.Code, domain.CodeAvatarNotFound)
+		}
+	}
+}
+
+func TestAdminClearsAvatar(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+	if _, err := deps.Users.UpdateAvatar(ctx, u.ID, adminTestPNG); err != nil {
+		t.Fatalf("UpdateAvatar: %v", err)
+	}
+	path := "/admin/api/users/" + u.ID.String() + "/avatar"
+
+	if rec := do(t, h, "", http.MethodDelete, path, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录 status = %d, want 401", rec.Code)
+	}
+	if fresh, err := deps.Users.GetByID(ctx, u.ID); err != nil || fresh.AvatarHash == "" {
+		t.Fatalf("未登录的请求不该清掉头像: %+v, %v", fresh, err)
+	}
+
+	rec := do(t, h, token, http.MethodDelete, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var d struct {
+		ID         string `json:"id"`
+		AvatarHash string `json:"avatarHash"`
+	}
+	decode(t, rec, &d)
+	if d.ID != u.ID.String() || d.AvatarHash != "" {
+		t.Fatalf("清除后应返回用户详情且 avatarHash 为空: %+v", d)
+	}
+	if _, _, err := deps.Users.GetAvatar(ctx, domain.AvatarHash(adminTestPNG)); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("清除后图片应取不到: %v", err)
+	}
+	if rec := do(t, h, token, http.MethodGet, "/admin/api/avatars/"+domain.AvatarHash(adminTestPNG), ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("清除后下载 status = %d, want 404", rec.Code)
+	}
+
+	// 重复清除不是错误；用户不存在才是。
+	if rec := do(t, h, token, http.MethodDelete, path, ""); rec.Code != http.StatusOK {
+		t.Fatalf("重复清除 status = %d, want 200", rec.Code)
+	}
+	rec = do(t, h, token, http.MethodDelete, "/admin/api/users/00000000-0000-0000-0000-000000000000/avatar", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("用户不存在 status = %d, want 404", rec.Code)
+	}
+}
+
+// 列表不带注册来源（逐行查一次不值得），但头像哈希是用户行上现成的。
+func TestUserListOmitsRegistrationSource(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+	app, _, err := deps.Apps.Create(ctx, "商城", "mall")
+	if err != nil {
+		t.Fatalf("创建应用: %v", err)
+	}
+	if err := deps.Users.EnsureRegistration(ctx, u.ID, app.ID, true); err != nil {
+		t.Fatalf("EnsureRegistration: %v", err)
+	}
+	rec := do(t, h, token, http.MethodGet, "/admin/api/users", "")
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "registeredApp") {
+		t.Fatalf("status = %d, body = %s——列表里不该出现 registeredApp", rec.Code, rec.Body.String())
 	}
 }
