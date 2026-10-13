@@ -124,7 +124,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		return nil, err
 	}
 
-	user, identity, err := s.resolveUser(ctx, result)
+	user, identity, created, err := s.resolveUser(ctx, result)
 	if err != nil {
 		s.logFailure(ctx, app, in, result.IdentityType, result.Subject, err)
 		return nil, err
@@ -151,7 +151,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	// 这些恰恰是"凭据已经验过、一次性验证码已经被消费掉"的那些尝试——
 	// 出事故时最想查的就是它们。只在凭据校验失败时记录，等于把成功通过
 	// 认证却没能建立会话的那批请求全部丢进黑洞。
-	if err := s.deps.Users.EnsureRegistration(ctx, user.ID, app.ID); err != nil {
+	if err := s.deps.Users.EnsureRegistration(ctx, user.ID, app.ID, created); err != nil {
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
@@ -368,24 +368,25 @@ func (s *AuthService) enabledConnector(ctx context.Context, app *domain.Applicat
 
 // resolveUser 依据 Connector 给出的结果找到或创建用户。
 // 归并规则完整地封装在 UserService 里，这里只决定"允不允许建号"。
-func (s *AuthService) resolveUser(ctx context.Context, r *connector.Result) (*domain.User, *domain.Identity, error) {
+//
+// created 报告这次是否新建了用户——登录流程据此把当前应用记为他的注册来源。
+func (s *AuthService) resolveUser(ctx context.Context, r *connector.Result) (user *domain.User, identity *domain.Identity, created bool, err error) {
 	if r.AllowCreate {
-		user, identity, _, err := s.deps.Users.EnsureUserWithIdentity(ctx, EnsureIdentityInput{
+		return s.deps.Users.EnsureUserWithIdentity(ctx, EnsureIdentityInput{
 			Type:       r.IdentityType,
 			Subject:    r.Subject,
 			UnionKey:   r.UnionKey,
 			Credential: r.Credential,
 			Nickname:   r.Nickname,
 		})
-		return user, identity, err
 	}
 
-	user, identity, err := s.deps.Users.FindByIdentity(ctx, r.IdentityType, r.Subject)
+	user, identity, err = s.deps.Users.FindByIdentity(ctx, r.IdentityType, r.Subject)
 	if errors.Is(err, domain.ErrNotFound) {
 		// 不允许建号且账号不存在：返回与凭据错误一致的错误，避免账号枚举。
-		return nil, nil, domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "账号或凭据不正确")
+		return nil, nil, false, domain.Failf(domain.ErrInvalidCredential, domain.CodeCredentialInvalid, "账号或凭据不正确")
 	}
-	return user, identity, err
+	return user, identity, false, err
 }
 
 // logFailure 记录一次失败登录。

@@ -1,6 +1,8 @@
 package domain_test
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/basicfu/fp/internal/domain"
@@ -48,6 +50,58 @@ func TestUserCanLogin(t *testing.T) {
 		u := domain.User{Status: tt.status}
 		if got := u.CanLogin(); got != tt.want {
 			t.Errorf("status %q CanLogin() = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestNormalizeNickname(t *testing.T) {
+	valid := map[string]string{
+		"小明":                          "小明",
+		"  小明\t":                      "小明",
+		"a":                           "a",
+		"Tom Hanks":                   "Tom Hanks",
+		"😀":                           "😀",
+		strings.Repeat("字", 32):       strings.Repeat("字", 32),
+		" " + strings.Repeat("x", 32): strings.Repeat("x", 32),
+	}
+	for in, want := range valid {
+		got, err := domain.NormalizeNickname(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeNickname(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"   ",
+		"\n",
+		strings.Repeat("字", 33),
+		"张三\n李四",
+		"张三\r李四",
+		"tab\tin",
+		"zero\x00byte",
+		"esc\x1b[31m",
+		"del\x7f",
+		"行分隔\u2028符",
+		"段分隔\u2029符",
+		"坏编码\xff",
+	}
+	for _, in := range invalid {
+		_, err := domain.NormalizeNickname(in)
+		var de *domain.Error
+		if !errors.As(err, &de) || de.Code != domain.CodeNicknameInvalid {
+			t.Errorf("NormalizeNickname(%q) err = %v, want NICKNAME_INVALID", in, err)
+		}
+	}
+}
+
+func TestValidGender(t *testing.T) {
+	for g, want := range map[string]bool{
+		"": true, domain.GenderMale: true, domain.GenderFemale: true,
+		"male": false, "M": false, "UNKNOWN": false, " MALE": false,
+	} {
+		if got := domain.ValidGender(g); got != want {
+			t.Errorf("ValidGender(%q) = %v, want %v", g, got, want)
 		}
 	}
 }

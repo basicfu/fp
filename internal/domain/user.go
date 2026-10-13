@@ -1,6 +1,12 @@
 package domain
 
-import "github.com/google/uuid"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
+)
 
 // 用户状态。状态机见 CanTransitionUserStatus。
 const (
@@ -37,14 +43,53 @@ func CanTransitionUserStatus(from, to string) bool {
 type User struct {
 	ID uuid.UUID
 	// PasswordHash 是 password connector 的凭据，未设置时为空串。
-	PasswordHash      string
-	Nickname          string
-	AvatarURL         string
+	PasswordHash string
+	Nickname     string
+	// AvatarURL 留给三方登录带来的外部地址。AvatarHash 非空时以 AvatarHash 为准。
+	AvatarURL string
+	// AvatarHash 是存在 fp 里的头像的内容哈希（见 AvatarHash 函数），没有头像时为空串。
+	AvatarHash        string
 	Gender            string
 	Status            string
 	DeleteSubmittedAt int64 // 0 表示未提交注销
 	CreatedAt         int64
 	UpdatedAt         int64
+}
+
+// 性别取值。空串表示未设置。
+const (
+	GenderMale   = "MALE"
+	GenderFemale = "FEMALE"
+)
+
+// ValidGender 报告 g 是否为合法的性别取值（含表示未设置的空串）。
+func ValidGender(g string) bool {
+	return g == "" || g == GenderMale || g == GenderFemale
+}
+
+// NicknameMaxLen 是昵称的最大长度，按字符（rune）计。
+const NicknameMaxLen = 32
+
+// NormalizeNickname 去掉首尾空白并校验昵称，返回可以落库的值。
+//
+// 控制字符与换行一律拒绝：昵称会被各业务方原样渲染进界面、通知与日志，
+// 一个换行就能伪造出一行日志或把列表撑乱。
+func NormalizeNickname(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if !utf8.ValidString(s) {
+		return "", Fail(ErrInvalidArgument, CodeNicknameInvalid, "昵称含有无法识别的字符")
+	}
+	n := utf8.RuneCountInString(s)
+	if n < 1 || n > NicknameMaxLen {
+		return "", Failf(ErrInvalidArgument, CodeNicknameInvalid, "昵称长度应为 1–%d 个字符", NicknameMaxLen)
+	}
+	for _, r := range s {
+		// Zl / Zp 是 Unicode 的行、段分隔符，不属于控制字符类，但同样会折行。
+		if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return "", Fail(ErrInvalidArgument, CodeNicknameInvalid, "昵称不能包含换行或控制字符")
+		}
+	}
+	return s, nil
 }
 
 // CanLogin 报告该状态的用户是否允许登录。

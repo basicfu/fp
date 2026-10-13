@@ -574,7 +574,7 @@ func TestEnsureRegistrationIsIdempotent(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		if err := users.EnsureRegistration(ctx, u.ID, app.ID); err != nil {
+		if err := users.EnsureRegistration(ctx, u.ID, app.ID, false); err != nil {
 			t.Fatalf("第 %d 次 EnsureRegistration: %v", i+1, err)
 		}
 	}

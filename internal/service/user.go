@@ -25,7 +25,7 @@ const minPasswordLength = 8
 const maxPasswordBytes = 72
 
 const userColumns = `
-	id, password_hash, nickname, avatar_url, gender, status,
+	id, password_hash, nickname, avatar_url, avatar_hash, gender, status,
 	coalesce((extract(epoch from delete_submitted_at) * 1000)::bigint, 0),
 	(extract(epoch from created_at) * 1000)::bigint,
 	(extract(epoch from updated_at) * 1000)::bigint`
@@ -33,7 +33,7 @@ const userColumns = `
 // userColumnsPrefixed 与 userColumns 列顺序完全一致，仅加上 u. 前缀，
 // 因此可以复用同一个 scanUser。
 const userColumnsPrefixed = `
-	u.id, u.password_hash, u.nickname, u.avatar_url, u.gender, u.status,
+	u.id, u.password_hash, u.nickname, u.avatar_url, u.avatar_hash, u.gender, u.status,
 	coalesce((extract(epoch from u.delete_submitted_at) * 1000)::bigint, 0),
 	(extract(epoch from u.created_at) * 1000)::bigint,
 	(extract(epoch from u.updated_at) * 1000)::bigint`
@@ -399,11 +399,16 @@ func (s *UserService) TouchIdentityLogin(ctx context.Context, identityID uuid.UU
 // 角色不在这张表上——它落在 user_role（全局，每人一行）。设计文档 5.5 那条
 // 「严禁添加 role 列」防的是授权模块交付之前的过渡态，现在授权已交付，
 // 其意图（不留过渡态、直接接 casbin）由 user_role 满足。
-func (s *UserService) EnsureRegistration(ctx context.Context, userID, appID uuid.UUID) error {
+//
+// registered 为 true 表示这次登录刚刚自动建了这个用户，这个应用就是他的注册来源。只在建号
+// 那一刻写一次：之后登录别的应用只插入普通行。它仅供展示与统计，不参与任何权限判断。
+func (s *UserService) EnsureRegistration(ctx context.Context, userID, appID uuid.UUID, registered bool) error {
+	// ON CONFLICT 不指定目标：「一个用户至多一个注册来源」的部分唯一索引也在兜底范围内，
+	// 撞上它时宁可这次不写，也不能让登录失败。
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO user_extra (user_id, application_id)
-		VALUES ($1, $2)
-		ON CONFLICT (user_id, application_id) DO NOTHING`, userID, appID)
+		INSERT INTO user_extra (user_id, application_id, is_registration)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`, userID, appID, registered)
 	if err != nil {
 		return fmt.Errorf("service: 写入注册关系: %w", err)
 	}
@@ -589,7 +594,7 @@ func insertIdentityTx(ctx context.Context, q querier, userID uuid.UUID, in Ensur
 
 func scanUser(r rowScanner) (*domain.User, error) {
 	var u domain.User
-	err := r.Scan(&u.ID, &u.PasswordHash, &u.Nickname, &u.AvatarURL, &u.Gender, &u.Status,
+	err := r.Scan(&u.ID, &u.PasswordHash, &u.Nickname, &u.AvatarURL, &u.AvatarHash, &u.Gender, &u.Status,
 		&u.DeleteSubmittedAt, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err

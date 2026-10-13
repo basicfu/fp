@@ -79,6 +79,10 @@ const (
 	CodeUnionKeyConflict           = "UNION_KEY_CONFLICT"
 	CodeConnectorAlreadyRegistered = "CONNECTOR_ALREADY_REGISTERED"
 	CodeConfigVersionConflict      = "CONFIG_VERSION_CONFLICT"
+	// CodeNicknameInvalid：昵称去首尾空白后不是 1–32 个字符，或含控制字符、换行。
+	CodeNicknameInvalid = "NICKNAME_INVALID"
+	// CodeAvatarInvalid：头像超过 1 MB，或按文件头识别不是 JPEG / PNG / WebP。
+	CodeAvatarInvalid = "AVATAR_INVALID"
 
 	// 授权模块。
 
@@ -113,6 +117,8 @@ const (
 	CodeConnectorNotConfigured = "CONNECTOR_NOT_CONFIGURED"
 	CodeNotifyProviderMissing  = "NOTIFY_PROVIDER_MISSING"
 	CodeConfigVersionNotFound  = "CONFIG_VERSION_NOT_FOUND"
+	// CodeAvatarNotFound：没有这个哈希的头像——哈希即版本，头像被替换或清除后旧哈希就取不到了。
+	CodeAvatarNotFound = "AVATAR_NOT_FOUND"
 
 	// 通知。
 
@@ -178,6 +184,8 @@ var codeSentinels = map[string]error{
 	CodeUnionKeyConflict:           ErrConflict,
 	CodeConnectorAlreadyRegistered: ErrConflict,
 	CodeConfigVersionConflict:      ErrConflict,
+	CodeNicknameInvalid:            ErrInvalidArgument,
+	CodeAvatarInvalid:              ErrInvalidArgument,
 
 	CodeUserNotFound:           ErrNotFound,
 	CodeIdentityNotFound:       ErrNotFound,
@@ -186,6 +194,7 @@ var codeSentinels = map[string]error{
 	CodeConnectorNotConfigured: ErrNotFound,
 	CodeNotifyProviderMissing:  ErrNotFound,
 	CodeConfigVersionNotFound:  ErrNotFound,
+	CodeAvatarNotFound:         ErrNotFound,
 	CodeRouteNotFound:          ErrNotFound,
 
 	CodeRoleNotFound:       ErrNotFound,
