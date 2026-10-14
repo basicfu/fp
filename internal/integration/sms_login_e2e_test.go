@@ -119,8 +119,8 @@ func TestSMSCodeLoginEndToEnd(t *testing.T) {
 	// 管理员还没在通知中心建 verify_code 模板：发码失败，但不能被当成鉴权失败。
 	err = client.Auth().SendLoginCode(ctx, phone)
 	var fe *fpsdk.Error
-	if !errors.As(err, &fe) || fe.Code != domain.CodeNotifySendFailed {
-		t.Fatalf("没有模板时 err = %v, want 码 %s", err, domain.CodeNotifySendFailed)
+	if !errors.As(err, &fe) || fe.Code != domain.CodeVerifyTemplateUnavailable {
+		t.Fatalf("没有模板时 err = %v, want 码 %s", err, domain.CodeVerifyTemplateUnavailable)
 	}
 	if errors.Is(err, fpsdk.ErrUnauthorized) || !errors.Is(err, fpsdk.ErrUnavailable) {
 		t.Fatalf("通知中心没配好应是 ErrUnavailable，不能被当成鉴权失败: %v", err)

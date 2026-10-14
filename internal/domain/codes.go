@@ -134,6 +134,10 @@ const (
 	CodeNotifyProviderInvalid   = "NOTIFY_PROVIDER_INVALID"
 	CodeNotifyLinkInvalid       = "NOTIFY_LINK_INVALID"
 	CodeNotifySendFailed        = "NOTIFY_SEND_FAILED"
+	// CodeVerifyTemplateUnavailable：应用开放了短信登录，但通知中心里的验证码模板还用不了
+	// （没建、已停用、变量不是 code、没关联供应商）。与 CONNECTOR_DISABLED（应用没开放这种登录）、
+	// NOTIFY_SEND_FAILED（模板配好了但供应商没发出去）是三件要去三个地方处理的事，所以各占一个码。
+	CodeVerifyTemplateUnavailable = "VERIFY_TEMPLATE_UNAVAILABLE"
 
 	// CodeRouteNotFound 是路由层的 404：请求的 HTTP 路径不存在。
 	// 与"资源不存在"那一组不同——它意味着调用方把 URL 写错了，
@@ -223,6 +227,8 @@ var codeSentinels = map[string]error{
 	CodeNotifyProviderInvalid:   ErrInvalidArgument,
 	CodeNotifyLinkInvalid:       ErrInvalidArgument,
 	CodeNotifySendFailed:        ErrInternal,
+	// 平台侧没配好，不是调用方的错：归 Internal，SDK 才会把它当"暂不可用"而不是"未授权"。
+	CodeVerifyTemplateUnavailable: ErrInternal,
 
 	CodeInternal: ErrInternal,
 }

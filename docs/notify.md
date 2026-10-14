@@ -104,7 +104,15 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 | 发码频率 | 同一手机号 30 秒 1 条、1 小时 5 条、1 天 10 条，超出返回 `RATE_LIMITED`，`detail.retryAfterMs` 是剩余等待毫秒数。发送失败同样占用额度：供应商超时但其实已送达的情况不少见，退还额度会让重试绕过上限 |
 | 重复发送 | 有效期内再发复用同一个码并续满 5 分钟，不会让用户手里已收到的码作废；被限流的重发更是不会动它 |
 
-**失败**：发送环节的任何问题——模板没建 / 已停用 / 变量对不上 / 没有可用供应商 / 供应商全挂——调用方统一拿到 `NOTIFY_SEND_FAILED`（gRPC `Internal`；SDK 里是带这个码的 `*fpsdk.Error`，同时满足 `ErrUnavailable`，`fpsdk.WriteError` 回 503），不会是 `NOT_FOUND` 或 `FORBIDDEN`：这是平台侧没配好，不是调用方的问题，业务登录页也不该把它显示成"未授权"。具体原因在 fp 的日志里（`登录验证码发送失败`）；供应商逐家尝试的结果另在控制台「发送记录」里，模板缺失、已停用、变量不符这类发送前就失败的情况不写发送记录，只有日志。发送记录的 code 列是 `verify_code`，不含验证码值。
+**失败**：发不出验证码有三种原因，各占一个错误码，要去的地方也不同：
+
+| 码 | 含义 | 去哪处理 |
+|---|---|---|
+| `CONNECTOR_DISABLED` | 应用没开放短信登录 | 应用的「登录方式」里启用 `sms_code` |
+| `VERIFY_TEMPLATE_UNAVAILABLE` | 应用开放了，但 `verify_code` 模板用不了：没建、已停用、变量不是 `code`、没关联供应商。`detail.reason` 是具体哪一种（通知中心的 `NOTIFY_*` 码） | 通知中心配好模板 |
+| `NOTIFY_SEND_FAILED` | 模板配好了，供应商全都没发出去 | 看「发送记录」与供应商 |
+
+后两个都是 gRPC `Internal`（SDK 里是带这个码的 `*fpsdk.Error`，同时满足 `ErrUnavailable`，`fpsdk.WriteError` 回 503），不会是 `NOT_FOUND` 或 `FORBIDDEN`：这是平台侧没配好，不是调用方的问题，业务登录页也不该把它显示成"未授权"。具体原因在 fp 的日志里（`登录验证码发送失败`）；供应商逐家尝试的结果另在控制台「发送记录」里，模板缺失、已停用、变量不符这类发送前就失败的情况不写发送记录，只有日志。发送记录的 code 列是 `verify_code`，不含验证码值。
 
 **本地开发**：建一个 `log` 类型供应商（`channel` 填 `sms`）关联到 `verify_code`，验证码会打在 fp 的日志里，不用真实短信账号，见 [examples/demo](../examples/demo/README.md)。
 

@@ -322,24 +322,32 @@ func TestSendLoginCodeIsRateLimitedPerPhone(t *testing.T) {
 	}
 }
 
-// 通知中心没配好是平台侧的问题：具体原因进日志，调用方只拿通用错误。
-// 透传的话模板缺失 / 停用会以 NotFound / PermissionDenied 出去，SDK 把它们归成 ErrUnauthorized，
-// 业务方的登录页就把"通知中心没配好"显示成了"未授权"。
+// 通知中心没配好是平台侧的问题，不能透传：模板缺失 / 停用会以 NotFound / PermissionDenied 出去，
+// SDK 把它们归成 ErrUnauthorized，业务方的登录页就把"通知中心没配好"显示成了"未授权"。
+// 但要分清是"模板没配好"（去控制台配）还是"供应商没发出去"（查供应商）。
 func TestSendLoginCodeHidesNotifyCenterFailures(t *testing.T) {
-	for name, cause := range map[string]error{
-		"模板不存在": domain.Fail(domain.ErrNotFound, domain.CodeNotifyTemplateNotFound, "no template"),
-		"模板被停用": domain.Fail(domain.ErrForbidden, domain.CodeNotifyTemplateDisabled, "disabled"),
-		"变量对不上": domain.Fail(domain.ErrInvalidArgument, domain.CodeNotifyParamsInvalid, "params"),
-		"供应商全挂": errors.New("boom"),
+	type tc struct {
+		cause error
+		want  string
+	}
+	tpl, sent := domain.CodeVerifyTemplateUnavailable, domain.CodeNotifySendFailed
+	for name, c := range map[string]tc{
+		"模板不存在":  {domain.Fail(domain.ErrNotFound, domain.CodeNotifyTemplateNotFound, "no template"), tpl},
+		"模板被停用":  {domain.Fail(domain.ErrForbidden, domain.CodeNotifyTemplateDisabled, "disabled"), tpl},
+		"变量对不上":  {domain.Fail(domain.ErrInvalidArgument, domain.CodeNotifyParamsInvalid, "params"), tpl},
+		"没关联供应商": {domain.Fail(domain.ErrNotFound, domain.CodeNotifyProviderMissing, "no provider"), tpl},
+		"供应商全挂":  {domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "all failed"), sent},
+		"未知错误":   {errors.New("boom"), sent},
 	} {
+		cause := c.cause
 		t.Run(name, func(t *testing.T) {
 			e := newAuthEnv(t)
 			e.sms.FailWith(cause)
 
 			err := e.auth.SendLoginCode(context.Background(), e.app.AppID, "13800138000")
 			var de *domain.Error
-			if !errors.As(err, &de) || de.Code != domain.CodeNotifySendFailed || !errors.Is(err, domain.ErrInternal) {
-				t.Fatalf("err = %v, want NOTIFY_SEND_FAILED / ErrInternal", err)
+			if !errors.As(err, &de) || de.Code != c.want || !errors.Is(err, domain.ErrInternal) {
+				t.Fatalf("err = %v, want %s / ErrInternal", err, c.want)
 			}
 			if errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrForbidden) || errors.Is(err, domain.ErrInvalidArgument) {
 				t.Fatalf("不该把平台侧的配置问题伪装成调用方的错误: %v", err)
@@ -386,15 +394,15 @@ func TestSMSCodeLoginThroughRealNotifyCenter(t *testing.T) {
 	}
 }
 
-// 管理员还没在通知中心建 verify_code 模板时，发码失败得是通用错误，而不是 NotFound。
+// 管理员还没在通知中心建 verify_code 模板时，发码失败得说清是模板的事，而不是 NotFound。
 func TestSendLoginCodeWithoutTemplateInNotifyCenter(t *testing.T) {
 	ne := newNotifyEnv(t)
 	auth, appID := newSMSAuth(t, ne, service.NewLoginCodeService(ne.rdb))
 
 	err := auth.SendLoginCode(context.Background(), appID, "13800138000")
 	var de *domain.Error
-	if !errors.As(err, &de) || de.Code != domain.CodeNotifySendFailed {
-		t.Fatalf("err = %v, want NOTIFY_SEND_FAILED", err)
+	if !errors.As(err, &de) || de.Code != domain.CodeVerifyTemplateUnavailable {
+		t.Fatalf("err = %v, want VERIFY_TEMPLATE_UNAVAILABLE", err)
 	}
 }
 

@@ -208,9 +208,10 @@ err = auth.Logout(ctx, token)
 `SendLoginCode` 的验证码经 fp 的通知中心发出：控制台里要先建好 code 为
 `verify_code` 的短信模板并关联供应商，见 [通知文档](../docs/notify.md#6-登录验证码)。
 同一手机号 30 秒 1 条、1 小时 5 条、1 天 10 条，超出得到 `ErrRateLimited`；
-手机号格式不对得到 `ErrInvalidArgument`；通知中心没配好、供应商全挂得到
-`ErrUnavailable`（同时是带 `NOTIFY_SEND_FAILED` 码的 `*fpsdk.Error`，`WriteError` 回 503，
-具体原因只在 fp 的日志里）。应用没启用 `sms_code` 时得到带 `CONNECTOR_DISABLED` 码的错误。
+手机号格式不对得到 `ErrInvalidArgument`。发不出去分三种，各有各的码：应用没启用 `sms_code`
+是 `CONNECTOR_DISABLED`；启用了但 `verify_code` 模板没配好是 `VERIFY_TEMPLATE_UNAVAILABLE`；
+模板配好了但供应商全挂是 `NOTIFY_SEND_FAILED`。后两个同时满足 `ErrUnavailable`
+（`WriteError` 回 503），具体原因在 fp 的日志里。
 
 ### 访客模式
 

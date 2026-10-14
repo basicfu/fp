@@ -95,14 +95,35 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 		To:     phone,
 		Params: map[string]string{"code": code},
 	}); err != nil {
-		// 走到这里的失败都是平台侧的：模板没建、被停用、变量对不上、供应商全挂——手机号和
-		// 参数前面已经校验过。具体原因只进日志，调用方拿通用错误。直接透传的话，模板缺失
+		// 走到这里的失败都是平台侧的——手机号和参数前面已经校验过。不能直接透传：模板缺失
 		// 以 NotFound、被停用以 PermissionDenied 出去，SDK 会把它们归成 ErrUnauthorized，
-		// 业务方的登录页就把"通知中心没配好"显示成了"未授权"。
+		// 业务方的登录页就把"通知中心没配好"显示成了"未授权"。统一换成 Internal，
+		// 但"模板没配好"与"供应商没发出去"分两个码：前者要去控制台配，后者要查供应商。
+		if reason := verifyTemplateProblem(err); reason != "" {
+			slog.Error("验证码模板不可用", "template", VerifyCodeTemplate, "appId", appID, "reason", reason, "err", err)
+			return domain.Failf(domain.ErrInternal, domain.CodeVerifyTemplateUnavailable,
+				"短信验证码模板 %s 未配置好，暂时无法发送验证码", VerifyCodeTemplate).
+				WithField("template", VerifyCodeTemplate).WithField("reason", reason)
+		}
 		slog.Error("登录验证码发送失败", "template", VerifyCodeTemplate, "appId", appID, "err", err)
 		return domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "验证码发送失败，请稍后重试")
 	}
 	return nil
+}
+
+// verifyTemplateProblem 认出"验证码模板本身没配好"的那几种通知中心错误，返回其错误码；
+// 其它失败（供应商全挂、内部错误）返回空串。
+func verifyTemplateProblem(err error) string {
+	var de *domain.Error
+	if !errors.As(err, &de) {
+		return ""
+	}
+	switch de.Code {
+	case domain.CodeNotifyTemplateNotFound, domain.CodeNotifyTemplateDisabled,
+		domain.CodeNotifyParamsInvalid, domain.CodeNotifyProviderMissing:
+		return de.Code
+	}
+	return ""
 }
 
 // Login 执行一次完整登录。
