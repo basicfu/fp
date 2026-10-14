@@ -30,9 +30,9 @@ func (c *PasswordConnector) Type() string { return TypePassword }
 // ConfigSchema 实现 Connector。
 func (c *PasswordConnector) ConfigSchema() []domain.Field {
 	return []domain.Field{
-		{Key: "allowPhone", Label: "允许手机号登录", Type: domain.FieldTypeBool, Default: true},
-		{Key: "allowUsername", Label: "允许用户名登录", Type: domain.FieldTypeBool, Default: true},
-		{Key: "allowEmail", Label: "允许邮箱登录", Type: domain.FieldTypeBool, Default: false},
+		{Key: "allowPhone", Label: "允许用手机号 + 密码登录", Type: domain.FieldTypeBool, Default: true},
+		{Key: "allowUsername", Label: "允许用用户名 + 密码登录", Type: domain.FieldTypeBool, Default: true},
+		{Key: "allowEmail", Label: "允许用邮箱 + 密码登录", Type: domain.FieldTypeBool, Default: false},
 	}
 }
 
