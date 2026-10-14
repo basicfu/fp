@@ -250,7 +250,7 @@ func TestResendAfterAttemptsExhaustedDeliversUsableCode(t *testing.T) {
 	}
 }
 
-// 钉住与通知中心之间的约定：模板 code 是 login_code，收件人是手机号，变量只有 code，
+// 钉住与通知中心之间的约定：模板 code 是 verify_code，收件人是手机号，变量只有 code，
 // 不带幂等键（每次点"发送"都是一次新的尝试，由发码限流兜住重复）。
 func TestSendLoginCodeAsksNotifyCenterForTheLoginTemplate(t *testing.T) {
 	e := newAuthEnv(t)
@@ -262,8 +262,8 @@ func TestSendLoginCodeAsksNotifyCenterForTheLoginTemplate(t *testing.T) {
 		t.Fatalf("发送次数 = %d, want 1", len(sent))
 	}
 	got := sent[0]
-	if got.Code != "login_code" {
-		t.Errorf("模板 code = %q, want login_code", got.Code)
+	if got.Code != "verify_code" {
+		t.Errorf("模板 code = %q, want verify_code", got.Code)
 	}
 	if got.To != "13800138000" || got.AppID != e.app.AppID || got.IdempotencyKey != "" {
 		t.Errorf("请求 = %+v", got)
@@ -349,13 +349,13 @@ func TestSendLoginCodeHidesNotifyCenterFailures(t *testing.T) {
 }
 
 // 真的通知中心 + 假供应商：发码 → 供应商收到 → 用收到的码登录 → 发送记录里有这一条。
-// 钉住 AuthService 与通知模板之间的约定（code 是 login_code，变量是 code）：
+// 钉住 AuthService 与通知模板之间的约定（code 是 verify_code，变量是 code）：
 // 任何一边改了名，这条先红。
 func TestSMSCodeLoginThroughRealNotifyCenter(t *testing.T) {
 	ne := newNotifyEnv(t)
-	ne.smsTemplate(t, service.LoginCodeTemplate)
+	ne.smsTemplate(t, service.VerifyCodeTemplate)
 	pid := ne.provider(t, "fake_sms", "sms1")
-	ne.link(t, service.LoginCodeTemplate, pid, "SMS_LOGIN_1", 0)
+	ne.link(t, service.VerifyCodeTemplate, pid, "SMS_LOGIN_1", 0)
 	auth, appID := newSMSAuth(t, ne, service.NewLoginCodeService(ne.rdb))
 	ctx := context.Background()
 
@@ -380,13 +380,13 @@ func TestSMSCodeLoginThroughRealNotifyCenter(t *testing.T) {
 		t.Fatalf("Login: %v", err)
 	}
 
-	logs, total, err := ne.svc.ListLogs(ctx, service.NotifyLogFilter{Code: service.LoginCodeTemplate})
+	logs, total, err := ne.svc.ListLogs(ctx, service.NotifyLogFilter{Code: service.VerifyCodeTemplate})
 	if err != nil || total != 1 || !logs[0].Success || logs[0].AppID != appID || logs[0].Target != "13800138000" {
 		t.Fatalf("发送记录 = %+v, total = %d, err = %v", logs, total, err)
 	}
 }
 
-// 管理员还没在通知中心建 login_code 模板时，发码失败得是通用错误，而不是 NotFound。
+// 管理员还没在通知中心建 verify_code 模板时，发码失败得是通用错误，而不是 NotFound。
 func TestSendLoginCodeWithoutTemplateInNotifyCenter(t *testing.T) {
 	ne := newNotifyEnv(t)
 	auth, appID := newSMSAuth(t, ne, service.NewLoginCodeService(ne.rdb))

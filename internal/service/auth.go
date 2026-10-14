@@ -11,10 +11,12 @@ import (
 	"github.com/basicfu/fp/internal/domain"
 )
 
-// LoginCodeTemplate 是登录验证码使用的通知模板 code。
+// VerifyCodeTemplate 是验证码短信使用的通知模板 code。
 //
+// 名字不带"登录"：模板内容只有验证码本身，登录之外的身份校验（换绑、找回密码）将来共用这一条，
+// 不必每种用途各建各审一个模板。
 // 控制台「通知中心」里必须有一条同名的 sms 模板，变量只有 code，见 docs/notify.md。
-const LoginCodeTemplate = "login_code"
+const VerifyCodeTemplate = "verify_code"
 
 // LoginCodeSender 是 SendLoginCode 需要的最小发送能力，*NotifyService 满足它。
 type LoginCodeSender interface {
@@ -89,7 +91,7 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 	}
 	if err := s.deps.Notifier.Send(ctx, NotifySendInput{
 		AppID:  app.AppID,
-		Code:   LoginCodeTemplate,
+		Code:   VerifyCodeTemplate,
 		To:     phone,
 		Params: map[string]string{"code": code},
 	}); err != nil {
@@ -97,7 +99,7 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 		// 参数前面已经校验过。具体原因只进日志，调用方拿通用错误。直接透传的话，模板缺失
 		// 以 NotFound、被停用以 PermissionDenied 出去，SDK 会把它们归成 ErrUnauthorized，
 		// 业务方的登录页就把"通知中心没配好"显示成了"未授权"。
-		slog.Error("登录验证码发送失败", "template", LoginCodeTemplate, "appId", appID, "err", err)
+		slog.Error("登录验证码发送失败", "template", VerifyCodeTemplate, "appId", appID, "err", err)
 		return domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "验证码发送失败，请稍后重试")
 	}
 	return nil

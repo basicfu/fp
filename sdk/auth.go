@@ -280,7 +280,7 @@ type LoginResult struct {
 
 // SendLoginCode 给手机号发送登录验证码，之后用 ConnectorType "sms_code" 登录。
 //
-// 验证码经 fp 的通知中心发出，控制台里要先配好 code 为 login_code 的短信模板，
+// 验证码经 fp 的通知中心发出，控制台里要先配好 code 为 verify_code 的短信模板，
 // 见 docs/notify.md。同一手机号 30 秒内只能发 1 条、1 小时 5 条、1 天 10 条，超出得到 ErrRateLimited。
 func (a *Auth) SendLoginCode(ctx context.Context, phone string) error {
 	_, err := a.c.rpc.SendLoginCode(ctx, &fpv1.SendLoginCodeRequest{Phone: phone})

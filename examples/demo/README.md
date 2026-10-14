@@ -166,7 +166,7 @@ TOKEN=<上面拿到的 token>
 
 1. 「通知中心 → 供应商」新建一个 `log` 类型的供应商，`channel` 填 `sms`（只把消息打进 fp 的日志、
    不真发，仅开发环境可用；要真发短信就建 `aliyun` / `zhutong` 供应商）。
-2. 「通知中心 → 模板」新建短信模板，code 填 `login_code`，变量只有 `code`；进模板详情页关联上一步的供应商
+2. 「通知中心 → 模板」新建短信模板，code 填 `verify_code`，变量只有 `code`；进模板详情页关联上一步的供应商
    （供应商侧模板 ID 随便填，`log` 供应商不看它）。
 3. 「应用 → 登录方式」里启用 `sms_code`（或把第 1c 步的 `password` 换成 `sms_code` 再跑一遍）。
 
@@ -179,7 +179,7 @@ curl -s -X POST http://localhost:8090/api/login/code \
 ```
 
 **该看到**：`{"ok":true}`（返回 `503` 说明通知中心还没配好，看 fp 日志里的「登录验证码发送失败」）。验证码不会发到手机上，而是打在 **fp 自己的进程日志**里（不是 demo 的日志），
-形如 `notify[log]: 只记录、不真发……  code=login_code to=13800138000 params=map[code:123456]`。
+形如 `notify[log]: 只记录、不真发……  code=verify_code to=13800138000 params=map[code:123456]`。
 把 6 位验证码抄出来登录；手机号没注册过会自动建号：
 
 ```bash

@@ -46,7 +46,7 @@ func (c *smsCapture) snapshot() (notify.Delivery, int) {
 // TestSMSCodeLoginEndToEnd 走完整链路：SDK → 真实监听的 gRPC 服务 → AuthService → 通知中心 → 供应商，
 // 再用供应商收到的验证码经 SDK 登录。
 //
-// 单元测试各自守着自己那一层；这条守层与层之间的约定：通知模板 code 是 login_code、变量是 code，
+// 单元测试各自守着自己那一层；这条守层与层之间的约定：通知模板 code 是 verify_code、变量是 code，
 // 以及错误经 gRPC 到 SDK 之后归在正确的哨兵上——限流是 ErrRateLimited、手机号格式错是 ErrInvalidArgument，
 // 通知中心没配好是 ErrUnavailable（WriteError 回 503），不能变成 ErrUnauthorized（业务方的登录页会显示"未授权"）。
 func TestSMSCodeLoginEndToEnd(t *testing.T) {
@@ -116,7 +116,7 @@ func TestSMSCodeLoginEndToEnd(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 	const phone = "13800138000"
 
-	// 管理员还没在通知中心建 login_code 模板：发码失败，但不能被当成鉴权失败。
+	// 管理员还没在通知中心建 verify_code 模板：发码失败，但不能被当成鉴权失败。
 	err = client.Auth().SendLoginCode(ctx, phone)
 	var fe *fpsdk.Error
 	if !errors.As(err, &fe) || fe.Code != domain.CodeNotifySendFailed {
@@ -132,18 +132,18 @@ func TestSMSCodeLoginEndToEnd(t *testing.T) {
 		t.Fatalf("WriteError 状态码 = %d, want 503", rec.Code)
 	}
 
-	// 按文档配好：login_code 模板，变量只有 code，关联一个短信供应商。
+	// 按文档配好：verify_code 模板，变量只有 code，关联一个短信供应商。
 	prov, err := notifySvc.CreateProvider(ctx, service.CreateNotifyProviderInput{Type: "capture", Enabled: true, Config: map[string]any{}})
 	if err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
 	if _, err := notifySvc.CreateTemplate(ctx, service.CreateNotifyTemplateInput{
-		Code: service.LoginCodeTemplate, Channel: domain.NotifyChannelSMS, Mode: domain.NotifyModeVendor, Enabled: true,
+		Code: service.VerifyCodeTemplate, Channel: domain.NotifyChannelSMS, Mode: domain.NotifyModeVendor, Enabled: true,
 		Content: domain.NotifyContent{Content: "验证码 ${code}", Variables: []string{"code"}},
 	}); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
-	if err := notifySvc.SetTemplateProvider(ctx, service.LoginCodeTemplate, prov.ID,
+	if err := notifySvc.SetTemplateProvider(ctx, service.VerifyCodeTemplate, prov.ID,
 		service.SetNotifyLinkInput{ProviderTemplateID: "SMS_LOGIN", Enabled: true}); err != nil {
 		t.Fatalf("SetTemplateProvider: %v", err)
 	}

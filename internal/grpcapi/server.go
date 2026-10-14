@@ -114,7 +114,7 @@ func New(d Deps) *Server {
 	configHub := NewConfigHub(d.ConfigPub)
 
 	srv := grpc.NewServer(
-		grpc.UnaryInterceptor(verifier.UnaryInterceptor),
+		grpc.ChainUnaryInterceptor(verifier.UnaryInterceptor, logFailedUnary),
 		grpc.StreamInterceptor(verifier.StreamInterceptor),
 
 		// MinTime 必须**小于**客户端的 keepalive Time，否则服务端会认为

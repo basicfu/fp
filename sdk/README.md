@@ -206,7 +206,7 @@ err = auth.Logout(ctx, token)
 决定（`sms_code` 需要 `phone` + `code`，`password` 需要 `account` + `password`）。
 
 `SendLoginCode` 的验证码经 fp 的通知中心发出：控制台里要先建好 code 为
-`login_code` 的短信模板并关联供应商，见 [通知文档](../docs/notify.md#6-登录验证码)。
+`verify_code` 的短信模板并关联供应商，见 [通知文档](../docs/notify.md#6-登录验证码)。
 同一手机号 30 秒 1 条、1 小时 5 条、1 天 10 条，超出得到 `ErrRateLimited`；
 手机号格式不对得到 `ErrInvalidArgument`；通知中心没配好、供应商全挂得到
 `ErrUnavailable`（同时是带 `NOTIFY_SEND_FAILED` 码的 `*fpsdk.Error`，`WriteError` 回 503，
