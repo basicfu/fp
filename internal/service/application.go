@@ -421,12 +421,28 @@ func (s *ApplicationService) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 // SetConnector 写入或覆盖某个应用的某种登录方式配置。
+//
+// secret 字段收到掩码表示保持原值：控制台读到的就是掩码（见 ListConnectors），
+// 启停开关会把它原样传回来。
 func (s *ApplicationService) SetConnector(ctx context.Context, appID uuid.UUID, connectorType string, enabled bool, config map[string]any) error {
 	if connectorType == "" {
 		return domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "connector 类型不能为空")
 	}
 	if config == nil {
 		config = map[string]any{}
+	}
+	if s.schemas != nil {
+		if fields, ok := s.schemas.Schemas()[connectorType]; ok {
+			var existing map[string]any
+			cur, err := s.GetConnector(ctx, appID, connectorType)
+			switch {
+			case err == nil:
+				existing = cur.Config
+			case !errors.Is(err, domain.ErrNotFound):
+				return err
+			}
+			config = domain.MergeSecrets(fields, config, existing)
+		}
 	}
 	if err := s.validateConnectorConfig(connectorType, config); err != nil {
 		return err
@@ -546,7 +562,10 @@ func (s *ApplicationService) GetConnector(ctx context.Context, appID uuid.UUID, 
 	return &c, nil
 }
 
-// ListConnectors 返回某个应用已配置的全部登录方式。永不返回 nil 切片。
+// ListConnectors 返回某个应用已配置的全部登录方式，供控制台展示：secret 字段已脱敏，
+// 认不出 schema 的类型（已从代码里下线）不返回配置。永不返回 nil 切片。
+//
+// 登录流程读配置走 GetConnector（明文），不走这里。
 func (s *ApplicationService) ListConnectors(ctx context.Context, appID uuid.UUID) ([]domain.ApplicationConnector, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT connector_type, enabled, config
@@ -570,6 +589,7 @@ func (s *ApplicationService) ListConnectors(ctx context.Context, appID uuid.UUID
 		if err := json.Unmarshal(raw, &c.Config); err != nil {
 			return nil, fmt.Errorf("service: 解析 connector 配置: %w", err)
 		}
+		c.Config = s.maskConnectorConfig(c.Type, c.Config)
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -674,4 +694,15 @@ func (s *ApplicationService) SetIMConfig(ctx context.Context, id uuid.UUID, cfg 
 		}
 	}
 	return app, nil
+}
+
+func (s *ApplicationService) maskConnectorConfig(connectorType string, config map[string]any) map[string]any {
+	if s.schemas == nil {
+		return map[string]any{}
+	}
+	fields, ok := s.schemas.Schemas()[connectorType]
+	if !ok {
+		return map[string]any{}
+	}
+	return domain.MaskSecrets(fields, config)
 }

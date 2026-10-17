@@ -805,3 +805,36 @@ func TestCreateKeepsAppIDAndCodeDisjoint(t *testing.T) {
 		t.Fatalf("code 等于现存 app_id err = %v, want ErrConflict", err)
 	}
 }
+
+// 控制台读到的 secret 是掩码；把掩码原样写回（启停开关就是这么做的）不能把真值冲掉。
+func TestConnectorSecretMaskedAndPreserved(t *testing.T) {
+	schemas := stubSchemas{"wx": {
+		{Key: "appId", Type: domain.FieldTypeString, Required: true},
+		{Key: "appSecret", Type: domain.FieldTypeSecret, Required: true},
+	}}
+	svc := service.NewApplicationService(testsupport.NewTestDB(t), schemas)
+	ctx := context.Background()
+	app, _, err := svc.Create(ctx, "A", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetConnector(ctx, app.ID, "wx", false, map[string]any{"appId": "id1", "appSecret": "real"}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := svc.ListConnectors(ctx, app.ID)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list = %v, err = %v", list, err)
+	}
+	if got := list[0].Config["appSecret"]; got != domain.SecretMask {
+		t.Fatalf("appSecret 读出 %v, want 掩码", got)
+	}
+
+	if err := svc.SetConnector(ctx, app.ID, "wx", true, list[0].Config); err != nil {
+		t.Fatalf("回传掩码: %v", err)
+	}
+	cur, err := svc.GetConnector(ctx, app.ID, "wx")
+	if err != nil || cur.Config["appSecret"] != "real" || !cur.Enabled {
+		t.Fatalf("cur = %+v, err = %v", cur, err)
+	}
+}

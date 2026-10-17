@@ -139,6 +139,21 @@ const (
 	// NOTIFY_SEND_FAILED（模板配好了但供应商没发出去）是三件要去三个地方处理的事，所以各占一个码。
 	CodeVerifyTemplateUnavailable = "VERIFY_TEMPLATE_UNAVAILABLE"
 
+	// 三方扫码登录（微信网站应用等）。
+
+	// CodeOAuthStateInvalid：登录会话不存在、已过期，或不属于调用方应用。用户需要重新发起登录。
+	CodeOAuthStateInvalid = "OAUTH_STATE_INVALID"
+	// CodeOAuthTicketInvalid：fpTicket 或 bindTicket 无效、过期或已用过。
+	CodeOAuthTicketInvalid = "OAUTH_TICKET_INVALID"
+	// CodeReturnURLNotAllowed：网页端回跳地址不在该登录方式配置的白名单里。
+	CodeReturnURLNotAllowed = "RETURN_URL_NOT_ALLOWED"
+	// CodeDesktopModeDisabled：该应用既没配桌面协议也没开桌面轮询，不接受 desktop 模式。
+	CodeDesktopModeDisabled = "DESKTOP_MODE_DISABLED"
+	// CodeWechatUpstreamFailed：调微信接口失败（code 失效、AppSecret 配错、微信不可达）。
+	CodeWechatUpstreamFailed = "WECHAT_UPSTREAM_FAILED"
+	// CodePublicURLMissing：系统配置没填 public_url，拼不出微信回调地址。
+	CodePublicURLMissing = "PUBLIC_URL_MISSING"
+
 	// CodeRouteNotFound 是路由层的 404：请求的 HTTP 路径不存在。
 	// 与"资源不存在"那一组不同——它意味着调用方把 URL 写错了，
 	// 而不是某个 id 查不到。
@@ -229,6 +244,13 @@ var codeSentinels = map[string]error{
 	CodeNotifySendFailed:        ErrInternal,
 	// 平台侧没配好，不是调用方的错：归 Internal，SDK 才会把它当"暂不可用"而不是"未授权"。
 	CodeVerifyTemplateUnavailable: ErrInternal,
+
+	CodeOAuthStateInvalid:    ErrInvalidCredential,
+	CodeOAuthTicketInvalid:   ErrInvalidCredential,
+	CodeReturnURLNotAllowed:  ErrInvalidArgument,
+	CodeDesktopModeDisabled:  ErrForbidden,
+	CodeWechatUpstreamFailed: ErrInternal,
+	CodePublicURLMissing:     ErrInternal,
 
 	CodeInternal: ErrInternal,
 }

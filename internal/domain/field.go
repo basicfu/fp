@@ -10,10 +10,8 @@ const (
 	// FieldTypeSecret 与 string 相同，但控制台读取时脱敏显示（MaskSecrets），
 	// 写回时收到 SecretMask 表示保持原值（MergeSecrets）。
 	//
-	// 落库**不加密**，与访问密钥的 SK 同一先例（docs/access-key.md）。目前只有通知供应商
-	// 的配置走了这套脱敏；登录方式的 application_connector.config 仍是明文进出，
-	// 新增带 secret 字段的 connector 之前要先把脱敏接上，否则 secret 会明文出现在
-	// GET /admin/api/applications/{id}/connectors 的响应里。
+	// 落库**不加密**，与访问密钥的 SK 同一先例（docs/access-key.md）。通知供应商与登录方式的配置
+	// 都走这套脱敏。
 	FieldTypeSecret FieldType = "secret"
 )
 

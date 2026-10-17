@@ -204,3 +204,15 @@ func TestToYAMLNoLongerEmitsSMS(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePublicURL(t *testing.T) {
+	cfg, err := Parse("public_url: https://fp.example.com/\n", "DEV")
+	if err != nil || cfg.PublicURL != "https://fp.example.com" {
+		t.Fatalf("PublicURL = %q, err = %v", cfg.PublicURL, err)
+	}
+	for _, bad := range []string{"fp.example.com", "ftp://fp.example.com", "https://fp.example.com/?a=1"} {
+		if _, err := Parse("public_url: "+bad+"\n", "DEV"); err == nil {
+			t.Errorf("public_url %q 应当被拒绝", bad)
+		}
+	}
+}

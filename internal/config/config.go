@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -29,6 +30,9 @@ type Config struct {
 	HTTP           Listen         `yaml:"http"` // 管理控制台
 	GRPC           Listen         `yaml:"grpc"` // SDK 接入
 	BootstrapAdmin BootstrapAdmin `yaml:"bootstrap_admin"`
+	// PublicURL 是 fp 对公网的地址（如 https://fp.example.com），三方扫码登录用它拼回调地址。
+	// 微信开放平台的「授权回调域」要填它的域名。不用扫码登录可以不填。
+	PublicURL string `yaml:"public_url"`
 	// LegacySMS 只为兼容：Parse 开着 KnownFields(true)，而存量系统配置的第一版是
 	// seedDefaultsYAML 把默认值整份写进去的，里面带着 sms: 段。直接删字段会让这些
 	// 库启动时解析失败；版本快照又不允许改写。读进来、丢掉；omitempty 保证 ToYAML
@@ -82,12 +86,16 @@ func Parse(yamlText string, env string) (*Config, error) {
 	// decodeJSON 开 DisallowUnknownFields 同一条纪律。
 	dec.KnownFields(true)
 	// 空文本解码返回 io.EOF，不是错误——它只是"什么都没覆盖"。
-	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
+	var err error
+	if err = dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("config: 解析系统配置: %w", err)
 	}
 	// 旧 sms 段读进来只是为了过 KnownFields；不丢掉的话，ToYAML 会把其中
 	// 的 access_key_secret 原样写回库里。
 	c.LegacySMS = nil
+	if c.PublicURL, err = normalizePublicURL(c.PublicURL); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -113,4 +121,17 @@ func ToYAML(c *Config) (string, error) {
 		return "", fmt.Errorf("config: 序列化默认配置: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// normalizePublicURL 去掉末尾的 /（之后直接拼 "/oauth/callback"），要求是 http(s) 绝对地址、不带查询串和锚点。
+func normalizePublicURL(raw string) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("config: public_url 必须形如 https://fp.example.com，收到 %q", raw)
+	}
+	return raw, nil
 }
