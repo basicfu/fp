@@ -63,6 +63,8 @@ type EnsureIdentityInput struct {
 	Credential string
 	// Nickname 仅在需要新建用户时用作初始昵称。
 	Nickname string
+	// AvatarURL 仅在需要新建用户时用作初始头像（三方头像地址）。
+	AvatarURL string
 }
 
 func (in EnsureIdentityInput) validate() error {
@@ -162,7 +164,7 @@ func (s *UserService) ensureOnce(ctx context.Context, in EnsureIdentityInput) (*
 	// 规则 3：新建用户
 	if userID == uuid.Nil {
 		row := tx.QueryRow(ctx,
-			`INSERT INTO app_user (nickname) VALUES ($1) RETURNING `+userColumns, in.Nickname)
+			`INSERT INTO app_user (nickname, avatar_url) VALUES ($1, $2) RETURNING `+userColumns, in.Nickname, in.AvatarURL)
 		u, err := scanUser(row)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("service: 创建用户: %w", err)
