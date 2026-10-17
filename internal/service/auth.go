@@ -36,6 +36,10 @@ type AuthDeps struct {
 	// Authz 解析用户在本应用的有效角色，签发会话时刻进去。
 	// 可为 nil——授权模块未启用时会话不带角色，判定一律拒绝（默认拒绝）。
 	Authz *AuthzService
+	// OAuth 存三方扫码登录的 state 会话与票据；PublicURL 是 fp 的公网地址，拼回调用。
+	// 不用扫码登录的部署（含大部分测试）可以不给。
+	OAuth     *OAuthStore
+	PublicURL string
 }
 
 // AuthService 编排登录流程。它是唯一知道"登录该按什么顺序发生"的地方：
@@ -75,7 +79,8 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 	if err != nil {
 		return err
 	}
-	if _, err := s.enabledConnector(ctx, app, connector.TypeSMSCode); err != nil {
+	// 三方扫码登录首次要绑手机号，也要发码：只开了微信、没开短信登录的应用同样能发。
+	if _, err := s.enabledConnector(ctx, app, connector.TypeSMSCode); err != nil && !s.phoneBindingEnabled(ctx, app) {
 		return err
 	}
 	if connector.DetectIdentityType(phone) != domain.IdentityTypePhone {
@@ -152,7 +157,13 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		s.logFailure(ctx, app, in, result.IdentityType, result.Subject, err)
 		return nil, err
 	}
+	return s.completeLogin(ctx, app, in, result, user, identity, created, "")
+}
 
+// completeLogin 是凭据已经验过、用户已经确定之后的那一段：状态检查、注册来源、签发会话、审计。
+// 密码 / 短信登录与三方扫码登录共用它。note 非空时写进成功记录的 reason（如微信换绑）。
+func (s *AuthService) completeLogin(ctx context.Context, app *domain.Application, in LoginInput, result *connector.Result,
+	user *domain.User, identity *domain.Identity, created bool, note string) (*LoginResult, error) {
 	if !user.CanLogin() {
 		err := accountUnavailableError(user)
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
@@ -190,6 +201,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 	// 让人登不进去更合理——后者会把一个授权模块的故障放大成完全不可用。
 	var roles []string
 	if s.deps.Authz != nil {
+		var err error
 		roles, err = s.deps.Authz.EffectiveRoles(ctx, user.ID, app.ID)
 		if err != nil {
 			slog.Error("service: 解析用户角色失败，本次会话不带角色", "err", err,
@@ -217,7 +229,8 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		IdentityType: result.IdentityType,
 		Subject:      MaskSubject(result.IdentityType, result.Subject),
 		Event:        domain.LoginEventLogin, Success: true,
-		IP: in.IP, UA: in.UA, SessionID: sess.ID,
+		Reason: note,
+		IP:     in.IP, UA: in.UA, SessionID: sess.ID,
 	})
 
 	return &LoginResult{User: user, Session: sess}, nil
