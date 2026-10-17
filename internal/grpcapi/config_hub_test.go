@@ -78,16 +78,29 @@ func TestConfigHubDropsSaturatedSubscriber(t *testing.T) {
 		signals <- store.ConfigSignal{AppID: appID, Type: domain.ConfigTypeDefault, Seq: int64(i)}
 	}
 
-	deadline := time.After(2 * time.Second)
+	// 等 hub 自己把订阅者摘掉之后才读 ch：边推边读会腾出缓冲，读得够快时缓冲永远不满，
+	// 订阅者也就永远不会被摘，测试因此时灵时不灵。
+	deadline := time.Now().Add(2 * time.Second)
 	for {
-		select {
-		case _, ok := <-ch:
-			if !ok {
-				return // channel 已关闭，正是期望
-			}
-		case <-deadline:
+		h.mu.RLock()
+		n := len(h.subs)
+		h.mu.RUnlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
 			t.Fatal("缓冲满之后订阅者仍未被摘掉")
 		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 摘除时 channel 与删表在同一把锁里完成，这里能读完缓冲里的事件并看到关闭。
+	got := 0
+	for range ch {
+		got++
+	}
+	if got != configBufferSize {
+		t.Fatalf("关闭前缓冲里有 %d 条事件，期望 %d", got, configBufferSize)
 	}
 }
 
