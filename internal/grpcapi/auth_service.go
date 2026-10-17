@@ -146,11 +146,7 @@ func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.L
 	if err != nil {
 		return nil, StatusFrom(err)
 	}
-	return &fpv1.LoginResponse{
-		Token:     res.Session.Token,
-		SessionId: res.Session.ID,
-		User:      userInfo(res.User),
-	}, nil
+	return loginResponse(res), nil
 }
 
 func (s *authServer) Logout(ctx context.Context, req *fpv1.LogoutRequest) (*fpv1.LogoutResponse, error) {

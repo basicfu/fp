@@ -54,7 +54,7 @@ func resolveBootstrapAdmin(cfg config.BootstrapAdmin) config.BootstrapAdmin {
 // ok=false，调用方不该覆盖管理员可能已经改过的内容。
 //
 // 拆成纯函数是为了不经过真实数据库也能测——真正的写库动作
-//（SystemConfigService.Save）留在 run() 里，那一步本身不值得单独测，
+// （SystemConfigService.Save）留在 run() 里，那一步本身不值得单独测，
 // service 层已经测过 Save 自己的行为。
 func seedDefaultsYAML(cur domain.SystemConfig, cfg *config.Config) (yamlText string, ok bool, err error) {
 	if cur.Seq != 0 {
@@ -149,6 +149,9 @@ func run() error {
 	if err := registry.Register(connector.NewSMSCode(loginCodes)); err != nil {
 		return err
 	}
+	if err := registry.Register(connector.NewWechatWeb()); err != nil {
+		return err
+	}
 
 	appSvc := service.NewApplicationService(pool, registry, service.WithIMConfigPublisher(configPub))
 
@@ -178,14 +181,16 @@ func run() error {
 	notifySvc := service.NewNotifyService(pool, rdb, notify.DefaultRegistry(), service.WithNotifyProd(cfg.IsProd()))
 
 	authSvc := service.NewAuthService(service.AuthDeps{
-		Apps:     appSvc,
-		Users:    userSvc,
-		Sessions: sessionSvc,
-		Logs:     logSvc,
-		Registry: registry,
-		Codes:    loginCodes,
-		Notifier: notifySvc,
-		Authz:    authzSvc,
+		Apps:      appSvc,
+		Users:     userSvc,
+		Sessions:  sessionSvc,
+		Logs:      logSvc,
+		Registry:  registry,
+		Codes:     loginCodes,
+		Notifier:  notifySvc,
+		Authz:     authzSvc,
+		OAuth:     service.NewOAuthStore(rdb),
+		PublicURL: cfg.PublicURL,
 	})
 
 	httpSrv := &http.Server{
@@ -204,6 +209,7 @@ func run() error {
 			IMCreds:       imCredSvc,
 			AccessKeys:    accessKeySvc,
 			Notify:        notifySvc,
+			Auth:          authSvc,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
 			Console:       web.Dist(),

@@ -97,7 +97,9 @@ func TestCreateUserOverHTTP(t *testing.T) {
 	// 密码却没真的落到能通过校验的那条路径上。
 	listRec := do(t, h, token, http.MethodGet, "/admin/api/users?keyword=13800138000", "")
 	var list struct {
-		Items []struct{ ID string `json:"id"` } `json:"items"`
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
 	}
 	decode(t, listRec, &list)
 	if len(list.Items) != 1 || list.Items[0].ID != u.ID {

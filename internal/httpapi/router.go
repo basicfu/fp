@@ -32,6 +32,8 @@ type Deps struct {
 	AccessKeys *service.AccessKeyService
 	// Notify 管理通知的供应商、模板与发送记录。为 nil 时整组路由不挂载。
 	Notify *service.NotifyService
+	// Auth 处理三方扫码登录的回调（GET /oauth/callback，对公网）。为 nil 时不挂载。
+	Auth *service.AuthService
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -49,7 +51,7 @@ type Deps struct {
 // NewRouter 装配管理 UI 的 HTTP 路由。
 //
 // 这套 API 只服务管理控制台。SDK 走 gRPC（计划二），终端用户的登录接口
-// 在第一阶段也由 SDK 代理，fp 暂不直接对终端用户暴露 HTTP。
+// 由 SDK 代理。唯一直接面向终端用户浏览器的是三方扫码登录的回调 /oauth/callback。
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -82,6 +84,10 @@ func NewRouter(d Deps) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
+	if d.Auth != nil {
+		r.Get(service.OAuthCallbackPath, oauthCallback(d.Auth))
+	}
 
 	r.Route("/admin/api", func(r chi.Router) {
 		// API 的 404 必须是 JSON。少了这行，chi 会用它默认的纯文本 404，

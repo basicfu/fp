@@ -17,6 +17,19 @@ service AuthService {
   // Login 用某种登录方式的凭据换取会话 token。
   rpc Login(LoginRequest) returns (LoginResponse);
 
+  // StartOAuthLogin 发起一次三方扫码登录（微信网站应用等），返回授权页地址。
+  // 用法见 docs/wechat-login.md。
+  rpc StartOAuthLogin(StartOAuthLoginRequest) returns (StartOAuthLoginResponse);
+
+  // ExchangeOAuthTicket 用回调交付的一次性 fpTicket 换结论（网页端、桌面端自定义协议）。
+  rpc ExchangeOAuthTicket(ExchangeOAuthTicketRequest) returns (ExchangeOAuthTicketResponse);
+
+  // PollOAuthLogin 是桌面端按 state 轮询，只对应用开启了轮询时以 desktop 模式发起的 state 有效。
+  rpc PollOAuthLogin(PollOAuthLoginRequest) returns (PollOAuthLoginResponse);
+
+  // BindPhoneLogin 用绑手机票据加短信验证码完成首次扫码登录。发码用 SendLoginCode。
+  rpc BindPhoneLogin(BindPhoneLoginRequest) returns (BindPhoneLoginResponse);
+
   // Logout 撤销一个 token。
   rpc Logout(LogoutRequest) returns (LogoutResponse);
 
@@ -75,6 +88,80 @@ message LoginResponse {
   UserInfo user = 2;
   // session_id 是会话标识，token 轮换时不变。
   string session_id = 3;
+}
+
+// StartOAuthLoginRequest 是一次扫码登录的发起。
+message StartOAuthLoginRequest {
+  // connector_type 是扫码登录方式，例如 "wechat_web"。
+  string connector_type = 1;
+  // mode 取 "web"（网页、桌面内嵌 webview）或 "desktop"（桌面 App 拉起系统浏览器）。
+  string mode = 2;
+  // return_url 仅 web 模式：登录完成后浏览器回到的业务页面，必须在该登录方式的回跳白名单里。
+  string return_url = 3;
+}
+
+// StartOAuthLoginResponse 是发起结果。跳转 auth_url，或拿后三项嵌入官方登录组件。
+message StartOAuthLoginResponse {
+  string state = 1;
+  string auth_url = 2;
+  // provider_app_id 是三方平台上的应用标识（微信 AppID）。
+  string provider_app_id = 3;
+  string redirect_uri = 4;
+  int64 expires_in_sec = 5;
+}
+
+// OAuthLoginResult 是换票据 / 轮询的结论。
+message OAuthLoginResult {
+  // status 取 SUCCESS / BIND_PHONE / PENDING / CANCELLED / FAILED。
+  // 用字符串而不是 enum：将来新增结论时老 SDK 能原样透传。
+  string status = 1;
+  // login 仅 SUCCESS。
+  LoginResponse login = 2;
+  // bind_ticket、nickname、avatar_url 仅 BIND_PHONE：昵称头像供绑手机页面展示。
+  string bind_ticket = 3;
+  string nickname = 4;
+  string avatar_url = 5;
+}
+
+// ExchangeOAuthTicketRequest 用 fpTicket 换结论。ip / user_agent / mobile 同 LoginRequest。
+message ExchangeOAuthTicketRequest {
+  string ticket = 1;
+  string ip = 2;
+  string user_agent = 3;
+  bool mobile = 4;
+}
+
+// ExchangeOAuthTicketResponse 是换票据结果。
+message ExchangeOAuthTicketResponse {
+  OAuthLoginResult result = 1;
+}
+
+// PollOAuthLoginRequest 按 state 轮询。ip / user_agent / mobile 同 LoginRequest。
+message PollOAuthLoginRequest {
+  string state = 1;
+  string ip = 2;
+  string user_agent = 3;
+  bool mobile = 4;
+}
+
+// PollOAuthLoginResponse 是轮询结果。
+message PollOAuthLoginResponse {
+  OAuthLoginResult result = 1;
+}
+
+// BindPhoneLoginRequest 是一次绑手机登录。ip / user_agent / mobile 同 LoginRequest。
+message BindPhoneLoginRequest {
+  string bind_ticket = 1;
+  string phone = 2;
+  string code = 3;
+  string ip = 4;
+  string user_agent = 5;
+  bool mobile = 6;
+}
+
+// BindPhoneLoginResponse 是绑手机登录成功的结果。
+message BindPhoneLoginResponse {
+  LoginResponse login = 1;
 }
 
 // UserInfo 是用户的基本资料。

@@ -21,6 +21,10 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	AuthService_SendLoginCode_FullMethodName        = "/fp.v1.AuthService/SendLoginCode"
 	AuthService_Login_FullMethodName                = "/fp.v1.AuthService/Login"
+	AuthService_StartOAuthLogin_FullMethodName      = "/fp.v1.AuthService/StartOAuthLogin"
+	AuthService_ExchangeOAuthTicket_FullMethodName  = "/fp.v1.AuthService/ExchangeOAuthTicket"
+	AuthService_PollOAuthLogin_FullMethodName       = "/fp.v1.AuthService/PollOAuthLogin"
+	AuthService_BindPhoneLogin_FullMethodName       = "/fp.v1.AuthService/BindPhoneLogin"
 	AuthService_Logout_FullMethodName               = "/fp.v1.AuthService/Logout"
 	AuthService_ValidateToken_FullMethodName        = "/fp.v1.AuthService/ValidateToken"
 	AuthService_Watch_FullMethodName                = "/fp.v1.AuthService/Watch"
@@ -43,6 +47,15 @@ type AuthServiceClient interface {
 	SendLoginCode(ctx context.Context, in *SendLoginCodeRequest, opts ...grpc.CallOption) (*SendLoginCodeResponse, error)
 	// Login 用某种登录方式的凭据换取会话 token。
 	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error)
+	// StartOAuthLogin 发起一次三方扫码登录（微信网站应用等），返回授权页地址。
+	// 用法见 docs/wechat-login.md。
+	StartOAuthLogin(ctx context.Context, in *StartOAuthLoginRequest, opts ...grpc.CallOption) (*StartOAuthLoginResponse, error)
+	// ExchangeOAuthTicket 用回调交付的一次性 fpTicket 换结论（网页端、桌面端自定义协议）。
+	ExchangeOAuthTicket(ctx context.Context, in *ExchangeOAuthTicketRequest, opts ...grpc.CallOption) (*ExchangeOAuthTicketResponse, error)
+	// PollOAuthLogin 是桌面端按 state 轮询，只对应用开启了轮询时以 desktop 模式发起的 state 有效。
+	PollOAuthLogin(ctx context.Context, in *PollOAuthLoginRequest, opts ...grpc.CallOption) (*PollOAuthLoginResponse, error)
+	// BindPhoneLogin 用绑手机票据加短信验证码完成首次扫码登录。发码用 SendLoginCode。
+	BindPhoneLogin(ctx context.Context, in *BindPhoneLoginRequest, opts ...grpc.CallOption) (*BindPhoneLoginResponse, error)
 	// Logout 撤销一个 token。
 	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
 	// ValidateToken 是 SDK 回源校验的入口。
@@ -87,6 +100,46 @@ func (c *authServiceClient) Login(ctx context.Context, in *LoginRequest, opts ..
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(LoginResponse)
 	err := c.cc.Invoke(ctx, AuthService_Login_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *authServiceClient) StartOAuthLogin(ctx context.Context, in *StartOAuthLoginRequest, opts ...grpc.CallOption) (*StartOAuthLoginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartOAuthLoginResponse)
+	err := c.cc.Invoke(ctx, AuthService_StartOAuthLogin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *authServiceClient) ExchangeOAuthTicket(ctx context.Context, in *ExchangeOAuthTicketRequest, opts ...grpc.CallOption) (*ExchangeOAuthTicketResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExchangeOAuthTicketResponse)
+	err := c.cc.Invoke(ctx, AuthService_ExchangeOAuthTicket_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *authServiceClient) PollOAuthLogin(ctx context.Context, in *PollOAuthLoginRequest, opts ...grpc.CallOption) (*PollOAuthLoginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PollOAuthLoginResponse)
+	err := c.cc.Invoke(ctx, AuthService_PollOAuthLogin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *authServiceClient) BindPhoneLogin(ctx context.Context, in *BindPhoneLoginRequest, opts ...grpc.CallOption) (*BindPhoneLoginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BindPhoneLoginResponse)
+	err := c.cc.Invoke(ctx, AuthService_BindPhoneLogin_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +232,15 @@ type AuthServiceServer interface {
 	SendLoginCode(context.Context, *SendLoginCodeRequest) (*SendLoginCodeResponse, error)
 	// Login 用某种登录方式的凭据换取会话 token。
 	Login(context.Context, *LoginRequest) (*LoginResponse, error)
+	// StartOAuthLogin 发起一次三方扫码登录（微信网站应用等），返回授权页地址。
+	// 用法见 docs/wechat-login.md。
+	StartOAuthLogin(context.Context, *StartOAuthLoginRequest) (*StartOAuthLoginResponse, error)
+	// ExchangeOAuthTicket 用回调交付的一次性 fpTicket 换结论（网页端、桌面端自定义协议）。
+	ExchangeOAuthTicket(context.Context, *ExchangeOAuthTicketRequest) (*ExchangeOAuthTicketResponse, error)
+	// PollOAuthLogin 是桌面端按 state 轮询，只对应用开启了轮询时以 desktop 模式发起的 state 有效。
+	PollOAuthLogin(context.Context, *PollOAuthLoginRequest) (*PollOAuthLoginResponse, error)
+	// BindPhoneLogin 用绑手机票据加短信验证码完成首次扫码登录。发码用 SendLoginCode。
+	BindPhoneLogin(context.Context, *BindPhoneLoginRequest) (*BindPhoneLoginResponse, error)
 	// Logout 撤销一个 token。
 	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
 	// ValidateToken 是 SDK 回源校验的入口。
@@ -214,6 +276,18 @@ func (UnimplementedAuthServiceServer) SendLoginCode(context.Context, *SendLoginC
 }
 func (UnimplementedAuthServiceServer) Login(context.Context, *LoginRequest) (*LoginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Login not implemented")
+}
+func (UnimplementedAuthServiceServer) StartOAuthLogin(context.Context, *StartOAuthLoginRequest) (*StartOAuthLoginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartOAuthLogin not implemented")
+}
+func (UnimplementedAuthServiceServer) ExchangeOAuthTicket(context.Context, *ExchangeOAuthTicketRequest) (*ExchangeOAuthTicketResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExchangeOAuthTicket not implemented")
+}
+func (UnimplementedAuthServiceServer) PollOAuthLogin(context.Context, *PollOAuthLoginRequest) (*PollOAuthLoginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PollOAuthLogin not implemented")
+}
+func (UnimplementedAuthServiceServer) BindPhoneLogin(context.Context, *BindPhoneLoginRequest) (*BindPhoneLoginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindPhoneLogin not implemented")
 }
 func (UnimplementedAuthServiceServer) Logout(context.Context, *LogoutRequest) (*LogoutResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Logout not implemented")
@@ -289,6 +363,78 @@ func _AuthService_Login_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AuthServiceServer).Login(ctx, req.(*LoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuthService_StartOAuthLogin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartOAuthLoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).StartOAuthLogin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_StartOAuthLogin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).StartOAuthLogin(ctx, req.(*StartOAuthLoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuthService_ExchangeOAuthTicket_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExchangeOAuthTicketRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).ExchangeOAuthTicket(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_ExchangeOAuthTicket_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).ExchangeOAuthTicket(ctx, req.(*ExchangeOAuthTicketRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuthService_PollOAuthLogin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PollOAuthLoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).PollOAuthLogin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_PollOAuthLogin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).PollOAuthLogin(ctx, req.(*PollOAuthLoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuthService_BindPhoneLogin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BindPhoneLoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).BindPhoneLogin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_BindPhoneLogin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).BindPhoneLogin(ctx, req.(*BindPhoneLoginRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -422,6 +568,22 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Login",
 			Handler:    _AuthService_Login_Handler,
+		},
+		{
+			MethodName: "StartOAuthLogin",
+			Handler:    _AuthService_StartOAuthLogin_Handler,
+		},
+		{
+			MethodName: "ExchangeOAuthTicket",
+			Handler:    _AuthService_ExchangeOAuthTicket_Handler,
+		},
+		{
+			MethodName: "PollOAuthLogin",
+			Handler:    _AuthService_PollOAuthLogin_Handler,
+		},
+		{
+			MethodName: "BindPhoneLogin",
+			Handler:    _AuthService_BindPhoneLogin_Handler,
 		},
 		{
 			MethodName: "Logout",
