@@ -12,6 +12,7 @@ import type { ConnectorConfig, ConnectorSchema } from '@/lib/types'
 const typeLabels: Record<string, string> = {
   password: '密码登录',
   sms_code: '短信验证码登录',
+  wechat_web: '微信扫码登录',
 }
 
 export default function ConnectorsPanel({ appId }: { appId: string }) {

@@ -215,39 +215,45 @@ func WriteError(w http.ResponseWriter, err error) {
 		return
 	}
 
+	status, text := classifyError(err)
+	http.Error(w, text, status)
+}
+
+// classifyError 是 WriteError 与 OAuthHandler 共用的状态码分类，理由见 WriteError 各分支。
+func classifyError(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrNoToken), errors.Is(err, ErrUnauthorized):
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return http.StatusUnauthorized, "unauthorized"
 	case errors.Is(err, ErrUnavailable):
 		// 503 而不是 401：认证服务不可用不是"你没通过认证"。
 		// 回 401 会让客户端清掉一个其实完全有效的 token，把一次
 		// fp 抖动放大成全体用户重新登录。
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return http.StatusServiceUnavailable, "service unavailable"
 	case errors.Is(err, ErrInvalidArgument):
 		// 400：请求本身没法处理（手机号格式错、验证码格式错），不是
 		// 凭据问题。回 401 会让客户端误以为要清会话/跳登录页，而用户
 		// 可能只是手机号少打了一位。
-		http.Error(w, "bad request", http.StatusBadRequest)
+		return http.StatusBadRequest, "bad request"
 	case errors.Is(err, ErrRateLimited):
 		// 429：被服务端限流（验证码发送过于频繁），用户的凭据没有任何
 		// 问题，同样不该被当成鉴权失败。
-		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return http.StatusTooManyRequests, "too many requests"
 	case errors.Is(err, ErrForbidden):
 		// 403：凭据本身有效，但不被允许（访问密钥已停用/已过期、来源 IP
 		// 不在白名单）。不是"你是谁没验证"，是"你是谁我知道，但不让进"。
-		http.Error(w, "forbidden", http.StatusForbidden)
+		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, ErrNotFound):
 		// 404：用户或头像不存在。落进 default 回 401 的话，一张被换掉的旧头像地址会让客户端
 		// 以为登录态失效。
-		http.Error(w, "not found", http.StatusNotFound)
+		return http.StatusNotFound, "not found"
 	case errors.Is(err, ErrBodyTooLarge):
 		// 413：签名请求的 body 超过 Options.MaxSignedBodyBytes。
-		http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
+		return http.StatusRequestEntityTooLarge, "request entity too large"
 	default:
 		// 服务端返回了一个 SDK 还没有对应哨兵错误的 gRPC code——保守
 		// 起见按拒绝处理，而不是放行一个无法归类的错误。这不是"正常
 		// 路径"，出现意味着 SDK 的哨兵词汇表需要再扩充一条。
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return http.StatusUnauthorized, "unauthorized"
 	}
 }
 

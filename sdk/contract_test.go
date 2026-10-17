@@ -90,6 +90,11 @@ func TestAuthServiceSurface(t *testing.T) {
 		// 访问密钥：取校验材料、上报使用时间。
 		"GetAccessKey":         {false, false},
 		"ReportAccessKeyUsage": {false, false},
+		// 三方扫码登录：发起、换票据、轮询、绑手机。
+		"StartOAuthLogin":     {false, false},
+		"ExchangeOAuthTicket": {false, false},
+		"PollOAuthLogin":      {false, false},
+		"BindPhoneLogin":      {false, false},
 	}
 
 	methods := svc.Methods()

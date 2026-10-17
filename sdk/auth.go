@@ -299,7 +299,7 @@ func (a *Auth) Login(ctx context.Context, in LoginInput) (*LoginResult, error) {
 	if err != nil {
 		return nil, translate(err)
 	}
-	return &LoginResult{Token: res.GetToken(), SessionID: res.GetSessionId(), User: res.GetUser()}, nil
+	return loginResultFrom(res), nil
 }
 
 // Logout 撤销一个 token，并立即清掉本地缓存。

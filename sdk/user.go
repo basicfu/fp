@@ -74,7 +74,7 @@ type UserProfile struct {
 
 // UserIdentity 是用户的一个登录标识。
 type UserIdentity struct {
-	// Type 取 phone / username / email / wechat_mp。
+	// Type 取 phone / username / email / wechat_mp / wechat_web。
 	Type    string
 	Subject string
 	// LastLoginAt 是最后一次用它登录的时间，从未用过时是零值（IsZero）。

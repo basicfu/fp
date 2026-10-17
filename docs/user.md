@@ -40,7 +40,7 @@ img, contentType, err := u.Avatar(ctx, hash)                       // 按哈希�
 | `Gender` | `MALE`（`fpsdk.GenderMale`）/ `FEMALE`（`fpsdk.GenderFemale`），空串表示未设置。修改时 `UserUpdate.Gender` 指向空串即清空 |
 | `Status` | `ACTIVE` / `FROZEN` / `PENDING_DELETE` / `DELETED` |
 | `HasPassword` | 是否设过密码。密码哈希与第三方凭据永不返回 |
-| `Identities` | 全部登录标识：`Type`（`phone` / `username` / `email` / `wechat_mp`）、`Subject`、`LastLoginAt`（从未用它登录过时是零值） |
+| `Identities` | 全部登录标识：`Type`（`phone` / `username` / `email` / `wechat_mp` / `wechat_web`）、`Subject`、`LastLoginAt`（从未用它登录过时是零值） |
 | `CreatedAt` / `UpdatedAt` | 注册时间、资料最后修改时间 |
 | `RegisteredAppID` | 注册来源应用的 `app_id`，见第 5 节 |
 

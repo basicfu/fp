@@ -213,6 +213,19 @@ err = auth.Logout(ctx, token)
 模板配好了但供应商全挂是 `NOTIFY_SEND_FAILED`。后两个同时满足 `ErrUnavailable`
 （`WriteError` 回 503），具体原因在 fp 的日志里。
 
+### 微信扫码登录
+
+网页端和桌面 App 都可以用。挂一个 Handler 就能得到全部后端接口（发起、换票据、轮询、发码、绑手机）：
+
+```go
+mux.Handle("/auth/wechat/", client.Auth().OAuthHandler(fpsdk.OAuthHandlerOptions{
+    ReturnURL:    "https://app.example.com/login/wechat",
+    CookieSecure: true,
+}))
+```
+
+各端前端怎么调用、控制台怎么配置、首次登录绑手机的规则，见 [微信扫码登录接入文档](../docs/wechat-login.md)。
+
 ### 访客模式
 
 没开 `AllowGuest` 时访客头被忽略，请求按匿名处理。`MiddlewareOptions.AllowGuest = true` 时，请求没带 token 但带了合法的
