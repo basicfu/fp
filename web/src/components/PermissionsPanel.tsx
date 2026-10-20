@@ -17,7 +17,7 @@ import { useResource, errorMessage } from '@/lib/useResource'
 import { toastFormErrors } from '@/lib/formErrors'
 import { formatDuration, formatTime } from '@/lib/format'
 import { permissionStatusLabels } from '@/lib/labels'
-import { layoutPermissions, type TreeRow } from '@/lib/permissionTree'
+import { colorPrefix, layoutPermissions, methodColumnWidths, prefixColorIndex, type TreeRow } from '@/lib/permissionTree'
 import type { Application, PermissionPoint } from '@/lib/types'
 
 /**
@@ -36,9 +36,15 @@ export default function PermissionsPanel({ app }: { app: Application }) {
     null,
   )
   const [keyword, setKeyword] = useState('')
-  // 折叠状态只记「用户展开过哪些」：搜索时的自动展开不写进来，清空关键字后
-  // 才能恢复用户原来的样子。
-  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
+  // 默认全部展开，所以只记「用户折叠了哪些」：搜索时的自动展开不写进来，清空
+  // 关键字后才能恢复用户原来的样子。
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+
+  // 草稿用字符串存：输入框清空重填的中途不能把数字强行改回去。
+  const [depthInput, setDepthInput] = useState(() => loadSetting(MAX_DEPTH_KEY, DEFAULT_MAX_DEPTH))
+  const maxDepth = parseCount(depthInput) ?? DEFAULT_MAX_DEPTH
+  const [toneInput, setToneInput] = useState(() => loadSetting(TONE_COUNT_KEY, DEFAULT_TONE_COUNT))
+  const toneDepth = parseCount(toneInput) ?? DEFAULT_TONE_COUNT
 
   const all = useMemo(() => perms.data ?? [], [perms.data])
   const kw = keyword.trim().toLowerCase()
@@ -46,17 +52,25 @@ export default function PermissionsPanel({ app }: { app: Application }) {
     () => (kw ? all.filter((p) => p.key.toLowerCase().includes(kw) || p.name.toLowerCase().includes(kw)) : all),
     [all, kw],
   )
-  const staleCount = all.filter((p) => p.status === 'stale').length
   const shownIds = shown.map((p) => p.id)
   const shownSelectedCount = shownIds.filter((id) => selected.has(id)).length
   const allShownSelected = shownIds.length > 0 && shownSelectedCount === shownIds.length
 
   const layout = useMemo(
-    () => layoutPermissions(shown, (id) => kw !== '' || openGroups.has(id)),
-    [shown, kw, openGroups],
+    () => layoutPermissions(shown, (id) => kw !== '' || !collapsedGroups.has(id), maxDepth),
+    [shown, kw, collapsedGroups, maxDepth],
   )
+  // 分色不分组：取路径前 n 段当前缀，前缀相同的行同色、不同前缀按序轮换颜色。
+  // 编号基于全量权限点算，搜索过滤时颜色不跟着跳。
+  const prefixIndex = useMemo(() => prefixColorIndex(all.map((p) => p.key), toneDepth), [all, toneDepth])
+  const toneOf = (key: string) => {
+    if (toneDepth === 0) return undefined
+    const p = colorPrefix(key, toneDepth)
+    return p === null ? undefined : prefixIndex.get(p)
+  }
+  const methodWidths = useMemo(() => methodColumnWidths(layout.rows), [layout.rows])
   const allExpanded =
-    layout.groupIds.length > 0 && layout.groupIds.every((id) => kw !== '' || openGroups.has(id))
+    layout.groupIds.length > 0 && layout.groupIds.every((id) => kw !== '' || !collapsedGroups.has(id))
 
   // 权限点被删掉（不管是这里批量删的，还是单条删的）之后，选中集合里
   // 残留的那个 id 不会自己消失——下次重新拉到的列表里已经没有这一项，
@@ -89,7 +103,7 @@ export default function PermissionsPanel({ app }: { app: Application }) {
   }
 
   function toggleCollapse(id: string) {
-    setOpenGroups((prev) => {
+    setCollapsedGroups((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -98,7 +112,7 @@ export default function PermissionsPanel({ app }: { app: Application }) {
   }
 
   function toggleExpandAll() {
-    setOpenGroups(allExpanded ? new Set() : new Set(layout.groupIds))
+    setCollapsedGroups(allExpanded ? new Set(layout.groupIds) : new Set())
   }
 
   function toggleOne(id: string, checked: boolean) {
@@ -195,15 +209,35 @@ export default function PermissionsPanel({ app }: { app: Application }) {
           <Button variant="outline" onClick={toggleExpandAll}>
             {allExpanded ? '全部折叠' : '全部展开'}
           </Button>
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            最大层级
+            <Input
+              type="number"
+              min={0}
+              value={depthInput}
+              onChange={(e) => {
+                setDepthInput(e.target.value)
+                if (parseCount(e.target.value) !== null) saveSetting(MAX_DEPTH_KEY, e.target.value)
+              }}
+              className="w-16"
+              aria-label="最大层级"
+            />
+          </label>
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            分组颜色
+            <Input
+              type="number"
+              min={0}
+              value={toneInput}
+              onChange={(e) => {
+                setToneInput(e.target.value)
+                if (parseCount(e.target.value) !== null) saveSetting(TONE_COUNT_KEY, e.target.value)
+              }}
+              className="w-16"
+              aria-label="分组颜色"
+            />
+          </label>
         </div>
-
-        {staleCount > 0 && (
-          <p className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm">
-            有 {staleCount} 个权限点处于「过渡中」：接入方最近的上报里没有它们。
-            这<strong>不代表它们已经没了</strong>——业务服务多半多实例，滚动发布时新旧版本同时在跑、交替上报，
-            所以 fp 不会自动删。看「已过渡」那一列，如果已经过了很久还在，多半是真的下线了，可以手动删掉。
-          </p>
-        )}
 
         {/* 只在真正首次加载（还没有任何数据）时显示这行文字——增删改之后的
             reload() 也会把 loading 短暂置回 true，这时候表格已经有上一次的
@@ -213,14 +247,15 @@ export default function PermissionsPanel({ app }: { app: Application }) {
 
         {perms.data && (
           <>
-            <Table className="table-fixed">
+            {/* 列线：权限点多了以后靠横线很难把同一行的各列对上眼。 */}
+            <Table className="table-fixed border [&_td]:border-r [&_th]:border-r [&_td:last-child]:border-r-0 [&_th:last-child]:border-r-0">
               {/* 操作列固定 136px（120px 按钮预留区 + 单元格左右各 8px padding），
-                  勾选列固定 40px，其余 6 列按百分比分配——跟 Applications 表格
+                  勾选列 32px、序号列 44px，其余列按百分比分配——跟 Applications 表格
                   是同一套做法。 */}
               <colgroup>
-                <col className="w-[40px]" />
-                <col className="w-[6%]" />
-                <col className="w-[22%]" />
+                <col className="w-[32px]" />
+                <col className="w-[44px]" />
+                <col className="w-[24%]" />
                 <col className="w-[16%]" />
                 <col className="w-[10%]" />
                 <col className="w-[12%]" />
@@ -229,7 +264,7 @@ export default function PermissionsPanel({ app }: { app: Application }) {
               </colgroup>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="p-0 px-2">
+                  <TableHead className="p-0 px-2 text-center">
                     <Checkbox
                       checked={allShownSelected}
                       indeterminate={!allShownSelected && shownSelectedCount > 0}
@@ -237,7 +272,7 @@ export default function PermissionsPanel({ app }: { app: Application }) {
                       aria-label="全选"
                     />
                   </TableHead>
-                  <TableHead className="p-0 px-2">序号</TableHead>
+                  <TableHead className="p-0 px-2 text-center">序号</TableHead>
                   <TableHead className="p-0 px-2">权限点</TableHead>
                   <TableHead className="p-0 px-2">名称</TableHead>
                   <TableHead className="p-0 px-2">状态</TableHead>
@@ -266,7 +301,8 @@ export default function PermissionsPanel({ app }: { app: Application }) {
                     <GroupRow
                       key={`g:${row.id}`}
                       row={row}
-                      open={kw !== '' || openGroups.has(row.id)}
+                      tone={toneOf(row.label)}
+                      open={kw !== '' || !collapsedGroups.has(row.id)}
                       selected={selected}
                       onToggle={() => toggleCollapse(row.id)}
                       onCheck={(checked) => toggleGroup(row.ids, checked)}
@@ -276,6 +312,8 @@ export default function PermissionsPanel({ app }: { app: Application }) {
                       key={row.point.id}
                       p={row.point}
                       depth={row.depth}
+                      methodCh={methodWidths.get(row.groupId ?? '') ?? 0}
+                      tone={toneOf(row.point.key)}
                       seq={layout.seq.get(row.point.id) ?? 0}
                       checked={selected.has(row.point.id)}
                       onToggle={(checked) => toggleOne(row.point.id, checked)}
@@ -536,17 +574,61 @@ function EditDialog({
   )
 }
 
+const MAX_DEPTH_KEY = 'fp.permissions.maxGroupDepth'
+const DEFAULT_MAX_DEPTH = 2
+const TONE_COUNT_KEY = 'fp.permissions.groupColorCount'
+const DEFAULT_TONE_COUNT = 2
+
+/** 0 是有效值：最大层级 0 = 不分组，分组颜色 0 = 不分色。 */
+function parseCount(v: string): number | null {
+  const n = Number(v)
+  return Number.isInteger(n) && n >= 0 ? n : null
+}
+
+// 隐私模式等场景下 localStorage 会抛异常，读写都兜住，退回默认值即可。
+function loadSetting(key: string, fallback: number): string {
+  try {
+    const v = localStorage.getItem(key)
+    if (v !== null && parseCount(v) !== null) return v
+  } catch {
+    // ignore
+  }
+  return String(fallback)
+}
+
+function saveSetting(key: string, v: string) {
+  try {
+    localStorage.setItem(key, v)
+  } catch {
+    // ignore
+  }
+}
+
 /** 每层缩进固定一小段，不画网格线。 */
 const INDENT_PX = 12
 
+/**
+ * 按路径前缀分色：前缀相同的行同色，不同前缀轮流取色，颜色用完循环。只给文字
+ * 上色、不铺底色，亮色/暗色主题各用一套明度合适的色。
+ */
+const TONE_CLASSES = [
+  'text-blue-600 dark:text-blue-400',
+  'text-emerald-600 dark:text-emerald-400',
+  'text-amber-600 dark:text-amber-400',
+  'text-fuchsia-600 dark:text-fuchsia-400',
+]
+const toneClass = (tone?: number) => (tone === undefined ? '' : TONE_CLASSES[tone % TONE_CLASSES.length])
+
 function GroupRow({
   row,
+  tone,
   open,
   selected,
   onToggle,
   onCheck,
 }: {
   row: Extract<TreeRow<PermissionPoint>, { type: 'group' }>
+  tone?: number
   open: boolean
   selected: Set<string>
   onToggle: () => void
@@ -556,7 +638,7 @@ function GroupRow({
   const full = n === row.ids.length
   return (
     <TableRow className="h-12 cursor-pointer select-none font-semibold" onClick={onToggle}>
-      <TableCell className="p-0 px-2" onClick={(e) => e.stopPropagation()}>
+      <TableCell className="p-0 px-2 text-center" onClick={(e) => e.stopPropagation()}>
         <Checkbox
           checked={full}
           indeterminate={!full && n > 0}
@@ -564,11 +646,13 @@ function GroupRow({
           aria-label={`选中分组 ${row.label}`}
         />
       </TableCell>
-      <TableCell className="p-0 px-2" />
+      <TableCell className="p-0 px-2 text-center" />
       <TableCell colSpan={6} className="p-0 px-2">
         <div className="flex items-center" style={{ paddingLeft: row.depth * INDENT_PX }}>
           <span className="w-4 shrink-0 text-xs text-muted-foreground">{open ? '▼' : '▶'}</span>
-          <span className="font-mono text-xs">{row.label}</span>
+          <span className={`font-mono text-xs ${toneClass(tone)}`} data-group={row.label}>
+            {row.label}
+          </span>
           <span className="ml-2 text-xs font-normal text-muted-foreground">{row.count} 个</span>
           {row.staleCount > 0 && (
             <Badge variant="destructive" className="ml-2">
@@ -584,6 +668,8 @@ function GroupRow({
 function PermRow({
   p,
   depth,
+  methodCh,
+  tone,
   seq,
   checked,
   onToggle,
@@ -592,6 +678,8 @@ function PermRow({
 }: {
   p: PermissionPoint
   depth: number
+  methodCh: number
+  tone?: number
   seq: number
   checked: boolean
   onToggle: (checked: boolean) => void
@@ -600,15 +688,21 @@ function PermRow({
 }) {
   return (
     <TableRow className="h-12 cursor-pointer" onClick={() => onToggle(!checked)}>
-      <TableCell className="p-0 px-2" onClick={(e) => e.stopPropagation()}>
+      <TableCell className="p-0 px-2 text-center" onClick={(e) => e.stopPropagation()}>
         <Checkbox checked={checked} onCheckedChange={(v) => onToggle(v === true)} aria-label={`选中 ${p.key}`} />
       </TableCell>
-      <TableCell className="p-0 px-2 text-muted-foreground">{seq}</TableCell>
+      <TableCell className="p-0 px-2 text-center text-muted-foreground">{seq}</TableCell>
       <TableCell className="whitespace-normal break-all p-0 px-2 font-mono text-xs">
         {/* 留出与分组 ▶ 同宽的空位，让权限点与同级分组名左对齐 */}
         <div className="flex" style={{ paddingLeft: depth * INDENT_PX }}>
           <span className="w-4 shrink-0" />
-          <span>{p.key}</span>
+          {/* 方法名列宽按同组最长的实时算（最长 + 1 个空格），同组各行的路径从同一列开始 */}
+          <span data-key={p.key} className={toneClass(tone)}>
+            <span className="inline-block" style={{ minWidth: `${methodCh}ch` }}>
+              {p.key.slice(0, p.key.indexOf(':') + 1)}
+            </span>
+            {p.key.slice(p.key.indexOf(':') + 1)}
+          </span>
         </div>
       </TableCell>
       <TableCell className="whitespace-normal break-words p-0 px-2 text-muted-foreground">{p.name || '-'}</TableCell>

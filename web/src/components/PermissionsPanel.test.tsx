@@ -64,10 +64,10 @@ function stubFetch(perms: PermissionPoint[], holders: string[] = [], onWrite?: (
   return fn
 }
 
-/** 同路径的两个权限点会被收进默认折叠的分组，测试要先展开才能看到行。 */
-async function expandAll() {
-  fireEvent.click(await screen.findByRole('button', { name: '全部展开' }))
-}
+// 权限点 key 被拆成「方法:」和「路径」两段做对齐，按文本匹配不到整串，改按 data-key 找。
+const keyText = (key: string) => (_: string, el: Element | null) => el?.getAttribute('data-key') === key
+
+const groupText = (label: string) => (_: string, el: Element | null) => el?.getAttribute('data-group') === label
 
 function renderPanel(a: Application = app) {
   return render(
@@ -164,7 +164,7 @@ test('删除前先查持有者，并在确认框里点名', async () => {
   const fetchMock = stubFetch([point({})], ['商城管理员', '客服'])
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText(keyText('GET:/orders/{id}'))).toBeTruthy())
   fireEvent.click(screen.getByRole('button', { name: '删除' }))
 
   await waitFor(() => expect(screen.getByText(/商城管理员、客服/)).toBeTruthy())
@@ -177,7 +177,7 @@ test('没有角色持有时，确认框说明不会影响任何人', async () =>
   stubFetch([point({})], [])
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText(keyText('GET:/orders/{id}'))).toBeTruthy())
   fireEvent.click(screen.getByRole('button', { name: '删除' }))
 
   await waitFor(() => expect(screen.getByText(/没有角色持有它/)).toBeTruthy())
@@ -189,7 +189,7 @@ test('确认后发出 DELETE', async () => {
   stubFetch([point({})], [], (url, m) => writes.push(`${m} ${url}`))
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText(keyText('GET:/orders/{id}'))).toBeTruthy())
   fireEvent.click(screen.getByRole('button', { name: '删除' }))
   const confirm = await waitFor(() => screen.getByRole('button', { name: '确认删除' }))
   fireEvent.click(confirm)
@@ -197,27 +197,13 @@ test('确认后发出 DELETE', async () => {
   await waitFor(() => expect(writes).toContain('DELETE /admin/api/permissions/p1'))
 })
 
-// 【辨别力】「过渡中」必须说清楚"不代表已经没了"。
-//
-// SDK 上报的是全量快照，但快照里缺一条不等于它消失了——滚动发布时新旧
-// 版本同时在跑、交替上报。一个把这个状态显示成"已删除"或不加解释的界面
-// 会诱导管理员去删掉一个其实还在服务的接口，那会让线上掉权限。
-test('有过渡中的权限点时给出解释，而不是只标一个状态', async () => {
+// 已过渡时长要显示出来——它是人判断"该不该删"的唯一依据。
+test('过渡中的权限点显示状态和已过渡时长', async () => {
   stubFetch([point({ status: 'stale', staleForMs: 3 * 3600 * 1000 })])
   renderPanel()
 
   await waitFor(() => expect(screen.getByText('过渡中')).toBeTruthy())
-  expect(screen.getByText(/这不代表它们已经没了|不代表它们已经没了/)).toBeTruthy()
-  // 已过渡时长要显示出来——它是人判断"该不该删"的唯一依据
   expect(screen.getByText('3 小时')).toBeTruthy()
-})
-
-test('没有过渡中的权限点时不显示那条提示', async () => {
-  stubFetch([point({ status: 'normal' })])
-  renderPanel()
-
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
-  expect(screen.queryByText(/不代表它们已经没了/)).toBeNull()
 })
 
 // 手动添加的权限点没有"最近上报"可言，不能显示成 1970 年。
@@ -288,8 +274,7 @@ test('批量删除：勾选多条后显示已选数量，确认框列出去重�
   const deletes = stubFetchBatchDelete([point({}), perm2], { p1: ['商城管理员'], p2: ['商城管理员', '客服'] })
   renderPanel()
 
-  await expandAll()
-  await screen.findByText('GET:/orders/{id}')
+  await screen.findByText(keyText('GET:/orders/{id}'))
   fireEvent.click(screen.getByRole('checkbox', { name: '选中 GET:/orders/{id}' }))
   fireEvent.click(screen.getByRole('checkbox', { name: '选中 DELETE:/orders/{id}' }))
   expect(screen.getByText('已选 2 项')).toBeTruthy()
@@ -307,8 +292,7 @@ test('表头的全选勾选框选中/取消当前显示的全部行', async () =
   stubFetchBatchDelete([point({}), perm2], {})
   renderPanel()
 
-  await expandAll()
-  await screen.findByText('GET:/orders/{id}')
+  await screen.findByText(keyText('GET:/orders/{id}'))
   fireEvent.click(screen.getByRole('checkbox', { name: '全选' }))
   expect(screen.getByText('已选 2 项')).toBeTruthy()
 
@@ -322,15 +306,14 @@ test('批量删除部分失败：成功的从选中里移除，失败的保留',
   const deletes = stubFetchBatchDelete([point({}), perm2], {}, ['p2'])
   renderPanel()
 
-  await expandAll()
-  await screen.findByText('GET:/orders/{id}')
+  await screen.findByText(keyText('GET:/orders/{id}'))
   fireEvent.click(screen.getByRole('checkbox', { name: '全选' }))
   fireEvent.click(screen.getByRole('button', { name: '批量删除' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认删除' }))
 
   await waitFor(() => expect(deletes.sort()).toEqual(['p1', 'p2']))
   // p1 删成功，重新拉取后的列表里它已经不在了，只剩 p2 这一行还选中。
-  await waitFor(() => expect(screen.queryByText('GET:/orders/{id}')).toBeNull())
+  await waitFor(() => expect(screen.queryByText(keyText('GET:/orders/{id}'))).toBeNull())
   expect(screen.getByText('已选 1 项')).toBeTruthy()
 })
 
@@ -338,9 +321,8 @@ test('批量删除部分失败：成功的从选中里移除，失败的保留',
 test('点击行内空白处（不是勾选框）也能选中/取消这一行', async () => {
   stubFetchBatchDelete([point({}), perm2], {})
   renderPanel()
-  await expandAll()
 
-  const row = (await screen.findByText('GET:/orders/{id}')).closest('tr') as HTMLElement
+  const row = (await screen.findByText(keyText('GET:/orders/{id}'))).closest('tr') as HTMLElement
   fireEvent.click(row)
   expect(screen.getByText('已选 1 项')).toBeTruthy()
   expect(screen.getByRole('checkbox', { name: '选中 GET:/orders/{id}' })).toHaveProperty('ariaChecked', 'true')
@@ -355,7 +337,7 @@ test('点行内的"编辑"/"删除"按钮不会顺带触发整行的选中', asy
   stubFetchBatchDelete([point({})], {})
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText(keyText('GET:/orders/{id}'))).toBeTruthy())
   fireEvent.click(screen.getByRole('button', { name: '编辑' }))
   await waitFor(() => expect(screen.getByRole('button', { name: '保存' })).toBeTruthy())
   expect(screen.queryByText(/已选/)).toBeNull()
@@ -374,7 +356,7 @@ test('批量删除按钮和已选数量显示在表格下方，按钮在前文�
   stubFetchBatchDelete([point({})], {})
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText(keyText('GET:/orders/{id}'))).toBeTruthy())
   fireEvent.click(screen.getByRole('checkbox', { name: '选中 GET:/orders/{id}' }))
 
   const table = document.querySelector('table') as HTMLElement
@@ -386,54 +368,139 @@ test('批量删除按钮和已选数量显示在表格下方，按钮在前文�
 })
 
 // 分组行：默认折叠、勾选整组（含半选）、搜索自动展开且清空后恢复。
-test('同路径权限点默认折叠成分组；整组勾选作用于所有后代，部分选中为半选', async () => {
-  stubFetchBatchDelete([point({}), perm2, point({ id: 'p3', key: 'GET:/ping', name: '' })], {})
+// 少于 4 个权限点不成组，所以这里造 4 个同路径的。
+const groupPts = ['GET', 'POST', 'PUT', 'DELETE'].map((m, i) =>
+  point({ id: `g${i}`, key: `${m}:/orders/{id}`, name: `订单${m}` }),
+)
+
+test('4 个及以上权限点才成分组；整组勾选作用于所有后代，部分选中为半选', async () => {
+  stubFetchBatchDelete([...groupPts, point({ id: 'p3', key: 'GET:/ping', name: '' })], {})
   renderPanel()
 
-  await screen.findByText('GET:/ping')
-  expect(screen.queryByText('GET:/orders/{id}')).toBeNull()
-  expect(screen.getByText('2 个')).toBeTruthy()
+  await screen.findByText(keyText('GET:/ping'))
+  // 默认全部展开
+  expect(screen.getByText(keyText('GET:/orders/{id}'))).toBeTruthy()
+  expect(screen.getByText('4 个')).toBeTruthy()
 
   fireEvent.click(screen.getByRole('checkbox', { name: '选中分组 /orders/{id}' }))
-  expect(screen.getByText('已选 2 项')).toBeTruthy()
+  expect(screen.getByText('已选 4 项')).toBeTruthy()
 
-  fireEvent.click(screen.getByText('/orders/{id}'))
   fireEvent.click(screen.getByRole('checkbox', { name: '选中 DELETE:/orders/{id}' }))
   expect(screen.getByRole('checkbox', { name: '选中分组 /orders/{id}' }).hasAttribute('data-indeterminate')).toBe(true)
+
+  fireEvent.click(screen.getByText(groupText('/orders/{id}')))
+  expect(screen.queryByText(keyText('DELETE:/orders/{id}'))).toBeNull()
+})
+
+test('少于 4 个权限点不显示分组，直接平铺', async () => {
+  stubFetchBatchDelete(groupPts.slice(0, 3), {})
+  renderPanel()
+
+  await screen.findByText(keyText('GET:/orders/{id}'))
+  expect(screen.queryByRole('checkbox', { name: /选中分组/ })).toBeNull()
 })
 
 test('搜索命中的分组自动展开，清空后恢复用户原来的折叠状态', async () => {
-  stubFetchBatchDelete([point({}), perm2], {})
+  stubFetchBatchDelete(groupPts, {})
   renderPanel()
 
-  await screen.findByText('/orders/{id}')
-  expect(screen.queryByText('GET:/orders/{id}')).toBeNull()
+  fireEvent.click(await screen.findByText(groupText('/orders/{id}')))
+  expect(screen.queryByText(keyText('GET:/orders/{id}'))).toBeNull()
 
   const input = screen.getByPlaceholderText('按路径或名称筛选')
-  fireEvent.change(input, { target: { value: '删除订单' } })
-  expect(screen.getByText('DELETE:/orders/{id}')).toBeTruthy()
+  fireEvent.change(input, { target: { value: '订单DELETE' } })
+  expect(screen.getByText(keyText('DELETE:/orders/{id}'))).toBeTruthy()
 
   fireEvent.change(input, { target: { value: '' } })
-  expect(screen.queryByText('DELETE:/orders/{id}')).toBeNull()
+  expect(screen.queryByText(keyText('DELETE:/orders/{id}'))).toBeNull()
 })
 
 test('全部展开/全部折叠按钮只取决于是否全部展开，并含嵌套分组', async () => {
   const pts = [
-    point({ id: 'a1', key: 'GET:/a/x/1' }),
-    point({ id: 'a2', key: 'GET:/a/x/2' }),
-    point({ id: 'a3', key: 'GET:/a' }),
+    ...[1, 2, 3, 4].map((n) => point({ id: `a${n}`, key: `GET:/a/x/${n}` })),
+    point({ id: 'a5', key: 'GET:/a' }),
   ]
   stubFetchBatchDelete(pts, {})
   renderPanel()
 
-  fireEvent.click(await screen.findByRole('button', { name: '全部展开' }))
-  expect(screen.getByText('GET:/a/x/1')).toBeTruthy()
-  expect(screen.getByRole('button', { name: '全部折叠' })).toBeTruthy()
+  // 默认全部展开
+  expect(await screen.findByRole('button', { name: '全部折叠' })).toBeTruthy()
+  expect(screen.getByText(keyText('GET:/a/x/1'))).toBeTruthy()
 
-  fireEvent.click(screen.getByText('/a/x'))
+  fireEvent.click(screen.getByText(groupText('/a/x')))
   expect(screen.getByRole('button', { name: '全部展开' })).toBeTruthy()
 
   fireEvent.click(screen.getByRole('button', { name: '全部展开' }))
   fireEvent.click(screen.getByRole('button', { name: '全部折叠' }))
-  expect(screen.queryByText('GET:/a')).toBeNull()
+  expect(screen.queryByText(keyText('GET:/a'))).toBeNull()
+})
+
+test('最大层级输入框默认 2，改动写入 localStorage 并限制分组层数', async () => {
+  localStorage.clear()
+  const pts = [
+    ...[1, 2, 3, 4].map((n) => point({ id: `a${n}`, key: `GET:/a/${n}` })),
+    ...[1, 2, 3, 4].map((n) => point({ id: `x${n}`, key: `GET:/a/x/${n}` })),
+  ]
+  stubFetchBatchDelete(pts, {})
+  renderPanel()
+
+  const input = (await screen.findByLabelText('最大层级')) as HTMLInputElement
+  expect(input.value).toBe('2')
+  expect(screen.getAllByRole('checkbox', { name: /选中分组/ })).toHaveLength(2)
+
+  fireEvent.change(input, { target: { value: '1' } })
+  expect(localStorage.getItem('fp.permissions.maxGroupDepth')).toBe('1')
+  expect(screen.getAllByRole('checkbox', { name: /选中分组/ })).toHaveLength(1)
+})
+
+test('分组颜色输入框默认 2、写入 localStorage；前 n 段前缀相同的同色，不同前缀轮换颜色', async () => {
+  localStorage.clear()
+  const keys = [
+    'GET:/console/api/calls',
+    'GET:/console/api/devices',
+    'GET:/console/api/devices/{id}',
+    'POST:/console/api/devices/{id}/ban',
+    'POST:/console/api/login',
+    'POST:/console/api/logout',
+    'GET:/console/api/sessions',
+    'GET:/console/api/sessions/{sid}',
+  ]
+  stubFetchBatchDelete(keys.map((key, i) => point({ id: `k${i}`, key })), {})
+  renderPanel()
+
+  const input = (await screen.findByLabelText('分组颜色')) as HTMLInputElement
+  expect(input.value).toBe('2')
+  fireEvent.change(await screen.findByLabelText('最大层级'), { target: { value: '1' } })
+  fireEvent.change(input, { target: { value: '3' } })
+  expect(localStorage.getItem('fp.permissions.groupColorCount')).toBe('3')
+
+  const cls = (key: string) => screen.getByText((_, el) => el?.getAttribute('data-key') === key).className
+  // 前缀 devices 下 3 条同色；calls / devices / login / logout / sessions 相邻前缀都不同色。
+  expect(new Set([keys[1], keys[2], keys[3]].map(cls)).size).toBe(1)
+  expect(new Set([keys[0], keys[1], keys[4], keys[5], keys[6]].map(cls)).size).toBe(4)
+  expect(cls(keys[6])).toBe(cls(keys[7]))
+
+  // 层数改成 2：前缀都是 /console/api，全部同色。
+  fireEvent.change(input, { target: { value: '2' } })
+  expect(new Set(keys.map(cls)).size).toBe(1)
+})
+
+test('最大层级填 0 不分组、分组颜色填 0 不分色', async () => {
+  localStorage.clear()
+  const pts = [1, 2, 3, 4].map((n) => point({ id: `a${n}`, key: `GET:/a/${n}` }))
+  stubFetchBatchDelete(pts, {})
+  renderPanel()
+
+  await screen.findByRole('checkbox', { name: '选中分组 /a' })
+  const key = () => screen.getByText(keyText('GET:/a/1'))
+  expect(key().className).toContain('text-')
+
+  fireEvent.change(screen.getByLabelText('最大层级'), { target: { value: '0' } })
+  expect(localStorage.getItem('fp.permissions.maxGroupDepth')).toBe('0')
+  expect(screen.queryByRole('checkbox', { name: /选中分组/ })).toBeNull()
+  expect(key()).toBeTruthy()
+
+  fireEvent.change(screen.getByLabelText('分组颜色'), { target: { value: '0' } })
+  expect(localStorage.getItem('fp.permissions.groupColorCount')).toBe('0')
+  expect(key().className).not.toContain('text-')
 })

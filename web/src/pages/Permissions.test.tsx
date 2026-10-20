@@ -88,7 +88,7 @@ test('渲染当前应用的权限点管理', async () => {
   // 页面级"权限管理 · 应用名"标题已经去掉（应用名已经在侧边栏的应用切换
   // 器里显示，这里再重复一遍是冗余）——默认角色的设置也挪到了应用列表的
   // 新建/编辑弹窗里，这个页面只剩权限点表格，直接断言表格内容渲染出来。
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await waitFor(() => expect(screen.getByText((_, el) => el?.getAttribute('data-key') === 'GET:/orders/{id}')).toBeTruthy())
 })
 
 test('没有任何应用时显示提示，不崩溃', () => {

@@ -3,7 +3,7 @@ import { useParams } from 'react-router'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { MultiSelect } from '@/components/ui/multi-select'
+import { GroupedPermissionSelect } from '@/components/GroupedPermissionSelect'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { ADMIN_ROLE_KEY, GUEST_ROLE_KEY } from '@/lib/roles'
@@ -105,7 +105,6 @@ function AppPermissionSelect({
   const [saving, setSaving] = useState(false)
 
   const points = perms.data ?? []
-  const options = points.map((p) => ({ value: p.id, label: p.name ? `${p.key}（${p.name}）` : p.key }))
   const allowed = new Set(grants.filter((g) => g.effect === 'allow').map((g) => g.permissionId))
   const selected = points.filter((p) => allowed.has(p.id)).map((p) => p.id)
 
@@ -143,13 +142,10 @@ function AppPermissionSelect({
         <p className="text-sm text-muted-foreground">这个应用还没有权限点。</p>
       )}
       {points.length > 0 && (
-        <MultiSelect
-          options={options}
-          defaultValue={selected}
-          onValueChange={(next) => void handleChange(next)}
-          placeholder="搜索"
-          variant="secondary"
-          maxCount={options.length}
+        <GroupedPermissionSelect
+          points={points}
+          selected={selected}
+          onChange={(next) => void handleChange(next)}
           disabled={saving}
         />
       )}

@@ -138,7 +138,7 @@ async function openDropdown(appName: string) {
 
 /** 下拉展开后，选项列表里那一行（跟收起状态下已选标签的同名文字区分开）。 */
 function optionRow(label: string) {
-  const el = [...document.querySelectorAll('[cmdk-item]')].find((n) => n.textContent?.includes(label))
+  const el = [...document.querySelectorAll('[data-option]')].find((n) => n.getAttribute('data-option') === label)
   if (!el) throw new Error(`选项列表里没找到「${label}」`)
   return el as HTMLElement
 }
@@ -184,7 +184,7 @@ test('勾选一个权限点，发出 PUT 且 effect 为 allow', async () => {
 
   await waitFor(() => expect(screen.getByText('商城')).toBeTruthy())
   await openDropdown('商城')
-  fireEvent.click(await screen.findByText('GET:/orders/{id}（查看订单）'))
+  fireEvent.click(optionRow('GET:/orders/{id}（查看订单）'))
 
   await waitFor(() => expect(writes.length).toBe(1))
   expect(writes[0].url).toBe('/admin/api/roles/r1/permissions/p1')
