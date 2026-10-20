@@ -2,12 +2,17 @@ package imgrpc
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/model"
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 )
+
+// maxSessionsMany 限制一次批量查询的 subject 数：再多就是一条巨大的 Redis 管道，
+// 拖慢同节点其它请求；业务方分批调用即可。
+const maxSessionsMany = 1000
 
 // sender 给 gRPC 流加锁：gRPC 不允许并发 Send，而 hub 会从多个协程往同一条流写
 // （处理请求的多个协程各自回 Result，同时路由器可能在别的协程往这条流写
@@ -69,6 +74,30 @@ func handle(ctx context.Context, h *hub.Hub, app string, req *fpimv1.ConnectRequ
 		}
 		for _, s := range list {
 			res.Sessions = append(res.Sessions, &fpimv1.Session{ConnId: s.ConnID, NodeId: s.Node, Os: s.OS, Mobile: s.Mobile, ConnectedAtMs: s.ConnectedAt})
+		}
+	case *fpimv1.ConnectRequest_SessionsMany:
+		raw := b.SessionsMany.GetSubjects()
+		if len(raw) > maxSessionsMany {
+			return fail(fmt.Sprintf("一次最多查 %d 个 subject", maxSessionsMany))
+		}
+		subs := make([]model.Subject, 0, len(raw))
+		for _, s := range raw {
+			sub, err := model.ParseSubject(s)
+			if err != nil {
+				return fail(err.Error())
+			}
+			subs = append(subs, sub)
+		}
+		many, err := h.SessionsMany(ctx, app, subs)
+		if err != nil {
+			return fail(err.Error())
+		}
+		for i, list := range many {
+			ss := &fpimv1.SubjectSessions{Subject: raw[i]}
+			for _, s := range list {
+				ss.Sessions = append(ss.Sessions, &fpimv1.Session{ConnId: s.ConnID, NodeId: s.Node, Os: s.OS, Mobile: s.Mobile, ConnectedAtMs: s.ConnectedAt})
+			}
+			res.SessionsMany = append(res.SessionsMany, ss)
 		}
 	case *fpimv1.ConnectRequest_Ping:
 		// 心跳只要一帧真正穿过代理的应答,空 Result 就够了。

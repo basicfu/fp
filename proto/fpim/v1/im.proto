@@ -24,6 +24,7 @@ message ConnectRequest {
     KickRequest     kick      = 4;
     SessionsRequest sessions  = 5;
     PingRequest     ping      = 6;
+    SessionsManyRequest sessions_many = 7;
   }
 }
 
@@ -70,6 +71,17 @@ message SessionsRequest {
   string subject = 1;
 }
 
+// SessionsManyRequest 一次查多个 subject 的连接，供业务方批量核对在线状态
+// （它重启或流断开期间漏掉的连接事件只能靠这样补）。
+message SessionsManyRequest {
+  repeated string subjects = 1;
+}
+
+message SubjectSessions {
+  string           subject  = 1;
+  repeated Session sessions = 2;
+}
+
 enum PushStatus {
   PUSH_STATUS_UNSPECIFIED = 0;
   // 此刻有连接，已递给持有它的节点。不代表到达 client 进程。
@@ -101,6 +113,8 @@ message Result {
   string              error    = 2;
   repeated PushResult pushes   = 3;
   repeated Session    sessions = 4;
+  // 与 SessionsManyRequest.subjects 一一对应、顺序相同。
+  repeated SubjectSessions sessions_many = 5;
 }
 
 // Inbound 是 client 发上来的一条消息，payload 原样透传。

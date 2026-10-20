@@ -132,6 +132,26 @@ func (h *Hub) Sessions(ctx context.Context, app string, sub model.Subject) ([]Se
 	return out, nil
 }
 
+// SessionsMany 是 Sessions 的批量版：一次注册表往返，结果与 subs 一一对应。
+func (h *Hub) SessionsMany(ctx context.Context, app string, subs []model.Subject) ([][]Session, error) {
+	keys := make([]string, len(subs))
+	for i, s := range subs {
+		keys[i] = s.String()
+	}
+	many, err := h.reg.LookupMany(ctx, app, keys, h.live.LiveNodes())
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]Session, len(subs))
+	for i, conns := range many {
+		out[i] = make([]Session, 0, len(conns))
+		for cid, m := range conns {
+			out[i] = append(out[i], Session{ConnID: cid, Node: m.Node, OS: m.OS, Mobile: m.Mobile, ConnectedAt: m.At})
+		}
+	}
+	return out, nil
+}
+
 // Kick 不传 connIDs 踢全部：先从注册表原子地取出并删除条目，再据此关闭
 // 本地连接、给远端节点发踢人信封。踢人和顶号走同一个 Evict，只是原因串不同。
 func (h *Hub) Kick(ctx context.Context, app string, sub model.Subject, connIDs ...string) error {

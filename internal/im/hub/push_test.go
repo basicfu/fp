@@ -117,6 +117,19 @@ func TestSessionsFromRegistry(t *testing.T) {
 	}
 }
 
+// 多个 subject 合成一次注册表查询, 结果与入参顺序一一对应。
+func TestSessionsManyOneLookup(t *testing.T) {
+	h, reg, _, _, _ := hubtest.NewHub()
+	reg.Table["u:1"] = map[string]model.ConnMeta{"c1": {Node: "im-b", At: 7}}
+	got, err := h.SessionsMany(context.Background(), "a1", []model.Subject{model.User("2"), model.User("1")})
+	if err != nil || len(got) != 2 || len(got[0]) != 0 || len(got[1]) != 1 || got[1][0].ConnID != "c1" || got[1][0].ConnectedAt != 7 {
+		t.Fatalf("SessionsMany=%+v err=%v", got, err)
+	}
+	if reg.LookupManyCalls != 1 {
+		t.Fatalf("应只查一次注册表, 实际 %d 次", reg.LookupManyCalls)
+	}
+}
+
 func TestKickAllLocalAndRemote(t *testing.T) {
 	h, reg, _, pub, _ := hubtest.NewHub()
 	local := &hubtest.Conn{ConnID: "c1"}

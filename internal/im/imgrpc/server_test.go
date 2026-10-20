@@ -95,6 +95,40 @@ func TestConnectReadyThenPushAndSessions(t *testing.T) {
 	}
 }
 
+func TestConnectSessionsMany(t *testing.T) {
+	c, _, reg := newClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := c.Connect(authed(ctx, "a1", "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	reg.Table["u:2"] = map[string]model.ConnMeta{"c2": {Node: "im-b", At: 5}}
+	_ = stream.Send(&fpimv1.ConnectRequest{ReqId: "m1", Body: &fpimv1.ConnectRequest_SessionsMany{SessionsMany: &fpimv1.SessionsManyRequest{Subjects: []string{"u:1", "u:2"}}}})
+	_ = stream.Send(&fpimv1.ConnectRequest{ReqId: "m2", Body: &fpimv1.ConnectRequest_SessionsMany{SessionsMany: &fpimv1.SessionsManyRequest{Subjects: []string{"bogus"}}}})
+	got := map[string]*fpimv1.Result{}
+	for len(got) < 2 {
+		resp, err := stream.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r := resp.GetResult(); r != nil {
+			got[r.ReqId] = r
+		}
+	}
+	m := got["m1"].SessionsMany
+	if len(m) != 2 || m[0].Subject != "u:1" || len(m[0].Sessions) != 0 || m[1].Subject != "u:2" ||
+		len(m[1].Sessions) != 1 || m[1].Sessions[0].ConnId != "c2" || m[1].Sessions[0].ConnectedAtMs != 5 {
+		t.Fatalf("m1 SessionsMany 不对：%+v", got["m1"])
+	}
+	if got["m2"].Error == "" {
+		t.Fatal("非法 subject 应以 Result.Error 返回")
+	}
+}
+
 // TestConnectAnswersPing: 心跳要回一帧不带错误的 Result——SDK 靠这一来一回让流上真的有数据,
 // 中间的 L7 代理才不会按空闲超时掐流。
 func TestConnectAnswersPing(t *testing.T) {

@@ -784,6 +784,40 @@ func (s *Server) Sessions(ctx context.Context, sub Subject) ([]Session, error) {
 	return out, nil
 }
 
+// SessionsMany 一次查多个 subject 的连接，结果与 subs 一一对应。im 一次最多接受
+// 1000 个，超过的请分批。
+func (s *Server) SessionsMany(ctx context.Context, subs []Subject) ([][]Session, error) {
+	if len(subs) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, len(subs))
+	for i, sub := range subs {
+		keys[i] = sub.String()
+	}
+	res, err := s.call(ctx, func(id string) *fpimv1.ConnectRequest {
+		return &fpimv1.ConnectRequest{
+			ReqId: id,
+			Body:  &fpimv1.ConnectRequest_SessionsMany{SessionsMany: &fpimv1.SessionsManyRequest{Subjects: keys}},
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	many := res.GetSessionsMany()
+	if len(many) != len(subs) {
+		// 旧版 im 不认识这个请求时会回 Result.Error(call 已转成 err);数量对不上只能是协议错配。
+		return nil, fmt.Errorf("fpim: SessionsMany 返回 %d 组, 请求了 %d 个", len(many), len(subs))
+	}
+	out := make([][]Session, len(subs))
+	for i, g := range many {
+		out[i] = make([]Session, 0, len(g.GetSessions()))
+		for _, x := range g.GetSessions() {
+			out[i] = append(out[i], Session{ConnID: x.GetConnId(), Node: x.GetNodeId(), OS: x.GetOs(), Mobile: x.GetMobile(), ConnectedAt: x.GetConnectedAtMs()})
+		}
+	}
+	return out, nil
+}
+
 // Kick 踢掉某个 subject 的连接。connIDs 为空表示踢掉该 subject 的全部连接。
 func (s *Server) Kick(ctx context.Context, sub Subject, connIDs ...string) error {
 	_, err := s.call(ctx, func(id string) *fpimv1.ConnectRequest {

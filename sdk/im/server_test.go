@@ -73,6 +73,14 @@ func (s *stubIm) Connect(st fpimv1.ImService_ConnectServer) error {
 			}
 		case *fpimv1.ConnectRequest_Sessions:
 			res.Sessions = []*fpimv1.Session{{ConnId: "c1", NodeId: "stub", Os: "ios", Mobile: true, ConnectedAtMs: 9}}
+		case *fpimv1.ConnectRequest_SessionsMany:
+			for i, sub := range b.SessionsMany.Subjects {
+				ss := &fpimv1.SubjectSessions{Subject: sub}
+				if i == 0 {
+					ss.Sessions = []*fpimv1.Session{{ConnId: "c1", ConnectedAtMs: 9}}
+				}
+				res.SessionsMany = append(res.SessionsMany, ss)
+			}
 		}
 		_ = st.Send(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Result{Result: res}})
 	}
@@ -140,6 +148,13 @@ func TestServerPushSessionsAndCredentials(t *testing.T) {
 	sess, err := s.Sessions(context.Background(), User("1"))
 	if err != nil || len(sess) != 1 || sess[0].ConnID != "c1" || sess[0].OS != "ios" || !sess[0].Mobile || sess[0].ConnectedAt != 9 {
 		t.Fatalf("Sessions 不对：%+v %v", sess, err)
+	}
+	many, err := s.SessionsMany(context.Background(), []Subject{User("1"), User("2")})
+	if err != nil || len(many) != 2 || len(many[0]) != 1 || many[0][0].ConnID != "c1" || many[0][0].ConnectedAt != 9 || len(many[1]) != 0 {
+		t.Fatalf("SessionsMany 不对：%+v %v", many, err)
+	}
+	if many, err := s.SessionsMany(context.Background(), nil); err != nil || len(many) != 0 {
+		t.Fatalf("空列表应直接返回：%+v %v", many, err)
 	}
 }
 
