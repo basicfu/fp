@@ -64,6 +64,11 @@ function stubFetch(perms: PermissionPoint[], holders: string[] = [], onWrite?: (
   return fn
 }
 
+/** 同路径的两个权限点会被收进默认折叠的分组，测试要先展开才能看到行。 */
+async function expandAll() {
+  fireEvent.click(await screen.findByRole('button', { name: '全部展开' }))
+}
+
 function renderPanel(a: Application = app) {
   return render(
     <MemoryRouter>
@@ -283,7 +288,8 @@ test('批量删除：勾选多条后显示已选数量，确认框列出去重�
   const deletes = stubFetchBatchDelete([point({}), perm2], { p1: ['商城管理员'], p2: ['商城管理员', '客服'] })
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await expandAll()
+  await screen.findByText('GET:/orders/{id}')
   fireEvent.click(screen.getByRole('checkbox', { name: '选中 GET:/orders/{id}' }))
   fireEvent.click(screen.getByRole('checkbox', { name: '选中 DELETE:/orders/{id}' }))
   expect(screen.getByText('已选 2 项')).toBeTruthy()
@@ -301,7 +307,8 @@ test('表头的全选勾选框选中/取消当前显示的全部行', async () =
   stubFetchBatchDelete([point({}), perm2], {})
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await expandAll()
+  await screen.findByText('GET:/orders/{id}')
   fireEvent.click(screen.getByRole('checkbox', { name: '全选' }))
   expect(screen.getByText('已选 2 项')).toBeTruthy()
 
@@ -315,7 +322,8 @@ test('批量删除部分失败：成功的从选中里移除，失败的保留',
   const deletes = stubFetchBatchDelete([point({}), perm2], {}, ['p2'])
   renderPanel()
 
-  await waitFor(() => expect(screen.getByText('GET:/orders/{id}')).toBeTruthy())
+  await expandAll()
+  await screen.findByText('GET:/orders/{id}')
   fireEvent.click(screen.getByRole('checkbox', { name: '全选' }))
   fireEvent.click(screen.getByRole('button', { name: '批量删除' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认删除' }))
@@ -330,6 +338,7 @@ test('批量删除部分失败：成功的从选中里移除，失败的保留',
 test('点击行内空白处（不是勾选框）也能选中/取消这一行', async () => {
   stubFetchBatchDelete([point({}), perm2], {})
   renderPanel()
+  await expandAll()
 
   const row = (await screen.findByText('GET:/orders/{id}')).closest('tr') as HTMLElement
   fireEvent.click(row)
@@ -374,4 +383,57 @@ test('批量删除按钮和已选数量显示在表格下方，按钮在前文�
   // compareDocumentPosition：button 在 table 之后，label 在 button 之后。
   expect(table.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   expect(button.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
+// 分组行：默认折叠、勾选整组（含半选）、搜索自动展开且清空后恢复。
+test('同路径权限点默认折叠成分组；整组勾选作用于所有后代，部分选中为半选', async () => {
+  stubFetchBatchDelete([point({}), perm2, point({ id: 'p3', key: 'GET:/ping', name: '' })], {})
+  renderPanel()
+
+  await screen.findByText('GET:/ping')
+  expect(screen.queryByText('GET:/orders/{id}')).toBeNull()
+  expect(screen.getByText('2 个')).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('checkbox', { name: '选中分组 /orders/{id}' }))
+  expect(screen.getByText('已选 2 项')).toBeTruthy()
+
+  fireEvent.click(screen.getByText('/orders/{id}'))
+  fireEvent.click(screen.getByRole('checkbox', { name: '选中 DELETE:/orders/{id}' }))
+  expect(screen.getByRole('checkbox', { name: '选中分组 /orders/{id}' }).hasAttribute('data-indeterminate')).toBe(true)
+})
+
+test('搜索命中的分组自动展开，清空后恢复用户原来的折叠状态', async () => {
+  stubFetchBatchDelete([point({}), perm2], {})
+  renderPanel()
+
+  await screen.findByText('/orders/{id}')
+  expect(screen.queryByText('GET:/orders/{id}')).toBeNull()
+
+  const input = screen.getByPlaceholderText('按路径或名称筛选')
+  fireEvent.change(input, { target: { value: '删除订单' } })
+  expect(screen.getByText('DELETE:/orders/{id}')).toBeTruthy()
+
+  fireEvent.change(input, { target: { value: '' } })
+  expect(screen.queryByText('DELETE:/orders/{id}')).toBeNull()
+})
+
+test('全部展开/全部折叠按钮只取决于是否全部展开，并含嵌套分组', async () => {
+  const pts = [
+    point({ id: 'a1', key: 'GET:/a/x/1' }),
+    point({ id: 'a2', key: 'GET:/a/x/2' }),
+    point({ id: 'a3', key: 'GET:/a' }),
+  ]
+  stubFetchBatchDelete(pts, {})
+  renderPanel()
+
+  fireEvent.click(await screen.findByRole('button', { name: '全部展开' }))
+  expect(screen.getByText('GET:/a/x/1')).toBeTruthy()
+  expect(screen.getByRole('button', { name: '全部折叠' })).toBeTruthy()
+
+  fireEvent.click(screen.getByText('/x'))
+  expect(screen.getByRole('button', { name: '全部展开' })).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: '全部展开' }))
+  fireEvent.click(screen.getByRole('button', { name: '全部折叠' }))
+  expect(screen.queryByText('GET:/a')).toBeNull()
 })

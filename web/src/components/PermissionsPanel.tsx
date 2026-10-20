@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -17,6 +17,7 @@ import { useResource, errorMessage } from '@/lib/useResource'
 import { toastFormErrors } from '@/lib/formErrors'
 import { formatDuration, formatTime } from '@/lib/format'
 import { permissionStatusLabels } from '@/lib/labels'
+import { layoutPermissions, type TreeRow } from '@/lib/permissionTree'
 import type { Application, PermissionPoint } from '@/lib/types'
 
 /**
@@ -35,14 +36,27 @@ export default function PermissionsPanel({ app }: { app: Application }) {
     null,
   )
   const [keyword, setKeyword] = useState('')
+  // 折叠状态只记「用户展开过哪些」：搜索时的自动展开不写进来，清空关键字后
+  // 才能恢复用户原来的样子。
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
 
-  const all = perms.data ?? []
+  const all = useMemo(() => perms.data ?? [], [perms.data])
   const kw = keyword.trim().toLowerCase()
-  const shown = kw ? all.filter((p) => p.key.toLowerCase().includes(kw) || p.name.toLowerCase().includes(kw)) : all
+  const shown = useMemo(
+    () => (kw ? all.filter((p) => p.key.toLowerCase().includes(kw) || p.name.toLowerCase().includes(kw)) : all),
+    [all, kw],
+  )
   const staleCount = all.filter((p) => p.status === 'stale').length
   const shownIds = shown.map((p) => p.id)
   const shownSelectedCount = shownIds.filter((id) => selected.has(id)).length
   const allShownSelected = shownIds.length > 0 && shownSelectedCount === shownIds.length
+
+  const layout = useMemo(
+    () => layoutPermissions(shown, (id) => kw !== '' || openGroups.has(id)),
+    [shown, kw, openGroups],
+  )
+  const allExpanded =
+    layout.groupIds.length > 0 && layout.groupIds.every((id) => kw !== '' || openGroups.has(id))
 
   // 权限点被删掉（不管是这里批量删的，还是单条删的）之后，选中集合里
   // 残留的那个 id 不会自己消失——下次重新拉到的列表里已经没有这一项，
@@ -64,6 +78,27 @@ export default function PermissionsPanel({ app }: { app: Application }) {
       shownIds.forEach((id) => (checked ? next.add(id) : next.delete(id)))
       return next
     })
+  }
+
+  function toggleGroup(ids: string[], checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      ids.forEach((id) => (checked ? next.add(id) : next.delete(id)))
+      return next
+    })
+  }
+
+  function toggleCollapse(id: string) {
+    setOpenGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleExpandAll() {
+    setOpenGroups(allExpanded ? new Set() : new Set(layout.groupIds))
   }
 
   function toggleOne(id: string, checked: boolean) {
@@ -157,6 +192,9 @@ export default function PermissionsPanel({ app }: { app: Application }) {
             placeholder="按路径或名称筛选"
             className="w-72"
           />
+          <Button variant="outline" onClick={toggleExpandAll}>
+            {allExpanded ? '全部折叠' : '全部展开'}
+          </Button>
         </div>
 
         {staleCount > 0 && (
@@ -223,65 +261,29 @@ export default function PermissionsPanel({ app }: { app: Application }) {
                     </TableCell>
                   </TableRow>
                 )}
-                {shown.map((p, i) => (
-                  <TableRow
-                    key={p.id}
-                    className="h-12 cursor-pointer"
-                    onClick={() => toggleOne(p.id, !selected.has(p.id))}
-                  >
-                    <TableCell className="p-0 px-2" onClick={(e) => e.stopPropagation()}>
-                      <Checkbox
-                        checked={selected.has(p.id)}
-                        onCheckedChange={(v) => toggleOne(p.id, v === true)}
-                        aria-label={`选中 ${p.key}`}
-                      />
-                    </TableCell>
-                    <TableCell className="p-0 px-2 text-muted-foreground">{i + 1}</TableCell>
-                    <TableCell className="whitespace-normal break-all p-0 px-2 font-mono text-xs">{p.key}</TableCell>
-                    <TableCell className="whitespace-normal break-words p-0 px-2 text-muted-foreground">
-                      {p.name || '-'}
-                    </TableCell>
-                    <TableCell className="p-0 px-2">
-                      <Badge
-                        variant={
-                          p.status === 'normal' ? 'default' : p.status === 'stale' ? 'destructive' : 'secondary'
-                        }
-                      >
-                        {permissionStatusLabels[p.status] ?? p.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
-                      {p.status === 'stale' ? formatDuration(p.staleForMs) : '-'}
-                    </TableCell>
-                    <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
-                      {p.source === 'manual' ? '（手动添加）' : formatTime(p.lastSeenAt)}
-                    </TableCell>
-                    <TableCell className="p-0 px-2">
-                      <div className="flex w-[120px] gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setEditing(p)
-                          }}
-                        >
-                          编辑
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            void askDelete(p)
-                          }}
-                        >
-                          删除
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {layout.rows.map((row) =>
+                  row.type === 'group' ? (
+                    <GroupRow
+                      key={`g:${row.id}`}
+                      row={row}
+                      open={kw !== '' || openGroups.has(row.id)}
+                      selected={selected}
+                      onToggle={() => toggleCollapse(row.id)}
+                      onCheck={(checked) => toggleGroup(row.ids, checked)}
+                    />
+                  ) : (
+                    <PermRow
+                      key={row.point.id}
+                      p={row.point}
+                      depth={row.depth}
+                      seq={layout.seq.get(row.point.id) ?? 0}
+                      checked={selected.has(row.point.id)}
+                      onToggle={(checked) => toggleOne(row.point.id, checked)}
+                      onEdit={() => setEditing(row.point)}
+                      onDelete={() => void askDelete(row.point)}
+                    />
+                  ),
+                )}
               </TableBody>
             </Table>
 
@@ -531,5 +533,120 @@ function EditDialog({
         </form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/** 每层缩进固定一小段，不画网格线。 */
+const INDENT_PX = 12
+
+function GroupRow({
+  row,
+  open,
+  selected,
+  onToggle,
+  onCheck,
+}: {
+  row: Extract<TreeRow<PermissionPoint>, { type: 'group' }>
+  open: boolean
+  selected: Set<string>
+  onToggle: () => void
+  onCheck: (checked: boolean) => void
+}) {
+  const n = row.ids.filter((id) => selected.has(id)).length
+  const full = n === row.ids.length
+  return (
+    <TableRow className="h-12 cursor-pointer select-none font-semibold" onClick={onToggle}>
+      <TableCell className="p-0 px-2" onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={full}
+          indeterminate={!full && n > 0}
+          onCheckedChange={(v) => onCheck(v === true)}
+          aria-label={`选中分组 ${row.label}`}
+        />
+      </TableCell>
+      <TableCell className="p-0 px-2" />
+      <TableCell colSpan={6} className="p-0 px-2">
+        <div className="flex items-center" style={{ paddingLeft: row.depth * INDENT_PX }}>
+          <span className="w-4 shrink-0 text-xs text-muted-foreground">{open ? '▼' : '▶'}</span>
+          <span className="font-mono text-xs">{row.label}</span>
+          <span className="ml-2 text-xs font-normal text-muted-foreground">{row.count} 个</span>
+          {row.staleCount > 0 && (
+            <Badge variant="destructive" className="ml-2">
+              {row.staleCount} 过渡中
+            </Badge>
+          )}
+        </div>
+      </TableCell>
+    </TableRow>
+  )
+}
+
+function PermRow({
+  p,
+  depth,
+  seq,
+  checked,
+  onToggle,
+  onEdit,
+  onDelete,
+}: {
+  p: PermissionPoint
+  depth: number
+  seq: number
+  checked: boolean
+  onToggle: (checked: boolean) => void
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  return (
+    <TableRow className="h-12 cursor-pointer" onClick={() => onToggle(!checked)}>
+      <TableCell className="p-0 px-2" onClick={(e) => e.stopPropagation()}>
+        <Checkbox checked={checked} onCheckedChange={(v) => onToggle(v === true)} aria-label={`选中 ${p.key}`} />
+      </TableCell>
+      <TableCell className="p-0 px-2 text-muted-foreground">{seq}</TableCell>
+      <TableCell className="whitespace-normal break-all p-0 px-2 font-mono text-xs">
+        {/* 留出与分组 ▶ 同宽的空位，让权限点与同级分组名左对齐 */}
+        <div className="flex" style={{ paddingLeft: depth * INDENT_PX }}>
+          <span className="w-4 shrink-0" />
+          <span>{p.key}</span>
+        </div>
+      </TableCell>
+      <TableCell className="whitespace-normal break-words p-0 px-2 text-muted-foreground">{p.name || '-'}</TableCell>
+      <TableCell className="p-0 px-2">
+        <Badge variant={p.status === 'normal' ? 'default' : p.status === 'stale' ? 'destructive' : 'secondary'}>
+          {permissionStatusLabels[p.status] ?? p.status}
+        </Badge>
+      </TableCell>
+      <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
+        {p.status === 'stale' ? formatDuration(p.staleForMs) : '-'}
+      </TableCell>
+      <TableCell className="whitespace-normal p-0 px-2 text-muted-foreground">
+        {p.source === 'manual' ? '（手动添加）' : formatTime(p.lastSeenAt)}
+      </TableCell>
+      <TableCell className="p-0 px-2">
+        <div className="flex w-[120px] gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation()
+              onEdit()
+            }}
+          >
+            编辑
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation()
+              onDelete()
+            }}
+          >
+            删除
+          </Button>
+        </div>
+      </TableCell>
+    </TableRow>
   )
 }
