@@ -56,14 +56,10 @@ function count<T>(n: Node<T>): number {
   return n.own.length + [...n.kids.values()].reduce((a, k) => a + count(k), 0)
 }
 
-/** 没有自有权限点且只有一个子分组的链压成一个标题（/api/v1），避免一层层点开。 */
-function squash<T>(n: Node<T>): [Node<T>, string] {
-  let label = `/${n.seg}`
-  while (n.own.length === 0 && n.kids.size === 1) {
-    n = [...n.kids.values()][0]
-    label += `/${n.seg}`
-  }
-  return [n, label]
+/** 没有自有权限点且只有一个子分组的链压成一个标题（/api/v1），避免一层层点开。分组名一律用完整路径，嵌套时也不省略前缀。 */
+function squash<T>(n: Node<T>): Node<T> {
+  while (n.own.length === 0 && n.kids.size === 1) n = [...n.kids.values()][0]
+  return n
 }
 
 /**
@@ -91,7 +87,7 @@ export function layoutPermissions<T extends TreePoint & { status?: string }>(
         if (visible) rows.push({ type: 'perm', point: p, depth })
         continue
       }
-      const [end, label] = squash(k)
+      const end = squash(k)
       const id = end.path
       groupIds.push(id)
       const ls = leaves(end)
@@ -100,7 +96,7 @@ export function layoutPermissions<T extends TreePoint & { status?: string }>(
         rows.push({
           type: 'group',
           id,
-          label,
+          label: id,
           depth,
           ids: ls.map((p) => p.id),
           count: ls.length,

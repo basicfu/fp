@@ -16,7 +16,7 @@ test('同一路径的权限点挂在同一分组下，自有权限点在子分�
     'G:/orders@0(4)',
     'P:GET:/orders@1',
     'P:POST:/orders@1',
-    'G:/{id}/x@1(2)',
+    'G:/orders/{id}/x@1(2)',
     'P:GET:/orders/{id}/x@2',
     'P:POST:/orders/{id}/x@2',
   ])
@@ -25,7 +25,7 @@ test('同一路径的权限点挂在同一分组下，自有权限点在子分�
 test('无自有权限点且只有一个子分组的链压成一个标题', () => {
   expect(shape(['GET:/api/v1/a', 'POST:/api/v1/a', 'GET:/api/v1/b', 'GET:/api/v1/c'])).toEqual([
     'G:/api/v1@0(4)',
-    'G:/a@1(2)',
+    'G:/api/v1/a@1(2)',
     'P:GET:/api/v1/a@2',
     'P:POST:/api/v1/a@2',
     'P:GET:/api/v1/b@1',

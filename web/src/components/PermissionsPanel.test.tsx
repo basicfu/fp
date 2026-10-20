@@ -430,7 +430,7 @@ test('全部展开/全部折叠按钮只取决于是否全部展开，并含嵌�
   expect(screen.getByText('GET:/a/x/1')).toBeTruthy()
   expect(screen.getByRole('button', { name: '全部折叠' })).toBeTruthy()
 
-  fireEvent.click(screen.getByText('/x'))
+  fireEvent.click(screen.getByText('/a/x'))
   expect(screen.getByRole('button', { name: '全部展开' })).toBeTruthy()
 
   fireEvent.click(screen.getByRole('button', { name: '全部展开' }))
