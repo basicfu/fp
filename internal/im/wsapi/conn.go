@@ -41,19 +41,19 @@ func (c *wsConn) ID() string    { return c.id }
 func (c *wsConn) Token() string { return c.token }
 
 // Send 实现 hub.Conn：hub 传进来的 payload 是不透明的业务消息体，client
-// 侧要靠 model.Frame.T 分辨这是一条 msg 而不是 hello/pong，所以这里要先
+// 侧要靠 model.Frame.T 分辨这是一条 msg 而不是鉴权结果/pong，所以这里要先
 // 用 msgFrame 包一层，而不是把裸 payload 直接丢上线。这是简报里定义了
 // msgFrame 却没有任何地方调用它的一个遗漏：不补上的话，hub 通过 Deliver/
 // Push 推给这条连接的每一条消息，client 收到的都是缺了 "t" 字段的裸
-// JSON，没法按 model.Frame 解析出 t=="msg"。
+// JSON，没法按 model.Frame 解析出 t==FrameMsg。
 func (c *wsConn) Send(payload []byte) bool {
 	return c.enqueue(msgFrame(payload))
 }
 
 // enqueue 把已经是最终帧格式的字节塞进发送队列，供 wsapi 内部直接发送
 // 已经封装好的控制帧（比如 pong）用，不经过 Send 的 msgFrame 包装——
-// pongFrame 本身就是 `{"t":"pong"}`，再包一层会把它变成
-// `{"t":"msg","p":{"t":"pong"}}`，client 会把它误判成一条业务消息。
+// pongFrame 本身就是 `{"t":5}`，再包一层会把它变成
+// `{"t":3,"p":{"t":5}}`，client 会把它误判成一条业务消息。
 func (c *wsConn) enqueue(frame []byte) bool {
 	select {
 	case c.sendq <- frame:
@@ -85,8 +85,8 @@ func (c *wsConn) closure() (code int, reason string, ok bool) {
 // writeLoop 把队列里的 payload 包成 msg 帧写出去，直到被关闭或写失败。
 //
 // 唯一的写者：这个 goroutine 是本连接上下文里唯一调用 c.ws.Write/Close 的
-// 地方（握手阶段的 hello 帧例外——那时 writeLoop 还没启动，见 handler.go
-// 里先写 hello 再 go writeLoop 的顺序），读循环只读不写。
+// 地方（握手阶段的鉴权结果帧例外——那时 writeLoop 还没启动，见 handler.go
+// 里先写结果帧再 go writeLoop 的顺序），读循环只读不写。
 func (c *wsConn) writeLoop(ctx context.Context) {
 	for {
 		select {
@@ -111,12 +111,13 @@ func (c *wsConn) writeLoop(ctx context.Context) {
 	}
 }
 
-// msgFrame 手拼 {"t":"msg","p":<payload>}：payload 已是 JSON，走 json.Marshal 会多一次拷贝与转义。
+// msgFrame 手拼 {"t":3,"p":<payload>}：payload 已是 JSON，走 json.Marshal 会多一次拷贝与转义。
+// 字面量里的 3 必须与 model.FrameMsg 一致，由 TestFrameLiteralsMatchConstants 守着。
 func msgFrame(payload []byte) []byte {
 	b := make([]byte, 0, len(payload)+16)
-	b = append(b, `{"t":"msg","p":`...)
+	b = append(b, `{"t":3,"p":`...)
 	b = append(b, payload...)
 	return append(b, '}')
 }
 
-var pongFrame = []byte(`{"t":"pong"}`)
+var pongFrame = []byte(`{"t":5}`)

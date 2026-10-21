@@ -322,7 +322,7 @@ func appsWithBizAuth(verifyURL string) staticApps {
 func TestServeWithBizAuthStartsAndDispatches(t *testing.T) {
 	var calls atomic.Int64
 	verify := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"user_id":"biz-42"}`))
+		w.Write([]byte(`{"code":"success","msg":"","time":1,"uid":"biz-42"}`))
 	}))
 	// 计数挂在 ConnState 而不是 handler 里：进程侧的 HTTP 客户端不信任这张
 	// 自签证书，TLS 握手会在证书校验阶段就被客户端中止（client 发一个
@@ -343,10 +343,14 @@ func TestServeWithBizAuthStartsAndDispatches(t *testing.T) {
 
 	c := dialWS(t, wsURL)
 	defer c.CloseNow()
-	sendFrame(t, c, map[string]any{"t": "auth", "app": "a1", "token": "whatever", "kind": "biz"})
+	sendFrame(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "whatever", "kind": "biz"})
 
 	// 证书不被信任，所以握手最终会失败并拿到 4004。但请求确实发出去了，
 	// 这证明 cmd 里的装配把 kind=biz 路由到了 bizauth 而不是 fpauth。
+	// 关闭前先收到 auth_unavailable 的鉴权结果帧。
+	if f, err := readFrame(t, c); err != nil || f.T != model.FrameAuthResult || !strings.Contains(string(f.P), model.CodeAuthUnavailable) {
+		t.Fatalf("回调失败应先回 auth_unavailable 结果帧，实际 %+v %v", f, err)
+	}
 	_, err := readFrame(t, c)
 	if websocket.CloseStatus(err) != model.CloseUnavailable {
 		t.Fatalf("回调失败应当以 4004 关闭，实际 %v", err)

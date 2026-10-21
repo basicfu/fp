@@ -15,14 +15,15 @@ import (
 	"github.com/coder/websocket"
 )
 
-// fakeIm 是最小的 ws 端点：读 auth 帧、回 hello、把 msg 原样回推、可按指令关闭。
+// fakeIm 是最小的 ws 端点：读 auth 帧、回鉴权结果、把 msg 原样回推、可按指令关闭。
 type fakeIm struct {
-	closeWith atomic.Int32 // 非零：握手后立刻以该码关闭
-	mu        sync.Mutex
-	auths     []map[string]any
-	conns     atomic.Int32
-	cur       atomic.Pointer[websocket.Conn] // 当前存活的服务端连接，供测试模拟网络切断
-	hellos    atomic.Int32                   // 成功写出 hello 的次数：确认某次握手真正完成，比只看 conns（刚 Accept）更准
+	closeWith  atomic.Int32           // 非零：发出拒绝结果后立刻以该码关闭
+	rejectWith atomic.Pointer[string] // 拒绝时的结果 p，nil 用默认的 auth_failed
+	mu         sync.Mutex
+	auths      []map[string]any
+	conns      atomic.Int32
+	cur        atomic.Pointer[websocket.Conn] // 当前存活的服务端连接，供测试模拟网络切断
+	accepted   atomic.Int32                   // 成功写出成功结果的次数：确认某次握手真正完成，比只看 conns（刚 Accept）更准
 }
 
 func (f *fakeIm) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -43,11 +44,16 @@ func (f *fakeIm) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.auths = append(f.auths, af)
 	f.mu.Unlock()
 	if code := f.closeWith.Load(); code != 0 {
+		p := `{"code":"auth_failed","msg":"身份验证失败","time":1}`
+		if r := f.rejectWith.Load(); r != nil {
+			p = *r
+		}
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"t":2,"p":`+p+`}`))
 		_ = c.Close(websocket.StatusCode(code), "test")
 		return
 	}
-	if c.Write(ctx, websocket.MessageText, []byte(`{"t":"hello","conn":"c1"}`)) == nil {
-		f.hellos.Add(1)
+	if c.Write(ctx, websocket.MessageText, []byte(`{"t":2,"conn":"c1","p":{"code":"success","msg":"","time":1}}`)) == nil {
+		f.accepted.Add(1)
 	}
 	for {
 		_, b, err := c.Read(ctx)
@@ -55,15 +61,15 @@ func (f *fakeIm) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var fr struct {
-			T string          `json:"t"`
+			T int             `json:"t"`
 			P json.RawMessage `json:"p"`
 		}
 		_ = json.Unmarshal(b, &fr)
-		if fr.T == "msg" {
-			_ = c.Write(ctx, websocket.MessageText, []byte(`{"t":"msg","p":`+string(fr.P)+`}`))
+		if fr.T == frameMsg {
+			_ = c.Write(ctx, websocket.MessageText, []byte(`{"t":3,"p":`+string(fr.P)+`}`))
 		}
-		if fr.T == "ping" {
-			_ = c.Write(ctx, websocket.MessageText, []byte(`{"t":"pong"}`))
+		if fr.T == framePing {
+			_ = c.Write(ctx, websocket.MessageText, []byte(`{"t":5}`))
 		}
 	}
 }
@@ -126,7 +132,7 @@ func TestDialSendsAuthFrameAndEchoes(t *testing.T) {
 	defer c.Close()
 	c.OnMessage(func(p []byte) { got <- p })
 	auths := f.authsSnapshot()
-	if len(auths) != 1 || auths[0]["t"] != "auth" || auths[0]["app"] != "a1" || auths[0]["token"] != "tok" || auths[0]["os"] != "linux" {
+	if len(auths) != 1 || auths[0]["t"] != float64(frameAuth) || auths[0]["app"] != "a1" || auths[0]["token"] != "tok" || auths[0]["os"] != "linux" {
 		t.Fatalf("握手帧不对：%v", auths)
 	}
 	if err := c.Send(context.Background(), []byte(`{"hi":1}`)); err != nil {
@@ -149,8 +155,9 @@ func TestDialFailsOn4001AndDoesNotReconnect(t *testing.T) {
 	f, url := newFake(t)
 	f.closeWith.Store(CloseAuthFailed)
 	_, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "bad"})
-	if err == nil {
-		t.Fatal("4001 应让 Dial 失败")
+	var ae *AuthError
+	if !errors.As(err, &ae) || ae.Result.Code != "auth_failed" || ae.Result.Msg != "身份验证失败" || ae.Result.Time != 1 || ae.CloseCode != CloseAuthFailed {
+		t.Fatalf("4001 应让 Dial 返回带结果与关闭码的 AuthError，实际 %v", err)
 	}
 	// 这条是"确认没有重连"的否定断言：只能靠等一小段时间后查计数来证伪，
 	// 没有事件可等——不代表真的等满这段时间就能证明"永远不会重连"，只是
@@ -203,15 +210,15 @@ func TestSendAfterCloseReturnsErrUnavailable(t *testing.T) {
 	}
 }
 
-// waitHellos 轮询等待 hellos 计数达到 n，超时则让测试失败。用它而不是
+// waitAccepted 轮询等待 accepted 计数达到 n，超时则让测试失败。用它而不是
 // sleep，是因为"握手完成"本身就有一个可观察的信号（服务端成功写出
 // hello），没有理由退化成猜一个足够长的睡眠时间。
-func waitHellos(t *testing.T, f *fakeIm, n int32, timeout time.Duration) {
+func waitAccepted(t *testing.T, f *fakeIm, n int32, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	for f.hellos.Load() < n {
+	for f.accepted.Load() < n {
 		if time.Now().After(deadline) {
-			t.Fatalf("等待第 %d 次握手完成超时，实际 hellos=%d", n, f.hellos.Load())
+			t.Fatalf("等待第 %d 次握手完成超时，实际 accepted=%d", n, f.accepted.Load())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -221,7 +228,7 @@ func waitHellos(t *testing.T, f *fakeIm, n int32, timeout time.Duration) {
 // 已经建立并正常用了一段时间之后，才收到不可重连的关闭码"这条路径。
 //
 // 与 TestDialFailsOn4001AndDoesNotReconnect 是两条不同的代码路径：那条
-// 测试里服务端在发 hello 回执之前就关闭，client 的 connect() 直接返回
+// 测试里服务端发出拒绝结果后就关闭，client 的 connect() 直接返回
 // 错误，Dial 直接失败，根本进不了 runLoop 的重连循环——那条判断守的是
 // "握手期间被拒"。这里握手先正常走完（Dial 成功返回），之后才通过已建立
 // 的连接收到关闭帧，真正走到 runLoop 里 `noAutoReconnect(code)` 那个
@@ -236,7 +243,7 @@ func TestClientDoesNotReconnectOnKickedAfterEstablishedConnection(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer c.Close()
-	waitHellos(t, f, 1, 2*time.Second) // 确认握手已经真正完成，不是还在半路上
+	waitAccepted(t, f, 1, 2*time.Second) // 确认握手已经真正完成，不是还在半路上
 
 	codes := make(chan int, 4)
 	c.OnClose(func(code int) { codes <- code })
@@ -275,16 +282,16 @@ func TestIdleTimeoutReconnectsImmediatelyUnlikeUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	waitHellos(t, f, 1, 2*time.Second)
+	waitAccepted(t, f, 1, 2*time.Second)
 
 	idleStart := time.Now()
 	f.closeCurrentConnWithCode(CloseIdleTimeout)
-	waitHellos(t, f, 2, 5*time.Second)
+	waitAccepted(t, f, 2, 5*time.Second)
 	idleElapsed := time.Since(idleStart)
 
 	unavailStart := time.Now()
 	f.closeCurrentConnWithCode(CloseUnavailable)
-	waitHellos(t, f, 3, 5*time.Second)
+	waitAccepted(t, f, 3, 5*time.Second)
 	unavailElapsed := time.Since(unavailStart)
 
 	// 4005 应该远远快于 minBackoff（200ms）：留足够宽的余量（150ms）
@@ -318,7 +325,7 @@ func TestClientReportsGivingUpDuringReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	waitHellos(t, f, 1, 2*time.Second)
+	waitAccepted(t, f, 1, 2*time.Second)
 
 	codes := make(chan int, 4)
 	c.OnClose(func(code int) { codes <- code })
@@ -357,7 +364,7 @@ func TestClientGaveUpFalseWhileHealthyAndAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitHellos(t, f, 1, 2*time.Second)
+	waitAccepted(t, f, 1, 2*time.Second)
 	if c.GaveUp() {
 		t.Fatal("连接正常时 GaveUp() 应为假")
 	}
@@ -410,5 +417,63 @@ func waitUntilTrue(t *testing.T, cond func() bool, msg string) {
 			t.Fatal(msg)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDialAuthErrorCarriesBizResult 覆盖业务方拒绝：业务方自定的 code、detail
+// 与自加字段都要原样交给调用方。
+func TestDialAuthErrorCarriesBizResult(t *testing.T) {
+	f, url := newFake(t)
+	p := `{"code":"device_banned","msg":"设备已被封禁","detail":"d-1","time":1700000000000,"extra":1}`
+	f.rejectWith.Store(&p)
+	f.closeWith.Store(CloseAuthFailed)
+	_, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok", Kind: TokenKindBiz})
+	var ae *AuthError
+	if !errors.As(err, &ae) {
+		t.Fatalf("应返回 AuthError，实际 %v", err)
+	}
+	want := Result{Code: "device_banned", Msg: "设备已被封禁", Detail: "d-1", Time: 1700000000000}
+	if ae.Result != want || string(ae.Raw) != p || ae.CloseCode != CloseAuthFailed {
+		t.Fatalf("AuthError 不对：%+v raw=%s", ae, ae.Raw)
+	}
+}
+
+// TestReconnectRetriesOnAuthUnavailable 覆盖重连时被以 4004 拒绝：AuthError
+// 里的关闭码是可重连的，client 必须继续退避重试，而不是当成不可重连放弃。
+func TestReconnectRetriesOnAuthUnavailable(t *testing.T) {
+	f, url := newFake(t)
+	c, err := Dial(context.Background(), ClientConfig{URL: url, App: "a1", Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	waitAccepted(t, f, 1, 2*time.Second)
+	p := `{"code":"auth_unavailable","msg":"服务器授权异常","time":1}`
+	f.rejectWith.Store(&p)
+	f.closeWith.Store(CloseUnavailable)
+	f.closeCurrentConnWithCode(CloseUnavailable)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.conns.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("4004 拒绝后应继续重试，实际只连了 %d 次", f.conns.Load())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.closeWith.Store(0)
+	waitAccepted(t, f, 2, 5*time.Second)
+	if c.GaveUp() {
+		t.Fatal("4004 不该让 client 放弃重连")
+	}
+}
+
+// TestFrameLiterals 守住手拼的帧字面量与 frameXxx 常量一致。
+func TestFrameLiterals(t *testing.T) {
+	var f frame
+	if json.Unmarshal(pingFrame, &f) != nil || f.T != framePing {
+		t.Fatalf("pingFrame 与 framePing 不一致：%s", pingFrame)
+	}
+	f = frame{}
+	if json.Unmarshal(append(append([]byte{}, msgPrefix...), `{}}`...), &f) != nil || f.T != frameMsg {
+		t.Fatalf("msgPrefix 与 frameMsg 不一致：%s", msgPrefix)
 	}
 }

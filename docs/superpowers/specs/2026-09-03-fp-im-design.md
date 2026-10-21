@@ -95,13 +95,16 @@ ws 帧用 JSON（第一版；后续可加二进制协商）：
 
 | 方向 | 帧 | 说明 |
 |---|---|---|
-| client→im | `{"t":"auth","token":"…"}` 或 `{"t":"auth","guest":"<uuid>","app":"a1"}`，可选 `ua`、`os`、`mobile` | 握手，连接建立后第一帧，5 秒内不发则关闭 |
-| im→client | `{"t":"hello","conn":"<connId>"}` | 握手成功 |
-| client→im | `{"t":"msg","p":<payload>}` | 发给 server。payload 对 im 是不透明字节，client 若需要 clientMsgId 放在 payload 里 |
-| im→client | `{"t":"msg","p":<payload>}` | 来自 server 的推送 |
-| 双向 | `{"t":"ping"}` / `{"t":"pong"}` | 应用层心跳，60 秒无任何帧关闭连接 |
+| client→im | `{"t":1,"app":"a1","token":"…"}` 或 `{"t":1,"guest":"<uuid>","app":"a1"}`，可选 `ua`、`os`、`mobile` | 握手，连接建立后第一帧，5 秒内不发则拒绝 |
+| im→client | `{"t":2,"conn":"<connId>","p":{"code":"success","msg":"","time":<毫秒>}}` | 鉴权结果。失败时 `p.code` 为错误码，随后关闭 |
+| client→im | `{"t":3,"p":<payload>}` | 发给 server。payload 对 im 是不透明字节，client 若需要 clientMsgId 放在 payload 里 |
+| im→client | `{"t":3,"p":<payload>}` | 来自 server 的推送 |
+| 双向 | `{"t":4}` / `{"t":5}` | 应用层心跳 ping/pong，60 秒无任何帧关闭连接 |
 
-im→client **没有错误帧**。server 侧的任何故障对 client 不可见，client 靠自己的超时重发。
+> 2026-10-21 修订：帧类型改为数字，`hello` 换成 t=2 鉴权结果帧，握手阶段的拒绝也先发 t=2
+> 再关闭。完整约定见 `docs/im.md` 的 ws 协议一节。
+
+握手之后 im→client **没有错误帧**。server 侧的任何故障对 client 不可见，client 靠自己的超时重发。
 
 gRPC 流上的帧（proto 放 `proto/fp/im/v1`，这里只列语义）：
 
@@ -115,7 +118,7 @@ gRPC 流上的帧（proto 放 `proto/fp/im/v1`，这里只列语义）：
 ## 四、握手与连接策略
 
 ```
-client ──ws {t:"auth", token | guest+app, ua?, os?, mobile?}──► im-B
+client ──ws {t:1, token | guest+app, ua?, os?, mobile?}──► im-B
                     │
                     ▼
         ┌───────────────────────────────────────────────┐
@@ -157,7 +160,7 @@ client ──ws {t:"auth", token | guest+app, ua?, os?, mobile?}──► im-B
    deliver(Event{Connected, subject, connId, os, mobile, ua, ts}, hops=0)   ← 第六节
                    │
                    ▼
-   回 {t:"hello", conn:<connId>}
+   回 {t:2, conn:<connId>, p:{code:"success", …}}
 ```
 
 要点：
@@ -190,7 +193,7 @@ server.Push(u:1001, payload)
         ▼
    本地连接表有 a1:u:1001 ？
         │
-   有 ──┼──► 逐条写 ws 帧 {t:"msg", p}
+   有 ──┼──► 逐条写 ws 帧 {t:3, p}
         │    策略为 replace / reject（全网最多一条）→ 返回 Sent{nodes=1}，结束   ← Redis 0 次
         │    策略为 limit N → 继续往下找其他节点，SPUBLISH 时排除自己
         │
@@ -212,7 +215,7 @@ server.Push(u:1001, payload)
    ═════════════════════╪═══════════════════════════════════
                         ▼
    im-B 节点频道读协程收到 MSG：
-     本地连接表查 a1:u:1001 的所有连接 → 每条写 ws 帧 {t:"msg", p}
+     本地连接表查 a1:u:1001 的所有连接 → 每条写 ws 帧 {t:3, p}
      本地没有（刚断线）→ 丢弃
    无 Redis 命令
 ```

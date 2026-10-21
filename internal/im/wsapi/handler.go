@@ -85,9 +85,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(s.Cfg.MaxFrame)
 	ctx := r.Context()
 
-	af, rawFrame, ok := s.readAuthFrame(ctx, ws)
-	if !ok {
+	af, rawFrame, st := s.readAuthFrame(ctx, ws)
+	switch st {
+	case frameBroken:
+		// 连接已经读不了，写一帧结果也到不了 client，直接关。
 		_ = ws.Close(websocket.StatusCode(model.CloseAuthFailed), "auth frame")
+		return
+	case frameBad:
+		s.reject(ctx, ws, fail(model.CloseAuthFailed, model.CodeBadRequest, "请求格式错误"))
 		return
 	}
 	// 先确保这个 app 的配置在本地缓存里。冷路径，可能回源到 fp；
@@ -97,20 +102,20 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// **4002 策略拒绝**而不是 4001 认证失败——token 可能完全有效，把
 	// client 指去重新登录是错的方向：它登录完还是连不上，变成死循环。
 	if err := s.Apps.Load(ctx, af.App); err != nil {
-		_ = ws.Close(websocket.StatusCode(model.ClosePolicyRejected), "app unavailable")
+		s.reject(ctx, ws, fail(model.ClosePolicyRejected, model.CodeAppUnavailable, "应用不可用"))
 		return
 	}
 	appCfg, ok := s.Apps.Get(af.App)
 	if !ok {
-		_ = ws.Close(websocket.StatusCode(model.ClosePolicyRejected), "unknown app")
+		s.reject(ctx, ws, fail(model.ClosePolicyRejected, model.CodeAppUnavailable, "应用不可用"))
 		return
 	}
 	// 握手帧里的 app 可以是应用 code；从这里起一律换成规范 app_id——连接表、路由、
 	// 撤销都按它做键，不归一的话 code 与 app_id 会变成两个互不相通的应用。
 	af.App = appCfg.AppID
-	sub, code := s.resolveSubject(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
-	if code != 0 {
-		_ = ws.Close(websocket.StatusCode(code), "auth")
+	sub, rej := s.resolveSubject(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
+	if rej != nil {
+		s.reject(ctx, ws, rej)
 		return
 	}
 	osName, mobile := af.OS, af.Mobile != nil && *af.Mobile
@@ -119,29 +124,29 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	connID, err := uuid.NewV7()
 	if err != nil {
-		_ = ws.Close(websocket.StatusCode(model.CloseUnavailable), "id")
+		s.reject(ctx, ws, unavailable())
 		return
 	}
 	meta := model.ConnMeta{Node: s.Live.NodeID(), OS: osName, Mobile: mobile, At: time.Now().UnixMilli()}
 	res, err := s.Conns.Handshake(ctx, af.App, sub.String(), connID.String(), meta, appCfg.ConnPolicy, appCfg.ConnLimit, s.Live.LiveNodes())
 	if err != nil {
 		slog.Warn("wsapi: 握手脚本失败", "app", af.App, "err", err)
-		_ = ws.Close(websocket.StatusCode(model.CloseUnavailable), "registry")
+		s.reject(ctx, ws, unavailable())
 		return
 	}
 	if res.Rejected {
-		_ = ws.Close(websocket.StatusCode(model.ClosePolicyRejected), "policy")
+		s.reject(ctx, ws, fail(model.ClosePolicyRejected, model.CodeConnLimited, "连接数超出限制"))
 		return
 	}
-	// 顺序：先跑握手脚本拿到裁决，再顶掉旧连接，再登记进路由器，最后回 hello 帧。
+	// 顺序：先跑握手脚本拿到裁决，再顶掉旧连接，再登记进路由器，最后回鉴权结果帧。
 	s.Hub.Evict(ctx, af.App, sub, res.Kicked, model.ReasonReplaced)
 
 	c := newWsConn(connID.String(), af.Token, ws, s.Cfg.SendQueue)
 	s.Hub.AddConn(ctx, af.App, sub, c, meta, af.UA)
-	hello, _ := json.Marshal(model.Frame{T: model.FrameHello, Conn: c.id})
+	success, _ := json.Marshal(model.NewResult(model.CodeSuccess, ""))
 	// 这一次 ws.Write 是安全的：writeLoop 还没启动（下面才 go c.writeLoop），
 	// 此刻只有当前协程会碰这条 ws，不存在两个协程同时写的风险。
-	if err := ws.Write(ctx, websocket.MessageText, hello); err != nil {
+	if err := ws.Write(ctx, websocket.MessageText, authResultFrame(c.id, success)); err != nil {
 		s.teardown(af.App, sub, c, model.ReasonClient)
 		return
 	}
@@ -153,7 +158,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.teardown(af.App, sub, c, reason)
 }
 
-// readAuthFrame 等第一帧，超过 AuthTimeout 没等到就返回 ok=false。
+// readAuthFrame 等第一帧。超过 AuthTimeout 没等到、或帧不合格返回 frameBad
+// （连接还能写，要先回 bad_request 再关）；读本身出错返回 frameBroken。
 //
 // 没有直接把 AuthTimeout 套在 ws.Read 的 ctx 上：coder/websocket 对"ctx
 // 到期"的实现是 setupReadTimeout 里注册的 context.AfterFunc(ctx, c.close)
@@ -165,15 +171,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 读不到任何状态码——这个和"握手超时要以 4001 拒绝"的要求直接冲突。
 //
 // 改成:用不带 deadline 的 ctx 在后台读，这里只是等一个定时器；定时器先到
-// 就直接返回"没读到"，真正的关闭（带 4001）交给 ServeHTTP 里统一的
-// `if !ok { ws.Close(...) }` 分支去做——那次 Close 本身会让还卡着的
+// 就直接返回"没读到"，回结果帧与真正的关闭（带 4001）交给 ServeHTTP 里的
+// reject 去做——那次 Close 本身会让还卡着的
 // 后台读 goroutine 解除阻塞退出，不会泄漏，也不会有第二个协程抢着关闭
 // 同一条 ws（读 goroutine 只读不写/不关）。
 // readAuthFrame 读第一帧并解析。第二个返回值是原始字节：业务方的验证
 // 回调要把它逐字节转发过去，client 塞的自定义字段（设备指纹之类）才能到
 // 业务方手里；解析后再重新序列化会丢掉网关不认识的字段，所以这里必须
 // 把 ws.Read 读到的那份字节原样带出去，不能在别处重新 Marshal 一份。
-func (s *server) readAuthFrame(ctx context.Context, ws *websocket.Conn) (model.AuthFrame, []byte, bool) {
+func (s *server) readAuthFrame(ctx context.Context, ws *websocket.Conn) (model.AuthFrame, []byte, frameStatus) {
 	type result struct {
 		data []byte
 		err  error
@@ -187,43 +193,92 @@ func (s *server) readAuthFrame(ctx context.Context, ws *websocket.Conn) (model.A
 	select {
 	case r := <-done:
 		if r.err != nil {
-			return model.AuthFrame{}, nil, false
+			return model.AuthFrame{}, nil, frameBroken
 		}
 		var af model.AuthFrame
 		// 握手帧必须带 app：fp 签发的 token 不透明，没有 claim，网关要先知道
 		// 用哪个 app 的凭据去验它，缺 app 直接拒。
 		if json.Unmarshal(r.data, &af) != nil || af.T != model.FrameAuth || af.App == "" {
-			return model.AuthFrame{}, nil, false
+			return model.AuthFrame{}, nil, frameBad
 		}
-		return af, r.data, true
+		return af, r.data, frameOK
 	case <-time.After(s.Cfg.AuthTimeout):
-		return model.AuthFrame{}, nil, false
+		return model.AuthFrame{}, nil, frameBad
 	}
 }
 
-// resolveSubject 返回 subject，或非零的关闭码。raw 是 readAuthFrame 读到的
+type frameStatus int
+
+const (
+	frameOK frameStatus = iota
+	frameBad
+	frameBroken
+)
+
+// rejection 是握手阶段的一次拒绝：先把 result 作为鉴权结果发给 client，再用 closeCode 关闭。
+type rejection struct {
+	closeCode int
+	result    []byte
+}
+
+func fail(closeCode int, code, msg string) *rejection {
+	b, _ := json.Marshal(model.NewResult(code, msg))
+	return &rejection{closeCode: closeCode, result: b}
+}
+
+func unavailable() *rejection {
+	return fail(model.CloseUnavailable, model.CodeAuthUnavailable, "服务器授权异常")
+}
+
+// reject 先发鉴权结果帧再关闭：client 发出首帧后收到的第一帧必须是 t=2，
+// 拒绝也不例外，client 才能拿到可展示的原因，而不是只看到一个关闭码。
+func (s *server) reject(ctx context.Context, ws *websocket.Conn, rej *rejection) {
+	// 写给个上限：写不出去说明连接已坏。coder/websocket 在 ctx 到期时直接
+	// 断开底层连接，随后的 Close 成为空操作——正好是"没法写就直接关闭"。
+	wctx, cancel := context.WithTimeout(ctx, rejectWriteTimeout)
+	defer cancel()
+	_ = ws.Write(wctx, websocket.MessageText, authResultFrame("", rej.result))
+	_ = ws.Close(websocket.StatusCode(rej.closeCode), "auth")
+}
+
+const rejectWriteTimeout = 3 * time.Second
+
+// authResultFrame 拼 {"t":2,"conn":…,"p":<result>}。result 可能是业务方响应体
+// 的原始字节，经 json.Marshal 校验并压缩后原样放进 p。
+func authResultFrame(conn string, result []byte) []byte {
+	b, _ := json.Marshal(model.Frame{T: model.FrameAuthResult, Conn: conn, P: result})
+	return b
+}
+
+// resolveSubject 返回 subject，或一次拒绝。raw 是 readAuthFrame 读到的
 // 原始帧字节，只有走 token 分支时才会用到；访客分支不经过认证器，用不上它。
-func (s *server) resolveSubject(ctx context.Context, af model.AuthFrame, raw []byte, cfg model.AppConfig, ip string) (model.Subject, int) {
+func (s *server) resolveSubject(ctx context.Context, af model.AuthFrame, raw []byte, cfg model.AppConfig, ip string) (model.Subject, *rejection) {
 	switch {
 	case af.Token != "":
-		sub, err := s.Auth.Verify(ctx, auth.VerifyRequest{App: af.App, Kind: af.Kind, Token: af.Token, Raw: raw})
-		if errors.Is(err, auth.ErrUnavailable) {
-			return model.Subject{}, model.CloseUnavailable
+		sub, err := s.Auth.Verify(ctx, auth.VerifyRequest{App: af.App, Kind: af.Kind, Token: af.Token, Raw: raw, IP: ip})
+		var biz *auth.RejectedError
+		switch {
+		case err == nil:
+			return sub, nil
+		case errors.As(err, &biz):
+			return model.Subject{}, &rejection{closeCode: model.CloseAuthFailed, result: biz.Result}
+		case errors.Is(err, auth.ErrUnavailable):
+			return model.Subject{}, unavailable()
 		}
-		if err != nil {
-			return model.Subject{}, model.CloseAuthFailed
-		}
-		return sub, 0
+		return model.Subject{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "身份验证失败")
 	case af.Guest != "":
-		if !cfg.AllowGuest || !model.IsUUIDv4(af.Guest) {
-			return model.Subject{}, model.CloseAuthFailed
+		if !cfg.AllowGuest {
+			return model.Subject{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "不允许访客")
+		}
+		if !model.IsUUIDv4(af.Guest) {
+			return model.Subject{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "访客标识非法")
 		}
 		if !s.Guests.Allow(af.App, ip, af.Guest, cfg.GuestIPRate, time.Now()) {
-			return model.Subject{}, model.CloseAuthFailed
+			return model.Subject{}, fail(model.CloseAuthFailed, model.CodeRateLimited, "访客连接过于频繁")
 		}
-		return model.Guest(af.Guest), 0
+		return model.Guest(af.Guest), nil
 	}
-	return model.Subject{}, model.CloseAuthFailed
+	return model.Subject{}, fail(model.CloseAuthFailed, model.CodeBadRequest, "缺少令牌")
 }
 
 // readLoop 读到连接结束，返回断开原因。
@@ -309,8 +364,8 @@ func (s *server) readLoop(ctx context.Context, app string, sub model.Subject, c 
 				s.Hub.Deliver(ctx, bus.Envelope{Type: bus.TypeUp, App: app, Subject: sub.String(), ConnID: c.id, Payload: []byte(f.P)})
 			case model.FramePing:
 				// pongFrame 已经是完整帧，走 enqueue 而不是 Send：Send 会再用
-				// msgFrame 包一层，把 {"t":"pong"} 变成
-				// {"t":"msg","p":{"t":"pong"}}，client 就认不出这是心跳回复了。
+				// msgFrame 包一层，把 {"t":5} 变成 {"t":3,"p":{"t":5}}，
+				// client 就认不出这是心跳回复了。
 				c.enqueue(pongFrame)
 			}
 		case <-timer.C:

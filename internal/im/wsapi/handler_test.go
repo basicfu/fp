@@ -26,6 +26,7 @@ import (
 // 工具抓到，表现为一条偶发的、看起来毫无道理的失败。
 type fakeAuth struct {
 	byToken map[string]model.Subject
+	errs    map[string]error // 按 token 指定的失败，没列出的未知 token 一律 ErrUnauthorized
 	mu      sync.Mutex
 	last    auth.VerifyRequest
 }
@@ -36,6 +37,9 @@ func (a *fakeAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subj
 	a.mu.Unlock()
 	if s, ok := a.byToken[req.Token]; ok {
 		return s, nil
+	}
+	if err, ok := a.errs[req.Token]; ok {
+		return model.Subject{}, err
 	}
 	return model.Subject{}, auth.ErrUnauthorized
 }
@@ -49,11 +53,12 @@ func (a *fakeAuth) lastSnapshot() auth.VerifyRequest {
 
 type fakeHandshaker struct {
 	result  registry.HandshakeResult
+	err     error
 	removed []string
 }
 
 func (f *fakeHandshaker) Handshake(context.Context, string, string, string, model.ConnMeta, model.Policy, int, []string) (registry.HandshakeResult, error) {
-	return f.result, nil
+	return f.result, f.err
 }
 func (f *fakeHandshaker) Remove(_ context.Context, _, _, connID string) error {
 	f.removed = append(f.removed, connID)
@@ -114,7 +119,13 @@ func newEnv(t *testing.T, cfg Config) *env {
 	if cfg.SendQueue == 0 {
 		cfg.SendQueue = 8
 	}
-	fa := &fakeAuth{byToken: map[string]model.Subject{"tok-1": model.User("1")}}
+	fa := &fakeAuth{
+		byToken: map[string]model.Subject{"tok-1": model.User("1")},
+		errs: map[string]error{
+			"biz-rejected": &auth.RejectedError{Code: "device_banned", Result: []byte(bizRejectBody)},
+			"down":         auth.ErrUnavailable,
+		},
+	}
 	handler := New(Deps{Hub: h, Conns: hs, Live: fakeLiveness{}, Auth: fa, Apps: apps, Guests: NewGuestLimiter(), Cfg: cfg})
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -153,6 +164,42 @@ func read(t *testing.T, c *websocket.Conn) (model.Frame, error) {
 	return f, nil
 }
 
+// bizRejectBody 模拟业务方的拒绝响应，故意带一个网关不认识的字段：
+// 转发必须原样，不能只挑 Result 认识的几个字段重新序列化。
+const bizRejectBody = `{"code":"device_banned","msg":"设备已被封禁","detail":"d-1","time":1700000000000,"extra":{"until":1}}`
+
+// expectReject 断言握手被拒：先收到且只收到一帧 t=2（p.code 为 wantCode），
+// 随后连接以 wantClose 关闭。返回 p 的原始字节供进一步断言。
+func expectReject(t *testing.T, c *websocket.Conn, wantCode string, wantClose int) []byte {
+	t.Helper()
+	f, err := read(t, c)
+	if err != nil {
+		t.Fatalf("关闭前应先收到鉴权结果帧，实际直接 %v", err)
+	}
+	var r model.Result
+	if f.T != model.FrameAuthResult || json.Unmarshal(f.P, &r) != nil || r.Code != wantCode {
+		t.Fatalf("鉴权结果帧不对：期望 t=%d code=%s，实际 %+v p=%s", model.FrameAuthResult, wantCode, f, f.P)
+	}
+	if f.Conn != "" {
+		t.Fatalf("拒绝帧不该带 conn，实际 %q", f.Conn)
+	}
+	if _, err := read(t, c); websocket.CloseStatus(err) != websocket.StatusCode(wantClose) {
+		t.Fatalf("结果帧之后应以 %d 关闭，实际 %v", wantClose, err)
+	}
+	return f.P
+}
+
+// expectSuccess 断言握手成功：第一帧是 t=2、code=success、带 conn 与 time。
+func expectSuccess(t *testing.T, c *websocket.Conn) model.Frame {
+	t.Helper()
+	f, err := read(t, c)
+	var r model.Result
+	if err != nil || f.T != model.FrameAuthResult || f.Conn == "" || json.Unmarshal(f.P, &r) != nil || r.Code != model.CodeSuccess || r.Time == 0 {
+		t.Fatalf("应收到成功的鉴权结果帧，实际 %+v p=%s err=%v", f, f.P, err)
+	}
+	return f
+}
+
 func waitUntil(t *testing.T, cond func() bool, msg string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -168,27 +215,27 @@ func TestHandshakeWithTokenThenMessageAndPing(t *testing.T) {
 	e := newEnv(t, Config{})
 	c := e.dial(t)
 	defer c.CloseNow()
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "tok-1", "ua": "Mozilla/5.0 (iPhone)"})
-	hello, err := read(t, c)
-	if err != nil || hello.T != "hello" || hello.Conn == "" {
-		t.Fatalf("应收到 hello 帧，实际 %+v %v", hello, err)
-	}
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "tok-1", "ua": "Mozilla/5.0 (iPhone)"})
+	res := expectSuccess(t, c)
 	waitUntil(t, func() bool { return len(e.stream.GotSnapshot()) >= 1 }, "server 流应收到 Connected")
 	ev := e.stream.GotSnapshot()[0].GetEvent()
 	if ev == nil || ev.Kind != fpimv1.EventKind_EVENT_KIND_CONNECTED || ev.Subject != "u:1" || ev.Os != "ios" || !ev.Mobile || ev.Ua == "" {
 		t.Fatalf("Connected 事件不对：%+v", ev)
 	}
 
-	send(t, c, map[string]any{"t": "msg", "p": map[string]any{"x": 1}})
+	send(t, c, map[string]any{"t": model.FrameMsg, "p": map[string]any{"x": 1}})
 	waitUntil(t, func() bool { return len(e.stream.GotSnapshot()) >= 2 }, "server 流应收到 Inbound")
 	in := e.stream.GotSnapshot()[1].GetInbound()
-	if in == nil || in.Subject != "u:1" || in.ConnId != hello.Conn || string(in.Payload) != `{"x":1}` {
+	if in == nil || in.Subject != "u:1" || in.ConnId != res.Conn || string(in.Payload) != `{"x":1}` {
 		t.Fatalf("Inbound 不对：%+v", in)
 	}
 
-	send(t, c, map[string]any{"t": "ping"})
-	if f, _ := read(t, c); f.T != "pong" {
-		t.Fatalf("ping 应回 pong，实际 %+v", f)
+	if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"t":4}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, b, err := c.Read(context.Background())
+	if err != nil || string(b) != `{"t":5}` {
+		t.Fatalf("ping 应回 {\"t\":5}，实际 %s %v", b, err)
 	}
 }
 
@@ -202,7 +249,7 @@ func TestHandshakePassesRawFrameAndKind(t *testing.T) {
 	c := e.dial(t)
 	defer c.CloseNow()
 	// 帧里故意带一个网关不认识的字段，它必须原样出现在 Raw 里
-	raw := `{"t":"auth","app":"a1","token":"tok-1","kind":"biz","custom":{"deviceId":"d-1"}}`
+	raw := `{"t":1,"app":"a1","token":"tok-1","kind":"biz","custom":{"deviceId":"d-1"}}`
 	if err := c.Write(context.Background(), websocket.MessageText, []byte(raw)); err != nil {
 		t.Fatal(err)
 	}
@@ -228,49 +275,38 @@ func TestHandshakeDefaultsKindToEmpty(t *testing.T) {
 	c := e.dial(t)
 	defer c.CloseNow()
 	// 不带 kind 的老客户端，Kind 应当是空串，由 multiauth 当成 fp 处理
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "tok-1"})
-	if f, err := read(t, c); err != nil || f.T != "hello" {
-		t.Fatalf("不带 kind 的握手应当成功，实际 %+v %v", f, err)
-	}
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "tok-1"})
+	expectSuccess(t, c)
 	if kind := e.auth.lastSnapshot().Kind; kind != "" {
 		t.Fatalf("缺省的令牌类型应当是空串，实际 %q——老客户端一行不用改是这次改动的前提", kind)
 	}
 }
 
-func TestNoAuthFrameCloses4001(t *testing.T) {
+func TestNoAuthFrameRejectsBadRequest(t *testing.T) {
 	e := newEnv(t, Config{AuthTimeout: 200 * time.Millisecond})
 	c := e.dial(t)
 	defer c.CloseNow()
-	_, err := read(t, c)
-	if websocket.CloseStatus(err) != model.CloseAuthFailed {
-		t.Fatalf("超时不发握手帧应 4001，实际 %v", err)
-	}
+	expectReject(t, c, model.CodeBadRequest, model.CloseAuthFailed)
 }
 
 func TestBadTokenCloses4001AndGuestRules(t *testing.T) {
 	e := newEnv(t, Config{})
 	c := e.dial(t)
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "bad"})
-	if _, err := read(t, c); websocket.CloseStatus(err) != model.CloseAuthFailed {
-		t.Fatalf("坏 token 应 4001，实际 %v", err)
-	}
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "bad"})
+	expectReject(t, c, model.CodeAuthFailed, model.CloseAuthFailed)
 	c.CloseNow()
 
 	// a1 不允许访客
 	c = e.dial(t)
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "guest": "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"})
-	if _, err := read(t, c); websocket.CloseStatus(err) != model.CloseAuthFailed {
-		t.Fatalf("app 未开访客应 4001，实际 %v", err)
-	}
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "guest": "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"})
+	expectReject(t, c, model.CodeAuthFailed, model.CloseAuthFailed)
 	c.CloseNow()
 
 	e.apps["a1"] = model.AppConfig{AppID: "a1", ConnPolicy: model.PolicyReplace, AllowGuest: true, GuestIPRate: 20}
 	c = e.dial(t)
 	defer c.CloseNow()
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "guest": "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"})
-	if f, err := read(t, c); err != nil || f.T != "hello" {
-		t.Fatalf("开了访客应 hello，实际 %+v %v", f, err)
-	}
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "guest": "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"})
+	expectSuccess(t, c)
 	waitUntil(t, func() bool {
 		got := e.stream.GotSnapshot()
 		return len(got) >= 1 && got[0].GetEvent().Subject == "g:6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"
@@ -285,30 +321,26 @@ func TestGuestNonUUIDCloses4001(t *testing.T) {
 	e.apps["a1"] = model.AppConfig{AppID: "a1", ConnPolicy: model.PolicyReplace, AllowGuest: true, GuestIPRate: 20}
 	c := e.dial(t)
 	defer c.CloseNow()
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "guest": "not-a-uuid"})
-	if _, err := read(t, c); websocket.CloseStatus(err) != model.CloseAuthFailed {
-		t.Fatalf("访客 id 不是合法 uuid 应 4001，实际 %v", err)
-	}
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "guest": "not-a-uuid"})
+	expectReject(t, c, model.CodeAuthFailed, model.CloseAuthFailed)
 }
 
-func TestPolicyRejectCloses4002(t *testing.T) {
+func TestPolicyRejectSendsConnLimited(t *testing.T) {
 	e := newEnv(t, Config{})
 	e.hs.result = registry.HandshakeResult{Rejected: true}
 	c := e.dial(t)
 	defer c.CloseNow()
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "tok-1"})
-	if _, err := read(t, c); websocket.CloseStatus(err) != model.ClosePolicyRejected {
-		t.Fatalf("策略拒绝应 4002，实际 %v", err)
-	}
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "tok-1"})
+	expectReject(t, c, model.CodeConnLimited, model.ClosePolicyRejected)
 }
 
 func TestKickCloses4003AndEmitsDisconnected(t *testing.T) {
 	e := newEnv(t, Config{})
 	c := e.dial(t)
 	defer c.CloseNow()
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "tok-1"})
-	hello, _ := read(t, c)
-	e.h.Evict(context.Background(), "a1", model.User("1"), []registry.ConnRef{{ConnID: hello.Conn, Node: "im-a"}}, model.ReasonReplaced)
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "tok-1"})
+	res := expectSuccess(t, c)
+	e.h.Evict(context.Background(), "a1", model.User("1"), []registry.ConnRef{{ConnID: res.Conn, Node: "im-a"}}, model.ReasonReplaced)
 	if _, err := read(t, c); websocket.CloseStatus(err) != model.CloseKicked {
 		t.Fatalf("被顶替应 4003，实际 %v", err)
 	}
@@ -320,7 +352,7 @@ func TestKickCloses4003AndEmitsDisconnected(t *testing.T) {
 		}
 		return false
 	}, "应发 Disconnected(replaced)")
-	if len(e.hs.removed) != 1 || e.hs.removed[0] != hello.Conn {
+	if len(e.hs.removed) != 1 || e.hs.removed[0] != res.Conn {
 		t.Fatalf("断开时必须从注册表删自己，实际 %v", e.hs.removed)
 	}
 }
@@ -329,8 +361,8 @@ func TestIdleTimeoutDisconnects(t *testing.T) {
 	e := newEnv(t, Config{IdleTimeout: 300 * time.Millisecond})
 	c := e.dial(t)
 	defer c.CloseNow()
-	send(t, c, map[string]any{"t": "auth", "app": "a1", "token": "tok-1"})
-	_, _ = read(t, c)
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "tok-1"})
+	expectSuccess(t, c)
 	// 断言收紧到具体关闭码，而不是"读会出错"：空闲超时和被踢/策略拒绝
 	// 一样，必须让 client 能分辨出这是网关主动清理而不是网络抖断，否则
 	// SDK 没法判断该退避还是立即重连。
@@ -398,5 +430,103 @@ func TestClientIPUsesRightmostForwardedHop(t *testing.T) {
 				t.Fatalf("clientIP=%q，期望 %q：访客限流的键必须取 client 改不了的那一跳", got, c.want)
 			}
 		})
+	}
+}
+
+// TestBizRejectionForwardedVerbatim 钉住业务方拒绝的转发契约：p 必须是业务方
+// 响应体的原样字节（含网关不认识的字段），随后 4001。
+func TestBizRejectionForwardedVerbatim(t *testing.T) {
+	e := newEnv(t, Config{})
+	c := e.dial(t)
+	defer c.CloseNow()
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "biz-rejected", "kind": "biz"})
+	if p := expectReject(t, c, "device_banned", model.CloseAuthFailed); string(p) != bizRejectBody {
+		t.Fatalf("业务方的 Result 没有原样转发：\n收到 %s\n期望 %s", p, bizRejectBody)
+	}
+}
+
+func TestAuthUnavailableSends4004(t *testing.T) {
+	e := newEnv(t, Config{})
+	c := e.dial(t)
+	defer c.CloseNow()
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "down", "kind": "biz"})
+	var r model.Result
+	_ = json.Unmarshal(expectReject(t, c, model.CodeAuthUnavailable, model.CloseUnavailable), &r)
+	if r.Msg != "服务器授权异常" || r.Time == 0 {
+		t.Fatalf("fp-im 自己生成的结果要带文案与毫秒时间，实际 %+v", r)
+	}
+}
+
+func TestRegistryErrorSendsAuthUnavailable(t *testing.T) {
+	e := newEnv(t, Config{})
+	e.hs.err = context.DeadlineExceeded
+	c := e.dial(t)
+	defer c.CloseNow()
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "tok-1"})
+	expectReject(t, c, model.CodeAuthUnavailable, model.CloseUnavailable)
+}
+
+func TestUnknownAppSendsAppUnavailable(t *testing.T) {
+	e := newEnv(t, Config{})
+	c := e.dial(t)
+	defer c.CloseNow()
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "nope", "token": "tok-1"})
+	expectReject(t, c, model.CodeAppUnavailable, model.ClosePolicyRejected)
+}
+
+// TestBadFirstFrameSendsBadRequest 覆盖首帧格式不对的几种形态，包括旧协议的
+// 字符串帧类型——不兼容旧版本，旧客户端要拿到明确的 bad_request 而不是静默超时。
+func TestBadFirstFrameSendsBadRequest(t *testing.T) {
+	e := newEnv(t, Config{})
+	for _, raw := range []string{
+		`{"t":"auth","app":"a1","token":"tok-1"}`,
+		`{"t":3,"app":"a1","token":"tok-1"}`,
+		`{"t":1,"token":"tok-1"}`,
+		`{"t":1,"app":"a1"}`,
+		`not json`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			c := e.dial(t)
+			defer c.CloseNow()
+			if err := c.Write(context.Background(), websocket.MessageText, []byte(raw)); err != nil {
+				t.Fatal(err)
+			}
+			expectReject(t, c, model.CodeBadRequest, model.CloseAuthFailed)
+		})
+	}
+}
+
+func TestGuestRateLimited(t *testing.T) {
+	e := newEnv(t, Config{})
+	// GuestIPRate=0 让第一个新访客就超额，见 GuestLimiter.Allow。
+	e.apps["a1"] = model.AppConfig{AppID: "a1", ConnPolicy: model.PolicyReplace, AllowGuest: true}
+	c := e.dial(t)
+	defer c.CloseNow()
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "guest": "6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f"})
+	expectReject(t, c, model.CodeRateLimited, model.CloseAuthFailed)
+}
+
+// TestHandshakePassesClientIP 钉住 client 地址透传给认证器：业务方回调靠它
+// 做按 IP 的风控，来源必须与访客限流用的是同一个 clientIP。
+func TestHandshakePassesClientIP(t *testing.T) {
+	e := newEnv(t, Config{})
+	c := e.dial(t)
+	defer c.CloseNow()
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "tok-1", "kind": "biz"})
+	expectSuccess(t, c)
+	if ip := e.auth.lastSnapshot().IP; ip != "127.0.0.1" {
+		t.Fatalf("认证器收到的 IP = %q，期望 127.0.0.1", ip)
+	}
+}
+
+// TestFrameLiteralsMatchConstants 守住 conn.go 里手拼的帧字面量与常量一致。
+func TestFrameLiteralsMatchConstants(t *testing.T) {
+	var f model.Frame
+	if json.Unmarshal(msgFrame([]byte(`{"x":1}`)), &f) != nil || f.T != model.FrameMsg || string(f.P) != `{"x":1}` {
+		t.Fatalf("msgFrame 与 FrameMsg 不一致：%+v", f)
+	}
+	f = model.Frame{}
+	if json.Unmarshal(pongFrame, &f) != nil || f.T != model.FramePong {
+		t.Fatalf("pongFrame 与 FramePong 不一致：%+v", f)
 	}
 }

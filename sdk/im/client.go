@@ -109,11 +109,51 @@ func (cfg ClientConfig) validate() error {
 	return nil
 }
 
-// frame 是握手之后的通用帧，与 internal/im/model.Frame 字节级一致。
+// 帧类型，与 internal/im/model 的 FrameXxx 一致。用数字是为了省流量，
+// 心跳是最高频的帧。
+const (
+	frameAuth       = 1
+	frameAuthResult = 2
+	frameMsg        = 3
+	framePing       = 4
+	framePong       = 5
+)
+
+// frame 是网关下发的帧，与 internal/im/model.Frame 字节级一致。
 type frame struct {
-	T    string          `json:"t"`
+	T    int             `json:"t"`
 	Conn string          `json:"conn,omitempty"`
 	P    json.RawMessage `json:"p,omitempty"`
+}
+
+// CodeSuccess 是鉴权结果里表示成功的 code，其余都是失败。
+const CodeSuccess = "success"
+
+// Result 是鉴权结果帧的 p，与 internal/im/model.Result 一致。失败时的 code
+// 可能来自网关（bad_request、auth_failed、auth_unavailable、app_unavailable、
+// conn_limited、rate_limited），也可能是业务方鉴权回调自定的值。
+type Result struct {
+	Code   string `json:"code"`
+	Msg    string `json:"msg"`
+	Detail string `json:"detail,omitempty"`
+	// Time 是服务端当前 Unix 毫秒。
+	Time int64 `json:"time"`
+}
+
+// AuthError 是握手被网关拒绝：收到了 code 不是 success 的鉴权结果。
+// 用 errors.As 取出，Result.Msg 可直接展示给用户。
+type AuthError struct {
+	Result Result
+	// Raw 是 p 的原始字节：业务方拒绝时网关原样转发，业务方自加的字段
+	// 只能从这里取。
+	Raw json.RawMessage
+	// CloseCode 是网关随后关闭连接用的码（见 CloseXxx）；没读到时为 -1。
+	// 是否该重连按它判断，而不是按 Result.Code——后者可能是业务方自定的值。
+	CloseCode int
+}
+
+func (e *AuthError) Error() string {
+	return "fpim: 握手被拒: " + e.Result.Code + " " + e.Result.Msg
 }
 
 // Client 是设备/原生程序接入 fp-im 网关的连接：握手、心跳、断线退避重连
@@ -152,10 +192,12 @@ type Client struct {
 	gaveUp atomic.Bool
 }
 
-// Dial 拨号、发握手帧、等 hello 回执，三步都同步完成——任何一步失败都
+// Dial 拨号、发握手帧、等鉴权结果，三步都同步完成——任何一步失败都
 // 直接返回错误，不进重连循环，调用方能立刻分辨是配置错了还是网络不通，
 // 而不是先拿到一个"看起来成功"的 *Client，过一会儿才通过 OnClose 得知
 // 握手其实失败了。
+//
+// 网关拒绝时返回 *AuthError（errors.As 取出），带 code/msg 与关闭码。
 //
 // 握手成功之后的断线由内部按 CloseXxx 常量的契约决定是否重连、要不要
 // 退避，调用方不需要关心。
@@ -230,7 +272,7 @@ func (c *Client) setWS(ws *websocket.Conn) {
 	c.wsMu.Unlock()
 }
 
-// connect 拨号、发握手帧、等 hello。任何一步失败都返回错误并关掉半成品
+// connect 拨号、发握手帧、等鉴权结果。任何一步失败都返回错误并关掉半成品
 // 连接，不留给调用方一条已经废掉但没关闭的 ws。
 func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -242,7 +284,7 @@ func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
 	// 握手帧必须带 app：身份平台签发的是不透明令牌，没有声明字段，网关
 	// 必须先知道用哪个 app 的凭据去验它，缺 app 网关会直接以 4001 拒绝
 	// （见 internal/im/wsapi/handler.go 的 readAuthFrame）。
-	auth := map[string]any{"t": "auth", "app": c.cfg.App}
+	auth := map[string]any{"t": frameAuth, "app": c.cfg.App}
 	if c.cfg.Token != "" {
 		auth["token"] = c.cfg.Token
 	} else {
@@ -278,11 +320,34 @@ func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
 		return nil, err
 	}
 	var f frame
-	if json.Unmarshal(data, &f) != nil || f.T != "hello" {
+	var res Result
+	if json.Unmarshal(data, &f) != nil || f.T != frameAuthResult || json.Unmarshal(f.P, &res) != nil {
 		ws.CloseNow()
-		return nil, errors.New("fpim: 握手未收到 hello")
+		return nil, errors.New("fpim: 握手未收到鉴权结果")
 	}
-	return ws, nil
+	if res.Code == CodeSuccess {
+		return ws, nil
+	}
+	// 网关发完结果帧紧接着就关闭；读到关闭码才知道该不该重连。
+	closeCode := -1
+	for {
+		if _, _, err := ws.Read(dctx); err != nil {
+			closeCode = int(websocket.CloseStatus(err))
+			break
+		}
+	}
+	ws.CloseNow()
+	return nil, &AuthError{Result: res, Raw: f.P, CloseCode: closeCode}
+}
+
+// closeCodeOf 取一次失败连接对应的关闭码：握手被拒时在 AuthError 里，
+// 其它情况从 ws 错误里读，读不到为 -1。
+func closeCodeOf(err error) int {
+	var ae *AuthError
+	if errors.As(err, &ae) {
+		return ae.CloseCode
+	}
+	return int(websocket.CloseStatus(err))
 }
 
 // runLoop 读到断开、通知 OnClose，再按关闭码的契约决定是否重连、要不要
@@ -336,7 +401,7 @@ func (c *Client) runLoop(ctx context.Context, ws *websocket.Conn) {
 				backoff = minBackoff
 				break
 			}
-			if st := int(websocket.CloseStatus(err)); noAutoReconnect(st) {
+			if st := closeCodeOf(err); noAutoReconnect(st) {
 				// 这次放弃发生在重连尝试里，不属于任何一条已建立的连接：
 				// 调用方此前只收到过上一次断开的码（节点崩溃时是 -1），
 				// 如果这里也一声不吭地 return，它永远不会知道 client 已经
@@ -383,7 +448,7 @@ func (c *Client) readUntilClosed(ctx context.Context, ws *websocket.Conn) int {
 				return
 			case <-t.C:
 				c.wsMu.Lock()
-				_ = ws.Write(pingCtx, websocket.MessageText, []byte(`{"t":"ping"}`))
+				_ = ws.Write(pingCtx, websocket.MessageText, pingFrame)
 				c.wsMu.Unlock()
 			}
 		}
@@ -397,7 +462,7 @@ func (c *Client) readUntilClosed(ctx context.Context, ws *websocket.Conn) int {
 		if json.Unmarshal(data, &f) != nil {
 			continue
 		}
-		if f.T == "msg" {
+		if f.T == frameMsg {
 			if fn := c.onMessage.Load(); fn != nil {
 				(*fn)([]byte(f.P))
 			}
@@ -424,7 +489,7 @@ func (c *Client) Send(ctx context.Context, payload []byte) error {
 		return ErrUnavailable
 	}
 	b := make([]byte, 0, len(payload)+16)
-	b = append(b, `{"t":"msg","p":`...)
+	b = append(b, msgPrefix...)
 	b = append(b, payload...)
 	b = append(b, '}')
 
@@ -452,3 +517,9 @@ func (c *Client) Close() error {
 	c.wg.Wait()
 	return err
 }
+
+// 手拼的帧字面量，数字必须与上面的 frameXxx 一致，由 TestFrameLiterals 守着。
+var (
+	pingFrame = []byte(`{"t":4}`)
+	msgPrefix = []byte(`{"t":3,"p":`)
+)

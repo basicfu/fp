@@ -3,6 +3,7 @@ package bizauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -48,17 +49,22 @@ func newEnv(t *testing.T, h http.HandlerFunc) (*Authenticator, *httptest.Server,
 	return a, srv, &calls
 }
 
+// okBody 是业务方的成功响应。
+func okBody(uid string, cacheSeconds int) string {
+	return fmt.Sprintf(`{"code":"success","msg":"","time":1700000000000,"uid":%q,"cache_seconds":%d}`, uid, cacheSeconds)
+}
+
 func req(app, token string, raw string) auth.VerifyRequest {
 	return auth.VerifyRequest{App: app, Kind: model.TokenKindBiz, Token: token, Raw: []byte(raw)}
 }
 
 func TestVerifyForwardsRawFrameVerbatim(t *testing.T) {
-	const raw = `{"t":"auth","app":"a1","token":"tok","kind":"biz","custom":{"deviceId":"d-1"}}`
+	const raw = `{"t":1,"app":"a1","token":"tok","kind":"biz","custom":{"deviceId":"d-1"}}`
 	var got string
 	a, _, _ := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		got = string(b)
-		w.Write([]byte(`{"user_id":"u1"}`))
+		w.Write([]byte(okBody("u1", 0)))
 	})
 	if _, err := a.Verify(context.Background(), req("a1", "tok", raw)); err != nil {
 		t.Fatal(err)
@@ -72,7 +78,7 @@ func TestVerifyForwardsRawFrameVerbatim(t *testing.T) {
 
 func TestVerifySuccessMapsToBizSubject(t *testing.T) {
 	a, _, _ := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"user_id":"1001"}`))
+		w.Write([]byte(okBody("1001", 0)))
 	})
 	sub, err := a.Verify(context.Background(), req("a1", "tok", `{}`))
 	if err != nil {
@@ -84,16 +90,25 @@ func TestVerifySuccessMapsToBizSubject(t *testing.T) {
 }
 
 func TestVerifyErrorMapping(t *testing.T) {
+	body := func(b string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(b)) }
+	}
 	for _, tc := range []struct {
 		name    string
 		handler http.HandlerFunc
 		want    error
 	}{
-		{"401 无效令牌", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }, auth.ErrUnauthorized},
-		{"200 但 user_id 为空", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"user_id":""}`)) }, auth.ErrUnauthorized},
-		{"200 但 user_id 含空字节", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{\"user_id\":\"a\\u0000b\"}")) }, auth.ErrUnauthorized},
+		// 新约定里拒绝也走 200 + code，401 不再有特殊含义，只说明接口不合约定。
+		{"401", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }, auth.ErrUnavailable},
 		{"500", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }, auth.ErrUnavailable},
-		{"200 但响应体不是 JSON", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`not json`)) }, auth.ErrUnavailable},
+		{"响应体不是 JSON", body(`not json`), auth.ErrUnavailable},
+		{"响应体是 null", body(`null`), auth.ErrUnavailable},
+		{"缺 code", body(`{"uid":"u1","time":1}`), auth.ErrUnavailable},
+		{"code 不是字符串", body(`{"code":0,"uid":"u1"}`), auth.ErrUnavailable},
+		{"success 但 uid 为空", body(`{"code":"success","msg":"","time":1,"uid":""}`), auth.ErrUnavailable},
+		{"success 但 uid 含空字节", body(`{"code":"success","uid":"a\u0000b"}`), auth.ErrUnavailable},
+		{"旧约定的 user_id 不再认", body(`{"code":"success","user_id":"u1"}`), auth.ErrUnavailable},
+		{"业务方拒绝", body(`{"code":"token_expired","msg":"登录已过期","time":1}`), auth.ErrUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _, _ := newEnv(t, tc.handler)
@@ -102,6 +117,42 @@ func TestVerifyErrorMapping(t *testing.T) {
 				t.Fatalf("错误映射不对：得到 %v，期望 %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestVerifyRejectionKeepsRawBody 钉住业务方拒绝时把响应体原样交出去：
+// wsapi 要逐字节转发给 client，业务方自加的字段也不能丢。
+func TestVerifyRejectionKeepsRawBody(t *testing.T) {
+	const rej = `{"code":"device_banned","msg":"设备已被封禁","detail":"d-1","time":1700000000000,"extra":1}`
+	a, _, calls := newEnv(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(rej)) })
+	for i := 0; i < 2; i++ {
+		_, err := a.Verify(context.Background(), req("a1", "tok", `{}`))
+		var re *auth.RejectedError
+		if !errors.As(err, &re) || re.Code != "device_banned" || string(re.Result) != rej {
+			t.Fatalf("应返回携带原始响应体的 RejectedError，实际 %v", err)
+		}
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("拒绝不该进缓存，应调两次，实际 %d 次", n)
+	}
+}
+
+func TestVerifySendsClientIPHeader(t *testing.T) {
+	var got []string
+	a, _, _ := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get(HeaderClientIP))
+		w.Write([]byte(okBody("u1", 0)))
+	})
+	r := req("a1", "tok", `{}`)
+	r.IP = "203.0.113.9"
+	if _, err := a.Verify(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Verify(context.Background(), req("a1", "tok", `{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "203.0.113.9" || got[1] != "" {
+		t.Fatalf("%s 应透传 client IP、没有 IP 时不带，实际 %q", HeaderClientIP, got)
 	}
 }
 
@@ -127,7 +178,7 @@ func TestVerifyAppWithoutBizAuthIsUnauthorized(t *testing.T) {
 
 func TestVerifyCachesWhenServerAsksFor(t *testing.T) {
 	a, _, calls := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"user_id":"u1","cache_seconds":60}`))
+		w.Write([]byte(okBody("u1", 60)))
 	})
 	for i := 0; i < 3; i++ {
 		if _, err := a.Verify(context.Background(), req("a1", "tok", `{}`)); err != nil {
@@ -141,7 +192,7 @@ func TestVerifyCachesWhenServerAsksFor(t *testing.T) {
 
 func TestVerifyDoesNotCacheWithoutTTL(t *testing.T) {
 	a, _, calls := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"user_id":"u1"}`))
+		w.Write([]byte(okBody("u1", 0)))
 	})
 	for i := 0; i < 3; i++ {
 		if _, err := a.Verify(context.Background(), req("a1", "tok", `{}`)); err != nil {
@@ -160,7 +211,7 @@ func TestVerifyReCallsAfterCacheExpires(t *testing.T) {
 	var calls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		w.Write([]byte(`{"user_id":"u1","cache_seconds":60}`))
+		w.Write([]byte(okBody("u1", 60)))
 	}))
 	t.Cleanup(srv.Close)
 	a, err := New(Config{
@@ -203,7 +254,7 @@ func TestVerifyDoesNotCacheFailures(t *testing.T) {
 			w.WriteHeader(500)
 			return
 		}
-		w.Write([]byte(`{"user_id":"u1","cache_seconds":60}`))
+		w.Write([]byte(okBody("u1", 60)))
 	})
 	if _, err := a.Verify(context.Background(), req("a1", "tok", `{}`)); err == nil {
 		t.Fatal("第一次应当失败")
@@ -271,7 +322,7 @@ func TestVerifyDoesNotFollowRedirectToPlaintext(t *testing.T) {
 	var plaintextCalls atomic.Int64
 	plaintext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		plaintextCalls.Add(1)
-		w.Write([]byte(`{"user_id":"attacker"}`))
+		w.Write([]byte(okBody("attacker", 0)))
 	}))
 	t.Cleanup(plaintext.Close)
 
@@ -291,7 +342,7 @@ func TestVerifyDoesNotFollowRedirectToPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, verr := a.Verify(context.Background(), req("a1", "tok", `{"t":"auth","app":"a1","token":"tok","kind":"biz"}`))
+	_, verr := a.Verify(context.Background(), req("a1", "tok", `{"t":1,"app":"a1","token":"tok","kind":"biz"}`))
 	if !errors.Is(verr, auth.ErrUnavailable) {
 		t.Fatalf("不跟随重定向的接口应归入服务不可用（4004，配错了让 client 退避重连），实际 %v", verr)
 	}
@@ -300,15 +351,15 @@ func TestVerifyDoesNotFollowRedirectToPlaintext(t *testing.T) {
 	}
 }
 
-// TestVerify401DrainsBodyForConnectionReuse 钉住终审发现 2：401 分支只
+// TestVerifyNon200DrainsBodyForConnectionReuse 钉住终审发现 2：非 200 分支只
 // Close 响应体没有先排空。Go 的 http.Transport 只有在响应体被读到 EOF
 // 之后才会把底层连接放回连接池；提前 Close 未读完的响应体会让连接被直接
-// 丢弃，令牌过期重连（稳态高频事件）时每次验证都多一次 TCP 握手。
+// 丢弃，业务方接口异常期间 client 退避重连时每次验证都多一次 TCP 握手。
 //
 // 用 httptrace 的 GotConn 钩子记录每次请求是否复用了连接：业务方对同一个
 // 令牌连续返回两次 401（各带一段非空响应体，不排空就无法判断是否读到
 // EOF），第二次请求必须复用第一次的连接。
-func TestVerify401DrainsBodyForConnectionReuse(t *testing.T) {
+func TestVerifyNon200DrainsBodyForConnectionReuse(t *testing.T) {
 	a, _, _ := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		// 非空响应体：如果只 Close 不排空，这段数据留在缓冲区里，Go 的
@@ -325,14 +376,14 @@ func TestVerify401DrainsBodyForConnectionReuse(t *testing.T) {
 	ctx := httptrace.WithClientTrace(context.Background(), trace)
 
 	for i := 0; i < 2; i++ {
-		if _, err := a.Verify(ctx, req("a1", "tok", `{}`)); !errors.Is(err, auth.ErrUnauthorized) {
-			t.Fatalf("第 %d 次应返回 ErrUnauthorized，实际 %v", i+1, err)
+		if _, err := a.Verify(ctx, req("a1", "tok", `{}`)); !errors.Is(err, auth.ErrUnavailable) {
+			t.Fatalf("第 %d 次应返回 ErrUnavailable，实际 %v", i+1, err)
 		}
 	}
 	if len(reused) != 2 {
 		t.Fatalf("应当各建立/复用一次连接共两次记录，实际记录了 %d 次", len(reused))
 	}
 	if !reused[1] {
-		t.Fatal("第二次请求应当复用第一次的连接（响应体已排空）；未复用说明 401 分支只 Close 没排空，白白多了一次 TCP 握手")
+		t.Fatal("第二次请求应当复用第一次的连接（响应体已排空）；未复用说明非 200 分支只 Close 没排空，白白多了一次 TCP 握手")
 	}
 }

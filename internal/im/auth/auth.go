@@ -34,7 +34,22 @@ type VerifyRequest struct {
 	// Raw 是 client 发上来的原始握手帧字节。业务方回调把它原样转发，
 	// 这样 client 塞的自定义字段（设备指纹之类）也能到业务方手里。
 	Raw []byte
+	// IP 是 wsapi 判定的 client 地址（与访客限流同一个来源）。业务方拿它
+	// 做按 IP 的风控；它不在 Raw 里，因为 client 自己填的地址不可信。
+	IP string
 }
+
+// RejectedError 是业务方明确拒绝了这个令牌。Result 是业务方响应体的原始
+// 字节，wsapi 原样转发给 client——拒绝原因与文案属于业务语义，网关不改写。
+//
+// 它同时是 ErrUnauthorized：只关心"是不是令牌问题"的调用方不必认识这个类型。
+type RejectedError struct {
+	Code   string
+	Result []byte
+}
+
+func (e *RejectedError) Error() string { return "auth: 业务方拒绝: " + e.Code }
+func (e *RejectedError) Unwrap() error { return ErrUnauthorized }
 
 // Authenticator 验证 client 的凭证，返回它对应的主体。
 type Authenticator interface {

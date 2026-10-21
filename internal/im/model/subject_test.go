@@ -82,7 +82,7 @@ func TestValidateUserID(t *testing.T) {
 		{"超长", strings.Repeat("x", 129)},
 	} {
 		if err := ValidateUserID(tc.id); err == nil {
-			t.Errorf("%s 必须被拒绝：user_id 会成为 Redis key 的一部分，空字节还会撞上路由表内存键的分隔符", tc.name)
+			t.Errorf("%s 必须被拒绝：uid 会成为 Redis key 的一部分，空字节还会撞上路由表内存键的分隔符", tc.name)
 		}
 	}
 	// 恰好 128 字节是允许的，边界不能少一个

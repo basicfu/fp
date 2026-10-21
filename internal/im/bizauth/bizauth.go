@@ -67,13 +67,19 @@ func New(cfg Config) (*Authenticator, error) {
 	return a, nil
 }
 
-// verifyResponse 是业务方接口的响应约定。
+// verifyResponse 是业务方接口的响应约定：一律 HTTP 200，body 是
+// model.Result，成功时额外带 uid 与可选的 cache_seconds。
 // CacheSeconds 由业务方决定：只有它知道自己的令牌撤销有多频繁、
 // 能容忍多长的失效窗口。不带就不缓存，默认安全。
 type verifyResponse struct {
-	UserID       string `json:"user_id"`
+	model.Result
+	UID          string `json:"uid"`
 	CacheSeconds int    `json:"cache_seconds"`
 }
+
+// HeaderClientIP 把 client 地址交给业务方。放请求头而不是改写请求体：
+// 请求体要逐字节保持为 client 的原始握手帧。
+const HeaderClientIP = "X-Fp-Client-Ip"
 
 func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (model.Subject, error) {
 	cfg, ok := a.apps.Get(req.App)
@@ -93,6 +99,9 @@ func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (mod
 		return model.Subject{}, fmt.Errorf("%w: 构造请求失败: %v", auth.ErrUnavailable, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if req.IP != "" {
+		httpReq.Header.Set(HeaderClientIP, req.IP)
+	}
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -101,14 +110,9 @@ func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (mod
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		// 业务方明确说这个令牌不对，client 该去重新登录而不是重连。
-		// 排空（带上限，防止异常大的响应体）而不是直接 Close：这样底层连接
-		// 能回连接池复用，令牌过期重连是稳态高频事件，省下的是每次一次
-		// TCP+TLS 握手。
-		drainBody(resp.Body)
-		return model.Subject{}, auth.ErrUnauthorized
-	}
+	// 约定里拒绝也走 200 + code，所以任何非 200（含 401）都是业务方接口
+	// 本身出了问题，而不是令牌不对。排空（带上限）而不是直接 Close：底层
+	// 连接能回连接池复用，省下每次一次 TCP+TLS 握手。
 	if resp.StatusCode != http.StatusOK {
 		a.log.Warn("bizauth: 业务方验证接口返回异常状态", "app", req.App, "status", resp.StatusCode)
 		drainBody(resp.Body)
@@ -120,19 +124,23 @@ func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (mod
 		return model.Subject{}, fmt.Errorf("%w: 读响应失败: %v", auth.ErrUnavailable, err)
 	}
 	var vr verifyResponse
-	if err := json.Unmarshal(body, &vr); err != nil {
-		// 响应体坏了是业务方的接口出问题，不是 client 的令牌有问题，
+	if err := json.Unmarshal(body, &vr); err != nil || vr.Code == "" {
+		// 响应体不合约定是业务方的接口出问题，不是 client 的令牌有问题，
 		// 所以归 Unavailable 让 client 退避重连，等业务方修好。
-		a.log.Warn("bizauth: 业务方响应不是合法 JSON", "app", req.App, "err", err)
-		return model.Subject{}, fmt.Errorf("%w: 响应不是合法 JSON", auth.ErrUnavailable)
+		a.log.Warn("bizauth: 业务方响应不合约定", "app", req.App, "err", err)
+		return model.Subject{}, fmt.Errorf("%w: 响应缺 code 或不是合法 JSON", auth.ErrUnavailable)
 	}
-	if err := model.ValidateUserID(vr.UserID); err != nil {
-		// user_id 会成为 Redis key 的一部分，非法值必须在这里拦住。
-		a.log.Warn("bizauth: 业务方返回了非法的 user_id", "app", req.App, "err", err)
-		return model.Subject{}, fmt.Errorf("%w: %v", auth.ErrUnauthorized, err)
+	if vr.Code != model.CodeSuccess {
+		return model.Subject{}, &auth.RejectedError{Code: vr.Code, Result: body}
+	}
+	if err := model.ValidateUserID(vr.UID); err != nil {
+		// uid 会成为 Redis key 的一部分，非法值必须在这里拦住。业务方说了
+		// success 却给不出可用的 uid，是它的接口有 bug，按不可用处理。
+		a.log.Warn("bizauth: 业务方返回了非法的 uid", "app", req.App, "err", err)
+		return model.Subject{}, fmt.Errorf("%w: %v", auth.ErrUnavailable, err)
 	}
 
-	sub := model.Biz(vr.UserID)
+	sub := model.Biz(vr.UID)
 	// 只缓存成功的结果。失败不缓存：业务方接口恢复之后 client 应当立刻能连上，
 	// 而不是等一个负缓存过期。
 	a.cache.put(req.App, req.Token, cfg.BizAuth.VerifyURL, sub, time.Duration(vr.CacheSeconds)*time.Second, cfg.BizAuth.CacheSize, a.now())

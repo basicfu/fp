@@ -260,7 +260,7 @@ ev.AppID == ""  → 对本节点持有连接的每个 app 各调一次
 
 ```
 client ──ws──▶ fp-im                                    fp
-   {"t":"auth","app":"X","token":"…"}
+   {"t":1,"app":"X","token":"…"}
                │
                │ ① 取 X 的 IM 配置（本地缓存未命中才回源）
                │    GetAppIMConfig()  md: app-id=X, caller-type=im
@@ -283,7 +283,7 @@ client ──ws──▶ fp-im                                    fp
 
 ### 9.3 访客握手
 
-`{"t":"auth","app":"X","guest":"<uuid v4>"}` —— **全程不碰 `ValidateToken`**，但仍然需要
+`{"t":1,"app":"X","guest":"<uuid v4>"}` —— **全程不碰 `ValidateToken`**，但仍然需要
 ① 那次 `GetAppIMConfig` 才知道 `allow_guest` 与 `guest_ip_rate`。这就是那个 RPC 必须存在
 的原因：这条路上没有任何 token 可以顺带把配置带回来。
 

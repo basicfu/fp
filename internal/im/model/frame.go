@@ -55,13 +55,14 @@ const (
 	ReasonShutdown = "shutdown"
 )
 
-// 帧类型。
+// 帧类型。用数字而不是单词：心跳是全网最高频的帧，{"t":4} 比 {"t":"ping"}
+// 省一小半字节。帧内 p 的业务消息格式由业务方自定，不受这里影响。
 const (
-	FrameAuth  = "auth"
-	FrameHello = "hello"
-	FrameMsg   = "msg"
-	FramePing  = "ping"
-	FramePong  = "pong"
+	FrameAuth       = 1 // client 首帧，带令牌
+	FrameAuthResult = 2 // 鉴权结果，p 是 Result；client 发出首帧后收到的第一帧必定是它
+	FrameMsg        = 3
+	FramePing       = 4
+	FramePong       = 5
 )
 
 // 握手帧里的令牌类型。缺省（空串）视为 fp，所以老客户端一行不用改。
@@ -73,7 +74,7 @@ const (
 // AuthFrame 是 client 连接后的第一帧。App 必须给：fp 的 token 是不透明的，
 // im 要先知道用哪个 app 的凭据去 fp 验它。
 type AuthFrame struct {
-	T     string `json:"t"`
+	T     int    `json:"t"`
 	App   string `json:"app"`
 	Token string `json:"token,omitempty"`
 	Guest string `json:"guest,omitempty"`
@@ -85,9 +86,10 @@ type AuthFrame struct {
 	Mobile *bool  `json:"mobile,omitempty"`
 }
 
-// Frame 是握手之后的通用帧。P 对 im 是不透明的 JSON 原样值。
+// Frame 是鉴权结果帧与握手之后的通用帧。msg 帧的 P 对 im 是不透明的 JSON
+// 原样值；Conn 只在成功的鉴权结果帧上出现。
 type Frame struct {
-	T    string          `json:"t"`
+	T    int             `json:"t"`
 	Conn string          `json:"conn,omitempty"`
 	P    json.RawMessage `json:"p,omitempty"`
 }
