@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
@@ -30,6 +31,16 @@ func (e *authzEnv) list(t *testing.T) map[string]service.PermissionListItem {
 		out[it.Permission.Key] = it
 	}
 	return out
+}
+
+// ageReports 把已有的上报记录整体推到 d 之前，相当于从上次上报起已经过了这么久。
+func (e *authzEnv) ageReports(t *testing.T, d time.Duration) {
+	t.Helper()
+	if _, err := e.pool.Exec(context.Background(), `
+		UPDATE permission SET last_seen_at = last_seen_at - make_interval(secs => $2)
+		WHERE application_id = $1`, e.app.ID, d.Seconds()); err != nil {
+		t.Fatalf("推迟 last_seen_at: %v", err)
+	}
 }
 
 func TestReportCreatesPoints(t *testing.T) {
@@ -72,6 +83,70 @@ func TestReportDoesNotDeleteMissingPoints(t *testing.T) {
 	if got["DELETE:/orders/{id}"].Status != domain.PermissionStatusNormal {
 		t.Fatalf("刚少报一次就判成 %q——判据应当是时间，而不是这次快照里有没有它",
 			got["DELETE:/orders/{id}"].Status)
+	}
+}
+
+// 【辨别力】SDK 只在启动时报一次，服务稳定运行再久也不能把权限点判成过渡中。
+//
+// 只按"多久没被报过"判定的实现，会在启动 30 分钟后把全部接口标成过渡中。
+func TestLongRunningAppStaysNormal(t *testing.T) {
+	e := newAuthzEnv(t)
+
+	e.report(t, "GET:/orders/{id}", "POST:/orders")
+	e.ageReports(t, 5*time.Hour)
+
+	for k, it := range e.list(t) {
+		if it.Status != domain.PermissionStatusNormal {
+			t.Fatalf("没有新上报，%s 却判成 %q——它仍在最近一次快照里", k, it.Status)
+		}
+	}
+}
+
+// 【辨别力】只有重启后快照里少掉的那条才过渡，同一批的其余接口不受影响。
+func TestPointDroppedByRestartBecomesStale(t *testing.T) {
+	e := newAuthzEnv(t)
+
+	e.report(t, "GET:/orders/{id}", "DELETE:/orders/{id}")
+	e.ageReports(t, time.Hour)
+	e.report(t, "GET:/orders/{id}") // 新版本去掉了 DELETE
+	e.ageReports(t, 5*time.Hour)
+
+	got := e.list(t)
+	if s := got["GET:/orders/{id}"].Status; s != domain.PermissionStatusNormal {
+		t.Fatalf("还在快照里的接口状态 = %q, want normal", s)
+	}
+	dropped := got["DELETE:/orders/{id}"]
+	if dropped.Status != domain.PermissionStatusStale {
+		t.Fatalf("被去掉的接口状态 = %q, want stale", dropped.Status)
+	}
+	if dropped.StaleFor < 6*time.Hour {
+		t.Fatalf("StaleFor = %v, want >= 6h", dropped.StaleFor)
+	}
+
+	e.report(t, "GET:/orders/{id}", "DELETE:/orders/{id}") // 又加回来
+	if s := e.list(t)["DELETE:/orders/{id}"].Status; s != domain.PermissionStatusNormal {
+		t.Fatalf("重新上报后状态 = %q, want normal", s)
+	}
+}
+
+// 【辨别力】控制台改名走单点算状态，判据必须和列表一致，否则改个名就显示过渡中。
+func TestPermissionItemMatchesList(t *testing.T) {
+	e := newAuthzEnv(t)
+	ctx := context.Background()
+
+	e.report(t, "GET:/orders/{id}", "DELETE:/orders/{id}")
+	e.ageReports(t, time.Hour)
+	e.report(t, "GET:/orders/{id}")
+	e.ageReports(t, 5*time.Hour)
+
+	for k, want := range e.list(t) {
+		got, err := e.svc.PermissionItem(ctx, want.Permission)
+		if err != nil {
+			t.Fatalf("PermissionItem: %v", err)
+		}
+		if got.Status != want.Status {
+			t.Fatalf("%s 单点状态 = %q，列表状态 = %q", k, got.Status, want.Status)
+		}
 	}
 }
 

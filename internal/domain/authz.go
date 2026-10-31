@@ -37,10 +37,11 @@ type PermissionStatus string
 const (
 	// PermissionStatusNormal：app 上报的，最近还在报。
 	PermissionStatusNormal PermissionStatus = "normal"
-	// PermissionStatusStale：app 上报的，超过阈值没有任何实例报过它。
+	// PermissionStatusStale：app 上报的，不在应用最近一次快照里，且超过阈值
+	// 没有任何实例报过它。
 	//
-	// 判据刻意是"多久没被报过"而不是"这次上报里有没有"：业务服务多半多实例，
-	// 滚动发布时新旧版本同时在跑，交替上报会让权限点在两个状态间反复横跳。
+	// 两个条件缺一不可。SDK 只在启动时上报，只看时间的话服务跑满阈值就全部
+	// 过渡中；只看快照的话，滚动发布时新旧版本交替上报会让权限点反复横跳。
 	PermissionStatusStale PermissionStatus = "stale"
 	// PermissionStatusManual：人手动加的，不参与消失判定。
 	PermissionStatusManual PermissionStatus = "manual"
@@ -48,7 +49,7 @@ const (
 
 // DefaultStaleAfter 是判定"过渡中"的默认阈值。
 //
-// 30 分钟：滚动发布通常几分钟内完成，窗口内新旧两个版本都在报，不会误判。
+// 30 分钟：滚动发布通常几分钟内完成，窗口内被新快照落下的权限点不会误判。
 const DefaultStaleAfter = 30 * time.Minute
 
 // Role 是一个全局角色。
@@ -81,13 +82,17 @@ type Permission struct {
 	CreatedAt  int64
 }
 
-// Status 按当前时刻算出展示状态。
-func (p Permission) Status(now time.Time, staleAfter time.Duration) PermissionStatus {
+// Status 按当前时刻算出展示状态。latestReportAt 是应用最近一次上报的毫秒时间戳。
+func (p Permission) Status(now time.Time, staleAfter time.Duration, latestReportAt int64) PermissionStatus {
 	if p.Source == PermissionSourceManual {
 		return PermissionStatusManual
 	}
 	if p.LastSeenAt == 0 {
 		return PermissionStatusStale
+	}
+	// 一次上报在同一事务里写同一个 now()，等于最近上报时刻就是还在最新快照里。
+	if p.LastSeenAt >= latestReportAt {
+		return PermissionStatusNormal
 	}
 	seen := time.UnixMilli(p.LastSeenAt)
 	if now.Sub(seen) > staleAfter {

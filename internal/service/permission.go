@@ -27,9 +27,9 @@ type ReportedPoint struct {
 // 四条规则：
 //
 //  1. 快照里的每一条 → 存在则刷新 last_seen_at；不存在则新建（source='app'）
-//  2. **快照里没有的一律不动**——状态是算出来的，不需要写库。"消失"的判据是
-//     "多久没有任何实例报过它"，不是"这次上报里有没有"：业务服务多半多实例，
-//     滚动发布时新旧版本同时在跑，交替上报会让权限点在两个状态间反复横跳
+//  2. **快照里没有的一律不动**——状态是算出来的，不需要写库。"消失"要同时满足
+//     "不在最近一次快照里"和"超过阈值没有实例报过它"：SDK 只在启动时上报，
+//     不能只看时间；滚动发布时新旧版本交替上报，也不能只看快照
 //  3. source='manual' 的永远不被触碰——业务方的路由清单里当然没有人手动加的
 //  4. name 与 parent 只在**首次创建时**由上报写入，之后不覆盖。否则每次重启，
 //     运营填的中文名和整理好的归类就没了
@@ -195,20 +195,45 @@ func (s *AuthzService) ListPermissions(ctx context.Context, appID uuid.UUID) ([]
 	}
 	defer rows.Close()
 
-	now := time.Now()
-	out := []PermissionListItem{}
+	perms := []domain.Permission{}
+	var latestReportAt int64
 	for rows.Next() {
 		p, err := scanPermission(rows)
 		if err != nil {
 			return nil, fmt.Errorf("service: 扫描权限点: %w", err)
 		}
-		item := PermissionListItem{Permission: *p, Status: p.Status(now, s.staleAfter)}
-		if item.Status == domain.PermissionStatusStale && p.LastSeenAt > 0 {
-			item.StaleFor = now.Sub(time.UnixMilli(p.LastSeenAt))
-		}
-		out = append(out, item)
+		perms = append(perms, *p)
+		latestReportAt = max(latestReportAt, p.LastSeenAt)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("service: 遍历权限点: %w", err)
+	}
+
+	now := time.Now()
+	out := make([]PermissionListItem, 0, len(perms))
+	for _, p := range perms {
+		out = append(out, s.permissionItem(p, now, latestReportAt))
+	}
+	return out, nil
+}
+
+// PermissionItem 给单个权限点算状态。状态取决于应用最近一次上报，所以要查库。
+func (s *AuthzService) PermissionItem(ctx context.Context, p domain.Permission) (PermissionListItem, error) {
+	var latestReportAt int64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT coalesce((extract(epoch from max(last_seen_at)) * 1000)::bigint, 0)
+		FROM permission WHERE application_id = $1`, p.ApplicationID).Scan(&latestReportAt); err != nil {
+		return PermissionListItem{}, fmt.Errorf("service: 查询最近一次上报: %w", err)
+	}
+	return s.permissionItem(p, time.Now(), latestReportAt), nil
+}
+
+func (s *AuthzService) permissionItem(p domain.Permission, now time.Time, latestReportAt int64) PermissionListItem {
+	item := PermissionListItem{Permission: p, Status: p.Status(now, s.staleAfter, latestReportAt)}
+	if item.Status == domain.PermissionStatusStale && p.LastSeenAt > 0 {
+		item.StaleFor = now.Sub(time.UnixMilli(p.LastSeenAt))
+	}
+	return item
 }
 
 // SetRolePermission 给角色授予或收回一个权限点。effect 为空表示收回。

@@ -10,18 +10,22 @@ import (
 func TestPermissionStatus(t *testing.T) {
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 	const staleAfter = 30 * time.Minute
+	// 默认用例里应用刚有过一次不含该权限点的上报；只有"还在快照里"那条单独设。
+	latest := now.UnixMilli()
 
 	tests := []struct {
-		name string
-		p    domain.Permission
-		want domain.PermissionStatus
+		name   string
+		p      domain.Permission
+		latest int64
+		want   domain.PermissionStatus
 	}{
 		{
 			name: "手动加的，永远是手动",
 			// 关键：LastSeenAt 为 0（从没被上报过）也不算过渡中——
 			// 手动权限点本来就不在业务方的路由清单里。
-			p:    domain.Permission{Source: domain.PermissionSourceManual},
-			want: domain.PermissionStatusManual,
+			p:      domain.Permission{Source: domain.PermissionSourceManual},
+			latest: latest,
+			want:   domain.PermissionStatusManual,
 		},
 		{
 			name: "刚被上报过 → 正常",
@@ -29,7 +33,18 @@ func TestPermissionStatus(t *testing.T) {
 				Source:     domain.PermissionSourceApp,
 				LastSeenAt: now.Add(-time.Minute).UnixMilli(),
 			},
-			want: domain.PermissionStatusNormal,
+			latest: latest,
+			want:   domain.PermissionStatusNormal,
+		},
+		{
+			name: "【辨别力】还在最近一次快照里，多久没上报都正常",
+			// SDK 只在启动时报一次。服务稳定跑几天没有新上报，不代表接口消失了。
+			p: domain.Permission{
+				Source:     domain.PermissionSourceApp,
+				LastSeenAt: now.Add(-72 * time.Hour).UnixMilli(),
+			},
+			latest: now.Add(-72 * time.Hour).UnixMilli(),
+			want:   domain.PermissionStatusNormal,
 		},
 		{
 			name: "【辨别力】阈值内还没被报过 → 仍然正常",
@@ -40,7 +55,8 @@ func TestPermissionStatus(t *testing.T) {
 				Source:     domain.PermissionSourceApp,
 				LastSeenAt: now.Add(-29 * time.Minute).UnixMilli(),
 			},
-			want: domain.PermissionStatusNormal,
+			latest: latest,
+			want:   domain.PermissionStatusNormal,
 		},
 		{
 			name: "【辨别力】恰好等于阈值 → 仍然正常",
@@ -50,26 +66,29 @@ func TestPermissionStatus(t *testing.T) {
 				Source:     domain.PermissionSourceApp,
 				LastSeenAt: now.Add(-staleAfter).UnixMilli(),
 			},
-			want: domain.PermissionStatusNormal,
+			latest: latest,
+			want:   domain.PermissionStatusNormal,
 		},
 		{
-			name: "超过阈值 → 过渡中",
+			name: "不在最近一次快照里且超过阈值 → 过渡中",
 			p: domain.Permission{
 				Source:     domain.PermissionSourceApp,
 				LastSeenAt: now.Add(-31 * time.Minute).UnixMilli(),
 			},
-			want: domain.PermissionStatusStale,
+			latest: latest,
+			want:   domain.PermissionStatusStale,
 		},
 		{
-			name: "app 来源但从未被上报过 → 过渡中",
-			p:    domain.Permission{Source: domain.PermissionSourceApp, LastSeenAt: 0},
-			want: domain.PermissionStatusStale,
+			name:   "app 来源但从未被上报过 → 过渡中",
+			p:      domain.Permission{Source: domain.PermissionSourceApp, LastSeenAt: 0},
+			latest: latest,
+			want:   domain.PermissionStatusStale,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.p.Status(now, staleAfter); got != tt.want {
+			if got := tt.p.Status(now, staleAfter, tt.latest); got != tt.want {
 				t.Fatalf("Status = %q, want %q", got, tt.want)
 			}
 		})

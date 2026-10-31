@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -151,15 +150,19 @@ func (h *authzHandler) listPermissions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]permissionDTO, 0, len(items))
 	for _, it := range items {
-		out = append(out, permissionDTO{
-			ID: it.Permission.ID.String(), Key: it.Permission.Key,
-			Name: it.Permission.Name, Kind: it.Permission.Kind,
-			Source: it.Permission.Source, Status: string(it.Status),
-			StaleForMs: it.StaleFor.Milliseconds(),
-			LastSeenAt: it.Permission.LastSeenAt, CreatedAt: it.Permission.CreatedAt,
-		})
+		out = append(out, toPermissionDTO(it))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func toPermissionDTO(it service.PermissionListItem) permissionDTO {
+	return permissionDTO{
+		ID: it.Permission.ID.String(), Key: it.Permission.Key,
+		Name: it.Permission.Name, Kind: it.Permission.Kind,
+		Source: it.Permission.Source, Status: string(it.Status),
+		StaleForMs: it.StaleFor.Milliseconds(),
+		LastSeenAt: it.Permission.LastSeenAt, CreatedAt: it.Permission.CreatedAt,
+	}
 }
 
 func (h *authzHandler) createPermission(w http.ResponseWriter, r *http.Request) {
@@ -211,12 +214,12 @@ func (h *authzHandler) updatePermission(w http.ResponseWriter, r *http.Request) 
 		writeError(w, err)
 		return
 	}
-	now := time.Now()
-	writeJSON(w, http.StatusOK, permissionDTO{
-		ID: p.ID.String(), Key: p.Key, Name: p.Name, Kind: p.Kind,
-		Source: p.Source, Status: string(p.Status(now, domain.DefaultStaleAfter)),
-		LastSeenAt: p.LastSeenAt, CreatedAt: p.CreatedAt,
-	})
+	it, err := h.svc.PermissionItem(r.Context(), *p)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toPermissionDTO(it))
 }
 
 func (h *authzHandler) deletePermission(w http.ResponseWriter, r *http.Request) {
