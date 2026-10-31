@@ -27,8 +27,7 @@
 ## 前置条件
 
 - fp 能跑起来：局域网 PostgreSQL / Redis 可达，`FP_POSTGRES_URL` / `FP_REDIS_URL`
-  两条连接串已设好（本机可以写进 git-ignored 的 `.env.local`），见
-  [docs/console.md](../../docs/console.md)。
+  两条连接串已设到系统环境变量里，见 [docs/console.md](../../docs/console.md)。
 - 本机没有 Docker、没有 make：全部用 bash 脚本 + `go run`，`./scripts/*.sh`
   在 Git Bash 里执行。
 
@@ -41,12 +40,11 @@
 | `FP_ADDR` | fp 的 gRPC 地址，必须带 scheme，如 `grpc://127.0.0.1:9090`（明文）或 `grpcs://fp.xxzj.com`（TLS，默认端口 443） |
 | `FP_APP_ID` / `FP_APP_SECRET` | 应用凭据，来自下面手工验收第 1 步 |
 
-`FP_APP_ID` / `FP_APP_SECRET` 是凭据，和 PG/Redis 密码一样只能进
-git-ignored 的 `.env.local`，不要提交到 git。`scripts/demo.sh` 先
-`. scripts/env.sh` 从 `.env.local` 载入这两个变量再起 demo（`scripts/run.sh`
-自己也读 `.env.local`，但 fp 只要求 `FP_POSTGRES_URL` / `FP_REDIS_URL` 两个
-环境变量，不读 `config.yaml`）；`FP_ADDR` 在 `scripts/demo.sh` 里给了本地开发的
-默认值（`grpc://127.0.0.1:9090`），不用额外配置。
+`FP_APP_ID` / `FP_APP_SECRET` 是凭据，和 PG/Redis 密码一样只放系统环境变量，
+不要提交到 git。`scripts/demo.sh` 直接读这两个变量（fp 只要求
+`FP_POSTGRES_URL` / `FP_REDIS_URL` 两个环境变量，不读 `config.yaml`）；
+`FP_ADDR` 在 `scripts/demo.sh` 里给了本地开发的默认值
+（`grpc://127.0.0.1:9090`），不用额外配置。
 
 SDK 走明文还是 TLS 由 `FP_ADDR` 的 scheme 决定：`grpc://` 明文、`grpcs://`
 TLS，两者都是 fpsdk 原生支持，不需要额外配置项。
@@ -107,7 +105,7 @@ curl -s -X POST http://localhost:8080/admin/api/applications \
 ```
 
 记下 `application.id`（下一步要用）、`application.appId` 与
-`appSecret`（写进 `.env.local` 要用）。
+`appSecret`（设环境变量要用）。
 
 ```bash
 # 1c. 启用 password 登录方式（把 <id> 换成上一步的 application.id）。
@@ -130,11 +128,11 @@ curl -s -X POST http://localhost:8080/admin/api/users \
 
 **该看到**：`201`。
 
-最后，把 `appId` / `appSecret` 追加到仓库根目录的 `.env.local`：
+最后，把 `appId` / `appSecret` 设成系统环境变量：
 
 ```bash
-FP_APP_ID=<application.appId>
-FP_APP_SECRET=<appSecret>
+export FP_APP_ID=<application.appId>
+export FP_APP_SECRET=<appSecret>
 ```
 
 ### 第 2 步：起 demo，登录

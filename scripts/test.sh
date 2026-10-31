@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck disable=SC1091
-. "$ROOT/scripts/env.sh"
 cd "$ROOT"
 # 参数分流：看起来像包路径的（./ 开头或就是 .）归包，其余归 go test 的标志。
 #

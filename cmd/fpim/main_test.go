@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,10 +82,7 @@ func guestApps() staticApps {
 // 直接写结构体字面量才能让两个节点真的各自配置不同。
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
-	url := os.Getenv("FP_TEST_REDIS_URL")
-	if url == "" {
-		t.Fatal("缺少 FP_TEST_REDIS_URL，请用 ./scripts/test.sh 跑测试")
-	}
+	url := testsupport.RedisURL(t)
 	return &config.Config{
 		Env:   "dev",
 		Log:   config.Log{Level: "warn"},

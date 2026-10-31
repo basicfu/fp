@@ -27,8 +27,8 @@
 重启 fp 才会生效。系统配置表还没有任何版本时（全新库）全部用零值默认
 启动，监听地址默认 `:8080`/`:9090`。
 
-`scripts/run.sh` 会顺手 source 一下仓库根目录的 `.env.local`（如果存在），
-本机开发可以把这两条连接串写在那里，不用每次手动 `export`。
+`scripts/run.sh` 只读系统环境变量，不读 `.env.local`，这两条连接串要设在
+系统环境变量里。
 
     go build -o fp ./cmd/fp && FP_POSTGRES_URL=... FP_REDIS_URL=... ./fp
 

@@ -3,7 +3,6 @@ package service_test
 import (
 	"context"
 	"errors"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -395,7 +394,7 @@ func isEpochCmd(cmd redis.Cmder, name string) bool {
 // Options() 复制：选项里带着它的推送处理器，新客户端会与它共用。
 func hookedRedis(t *testing.T, h redis.Hook) *redis.Client {
 	t.Helper()
-	c, err := store.OpenRedis(context.Background(), os.Getenv("FP_TEST_REDIS_URL"))
+	c, err := store.OpenRedis(context.Background(), testsupport.RedisURL(t))
 	if err != nil {
 		t.Fatalf("连接测试 Redis: %v", err)
 	}

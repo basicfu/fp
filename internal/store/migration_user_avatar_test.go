@@ -2,7 +2,6 @@ package store_test
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/basicfu/fp/internal/store/migrations"
+	"github.com/basicfu/fp/internal/testsupport"
 )
 
 // newScratchSchema 在测试库里开一个临时 schema，返回 search_path 指向它的连接池。
@@ -20,16 +20,13 @@ import (
 // 中途少了列会让并行的任何东西一起坏掉。迁移文件里的表名都不带 schema，换个 search_path 就整套隔离。
 func newScratchSchema(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("FP_TEST_POSTGRES_URL")
-	if url == "" {
-		t.Fatal("未设置 FP_TEST_POSTGRES_URL，请用 ./scripts/test.sh 跑测试")
-	}
+	url := testsupport.PostgresURL(t)
 	ctx := context.Background()
 	schema := "mig_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		t.Fatal("解析 FP_TEST_POSTGRES_URL 失败")
+		t.Fatal("解析测试库连接串失败")
 	}
 	admin, err := pgxpool.NewWithConfig(ctx, cfg.Copy())
 	if err != nil {

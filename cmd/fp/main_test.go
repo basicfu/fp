@@ -95,7 +95,7 @@ func TestSeedDefaultsYAMLSkipsWhenVersionExists(t *testing.T) {
 }
 
 // 下面几个 runSubcommand 用例走的都是"拒绝/失败"分支，本不该碰库。清空连接串是兜底：
-// scripts/test.sh 会把 .env.local 里的真实连接串带进测试进程，守卫万一回归，用例也只会
+// 系统环境变量里的真实连接串会带进测试进程，守卫万一回归，用例也只会
 // 因缺环境变量而失败，而不是真的去重置某个库里的管理员。
 func clearConnectionEnv(t *testing.T) {
 	t.Helper()

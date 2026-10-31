@@ -203,7 +203,7 @@ func usage() {
             fp 下次启动会从 00001 完整重跑迁移。适合库结构被改坏了。
 
 连接串取自环境变量 FP_POSTGRES_URL / FP_REDIS_URL，与 fp 本身读的是同一对，
-清的是**开发库**，不是测试库（测试库由 testsupport 在每次跑测试时自己清）。
+清的是这对变量指向的运行库。测试用 fp_tmp，由 testsupport 在每次跑测试时自己清。
 
 `)
 	flag.PrintDefaults()

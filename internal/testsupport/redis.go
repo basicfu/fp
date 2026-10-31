@@ -2,7 +2,10 @@ package testsupport
 
 import (
 	"context"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -11,15 +14,18 @@ import (
 	"github.com/basicfu/fp/internal/store"
 )
 
-const missingRedisHint = `
-未设置 FP_TEST_REDIS_URL。fp 的测试需要真实的 Redis。
+// tempRedisDB 是测试用的 Redis DB。测试每次都 FLUSHDB，所以只借 FP_REDIS_URL 的
+// 地址和账号，DB 号一律换成它，绝不碰变量指向的运行库。
+const tempRedisDB = 1
 
-用仓库根目录的脚本跑测试，它会从 .env.local 载入连接串：
+const missingRedisHint = `
+未设置 FP_REDIS_URL。fp 的测试需要真实的 Redis。
+
+把它设到系统环境变量里再跑测试：
 
   ./scripts/test.sh
 
-注意：测试会对该 Redis DB 执行 FLUSHDB，务必在 FP_TEST_REDIS_URL 里使用
-独立的 DB index（约定用 /1，开发库是 /0）。
+测试只取它的地址和账号，DB 号固定用 1，不碰它指向的运行库。
 `
 
 var (
@@ -28,17 +34,35 @@ var (
 	rdbErr  error
 )
 
+// RedisURL 返回测试 Redis 的连接串：FP_REDIS_URL 的地址和账号 + DB 1。
+func RedisURL(t *testing.T) string {
+	t.Helper()
+
+	raw := os.Getenv("FP_REDIS_URL")
+	if raw == "" {
+		t.Fatal(missingRedisHint)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		// 不带原错误：url.Parse 的错误会回显整条连接串，里面有密码。
+		t.Fatal("testsupport: FP_REDIS_URL 格式不正确")
+	}
+	db := strconv.Itoa(tempRedisDB)
+	if strings.Trim(u.Path, "/") == db {
+		t.Fatalf("testsupport: FP_REDIS_URL 指向的就是 DB %s，测试会清空运行库，请换一个 DB", db)
+	}
+	u.Path = "/" + db
+	return u.String()
+}
+
 // NewTestRedis 返回一个已清空的 Redis 客户端。
 func NewTestRedis(t *testing.T) *redis.Client {
 	t.Helper()
 
-	url := os.Getenv("FP_TEST_REDIS_URL")
-	if url == "" {
-		t.Fatal(missingRedisHint)
-	}
+	testURL := RedisURL(t)
 
 	rdbOnce.Do(func() {
-		rdb, rdbErr = store.OpenRedis(context.Background(), url)
+		rdb, rdbErr = store.OpenRedis(context.Background(), testURL)
 	})
 	if rdbErr != nil {
 		t.Fatalf("testsupport: 连接测试 Redis 失败: %v", rdbErr)

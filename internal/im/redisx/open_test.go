@@ -2,7 +2,6 @@ package redisx
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 
@@ -10,8 +9,8 @@ import (
 )
 
 func TestOpenDetectsStandalone(t *testing.T) {
-	testsupport.NewTestRedis(t) // 只为了触发"未设置 FP_TEST_REDIS_URL 就 Fatal"的统一指引
-	c, mode, err := Open(context.Background(), os.Getenv("FP_TEST_REDIS_URL"))
+	testsupport.NewTestRedis(t) // 只为了触发"未设置 FP_REDIS_URL 就 Fatal"的统一指引
+	c, mode, err := Open(context.Background(), testsupport.RedisURL(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

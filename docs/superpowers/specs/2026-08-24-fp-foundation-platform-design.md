@@ -908,7 +908,7 @@ Keycloak 用 master realm 提供这个隔离边界，但 **fp 砍掉了多用户
 - 第一阶段用手写 pgx 查询，未引入 sqlc。
 - `identity(union_key)` 上的索引**不是** UNIQUE——同一 unionId 允许多条 identity 是归并规则 2 的前提。
   「一个 union_key 只属于一个用户」由应用层的 `lockUnionKeyTx` + 归属校验维持。
-- 测试必须串行（`-p 1`，禁用 `t.Parallel()`）：所有包共用同一个 `fp_test` 库，而每次 `NewTestDB` 都会清空全表。
+- 测试必须串行（`-p 1`，禁用 `t.Parallel()`）：所有包共用 `fp_tmp` 库（取 `FP_POSTGRES_URL` 的地址和账号，只换库名），而每次 `NewTestDB` 都会清空全表。
 
 ---
 

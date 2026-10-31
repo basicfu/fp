@@ -3,7 +3,10 @@ package testsupport
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,38 +15,85 @@ import (
 	"github.com/basicfu/fp/internal/store"
 )
 
-const missingPGHint = `
-未设置 FP_TEST_POSTGRES_URL。fp 的测试需要真实的 PostgreSQL 18（uuidv7() 是 18 引入的）。
+// tempDBName 是测试用的库。测试每次都清全表，所以只借 FP_POSTGRES_URL 的地址和
+// 账号，库名一律换成它，绝不碰变量指向的运行库。
+const tempDBName = "fp_tmp"
 
-用仓库根目录的脚本跑测试，它会从 .env.local 载入连接串：
+const missingPGHint = `
+未设置 FP_POSTGRES_URL。fp 的测试需要真实的 PostgreSQL 18（uuidv7() 是 18 引入的）。
+
+把它设到系统环境变量里再跑测试：
 
   ./scripts/test.sh
 
-首次使用需要自己建一个 .env.local，写上 FP_TEST_POSTGRES_URL 与
-FP_TEST_REDIS_URL 两条测试库连接串（fp 自己的启动配置是 FP_POSTGRES_URL/
-FP_REDIS_URL/FP_ENV，fp-im 是 FP_IM_REDIS_URL/FP_IM_FPSDK_ADDR/
-FP_IM_FPSDK_SECRET，都是各自独立的环境变量，与这个文件无关）。
+测试只取它的地址和账号，库名固定用 fp_tmp（不存在会自动创建），不碰它指向的运行库。
 `
 
 var (
 	dbOnce sync.Once
 	dbPool *pgxpool.Pool
 	dbErr  error
+
+	tempDBOnce sync.Once
+	tempDBErr  error
 )
+
+// PostgresURL 返回测试库的连接串：FP_POSTGRES_URL 的地址和账号 + fp_tmp 库。
+func PostgresURL(t *testing.T) string {
+	t.Helper()
+
+	raw := os.Getenv("FP_POSTGRES_URL")
+	if raw == "" {
+		t.Fatal(missingPGHint)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		// 不带原错误：url.Parse 的错误会回显整条连接串，里面有密码。
+		t.Fatal("testsupport: FP_POSTGRES_URL 格式不正确")
+	}
+	if strings.Trim(u.Path, "/") == tempDBName {
+		t.Fatalf("testsupport: FP_POSTGRES_URL 指向的就是 %s，测试会清空运行库，请换一个运行库", tempDBName)
+	}
+	tempDBOnce.Do(func() { tempDBErr = ensureTempDB(context.Background(), raw) })
+	if tempDBErr != nil {
+		t.Fatalf("testsupport: 准备 %s 失败: %v", tempDBName, tempDBErr)
+	}
+	u.Path = "/" + tempDBName
+	return u.String()
+}
+
+// ensureTempDB 经运行库的连接建出 fp_tmp，这样换一台实例跑测试不用手工建库。
+func ensureTempDB(ctx context.Context, adminURL string) error {
+	pool, err := store.OpenPostgres(ctx, adminURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	var exists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, tempDBName).Scan(&exists); err != nil {
+		return fmt.Errorf("查询库是否存在: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := pool.Exec(ctx, `CREATE DATABASE `+tempDBName); err != nil {
+		return fmt.Errorf("建库: %w", err)
+	}
+	return nil
+}
 
 // NewTestDB 返回一个已完成迁移的连接池，并清空所有业务表。
 // 连接池在整个测试二进制内复用；每次调用只做数据清理。
 func NewTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
-	url := os.Getenv("FP_TEST_POSTGRES_URL")
-	if url == "" {
-		t.Fatal(missingPGHint)
-	}
+	testURL := PostgresURL(t)
 
 	dbOnce.Do(func() {
 		ctx := context.Background()
-		dbPool, dbErr = store.OpenPostgres(ctx, url)
+		dbPool, dbErr = store.OpenPostgres(ctx, testURL)
 		if dbErr != nil {
 			return
 		}
@@ -54,7 +104,7 @@ func NewTestDB(t *testing.T) *pgxpool.Pool {
 	}
 
 	truncateAll(t, dbPool)
-	// 与 fp 启动后的状态保持一致；测试库同时是开发库，不补的话跑完测试内置角色就没了。
+	// 与 fp 启动后的状态保持一致：TRUNCATE 把内置角色也清掉了。
 	if err := store.EnsureBuiltinRoles(context.Background(), dbPool); err != nil {
 		t.Fatalf("testsupport: %v", err)
 	}
