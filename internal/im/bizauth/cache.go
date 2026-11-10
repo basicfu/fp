@@ -6,7 +6,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
-	"github.com/basicfu/fp/internal/im/model"
+	"github.com/basicfu/fp/internal/im/auth"
 )
 
 // cacheKey 用结构体而不是拼接字符串。拼接会引入歧义：
@@ -23,8 +23,9 @@ type cacheKey struct {
 	verifyURL string
 }
 
+// cacheEntry 存整个 Identity：分组与策略都由令牌决定，与 uid 同进同出。
 type cacheEntry struct {
-	sub       model.Subject
+	id        auth.Identity
 	expiresAt time.Time
 }
 
@@ -39,24 +40,24 @@ func newCacheSet() *cacheSet {
 	return &cacheSet{byApp: map[string]*lru.Cache[cacheKey, cacheEntry]{}}
 }
 
-func (s *cacheSet) get(app, token, verifyURL string, now time.Time) (model.Subject, bool) {
+func (s *cacheSet) get(app, token, verifyURL string, now time.Time) (auth.Identity, bool) {
 	s.mu.Lock()
 	c, ok := s.byApp[app]
 	s.mu.Unlock()
 	if !ok {
-		return model.Subject{}, false
+		return auth.Identity{}, false
 	}
 	e, ok := c.Get(cacheKey{app, token, verifyURL})
 	if !ok || !now.Before(e.expiresAt) {
-		return model.Subject{}, false
+		return auth.Identity{}, false
 	}
-	return e.sub, true
+	return e.id, true
 }
 
 // put 在 ttl 大于零时写入。size 是该 app 配置的容量上限，
 // 首次为该 app 建缓存时生效；之后改配置不会缩容，重启才生效——
 // 缓存容量不值得为热更新引入重建逻辑。
-func (s *cacheSet) put(app, token, verifyURL string, sub model.Subject, ttl time.Duration, size int, now time.Time) {
+func (s *cacheSet) put(app, token, verifyURL string, id auth.Identity, ttl time.Duration, size int, now time.Time) {
 	if ttl <= 0 {
 		return
 	}
@@ -73,5 +74,5 @@ func (s *cacheSet) put(app, token, verifyURL string, sub model.Subject, ttl time
 		s.byApp[app] = c
 	}
 	s.mu.Unlock()
-	c.Add(cacheKey{app, token, verifyURL}, cacheEntry{sub: sub, expiresAt: now.Add(ttl)})
+	c.Add(cacheKey{app, token, verifyURL}, cacheEntry{id: id, expiresAt: now.Add(ttl)})
 }

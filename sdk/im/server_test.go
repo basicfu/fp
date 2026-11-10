@@ -28,7 +28,7 @@ type stubIm struct {
 	swallow  atomic.Bool
 	received atomic.Int64
 	pings    atomic.Int64
-	// oldIm 模拟不认识 PingRequest 的旧版 fp-im:回"未知请求类型"的错误结果。
+	// oldIm 模拟不认识 PingRequest / ListGroupRequest 的旧版 fp-im:回"未知请求类型"的错误结果。
 	oldIm atomic.Bool
 }
 
@@ -73,6 +73,20 @@ func (s *stubIm) Connect(st fpimv1.ImService_ConnectServer) error {
 			}
 		case *fpimv1.ConnectRequest_Sessions:
 			res.Sessions = []*fpimv1.Session{{ConnId: "c1", NodeId: "stub", Os: "ios", Mobile: true, ConnectedAtMs: 9}}
+		case *fpimv1.ConnectRequest_ListGroup:
+			switch {
+			case s.oldIm.Load():
+				res.Error = "未知请求类型"
+			case b.ListGroup.Group == "big":
+				res.Error = "分组在线主体超过 10000 个"
+			case b.ListGroup.Group == "boom":
+				res.Error = "redis: connection refused"
+			default:
+				res.GroupMembers = []*fpimv1.SubjectSessions{
+					{Subject: "b." + b.ListGroup.Group + ":n-1", Sessions: []*fpimv1.Session{{ConnId: "c1", NodeId: "stub", Os: "linux", ConnectedAtMs: 9}}},
+					{Subject: "b." + b.ListGroup.Group + ":a:b", Sessions: []*fpimv1.Session{{ConnId: "c2"}, {ConnId: "c3", Mobile: true}}},
+				}
+			}
 		case *fpimv1.ConnectRequest_SessionsMany:
 			for i, sub := range b.SessionsMany.Subjects {
 				ss := &fpimv1.SubjectSessions{Subject: sub}
@@ -745,5 +759,47 @@ func TestServerHeartbeatRebuildsStuckStream(t *testing.T) {
 	waitUntil(t, s.StreamHealthy, "重建后的流应就绪")
 	if _, err := s.Push(context.Background(), User("1"), []byte(`{"a":1}`)); err != nil {
 		t.Fatalf("重建后的流应能正常推送: %v", err)
+	}
+}
+
+func TestServerListGroup(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+	ctx := context.Background()
+
+	got, err := s.ListGroup(ctx, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Subject != BizGroup("r", "n-1") || got[1].Subject != BizGroup("r", "a:b") {
+		t.Fatalf("ListGroup 应把 subject 解析回分组主体，实际 %+v", got)
+	}
+	if len(got[0].Sessions) != 1 || got[0].Sessions[0] != (Session{ConnID: "c1", Node: "stub", OS: "linux", ConnectedAt: 9}) {
+		t.Fatalf("连接没有原样带回：%+v", got[0].Sessions)
+	}
+	if len(got[1].Sessions) != 2 || !got[1].Sessions[1].Mobile {
+		t.Fatalf("同一主体的多条连接要合在一条里：%+v", got[1].Sessions)
+	}
+
+	if _, err := s.ListGroup(ctx, "big"); !errors.Is(err, ErrGroupTooLarge) {
+		t.Fatalf("对端回分组过大的固定文案时应返回 ErrGroupTooLarge，实际 %v", err)
+	}
+	if _, err := s.ListGroup(ctx, "boom"); err == nil || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrGroupTooLarge) {
+		t.Fatalf("对端其它报错应原样返回、不能当成不支持或过大，实际 %v", err)
+	}
+	// 分组名在本地先校验：默认分组不建索引，空串发出去也是白跑一趟
+	if _, err := s.ListGroup(ctx, ""); err == nil {
+		t.Fatal("空分组应在本地就报错")
+	}
+
+	stub.oldIm.Store(true)
+	if _, err := s.ListGroup(ctx, "r"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("旧版 fp-im 回\"未知请求类型\"时应返回 ErrUnsupported，实际 %v", err)
 	}
 }

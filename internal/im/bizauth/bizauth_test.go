@@ -27,6 +27,17 @@ func (a apps) Apps() []string                         { return nil }
 // handler 里可以断言收到的请求，也可以按需返回不同响应。
 func newEnv(t *testing.T, h http.HandlerFunc) (*Authenticator, *httptest.Server, *atomic.Int64) {
 	t.Helper()
+	return newEnvFeatures(t, false, h)
+}
+
+// newGroupEnv 是第二步（发特性头）的认证器：只有这时才认回调里的分组字段。
+func newGroupEnv(t *testing.T, h http.HandlerFunc) (*Authenticator, *httptest.Server, *atomic.Int64) {
+	t.Helper()
+	return newEnvFeatures(t, true, h)
+}
+
+func newEnvFeatures(t *testing.T, send bool, h http.HandlerFunc) (*Authenticator, *httptest.Server, *atomic.Int64) {
+	t.Helper()
 	var calls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -41,7 +52,8 @@ func newEnv(t *testing.T, h http.HandlerFunc) (*Authenticator, *httptest.Server,
 			AppID: "a1", ConnPolicy: model.PolicyReplace,
 			BizAuth: &model.BizAuth{VerifyURL: srv.URL, Timeout: model.Duration(2 * time.Second), CacheSize: 100},
 		}},
-		Client: srv.Client(),
+		Client:       srv.Client(),
+		SendFeatures: send,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -80,12 +92,12 @@ func TestVerifySuccessMapsToBizSubject(t *testing.T) {
 	a, _, _ := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(okBody("1001", 0)))
 	})
-	sub, err := a.Verify(context.Background(), req("a1", "tok", `{}`))
+	id, err := a.Verify(context.Background(), req("a1", "tok", `{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sub != model.Biz("1001") {
-		t.Fatalf("主体应是 b:1001，实际 %s", sub)
+	if id != (auth.Identity{Subject: model.Biz("1001")}) {
+		t.Fatalf("主体应是 b:1001 且不带策略，实际 %+v", id)
 	}
 }
 
@@ -385,5 +397,122 @@ func TestVerifyNon200DrainsBodyForConnectionReuse(t *testing.T) {
 	}
 	if !reused[1] {
 		t.Fatal("第二次请求应当复用第一次的连接（响应体已排空）；未复用说明非 200 分支只 Close 没排空，白白多了一次 TCP 握手")
+	}
+}
+
+func TestVerifyGroupAndPolicy(t *testing.T) {
+	const pre = `{"code":"success","msg":"","time":1,"uid":"1001"`
+	for _, tc := range []struct {
+		name string
+		body string
+		want auth.Identity
+		err  error
+	}{
+		{"带分组", pre + `,"group":"r"}`, auth.Identity{Subject: model.BizGroup("r", "1001")}, nil},
+		{"group 为空串是默认分组", pre + `,"group":""}`, auth.Identity{Subject: model.Biz("1001")}, nil},
+		{"group 大写", pre + `,"group":"R"}`, auth.Identity{}, auth.ErrUnavailable},
+		{"group 超长", pre + `,"group":"abcdefghijklmnopq"}`, auth.Identity{}, auth.ErrUnavailable},
+		{"group 不是字符串", pre + `,"group":1}`, auth.Identity{}, auth.ErrUnavailable},
+		{"limit 带上限", pre + `,"group":"web","conn_policy":"limit","conn_limit":5}`,
+			auth.Identity{Subject: model.BizGroup("web", "1001"), Policy: model.PolicyLimit, Limit: 5}, nil},
+		{"limit 上限 100 放行", pre + `,"group":"web","conn_policy":"limit","conn_limit":100}`,
+			auth.Identity{Subject: model.BizGroup("web", "1001"), Policy: model.PolicyLimit, Limit: 100}, nil},
+		// replace/reject 带上 conn_limit 也不该把它带出去：脚本只在 limit 时读它
+		{"replace", pre + `,"group":"app","conn_policy":"replace","conn_limit":3}`,
+			auth.Identity{Subject: model.BizGroup("app", "1001"), Policy: model.PolicyReplace}, nil},
+		{"reject", pre + `,"group":"app","conn_policy":"reject"}`,
+			auth.Identity{Subject: model.BizGroup("app", "1001"), Policy: model.PolicyReject}, nil},
+		{"limit 缺上限", pre + `,"group":"web","conn_policy":"limit"}`, auth.Identity{}, auth.ErrUnavailable},
+		{"limit 上限 101", pre + `,"group":"web","conn_policy":"limit","conn_limit":101}`, auth.Identity{}, auth.ErrUnavailable},
+		{"未知策略", pre + `,"group":"web","conn_policy":"kick"}`, auth.Identity{}, auth.ErrUnavailable},
+		// none 是重登记专用的内部值，业务方不能用它绕过一切判定
+		{"内部策略 none", pre + `,"group":"web","conn_policy":"none"}`, auth.Identity{}, auth.ErrUnavailable},
+		// 默认分组只认应用级策略，回调给了也不生效，现有行为不变
+		{"默认分组带策略被忽略", pre + `,"conn_policy":"limit","conn_limit":5}`, auth.Identity{Subject: model.Biz("1001")}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, _ := newGroupEnv(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(tc.body)) })
+			got, err := a.Verify(context.Background(), req("a1", "tok", `{}`))
+			if tc.err != nil {
+				if !errors.Is(err, tc.err) {
+					t.Fatalf("期望 %v（业务方配置错误，client 应退避重连），实际 %v", tc.err, err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("得到 %+v err=%v，期望 %+v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestVerifyCacheKeepsGroupAndPolicy(t *testing.T) {
+	a, _, calls := newGroupEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":"success","uid":"1001","group":"web","conn_policy":"limit","conn_limit":5,"cache_seconds":60}`))
+	})
+	want := auth.Identity{Subject: model.BizGroup("web", "1001"), Policy: model.PolicyLimit, Limit: 5}
+	for i := 0; i < 2; i++ {
+		got, err := a.Verify(context.Background(), req("a1", "tok", `{}`))
+		if err != nil || got != want {
+			t.Fatalf("第 %d 次得到 %+v err=%v，期望 %+v", i+1, got, err, want)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("第二次应命中缓存，实际调了 %d 次", n)
+	}
+}
+
+// TestVerifyFeaturesHeader 钉住两步上线的第一步：默认不发特性头，业务方
+// 不会返回分组；只有显式打开 SendFeatures（第二步）才发。
+func TestVerifyFeaturesHeader(t *testing.T) {
+	for _, send := range []bool{false, true} {
+		var got []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Header.Values(HeaderFeatures)
+			w.Write([]byte(okBody("u1", 0)))
+		}))
+		a, err := New(Config{
+			Apps: apps{"a1": {
+				AppID: "a1", ConnPolicy: model.PolicyReplace,
+				BizAuth: &model.BizAuth{VerifyURL: srv.URL, Timeout: model.Duration(2 * time.Second), CacheSize: 10},
+			}},
+			Client:       srv.Client(),
+			SendFeatures: send,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.Verify(context.Background(), req("a1", "tok", `{}`)); err != nil {
+			t.Fatal(err)
+		}
+		srv.Close()
+		if send && (len(got) != 1 || got[0] != FeatureGroup) {
+			t.Fatalf("SendFeatures=true 时应带 %s: %s，实际 %q", HeaderFeatures, FeatureGroup, got)
+		}
+		if !send && len(got) != 0 {
+			t.Fatalf("默认不该带 %s，实际 %q", HeaderFeatures, got)
+		}
+	}
+}
+
+// TestVerifyIgnoresGroupWithoutFeatures 守住两步上线的第一步：没发特性头时，
+// 回调响应里的 group / conn_policy / conn_limit 一律当不存在。业务方现有响应
+// 里可能本来就有自己语义的同名字段，升级 fp-im 不能把它误当分组、更不能
+// 因为它类型不对把整个响应判成不合约定（4004）。
+func TestVerifyIgnoresGroupWithoutFeatures(t *testing.T) {
+	const pre = `{"code":"success","msg":"","time":1,"uid":"1001"`
+	for _, body := range []string{
+		pre + `,"group":"r"}`,
+		pre + `,"group":"R-非法"}`,
+		pre + `,"group":1}`,
+		pre + `,"group":{"id":7,"name":"vip"}}`,
+		pre + `,"group":"web","conn_policy":"limit","conn_limit":5}`,
+		pre + `,"group":"web","conn_policy":3,"conn_limit":"x"}`,
+	} {
+		a, _, _ := newEnv(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) })
+		got, err := a.Verify(context.Background(), req("a1", "tok", `{}`))
+		if err != nil || got != (auth.Identity{Subject: model.Biz("1001")}) {
+			t.Fatalf("未发特性头时应忽略分组字段、主体仍是 b:1001：body=%s 得到 %+v err=%v", body, got, err)
+		}
 	}
 }

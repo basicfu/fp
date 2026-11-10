@@ -12,6 +12,9 @@ func TestKeys(t *testing.T) {
 	if got := NodeChannel("im-a"); got != "fp:im:node:im-a" {
 		t.Fatalf("NodeChannel=%q", got)
 	}
+	if got := GroupIdxKey("a1", "r", "n1"); got != "fp:im:{a1:grp:r:n1}:idx" {
+		t.Fatalf("GroupIdxKey=%q", got)
+	}
 	if KeyNodes != "fp:im:node" {
 		t.Fatalf("KeyNodes=%q", KeyNodes)
 	}

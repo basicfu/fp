@@ -21,17 +21,17 @@ func New(fp, biz auth.Authenticator) auth.Authenticator {
 	return &dispatcher{fp: fp, biz: biz}
 }
 
-func (d *dispatcher) Verify(ctx context.Context, req auth.VerifyRequest) (model.Subject, error) {
+func (d *dispatcher) Verify(ctx context.Context, req auth.VerifyRequest) (auth.Identity, error) {
 	switch req.Kind {
 	case "", model.TokenKindFP:
 		return d.fp.Verify(ctx, req)
 	case model.TokenKindBiz:
 		if d.biz == nil {
-			return model.Subject{}, auth.ErrUnauthorized
+			return auth.Identity{}, auth.ErrUnauthorized
 		}
 		return d.biz.Verify(ctx, req)
 	}
 	// 未知类型直接拒，不兜底送给某一个下游：拼错的类型说明调用方有 bug，
 	// 静默降级会让它更难被发现，而且报出来的错会指向错误的方向。
-	return model.Subject{}, auth.ErrUnauthorized
+	return auth.Identity{}, auth.ErrUnauthorized
 }

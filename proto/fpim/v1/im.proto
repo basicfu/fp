@@ -6,7 +6,7 @@ option go_package = "github.com/basicfu/fp/sdk/gen/fpim/v1;fpimv1";
 
 // ImService 是业务 server 接入 fp-im 的唯一入口。
 //
-// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions / Ping），
+// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions / Ping / ListGroup），
 // im→server 发结果、client 上来的消息和连接事件。
 // 不拆成一元 RPC 的原因与 fp.v1.AuthService.Watch 相同：一条永不空闲的流
 // 让所有调用都走热连接，而且 Inbound/Event 本来就只能推。
@@ -25,6 +25,7 @@ message ConnectRequest {
     SessionsRequest sessions  = 5;
     PingRequest     ping      = 6;
     SessionsManyRequest sessions_many = 7;
+    ListGroupRequest    list_group    = 8;
   }
 }
 
@@ -77,6 +78,12 @@ message SessionsManyRequest {
   repeated string subjects = 1;
 }
 
+// ListGroupRequest 列出某分组此刻全部在线的主体。group 不能为空：默认分组不建索引。
+// 结果以连接表为准（与 SessionsMany 同一口径），超过 10000 个主体时整个请求失败。
+message ListGroupRequest {
+  string group = 1;
+}
+
 message SubjectSessions {
   string           subject  = 1;
   repeated Session sessions = 2;
@@ -106,8 +113,10 @@ message Session {
   int64  connected_at_ms = 5;
 }
 
-// Result 是对某个 ConnectRequest 的应答。error 非空表示整个请求失败，
-// 文案只用于日志，SDK 不据此分支。
+// Result 是对某个 ConnectRequest 的应答。error 非空表示整个请求失败。
+// 文案一般只用于日志，但下面两句是协议的一部分，SDK 按它们精确匹配，两边都不能改：
+//   - "未知请求类型"：对端不认识这个请求（旧版 fp-im 已经在回这句），SDK 映射成 ErrUnsupported；
+//   - "分组在线主体超过 10000 个"：ListGroup 分组过大，SDK 映射成 ErrGroupTooLarge。
 message Result {
   string              req_id   = 1;
   string              error    = 2;
@@ -115,6 +124,8 @@ message Result {
   repeated Session    sessions = 4;
   // 与 SessionsManyRequest.subjects 一一对应、顺序相同。
   repeated SubjectSessions sessions_many = 5;
+  // ListGroup 的结果，顺序不定。与 sessions_many 分开放，调用方不用按请求类型猜字段含义。
+  repeated SubjectSessions group_members = 6;
 }
 
 // Inbound 是 client 发上来的一条消息，payload 原样透传。

@@ -51,9 +51,19 @@ type RejectedError struct {
 func (e *RejectedError) Error() string { return "auth: 业务方拒绝: " + e.Code }
 func (e *RejectedError) Unwrap() error { return ErrUnauthorized }
 
-// Authenticator 验证 client 的凭证，返回它对应的主体。
+// Identity 是一次验证的结果：主体，加上这次握手要用的在线策略。
+//
+// Policy 为空表示沿用应用级策略。只有业务方回调给分组主体返回策略时才
+// 非空：分组是回调决定的，策略跟着分组走，业务方一处就能改全。
+type Identity struct {
+	Subject model.Subject
+	Policy  model.Policy
+	Limit   int // 仅 Policy 为 limit 时有意义
+}
+
+// Authenticator 验证 client 的凭证，返回它对应的身份。
 type Authenticator interface {
-	Verify(ctx context.Context, req VerifyRequest) (model.Subject, error)
+	Verify(ctx context.Context, req VerifyRequest) (Identity, error)
 }
 
 // AppConfigSource 提供 app 级配置。

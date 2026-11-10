@@ -1,13 +1,17 @@
 package integration_test
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	imconfig "github.com/basicfu/fp/internal/im/config"
+	"github.com/basicfu/fp/internal/im/hub/hubtest"
 	"github.com/basicfu/fp/internal/im/imgrpc"
 	"github.com/basicfu/fp/internal/im/model"
+	"github.com/basicfu/fp/internal/im/registry"
 	fpsdk "github.com/basicfu/fp/sdk"
 	fpim "github.com/basicfu/fp/sdk/im"
 )
@@ -37,9 +41,9 @@ func TestImKeepalivePairing(t *testing.T) {
 // 的存在）。
 //
 // 输入覆盖：合法用户主体、合法访客主体、大写 uuid、无连字符 uuid、
-// 版本位非 4 的 uuid、未知前缀、空串、业务方主体——这些正是两份实现里
-// 判断逻辑分叉的关键点（Cut 是否成功、前缀是否认识、uuid 格式/大小写/
-// 版本位校验、业务方 id 的校验规则）。
+// 版本位非 4 的 uuid、未知前缀、空串、业务方主体、分组主体——这些正是两份
+// 实现里判断逻辑分叉的关键点（Cut 是否成功、前缀是否认识、uuid 格式/大小写/
+// 版本位校验、业务方 id 的校验规则、分组名规则与"只有 b 能带分组"）。
 //
 // 业务方主体的输入集刻意不包含超长（>128 字节）或含空字节的 id：网关侧
 // model.ValidateUserID 会额外查这两项（那是给业务方回调返回值用的入口
@@ -58,6 +62,19 @@ func TestSubjectFormatParity(t *testing.T) {
 		"b:1001",                                 // 合法的业务方主体
 		"b:",                                     // 空 id，两边都要拒
 		"b:a-b_c",                                // 业务方的 id 不约束字符集，两边都要接受
+		// 分组主体：kind 段带 . 的写法，以及 Parse 必须拒绝的几种
+		"b.r:1001",
+		"b.r:a:b", // uid 含冒号：只按第一个冒号切
+		"b.a_1:x",
+		"b.abcdefghijklmnop:x",  // 16 个字符，恰好到上限
+		"b.abcdefghijklmnopq:x", // 17 个字符
+		"u.x:1",
+		"g.x:6f1c3c2e-4b1a-4d2e-9f0e-7a8b9c0d1e2f",
+		"b.:x",
+		"b.R:x",
+		"b.1a:x",
+		"b.a.b:x",
+		"b.r:",
 	}
 	for _, s := range cases {
 		a, errA := model.ParseSubject(s)
@@ -65,7 +82,7 @@ func TestSubjectFormatParity(t *testing.T) {
 		if (errA == nil) != (errB == nil) {
 			t.Fatalf("%q：model err=%v，fpim err=%v 两边是否报错不一致", s, errA, errB)
 		}
-		if errA == nil && a.String() != b.String() {
+		if errA == nil && (a.String() != b.String() || a.Group != b.Group || a.ID != b.ID) {
 			t.Fatalf("%q：model=%s fpim=%s 解析结果不一致", s, a, b)
 		}
 	}
@@ -197,5 +214,39 @@ func TestClientPingAndIdleTimeoutPairing(t *testing.T) {
 		t.Fatalf("config.MinIdleTimeout(%v) 必须至少是 fpim.PingInterval(%v) 的两倍，"+
 			"否则网关会周期性地把每个 client 以 4005 踢下线，而 4005 的契约是立即重连不退避，形成重连风暴",
 			imconfig.MinIdleTimeout, fpim.PingInterval)
+	}
+}
+
+// TestListGroupErrorTextParity 守住 imgrpc 与 SDK 之间按 Result.error 文案配对的
+// 两个约定："未知请求类型" → ErrUnsupported、分组过大 → ErrGroupTooLarge。
+// 两边各有一个常量、互不 import，任何一边改了文案，各自包内的测试都还是绿的，
+// 只有真把两边接起来才看得出 SDK 已经认不出了。
+func TestListGroupErrorTextParity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lg   func(context.Context, string, string) ([]registry.SubjectConns, error)
+		want error
+	}{
+		{"未装配等同旧版", nil, fpim.ErrUnsupported},
+		{"分组过大", func(context.Context, string, string) ([]registry.SubjectConns, error) {
+			return nil, registry.ErrGroupTooLarge
+		}, fpim.ErrGroupTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _, _, _ := hubtest.NewHub()
+			g := imgrpc.New(imgrpc.Deps{Hub: h, Creds: imCreds{"a1": "s1"}, ListGroup: tc.lg})
+			lis := listenAddr(t, "127.0.0.1:0")
+			go g.Serve(lis)
+			t.Cleanup(func() { g.Stop(context.Background()) })
+			srv, err := fpim.NewServer(fpim.ServerConfig{Addr: "grpc://" + lis.Addr().String(), AppID: "a1", AppSecret: "s1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer srv.Close()
+			waitUntil(t, srv.StreamHealthy, "流应就绪")
+			if _, err := srv.ListGroup(context.Background(), "r"); !errors.Is(err, tc.want) {
+				t.Fatalf("期望 %v，实际 %v", tc.want, err)
+			}
+		})
 	}
 }

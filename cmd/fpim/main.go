@@ -89,6 +89,11 @@ type serveOptions struct {
 // shutdownBudget 是关闭阶段每个独立步骤各自的时间预算。
 const shutdownBudget = 10 * time.Second
 
+// drainGroupsBudget 是关闭时写完分组索引的预算，比别的步骤短：写不完只是本
+// 节点那份索引留到 TTL 过期（读的一方用连接表核实，结果不出错），不值得为它
+// 把发版时每个节点的退出再拖 10 秒，尤其是 Redis 正好不可用的时候。
+const drainGroupsBudget = 3 * time.Second
+
 func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveOptions) error {
 	// 派生一个可取消的 ctx：后台服务（HTTP/gRPC）把自己搞挂时要主动触发
 	// 关闭流程，而调用方给的 ctx 的取消函数不在这里。cancel 与信号取消是
@@ -180,16 +185,25 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	// 业务方认证器与 fp 认证器并列，由 multiauth 按握手帧里的令牌类型分派。
 	// 即使没有任何 app 配了 biz_auth 也照常构造：判断"这个 app 支不支持"
 	// 在 bizauth 内部按 app 配置做，比在这里按全局有无来决定更精确。
-	bizAuthn, err := bizauth.New(bizauth.Config{Apps: appSrc, Logger: log})
+	bizAuthn, err := bizauth.New(bizauth.Config{
+		Apps: appSrc, Logger: log,
+		// 两步上线的第一步：全部节点都认分组之前不能让业务方返回分组。第二步是把
+		// 它改成 true 再发一版，见 docs/superpowers/specs/2026-11-09-fp-im-biz-group-design.md §9。
+		SendFeatures: false,
+	})
 	if err != nil {
 		return err
 	}
 	authn := multiauth.New(fpAuthn, bizAuthn)
 	h = hub.New(nodeID, conns, live, b, appSrc)
+	// 分组索引必须在开始接连接之前注入：注入前建立的分组连接不会标脏，
+	// 要等下一次整份重写才进索引。
+	gidx := registry.NewGroupIndex(rdb, nodeID, cfg.Conn.FieldTTL.Std(), h)
+	h.SetGroupIndex(gidx)
 
 	// 节点频道：先订阅、再登记心跳，保证别的节点看到我的心跳、开始往我的
 	// 频道投递时，我已经在监听，不会丢消息。
-	rr := &reregistrar{conns: conns, live: live, log: log, rate: reregisterInterval}
+	rr := &reregistrar{conns: conns, live: live, groups: gidx, log: log, rate: reregisterInterval}
 	if err := runBusLoop(ctx, b, nodeID, h, rr, log); err != nil {
 		return err
 	}
@@ -215,7 +229,9 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 		return fmt.Errorf("首次存活视图刷新失败: %w", err)
 	}
 	go live.Run(ctx)
-	go renewLoop(ctx, h, conns, cfg.Conn.FieldRenew.Std())
+	// Run 随 ctx 退出不丢数据：关闭时拆连接产生的脏集合由 shutdown 里的 Drain 写完
+	go gidx.Run(ctx)
+	go renewLoop(ctx, h, conns, gidx, cfg.Conn.FieldRenew.Std())
 	guests := wsapi.NewGuestLimiter()
 	go sweepLoop(ctx, guests)
 
@@ -234,7 +250,12 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 		_, _ = w.Write([]byte("ok"))
 	})
 	httpSrv := &http.Server{Addr: cfg.HTTP.Addr, Handler: mux}
-	grpcSrv := imgrpc.New(imgrpc.Deps{Hub: h, Creds: credSrc})
+	grpcSrv := imgrpc.New(imgrpc.Deps{
+		Hub: h, Creds: credSrc,
+		ListGroup: func(ctx context.Context, app, group string) ([]registry.SubjectConns, error) {
+			return registry.ListGroup(ctx, rdb, conns, app, group, live.LiveNodes())
+		},
+	})
 	// HTTP 与 gRPC 都先显式 net.Listen 再 Serve，而不是用
 	// httpSrv.ListenAndServe：端口配成 :0 时只有监听建立之后才知道操作
 	// 系统分配了哪个端口，测试要连上来就必须能读到真实地址（opt.ready）。
@@ -274,7 +295,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 
 	<-ctx.Done()
 	log.Info("fp-im 收到退出信号，正在关闭")
-	shutdown(h, httpSrv, grpcSrv, live, log)
+	shutdown(h, httpSrv, grpcSrv, live, gidx, log)
 
 	// 排空而不是只读一次，理由与 cmd/fp/main.go 的 fatalErr 排空一致：
 	// HTTP 与 gRPC 若同时失败，只读一次会让另一个错误永久丢失。
@@ -291,7 +312,7 @@ drain:
 	return errors.Join(errs...)
 }
 
-// shutdown 是收到退出信号之后的全部关闭动作。四步各给一个独立的时间
+// shutdown 是收到退出信号之后的全部关闭动作。每一步各给一个独立的时间
 // 预算，不共用同一个 ctx。
 //
 // 独立预算的理由与 cmd/fp/main.go 相同：gRPC 那边要等所有 Connect 长流的
@@ -300,7 +321,7 @@ drain:
 // 后面几步拿到的就是一个已经过期的 ctx，立刻返回超时错误——排障会被引去
 // 查错的地方。
 //
-// 顺序（乙一之后重新定的）：
+// 顺序（乙一之后重新定的；分组索引的排空插在②之后）：
 //
 //	① httpSrv.Shutdown：关掉监听、不再接受新的 ws 握手。它对已经建立的
 //	   ws 连接不起任何作用——按 Go 的契约，Shutdown"不等待也不关闭被劫持
@@ -309,6 +330,9 @@ drain:
 //	   重连，语义正好对应节点下线），然后等它们各自的拆连接流程走完。
 //	   走正常拆连接路径而不是直接砍连接，注册表条目与断开事件才会被正确
 //	   处理。
+//	②' 把分组索引剩下的脏集合写完（预算 3 秒，见 drainGroupsBudget）。必须在
+//	   ②之后：拆连接才把计数清零、标脏。不写也不会让 ListGroup 出错（读的一方
+//	   用连接表核实），只是本节点那份索引要留到 TTL（30 分钟）才消失。
 //	③ 停 gRPC。必须排在②之后：②发出的断开事件要经业务 server 的
 //	   ImService.Connect 长流才能送出去，先停 gRPC 的话这些事件就没有出口，
 //	   业务方的在线表里会留下一批永远不下线的连接。
@@ -319,7 +343,7 @@ drain:
 // 的二次断开"——那条顾虑在这里已经不成立：①已经把本节点的 HTTP 监听关掉
 // 了，重连的 client 根本落不回来，它们会被负载均衡送到别的节点。而"先停
 // gRPC"会直接让②发不出断开事件，代价比那条顾虑大得多。
-func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *registry.Liveness, log *slog.Logger) {
+func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *registry.Liveness, gidx *registry.GroupIndex, log *slog.Logger) {
 	hctx, hcancel := context.WithTimeout(context.Background(), shutdownBudget)
 	if err := httpSrv.Shutdown(hctx); err != nil {
 		log.Error("HTTP 优雅关闭超时", "err", err)
@@ -334,6 +358,12 @@ func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *re
 		}
 		wcancel()
 	}
+
+	ictx, icancel := context.WithTimeout(context.Background(), drainGroupsBudget)
+	if err := gidx.Drain(ictx); err != nil {
+		log.Warn("分组索引没有在预算内写完，残留成员等 TTL 过期", "err", err)
+	}
+	icancel()
 
 	gctx, gcancel := context.WithTimeout(context.Background(), shutdownBudget)
 	grpcSrv.Stop(gctx)
@@ -433,6 +463,11 @@ type livenessPort interface {
 	LiveNodes() []string
 }
 
+// groupRewriter 是 reregistrar 需要的 registry.GroupIndex 子集。
+type groupRewriter interface {
+	RewriteAll(ctx context.Context) error
+}
+
 // reregistrar 处理节点频道的 Gap（Redis 断线重连过）信号。
 //
 // 甲二修的是同一段代码上叠加的两个问题：
@@ -454,7 +489,9 @@ type livenessPort interface {
 type reregistrar struct {
 	conns handshaker
 	live  livenessPort
-	log   *slog.Logger
+	// groups 为 nil 时不重写分组索引（仅测试这样用）。
+	groups groupRewriter
+	log    *slog.Logger
 	// rate 是两条连接之间的间隔，<=0 表示不限速（仅测试这样用）。
 	rate time.Duration
 
@@ -501,6 +538,9 @@ func (r *reregistrar) run(ctx context.Context, h *hub.Hub) {
 		r.log.Warn("Gap 之后补写心跳失败", "err", err)
 	}
 	if present {
+		// 分组索引不看 present：Redis 主从切换可能丢掉已写的索引而节点条目还在
+		// （心跳每 3 秒就补回来），多数 Gap 都走这里提前 return，重写必须在这之前。
+		r.rewriteGroups(ctx)
 		r.log.Info("本节点存活条目仍在，跳过全量重登记")
 		if r.onDone != nil {
 			r.onDone(0, 0)
@@ -552,13 +592,23 @@ func (r *reregistrar) run(ctx context.Context, h *hub.Hub) {
 	} else {
 		r.log.Info("重新登记完成", "total", total)
 	}
+	// 排在全量重登记之后：Redis 刚抖过，重写先跑会推迟更要紧的连接表重登记。
+	r.rewriteGroups(ctx)
 	if r.onDone != nil {
 		r.onDone(total, failed)
 	}
 }
 
-// renewLoop 每 renew 周期按 subject 分组给本地连接续 field TTL。
-func renewLoop(ctx context.Context, h *hub.Hub, conns *registry.Conns, every time.Duration) {
+// rewriteGroups 整份重写分组索引。失败 RewriteAll 自己记日志，周期重写兜底。
+func (r *reregistrar) rewriteGroups(ctx context.Context) {
+	if r.groups != nil {
+		_ = r.groups.RewriteAll(ctx)
+	}
+}
+
+// renewLoop 每 renew 周期按 subject 分组给本地连接续 field TTL，并整份重写
+// 一次分组索引：索引 key 的 TTL 与连接表 field 同长，也靠这一下续上。
+func renewLoop(ctx context.Context, h *hub.Hub, conns *registry.Conns, gidx *registry.GroupIndex, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -575,6 +625,7 @@ func renewLoop(ctx context.Context, h *hub.Hub, conns *registry.Conns, every tim
 		for g, ids := range groups {
 			_ = conns.Renew(ctx, g.app, g.sub, ids)
 		}
+		_ = gidx.RewriteAll(ctx)
 	}
 }
 

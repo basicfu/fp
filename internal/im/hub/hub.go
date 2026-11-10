@@ -41,6 +41,17 @@ type Registry interface {
 	KickOne(ctx context.Context, app, subject, connID string) (*registry.ConnRef, error)
 }
 
+// GroupIndex 接收"某分组成员在本节点的有无变了"的通知，由 registry 的
+// 索引写协程实现。hub 只记脏不写 Redis：写协程按通知回读 GroupLocalCount
+// 写当前状态，所以通知可以合并、可以晚到，但不能漏。
+type GroupIndex interface {
+	MarkDirty(app, group, uid string)
+}
+
+// MaxGroupsPerApp 是每个应用在本节点上同时存在的分组数上限。防的是业务方
+// 回调有 bug、每个连接回一个不同分组，造出无数个索引 key。
+const MaxGroupsPerApp = 32
+
 type Liveness interface {
 	LiveNodes() []string
 	ServerNodes(app string) []string
@@ -90,6 +101,10 @@ type Hub struct {
 	conns   map[string]map[string]*connEntry // app+"\x00"+subject → connId → entry
 	byToken map[string][]Conn                // app+"\x00"+token → conns（撤销时用）
 	streams map[string][]Stream              // app → streams
+	// groups 是分组主体在本节点的连接数：app → group → uid → n。与 conns
+	// 同锁维护，计数永远与连接表一致；默认分组与 fp 用户不进来。
+	groups map[string]map[string]map[string]int
+	gidx   GroupIndex
 	// teardowns 是"已经从 conns 里摘掉、但断开事件还没发完"的连接数。
 	//
 	// 它存在的唯一理由是优雅关闭要等的那件事比"连接表空了"更晚：RemoveConn
@@ -113,7 +128,15 @@ func New(nodeID string, reg Registry, live Liveness, pub Publisher, apps auth.Ap
 	return &Hub{
 		nodeID: nodeID, reg: reg, live: live, pub: pub, apps: apps,
 		conns: map[string]map[string]*connEntry{}, byToken: map[string][]Conn{}, streams: map[string][]Stream{},
+		groups: map[string]map[string]map[string]int{},
 	}
+}
+
+// SetGroupIndex 注入分组索引。装配时、开始接连接之前调用；nil 表示不维护索引。
+func (h *Hub) SetGroupIndex(g GroupIndex) {
+	h.mu.Lock()
+	h.gidx = g
+	h.mu.Unlock()
 }
 
 func (h *Hub) NodeID() string { return h.nodeID }
@@ -146,11 +169,19 @@ func (h *Hub) AddConn(ctx context.Context, app string, sub model.Subject, c Conn
 	if h.conns[k] == nil {
 		h.conns[k] = map[string]*connEntry{}
 	}
+	_, dup := h.conns[k][c.ID()]
 	h.conns[k][c.ID()] = entry
 	if tok := c.Token(); tok != "" {
 		h.byToken[key(app, tok)] = append(h.byToken[key(app, tok)], c)
 	}
+	var dirty GroupIndex
+	if !dup {
+		dirty = h.groupAddLocked(app, sub, 1)
+	}
 	h.mu.Unlock()
+	if dirty != nil {
+		dirty.MarkDirty(app, sub.Group, sub.ID)
+	}
 	delivered := h.emit(ctx, app, sub, c.ID(), model.EventBody{Kind: model.EventConnected, OS: meta.OS, Mobile: meta.Mobile, UA: ua, At: meta.At})
 	entry.delivered = delivered
 }
@@ -198,7 +229,14 @@ func (h *Hub) RemoveConn(ctx context.Context, app string, sub model.Subject, con
 		// 现在起到断开事件发完之前，都还没"了结"。
 		h.teardowns++
 	}
+	var dirty GroupIndex
+	if ok {
+		dirty = h.groupAddLocked(app, sub, -1)
+	}
 	h.mu.Unlock()
+	if dirty != nil {
+		dirty.MarkDirty(app, sub.Group, sub.ID)
+	}
 	if ok {
 		defer func() {
 			h.mu.Lock()
@@ -227,6 +265,89 @@ func (h *Hub) RemoveConn(ctx context.Context, app string, sub model.Subject, con
 		return
 	}
 	h.emit(ctx, app, sub, connID, model.EventBody{Kind: model.EventDisconnected, OS: entry.meta.OS, Mobile: entry.meta.Mobile, Reason: reason, At: nowMs()})
+}
+
+// groupAddLocked 调整分组计数，0↔1 时返回要通知的索引。通知放到锁外由
+// 调用方发：写协程会回读 hub，持锁通知就和它的锁形成环。放锁后再发仍然
+// 正确——通知只要求晚于计数更新，写协程读到的总是不早于这次变化的状态。
+func (h *Hub) groupAddLocked(app string, sub model.Subject, delta int) GroupIndex {
+	if sub.Kind != model.KindBiz || sub.Group == "" {
+		return nil
+	}
+	byGroup := h.groups[app]
+	if byGroup == nil {
+		byGroup = map[string]map[string]int{}
+		h.groups[app] = byGroup
+	}
+	uids := byGroup[sub.Group]
+	if uids == nil {
+		uids = map[string]int{}
+		byGroup[sub.Group] = uids
+	}
+	before := uids[sub.ID]
+	after := before + delta
+	if after > 0 {
+		uids[sub.ID] = after
+	} else {
+		// 空了就逐层摘掉：GroupAdmit 按分组个数判上限，留着空壳会一直占名额
+		delete(uids, sub.ID)
+		if len(uids) == 0 {
+			delete(byGroup, sub.Group)
+			if len(byGroup) == 0 {
+				delete(h.groups, app)
+			}
+		}
+	}
+	if before == 0 || after <= 0 {
+		return h.gidx
+	}
+	return nil
+}
+
+// GroupAdmit 判断本节点能否再接一条该分组的连接：分组已存在，或该应用的
+// 分组数还没到 MaxGroupsPerApp。必须在握手脚本之前调用——脚本按 replace
+// 跑完就已经顶掉了旧连接，那之后再拒新连接，两条都没了。
+//
+// 判断与随后的 AddConn 不在同一个临界区，并发握手可能略超上限；它是防
+// 回调失控的护栏，不需要精确。
+func (h *Hub) GroupAdmit(app, group string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	byGroup := h.groups[app]
+	_, exists := byGroup[group]
+	return exists || len(byGroup) < MaxGroupsPerApp
+}
+
+// GroupSnapshot 返回本节点在该分组有连接的 uid，供索引整份重写。
+func (h *Hub) GroupSnapshot(app, group string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	uids := h.groups[app][group]
+	out := make([]string, 0, len(uids))
+	for uid := range uids {
+		out = append(out, uid)
+	}
+	return out
+}
+
+// GroupsOf 返回本节点当前所有的 (app, group)。
+func (h *Hub) GroupsOf() [][2]string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var out [][2]string
+	for app, byGroup := range h.groups {
+		for group := range byGroup {
+			out = append(out, [2]string{app, group})
+		}
+	}
+	return out
+}
+
+// GroupLocalCount 返回该分组主体在本节点的连接数，写协程据此决定 SADD 还是 SREM。
+func (h *Hub) GroupLocalCount(app, group, uid string) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.groups[app][group][uid]
 }
 
 // AddStream 登记一条 server 流；第一条时向 Redis 声明本节点在服务该 app。

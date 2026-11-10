@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,11 +31,11 @@ import (
 // fpauth 包自己的单元测试的职责。
 type staticAuth map[string]model.Subject
 
-func (a staticAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subject, error) {
+func (a staticAuth) Verify(_ context.Context, req auth.VerifyRequest) (auth.Identity, error) {
 	if s, ok := a[req.Token]; ok {
-		return s, nil
+		return auth.Identity{Subject: s}, nil
 	}
-	return model.Subject{}, auth.ErrUnauthorized
+	return auth.Identity{}, auth.ErrUnauthorized
 }
 
 // imNode 是测试里起的一个完整 im 节点的句柄：client 连 wsURL，业务 server
@@ -47,6 +48,9 @@ type imNode struct {
 	hub      *hub.Hub
 	wsURL    string
 	grpcAddr string
+	// kill 模拟节点崩溃：停掉心跳与后台协程，但不拆连接、不删注册表与索引，
+	// 与进程被 kill -9 时 Redis 里留下的东西一致。
+	kill context.CancelFunc
 }
 
 // startNode 起一个完整的 im 节点：registry、bus、hub、wsapi、imgrpc 全部
@@ -83,6 +87,8 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 	conns := registry.NewConns(rdb, run, 30*time.Minute)
 	b := bus.New(rdb, run)
 	h := hub.New(id, conns, live, b, apps)
+	gidx := registry.NewGroupIndex(rdb, id, 30*time.Minute, h)
+	h.SetGroupIndex(gidx)
 
 	// 先订阅节点频道、起分发协程，确保别的节点后面往我的频道发信封时
 	// 我已经在监听——与 cmd/fp-im/main.go 的 runBusLoop 同一个理由。
@@ -126,6 +132,7 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 		t.Fatalf("live.Refresh: %v", err)
 	}
 	go live.Run(ctx)
+	go gidx.Run(ctx)
 
 	wsLis := listenAddr(t, "127.0.0.1:0")
 	httpSrv := &http.Server{Handler: wsapi.New(wsapi.Deps{
@@ -136,7 +143,12 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 	t.Cleanup(func() { httpSrv.Close() })
 
 	grpcLis := listenAddr(t, "127.0.0.1:0")
-	g := imgrpc.New(imgrpc.Deps{Hub: h, Creds: imCreds{"a1": "s1"}})
+	g := imgrpc.New(imgrpc.Deps{
+		Hub: h, Creds: imCreds{"a1": "s1"},
+		ListGroup: func(ctx context.Context, app, group string) ([]registry.SubjectConns, error) {
+			return registry.ListGroup(ctx, rdb, conns, app, group, live.LiveNodes())
+		},
+	})
 	go g.Serve(grpcLis)
 	t.Cleanup(func() { g.Stop(context.Background()) })
 
@@ -146,6 +158,7 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 		hub:      h,
 		wsURL:    "ws://" + wsLis.Addr().String() + "/",
 		grpcAddr: "grpc://" + grpcLis.Addr().String(),
+		kill:     cancel,
 	}
 }
 
@@ -365,5 +378,126 @@ func TestImTwoNodesEndToEnd(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Kick 5 秒内没有生效")
+	}
+}
+
+// listGroupSubjects 返回 ListGroup 结果里的 subject 写法，已排序。
+func listGroupSubjects(t *testing.T, srv *fpim.Server, group string) []string {
+	t.Helper()
+	got, err := srv.ListGroup(context.Background(), group)
+	if err != nil {
+		t.Fatalf("ListGroup(%q): %v", group, err)
+	}
+	out := make([]string, 0, len(got))
+	for _, g := range got {
+		out = append(out, g.Subject.String())
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestImGroupEndToEnd 走通分组主体的主路径：两个节点各写自己那份索引、
+// ListGroup 合并拿全；Push/Kick 用分组主体寻址；新旧两种写法互不顶号；
+// 节点崩溃后它上面的主体随存活表判死立即从结果里消失，不用等索引 TTL。
+func TestImGroupEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	rdb := testsupport.NewTestRedis(t)
+	apps := writeApps(t, "replace")
+	authn := staticAuth{
+		"tok-r1": model.BizGroup("r", "1"), "tok-r2": model.BizGroup("r", "2"), "tok-r3": model.BizGroup("r", "3"),
+		"tok-w1": model.BizGroup("w", "1"), "tok-d1": model.Biz("1"),
+		"tok-old": model.Biz("r-x"), "tok-new": model.BizGroup("r", "x"),
+	}
+	a := startNode(t, rdb, uniqueNodeID("im-a"), apps, authn)
+	b := startNode(t, rdb, uniqueNodeID("im-b"), apps, authn)
+	waitUntil(t, func() bool { return a.live.IsLive(b.id) && b.live.IsLive(a.id) }, "两个节点应互相看到")
+
+	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: a.grpcAddr, AppID: "a1", AppSecret: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	waitUntil(t, srv.StreamHealthy, "server 到节点 A 的接入流应就绪")
+
+	dial := func(n *imNode, tok string) (*fpim.Client, chan []byte, chan int) {
+		t.Helper()
+		c, err := fpim.Dial(ctx, fpim.ClientConfig{URL: n.wsURL, App: "a1", Token: tok, OS: "linux"})
+		if err != nil {
+			t.Fatalf("Dial(%s): %v", tok, err)
+		}
+		t.Cleanup(func() { c.Close() })
+		msgs, closed := make(chan []byte, 4), make(chan int, 1)
+		c.OnMessage(func(p []byte) { msgs <- p })
+		c.OnClose(func(code int) { closed <- code })
+		return c, msgs, closed
+	}
+	dial(a, "tok-r1")
+	_, r2msgs, _ := dial(b, "tok-r2")
+	_, _, r3closed := dial(b, "tok-r3")
+	dial(a, "tok-w1") // 别的分组不能串进来
+	dial(a, "tok-d1") // 默认分组同名 uid 也不能串进来
+
+	// ① 两个节点上的成员合并拿全。索引是异步写的，轮询等它落地。
+	want := []string{"b.r:1", "b.r:2", "b.r:3"}
+	waitUntil(t, func() bool { return slices.Equal(listGroupSubjects(t, srv, "r"), want) },
+		fmt.Sprintf("ListGroup(r) 应拿全两个节点上的 %v", want))
+	if got := listGroupSubjects(t, srv, "w"); !slices.Equal(got, []string{"b.w:1"}) {
+		t.Fatalf("ListGroup(w)=%v", got)
+	}
+
+	// ② Push / Kick 用分组主体寻址，跨节点（server 在 A，r2/r3 在 B）
+	if res, err := srv.Push(ctx, fpim.BizGroup("r", "2"), []byte(`{"p":1}`)); err != nil || res.Status != fpim.Sent {
+		t.Fatalf("Push(b.r:2)=%+v err=%v", res, err)
+	}
+	select {
+	case p := <-r2msgs:
+		if string(p) != `{"p":1}` {
+			t.Fatalf("b.r:2 收到 %s", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("b.r:2 5 秒内没收到推送")
+	}
+	if err := srv.Kick(ctx, fpim.BizGroup("r", "3")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-r3closed:
+		if code != fpim.CloseKicked {
+			t.Fatalf("Kick 应以 %d 关闭，实际 %d", fpim.CloseKicked, code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kick(b.r:3) 5 秒内没有生效")
+	}
+	waitUntil(t, func() bool { return slices.Equal(listGroupSubjects(t, srv, "r"), []string{"b.r:1", "b.r:2"}) },
+		"被踢的 b.r:3 应从 ListGroup 消失")
+
+	// ③ 过渡期的两种写法是两个主体：应用策略是 replace，也不能互相顶掉
+	_, _, oldClosed := dial(a, "tok-old")
+	_, _, newClosed := dial(b, "tok-new")
+	for _, sub := range []fpim.Subject{fpim.Biz("r-x"), fpim.BizGroup("r", "x")} {
+		waitUntil(t, func() bool {
+			ss, err := srv.Sessions(ctx, sub)
+			return err == nil && len(ss) == 1
+		}, sub.String()+" 应各自有一条连接")
+	}
+	select {
+	case code := <-oldClosed:
+		t.Fatalf("b:r-x 被 b.r:x 顶掉了（%d）", code)
+	case code := <-newClosed:
+		t.Fatalf("b.r:x 被关掉了（%d）", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	waitUntil(t, func() bool {
+		return slices.Equal(listGroupSubjects(t, srv, "r"), []string{"b.r:1", "b.r:2", "b.r:x"})
+	}, "b.r:x 应进 r 组，b:r-x 是默认分组、不进")
+
+	// ④ 节点 B 崩溃：它的索引和连接表都还在 Redis 里，但存活表一判死，
+	// 它上面的主体就从结果里消失
+	b.kill()
+	waitUntilTimeout(t, 10*time.Second, func() bool {
+		return slices.Equal(listGroupSubjects(t, srv, "r"), []string{"b.r:1"})
+	}, "节点 B 判死后 b.r:2、b.r:x 应从 ListGroup 消失")
+	if n := rdb.Exists(ctx, model.GroupIdxKey("a1", "r", b.id)).Val(); n != 1 {
+		t.Fatal("节点 B 的索引应仍在 Redis 里：消失靠的是存活表，不是等 TTL")
 	}
 }

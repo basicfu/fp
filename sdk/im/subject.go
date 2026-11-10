@@ -30,25 +30,51 @@ const (
 )
 
 // Subject 是一条连接归属的主体。同一 Subject 可以有多条连接（多终端）。
+//
+// Group 只对业务方主体有意义，由业务方鉴权回调决定；空串是默认分组。
+// 不同分组是不同的主体：b:1001 与 b.r:1001 互不顶号，推送、踢人也要用
+// 各自的写法。
 type Subject struct {
-	Kind SubjectKind
-	ID   string
+	Kind  SubjectKind
+	Group string
+	ID    string
 }
 
 func User(id string) Subject  { return Subject{Kind: KindUser, ID: id} }
 func Guest(id string) Subject { return Subject{Kind: KindGuest, ID: id} }
-func Biz(id string) Subject   { return Subject{Kind: KindBiz, ID: id} }
+func Biz(id string) Subject   { return BizGroup("", id) }
 
-func (s Subject) String() string { return string(s.Kind) + ":" + s.ID }
+// BizGroup 构造分组业务方主体，写成 "b.<group>:<uid>"。
+func BizGroup(group, id string) Subject { return Subject{Kind: KindBiz, Group: group, ID: id} }
+
+// IsDefaultBiz 判断是否默认分组的业务方主体。只判 Kind==KindBiz 不够：
+// uid 是纯数字的分组主体会被误当成默认分组。
+func (s Subject) IsDefaultBiz() bool { return s.Kind == KindBiz && s.Group == "" }
+
+func (s Subject) String() string {
+	if s.Group != "" {
+		return string(s.Kind) + "." + s.Group + ":" + s.ID
+	}
+	return string(s.Kind) + ":" + s.ID
+}
 
 var ErrBadSubject = errors.New("fpim: subject 格式非法")
 
-// Parse 解析 "u:{uid}" / "g:{uuid}"。访客 id 必须是标准写法的 uuid v4，
-// 否则前端拼一个可预测的字符串就能冒充别人。
+// Parse 解析 "u:{uid}" / "g:{uuid}" / "b:{uid}" / "b.{group}:{uid}"。
+// 访客 id 必须是标准写法的 uuid v4，否则前端拼一个可预测的字符串就能冒充别人。
 func Parse(s string) (Subject, error) {
 	kind, id, ok := strings.Cut(s, ":")
 	if !ok || id == "" {
 		return Subject{}, fmt.Errorf("%w: %q", ErrBadSubject, s)
+	}
+	if base, group, dotted := strings.Cut(kind, "."); dotted {
+		if SubjectKind(base) != KindBiz {
+			return Subject{}, fmt.Errorf("%w: 只有业务方主体能带分组: %q", ErrBadSubject, s)
+		}
+		if !validGroup(group) {
+			return Subject{}, fmt.Errorf("%w: 分组名非法: %q", ErrBadSubject, group)
+		}
+		return BizGroup(group, id), nil
 	}
 	switch SubjectKind(kind) {
 	case KindUser:
@@ -84,4 +110,22 @@ func IsUUIDv4(s string) bool {
 	}
 	u, err := uuid.Parse(s)
 	return err == nil && u.Version() == 4
+}
+
+// validGroup 与网关侧 model.ValidateGroup 同一规则：^[a-z][a-z0-9_]{0,15}$。
+func validGroup(g string) bool {
+	if g == "" || len(g) > 16 {
+		return false
+	}
+	for i := 0; i < len(g); i++ {
+		c := g[i]
+		ok := c >= 'a' && c <= 'z'
+		if i > 0 {
+			ok = ok || c >= '0' && c <= '9' || c == '_'
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
 }

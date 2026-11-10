@@ -98,13 +98,13 @@ func (a *Authenticator) dispatchRevoke(ev fpsdk.RevokeEvent) {
 	}
 }
 
-func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (model.Subject, error) {
+func (a *Authenticator) Verify(ctx context.Context, req auth.VerifyRequest) (auth.Identity, error) {
 	// app 作用域逐调用附上：连接级凭据里没有 app_id。
 	id, err := a.client.Auth().Validate(fpsdk.WithAppID(ctx, req.App), req.Token)
 	if err != nil {
-		return model.Subject{}, translate(err)
+		return auth.Identity{}, translate(err)
 	}
-	return model.User(id.UserID), nil
+	return auth.Identity{Subject: model.User(id.UserID)}, nil
 }
 
 // Fetch 满足 fpappcfg.Fetcher：拉一个 app 的 IM 配置并转成 fp-im 的模型。

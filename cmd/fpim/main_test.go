@@ -611,3 +611,48 @@ func TestGapReregisterTreatsSelfPresentErrorAsMissing(t *testing.T) {
 		t.Fatalf("应真的跑了 2 条握手，实际 %d 条", hs.calls.Load())
 	}
 }
+
+// fakeRewriter 记录 RewriteAll 被调了几次，以及调用那一刻握手已经跑了几条。
+type fakeRewriter struct {
+	calls atomic.Int32
+	hs    *fakeHandshaker
+	seen  atomic.Int32
+}
+
+func (f *fakeRewriter) RewriteAll(context.Context) error {
+	f.calls.Add(1)
+	f.seen.Store(f.hs.calls.Load())
+	return nil
+}
+
+// TestGapRewritesGroupIndexEvenWhenEntryPresent 守住 Review Focus 第 5 条：
+// run 在"存活条目仍在"时提前 return，而多数 Gap 正是这种情况（只是订阅重连）。
+// 索引重写放在那次 return 之后，就几乎永远触发不了——Redis 主从切换丢掉的
+// 索引数据要等 10 分钟的周期重写才补回来。
+//
+// 条目没了时重写要排在全量重登记之后：Redis 刚抖过，先重写会推迟更要紧的
+// 重登记（连接表缺条目时推送对这些连接恒为"不在线"）。
+func TestGapRewritesGroupIndexEvenWhenEntryPresent(t *testing.T) {
+	for _, present := range []bool{true, false} {
+		h := hubWithConns(t, 3)
+		hs := &fakeHandshaker{}
+		rw := &fakeRewriter{hs: hs}
+		done := make(chan struct{})
+		r := &reregistrar{
+			conns: hs, live: &fakeLiveness{present: present}, groups: rw, log: slog.Default(),
+			onDone: func(int, int) { close(done) },
+		}
+		r.onGap(context.Background(), h)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Gap 处理 10 秒内没有跑完")
+		}
+		if n := rw.calls.Load(); n != 1 {
+			t.Fatalf("present=%v：Gap 之后应整份重写一次分组索引，实际 %d 次", present, n)
+		}
+		if want := map[bool]int32{true: 0, false: 3}[present]; rw.seen.Load() != want {
+			t.Fatalf("present=%v：重写时应已跑完 %d 条重登记，实际 %d 条", present, want, rw.seen.Load())
+		}
+	}
+}

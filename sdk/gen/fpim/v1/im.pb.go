@@ -137,6 +137,7 @@ type ConnectRequest struct {
 	//	*ConnectRequest_Sessions
 	//	*ConnectRequest_Ping
 	//	*ConnectRequest_SessionsMany
+	//	*ConnectRequest_ListGroup
 	Body          isConnectRequest_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -240,6 +241,15 @@ func (x *ConnectRequest) GetSessionsMany() *SessionsManyRequest {
 	return nil
 }
 
+func (x *ConnectRequest) GetListGroup() *ListGroupRequest {
+	if x != nil {
+		if x, ok := x.Body.(*ConnectRequest_ListGroup); ok {
+			return x.ListGroup
+		}
+	}
+	return nil
+}
+
 type isConnectRequest_Body interface {
 	isConnectRequest_Body()
 }
@@ -268,6 +278,10 @@ type ConnectRequest_SessionsMany struct {
 	SessionsMany *SessionsManyRequest `protobuf:"bytes,7,opt,name=sessions_many,json=sessionsMany,proto3,oneof"`
 }
 
+type ConnectRequest_ListGroup struct {
+	ListGroup *ListGroupRequest `protobuf:"bytes,8,opt,name=list_group,json=listGroup,proto3,oneof"`
+}
+
 func (*ConnectRequest_Push) isConnectRequest_Body() {}
 
 func (*ConnectRequest_PushMany) isConnectRequest_Body() {}
@@ -279,6 +293,8 @@ func (*ConnectRequest_Sessions) isConnectRequest_Body() {}
 func (*ConnectRequest_Ping) isConnectRequest_Body() {}
 
 func (*ConnectRequest_SessionsMany) isConnectRequest_Body() {}
+
+func (*ConnectRequest_ListGroup) isConnectRequest_Body() {}
 
 // PingRequest 是 SDK 在流上的应用层心跳，im 回一个空 Result。
 // gRPC 自带的 keepalive（HTTP/2 PING）只在相邻两跳之间往返，中间隔着 nginx/APISIX
@@ -729,6 +745,52 @@ func (x *SessionsManyRequest) GetSubjects() []string {
 	return nil
 }
 
+// ListGroupRequest 列出某分组此刻全部在线的主体。group 不能为空：默认分组不建索引。
+// 结果以连接表为准（与 SessionsMany 同一口径），超过 10000 个主体时整个请求失败。
+type ListGroupRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListGroupRequest) Reset() {
+	*x = ListGroupRequest{}
+	mi := &file_fpim_v1_im_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListGroupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListGroupRequest) ProtoMessage() {}
+
+func (x *ListGroupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fpim_v1_im_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListGroupRequest.ProtoReflect.Descriptor instead.
+func (*ListGroupRequest) Descriptor() ([]byte, []int) {
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ListGroupRequest) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
 type SubjectSessions struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Subject       string                 `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
@@ -739,7 +801,7 @@ type SubjectSessions struct {
 
 func (x *SubjectSessions) Reset() {
 	*x = SubjectSessions{}
-	mi := &file_fpim_v1_im_proto_msgTypes[9]
+	mi := &file_fpim_v1_im_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -751,7 +813,7 @@ func (x *SubjectSessions) String() string {
 func (*SubjectSessions) ProtoMessage() {}
 
 func (x *SubjectSessions) ProtoReflect() protoreflect.Message {
-	mi := &file_fpim_v1_im_proto_msgTypes[9]
+	mi := &file_fpim_v1_im_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -764,7 +826,7 @@ func (x *SubjectSessions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubjectSessions.ProtoReflect.Descriptor instead.
 func (*SubjectSessions) Descriptor() ([]byte, []int) {
-	return file_fpim_v1_im_proto_rawDescGZIP(), []int{9}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SubjectSessions) GetSubject() string {
@@ -793,7 +855,7 @@ type PushResult struct {
 
 func (x *PushResult) Reset() {
 	*x = PushResult{}
-	mi := &file_fpim_v1_im_proto_msgTypes[10]
+	mi := &file_fpim_v1_im_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -805,7 +867,7 @@ func (x *PushResult) String() string {
 func (*PushResult) ProtoMessage() {}
 
 func (x *PushResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fpim_v1_im_proto_msgTypes[10]
+	mi := &file_fpim_v1_im_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -818,7 +880,7 @@ func (x *PushResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushResult.ProtoReflect.Descriptor instead.
 func (*PushResult) Descriptor() ([]byte, []int) {
-	return file_fpim_v1_im_proto_rawDescGZIP(), []int{10}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PushResult) GetSubject() string {
@@ -855,7 +917,7 @@ type Session struct {
 
 func (x *Session) Reset() {
 	*x = Session{}
-	mi := &file_fpim_v1_im_proto_msgTypes[11]
+	mi := &file_fpim_v1_im_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -867,7 +929,7 @@ func (x *Session) String() string {
 func (*Session) ProtoMessage() {}
 
 func (x *Session) ProtoReflect() protoreflect.Message {
-	mi := &file_fpim_v1_im_proto_msgTypes[11]
+	mi := &file_fpim_v1_im_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -880,7 +942,7 @@ func (x *Session) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Session.ProtoReflect.Descriptor instead.
 func (*Session) Descriptor() ([]byte, []int) {
-	return file_fpim_v1_im_proto_rawDescGZIP(), []int{11}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Session) GetConnId() string {
@@ -918,8 +980,10 @@ func (x *Session) GetConnectedAtMs() int64 {
 	return 0
 }
 
-// Result 是对某个 ConnectRequest 的应答。error 非空表示整个请求失败，
-// 文案只用于日志，SDK 不据此分支。
+// Result 是对某个 ConnectRequest 的应答。error 非空表示整个请求失败。
+// 文案一般只用于日志，但下面两句是协议的一部分，SDK 按它们精确匹配，两边都不能改：
+//   - "未知请求类型"：对端不认识这个请求（旧版 fp-im 已经在回这句），SDK 映射成 ErrUnsupported；
+//   - "分组在线主体超过 10000 个"：ListGroup 分组过大，SDK 映射成 ErrGroupTooLarge。
 type Result struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	ReqId    string                 `protobuf:"bytes,1,opt,name=req_id,json=reqId,proto3" json:"req_id,omitempty"`
@@ -927,14 +991,16 @@ type Result struct {
 	Pushes   []*PushResult          `protobuf:"bytes,3,rep,name=pushes,proto3" json:"pushes,omitempty"`
 	Sessions []*Session             `protobuf:"bytes,4,rep,name=sessions,proto3" json:"sessions,omitempty"`
 	// 与 SessionsManyRequest.subjects 一一对应、顺序相同。
-	SessionsMany  []*SubjectSessions `protobuf:"bytes,5,rep,name=sessions_many,json=sessionsMany,proto3" json:"sessions_many,omitempty"`
+	SessionsMany []*SubjectSessions `protobuf:"bytes,5,rep,name=sessions_many,json=sessionsMany,proto3" json:"sessions_many,omitempty"`
+	// ListGroup 的结果，顺序不定。与 sessions_many 分开放，调用方不用按请求类型猜字段含义。
+	GroupMembers  []*SubjectSessions `protobuf:"bytes,6,rep,name=group_members,json=groupMembers,proto3" json:"group_members,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Result) Reset() {
 	*x = Result{}
-	mi := &file_fpim_v1_im_proto_msgTypes[12]
+	mi := &file_fpim_v1_im_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -946,7 +1012,7 @@ func (x *Result) String() string {
 func (*Result) ProtoMessage() {}
 
 func (x *Result) ProtoReflect() protoreflect.Message {
-	mi := &file_fpim_v1_im_proto_msgTypes[12]
+	mi := &file_fpim_v1_im_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -959,7 +1025,7 @@ func (x *Result) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Result.ProtoReflect.Descriptor instead.
 func (*Result) Descriptor() ([]byte, []int) {
-	return file_fpim_v1_im_proto_rawDescGZIP(), []int{12}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Result) GetReqId() string {
@@ -997,6 +1063,13 @@ func (x *Result) GetSessionsMany() []*SubjectSessions {
 	return nil
 }
 
+func (x *Result) GetGroupMembers() []*SubjectSessions {
+	if x != nil {
+		return x.GroupMembers
+	}
+	return nil
+}
+
 // Inbound 是 client 发上来的一条消息，payload 原样透传。
 type Inbound struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1009,7 +1082,7 @@ type Inbound struct {
 
 func (x *Inbound) Reset() {
 	*x = Inbound{}
-	mi := &file_fpim_v1_im_proto_msgTypes[13]
+	mi := &file_fpim_v1_im_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1021,7 +1094,7 @@ func (x *Inbound) String() string {
 func (*Inbound) ProtoMessage() {}
 
 func (x *Inbound) ProtoReflect() protoreflect.Message {
-	mi := &file_fpim_v1_im_proto_msgTypes[13]
+	mi := &file_fpim_v1_im_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1034,7 +1107,7 @@ func (x *Inbound) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inbound.ProtoReflect.Descriptor instead.
 func (*Inbound) Descriptor() ([]byte, []int) {
-	return file_fpim_v1_im_proto_rawDescGZIP(), []int{13}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Inbound) GetSubject() string {
@@ -1076,7 +1149,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_fpim_v1_im_proto_msgTypes[14]
+	mi := &file_fpim_v1_im_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1088,7 +1161,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_fpim_v1_im_proto_msgTypes[14]
+	mi := &file_fpim_v1_im_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1101,7 +1174,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_fpim_v1_im_proto_rawDescGZIP(), []int{14}
+	return file_fpim_v1_im_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Event) GetKind() EventKind {
@@ -1164,7 +1237,7 @@ var File_fpim_v1_im_proto protoreflect.FileDescriptor
 
 const file_fpim_v1_im_proto_rawDesc = "" +
 	"\n" +
-	"\x10fpim/v1/im.proto\x12\afpim.v1\"\xe9\x02\n" +
+	"\x10fpim/v1/im.proto\x12\afpim.v1\"\xa5\x03\n" +
 	"\x0eConnectRequest\x12\x15\n" +
 	"\x06req_id\x18\x01 \x01(\tR\x05reqId\x12*\n" +
 	"\x04push\x18\x02 \x01(\v2\x14.fpim.v1.PushRequestH\x00R\x04push\x127\n" +
@@ -1172,7 +1245,9 @@ const file_fpim_v1_im_proto_rawDesc = "" +
 	"\x04kick\x18\x04 \x01(\v2\x14.fpim.v1.KickRequestH\x00R\x04kick\x126\n" +
 	"\bsessions\x18\x05 \x01(\v2\x18.fpim.v1.SessionsRequestH\x00R\bsessions\x12*\n" +
 	"\x04ping\x18\x06 \x01(\v2\x14.fpim.v1.PingRequestH\x00R\x04ping\x12C\n" +
-	"\rsessions_many\x18\a \x01(\v2\x1c.fpim.v1.SessionsManyRequestH\x00R\fsessionsManyB\x06\n" +
+	"\rsessions_many\x18\a \x01(\v2\x1c.fpim.v1.SessionsManyRequestH\x00R\fsessionsMany\x12:\n" +
+	"\n" +
+	"list_group\x18\b \x01(\v2\x19.fpim.v1.ListGroupRequestH\x00R\tlistGroupB\x06\n" +
 	"\x04body\"\r\n" +
 	"\vPingRequest\"\xc2\x01\n" +
 	"\x0fConnectResponse\x12&\n" +
@@ -1195,7 +1270,9 @@ const file_fpim_v1_im_proto_rawDesc = "" +
 	"\x0fSessionsRequest\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\"1\n" +
 	"\x13SessionsManyRequest\x12\x1a\n" +
-	"\bsubjects\x18\x01 \x03(\tR\bsubjects\"Y\n" +
+	"\bsubjects\x18\x01 \x03(\tR\bsubjects\"(\n" +
+	"\x10ListGroupRequest\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\"Y\n" +
 	"\x0fSubjectSessions\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12,\n" +
 	"\bsessions\x18\x02 \x03(\v2\x10.fpim.v1.SessionR\bsessions\"i\n" +
@@ -1209,13 +1286,14 @@ const file_fpim_v1_im_proto_rawDesc = "" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12\x0e\n" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x16\n" +
 	"\x06mobile\x18\x04 \x01(\bR\x06mobile\x12&\n" +
-	"\x0fconnected_at_ms\x18\x05 \x01(\x03R\rconnectedAtMs\"\xcf\x01\n" +
+	"\x0fconnected_at_ms\x18\x05 \x01(\x03R\rconnectedAtMs\"\x8e\x02\n" +
 	"\x06Result\x12\x15\n" +
 	"\x06req_id\x18\x01 \x01(\tR\x05reqId\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12+\n" +
 	"\x06pushes\x18\x03 \x03(\v2\x13.fpim.v1.PushResultR\x06pushes\x12,\n" +
 	"\bsessions\x18\x04 \x03(\v2\x10.fpim.v1.SessionR\bsessions\x12=\n" +
-	"\rsessions_many\x18\x05 \x03(\v2\x18.fpim.v1.SubjectSessionsR\fsessionsMany\"V\n" +
+	"\rsessions_many\x18\x05 \x03(\v2\x18.fpim.v1.SubjectSessionsR\fsessionsMany\x12=\n" +
+	"\rgroup_members\x18\x06 \x03(\v2\x18.fpim.v1.SubjectSessionsR\fgroupMembers\"V\n" +
 	"\aInbound\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x17\n" +
 	"\aconn_id\x18\x02 \x01(\tR\x06connId\x12\x18\n" +
@@ -1255,7 +1333,7 @@ func file_fpim_v1_im_proto_rawDescGZIP() []byte {
 }
 
 var file_fpim_v1_im_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_fpim_v1_im_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_fpim_v1_im_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_fpim_v1_im_proto_goTypes = []any{
 	(PushStatus)(0),             // 0: fpim.v1.PushStatus
 	(EventKind)(0),              // 1: fpim.v1.EventKind
@@ -1268,12 +1346,13 @@ var file_fpim_v1_im_proto_goTypes = []any{
 	(*KickRequest)(nil),         // 8: fpim.v1.KickRequest
 	(*SessionsRequest)(nil),     // 9: fpim.v1.SessionsRequest
 	(*SessionsManyRequest)(nil), // 10: fpim.v1.SessionsManyRequest
-	(*SubjectSessions)(nil),     // 11: fpim.v1.SubjectSessions
-	(*PushResult)(nil),          // 12: fpim.v1.PushResult
-	(*Session)(nil),             // 13: fpim.v1.Session
-	(*Result)(nil),              // 14: fpim.v1.Result
-	(*Inbound)(nil),             // 15: fpim.v1.Inbound
-	(*Event)(nil),               // 16: fpim.v1.Event
+	(*ListGroupRequest)(nil),    // 11: fpim.v1.ListGroupRequest
+	(*SubjectSessions)(nil),     // 12: fpim.v1.SubjectSessions
+	(*PushResult)(nil),          // 13: fpim.v1.PushResult
+	(*Session)(nil),             // 14: fpim.v1.Session
+	(*Result)(nil),              // 15: fpim.v1.Result
+	(*Inbound)(nil),             // 16: fpim.v1.Inbound
+	(*Event)(nil),               // 17: fpim.v1.Event
 }
 var file_fpim_v1_im_proto_depIdxs = []int32{
 	6,  // 0: fpim.v1.ConnectRequest.push:type_name -> fpim.v1.PushRequest
@@ -1282,23 +1361,25 @@ var file_fpim_v1_im_proto_depIdxs = []int32{
 	9,  // 3: fpim.v1.ConnectRequest.sessions:type_name -> fpim.v1.SessionsRequest
 	3,  // 4: fpim.v1.ConnectRequest.ping:type_name -> fpim.v1.PingRequest
 	10, // 5: fpim.v1.ConnectRequest.sessions_many:type_name -> fpim.v1.SessionsManyRequest
-	5,  // 6: fpim.v1.ConnectResponse.ready:type_name -> fpim.v1.Ready
-	14, // 7: fpim.v1.ConnectResponse.result:type_name -> fpim.v1.Result
-	15, // 8: fpim.v1.ConnectResponse.inbound:type_name -> fpim.v1.Inbound
-	16, // 9: fpim.v1.ConnectResponse.event:type_name -> fpim.v1.Event
-	13, // 10: fpim.v1.SubjectSessions.sessions:type_name -> fpim.v1.Session
-	0,  // 11: fpim.v1.PushResult.status:type_name -> fpim.v1.PushStatus
-	12, // 12: fpim.v1.Result.pushes:type_name -> fpim.v1.PushResult
-	13, // 13: fpim.v1.Result.sessions:type_name -> fpim.v1.Session
-	11, // 14: fpim.v1.Result.sessions_many:type_name -> fpim.v1.SubjectSessions
-	1,  // 15: fpim.v1.Event.kind:type_name -> fpim.v1.EventKind
-	2,  // 16: fpim.v1.ImService.Connect:input_type -> fpim.v1.ConnectRequest
-	4,  // 17: fpim.v1.ImService.Connect:output_type -> fpim.v1.ConnectResponse
-	17, // [17:18] is the sub-list for method output_type
-	16, // [16:17] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	11, // 6: fpim.v1.ConnectRequest.list_group:type_name -> fpim.v1.ListGroupRequest
+	5,  // 7: fpim.v1.ConnectResponse.ready:type_name -> fpim.v1.Ready
+	15, // 8: fpim.v1.ConnectResponse.result:type_name -> fpim.v1.Result
+	16, // 9: fpim.v1.ConnectResponse.inbound:type_name -> fpim.v1.Inbound
+	17, // 10: fpim.v1.ConnectResponse.event:type_name -> fpim.v1.Event
+	14, // 11: fpim.v1.SubjectSessions.sessions:type_name -> fpim.v1.Session
+	0,  // 12: fpim.v1.PushResult.status:type_name -> fpim.v1.PushStatus
+	13, // 13: fpim.v1.Result.pushes:type_name -> fpim.v1.PushResult
+	14, // 14: fpim.v1.Result.sessions:type_name -> fpim.v1.Session
+	12, // 15: fpim.v1.Result.sessions_many:type_name -> fpim.v1.SubjectSessions
+	12, // 16: fpim.v1.Result.group_members:type_name -> fpim.v1.SubjectSessions
+	1,  // 17: fpim.v1.Event.kind:type_name -> fpim.v1.EventKind
+	2,  // 18: fpim.v1.ImService.Connect:input_type -> fpim.v1.ConnectRequest
+	4,  // 19: fpim.v1.ImService.Connect:output_type -> fpim.v1.ConnectResponse
+	19, // [19:20] is the sub-list for method output_type
+	18, // [18:19] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_fpim_v1_im_proto_init() }
@@ -1313,6 +1394,7 @@ func file_fpim_v1_im_proto_init() {
 		(*ConnectRequest_Sessions)(nil),
 		(*ConnectRequest_Ping)(nil),
 		(*ConnectRequest_SessionsMany)(nil),
+		(*ConnectRequest_ListGroup)(nil),
 	}
 	file_fpim_v1_im_proto_msgTypes[2].OneofWrappers = []any{
 		(*ConnectResponse_Ready)(nil),
@@ -1326,7 +1408,7 @@ func file_fpim_v1_im_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fpim_v1_im_proto_rawDesc), len(file_fpim_v1_im_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   15,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

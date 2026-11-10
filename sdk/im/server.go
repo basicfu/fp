@@ -43,6 +43,20 @@ var (
 	// 合法 JSON，从而让 client 完全解不出这一帧——所以校验必须在 SDK 这层
 	// 做在发送之前，而不是指望 fp-im 或 client 兜底。
 	ErrBadPayload = errors.New("fpim: payload 必须是合法 JSON")
+	// ErrUnsupported 表示这条流所在的 fp-im 节点版本太旧、不认识该请求
+	// （目前只有 ListGroup）。调用方据此回退到老办法（比如 SessionsMany）。
+	ErrUnsupported = errors.New("fpim: 对端 fp-im 不支持该请求")
+	// ErrGroupTooLarge 表示 ListGroup 的分组在线主体超过 10000 个。fp-im 不返回
+	// 部分结果；到这个量级该改用分页（尚未提供）或按业务自己的 id 走 SessionsMany。
+	ErrGroupTooLarge = errors.New("fpim: 分组在线主体超过上限")
+)
+
+// fp-im 按这两句 Result.error 文案告知特定错误，与 internal/im/imgrpc 里的同名
+// 常量逐字相同；两边不互相 import，配对由 internal/integration 的
+// TestListGroupErrorTextParity 守住。
+const (
+	unknownRequest = "未知请求类型"
+	groupTooLarge  = "分组在线主体超过 10000 个"
 )
 
 // ServerConfig 是 Server 的全部配置。用普通结构体按值传入，不用函数式
@@ -121,6 +135,12 @@ type Session struct {
 	OS          string
 	Mobile      bool
 	ConnectedAt int64
+}
+
+// SubjectSessions 是一个主体及其当前全部连接。
+type SubjectSessions struct {
+	Subject  Subject
+	Sessions []Session
 }
 
 // Inbound 是 client 发上来的一条消息，Payload 原样透传。
@@ -700,6 +720,12 @@ func (s *Server) call(ctx context.Context, body func(reqID string) *fpimv1.Conne
 			return nil, ErrUnavailable
 		}
 		if res.GetError() != "" {
+			switch res.GetError() {
+			case unknownRequest:
+				return nil, fmt.Errorf("%w: %s", ErrUnsupported, res.GetError())
+			case groupTooLarge:
+				return nil, fmt.Errorf("%w: %s", ErrGroupTooLarge, res.GetError())
+			}
 			return nil, errors.New("fpim: " + res.GetError())
 		}
 		return res, nil
@@ -814,6 +840,48 @@ func (s *Server) SessionsMany(ctx context.Context, subs []Subject) ([][]Session,
 		for _, x := range g.GetSessions() {
 			out[i] = append(out[i], Session{ConnID: x.GetConnId(), Node: x.GetNodeId(), OS: x.GetOs(), Mobile: x.GetMobile(), ConnectedAt: x.GetConnectedAtMs()})
 		}
+	}
+	return out, nil
+}
+
+// ListGroup 列出某分组此刻全部在线的主体（同一主体在多个节点上的连接合成一条），
+// 顺序不定。group 不能为空：默认分组不建索引。
+//
+// 结果以连接表为准，与 SessionsMany 同一口径，但它是某一刻的快照：
+//   - 刚连上、刚断开的主体可能在、也可能不在结果里；连上后到 fp-im 写进
+//     分组索引之间有一个很短的窗口（正常毫秒级，Redis 写失败时是退避重试
+//     的时间），这期间它不在结果里。要实时判断某一个主体在不在线，用 Sessions。
+//   - fp-im 某个节点暂时把另一个健康节点剔出本地存活视图时（最长约 3 秒），
+//     那个节点上的主体也不在结果里。
+//
+// 超过 10000 个主体时返回 ErrGroupTooLarge，不返回部分结果。流所在的 fp-im
+// 节点版本太旧时返回 ErrUnsupported。
+func (s *Server) ListGroup(ctx context.Context, group string) ([]SubjectSessions, error) {
+	if !validGroup(group) {
+		return nil, fmt.Errorf("%w: 分组名非法: %q", ErrBadSubject, group)
+	}
+	res, err := s.call(ctx, func(id string) *fpimv1.ConnectRequest {
+		return &fpimv1.ConnectRequest{
+			ReqId: id,
+			Body:  &fpimv1.ConnectRequest_ListGroup{ListGroup: &fpimv1.ListGroupRequest{Group: group}},
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SubjectSessions, 0, len(res.GetGroupMembers()))
+	for _, g := range res.GetGroupMembers() {
+		sub, err := Parse(g.GetSubject())
+		if err != nil {
+			// 网关只发它自己 Parse 得过的写法，解析失败是协议错配；丢这一条比整批失败有用
+			s.log.Warn("fpim: ListGroup 返回的 subject 解析失败", "subject", g.GetSubject(), "err", err)
+			continue
+		}
+		ss := SubjectSessions{Subject: sub, Sessions: make([]Session, 0, len(g.GetSessions()))}
+		for _, x := range g.GetSessions() {
+			ss.Sessions = append(ss.Sessions, Session{ConnID: x.GetConnId(), Node: x.GetNodeId(), OS: x.GetOs(), Mobile: x.GetMobile(), ConnectedAt: x.GetConnectedAtMs()})
+		}
+		out = append(out, ss)
 	}
 	return out, nil
 }

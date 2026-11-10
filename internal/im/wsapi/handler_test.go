@@ -26,22 +26,26 @@ import (
 // 工具抓到，表现为一条偶发的、看起来毫无道理的失败。
 type fakeAuth struct {
 	byToken map[string]model.Subject
-	errs    map[string]error // 按 token 指定的失败，没列出的未知 token 一律 ErrUnauthorized
+	ids     map[string]auth.Identity // 需要带分组策略的 token，优先于 byToken
+	errs    map[string]error         // 按 token 指定的失败，没列出的未知 token 一律 ErrUnauthorized
 	mu      sync.Mutex
 	last    auth.VerifyRequest
 }
 
-func (a *fakeAuth) Verify(_ context.Context, req auth.VerifyRequest) (model.Subject, error) {
+func (a *fakeAuth) Verify(_ context.Context, req auth.VerifyRequest) (auth.Identity, error) {
 	a.mu.Lock()
 	a.last = req
 	a.mu.Unlock()
+	if id, ok := a.ids[req.Token]; ok {
+		return id, nil
+	}
 	if s, ok := a.byToken[req.Token]; ok {
-		return s, nil
+		return auth.Identity{Subject: s}, nil
 	}
 	if err, ok := a.errs[req.Token]; ok {
-		return model.Subject{}, err
+		return auth.Identity{}, err
 	}
-	return model.Subject{}, auth.ErrUnauthorized
+	return auth.Identity{}, auth.ErrUnauthorized
 }
 
 // lastSnapshot 加锁返回 last 的快照，供测试协程安全读取。

@@ -9,15 +9,30 @@ import (
 	"github.com/basicfu/fp/internal/im/model"
 )
 
-// fake 记录自己被调用过，并返回一个可辨认的主体。
+// fake 记录自己被调用过，并返回一个可辨认的身份。
 type fake struct {
 	called bool
 	sub    model.Subject
+	id     *auth.Identity // 非 nil 时原样返回，测分组策略的透传
 }
 
-func (f *fake) Verify(_ context.Context, _ auth.VerifyRequest) (model.Subject, error) {
+func (f *fake) Verify(_ context.Context, _ auth.VerifyRequest) (auth.Identity, error) {
 	f.called = true
-	return f.sub, nil
+	if f.id != nil {
+		return *f.id, nil
+	}
+	return auth.Identity{Subject: f.sub}, nil
+}
+
+// TestDispatchPassesIdentityThrough 守住分派层不丢分组策略：wsapi 靠它
+// 决定这次握手按什么策略跑脚本。
+func TestDispatchPassesIdentityThrough(t *testing.T) {
+	want := auth.Identity{Subject: model.BizGroup("web", "2"), Policy: model.PolicyLimit, Limit: 5}
+	a := New(&fake{sub: model.User("1")}, &fake{id: &want})
+	got, err := a.Verify(context.Background(), auth.VerifyRequest{App: "a1", Kind: model.TokenKindBiz, Token: "t"})
+	if err != nil || got != want {
+		t.Fatalf("得到 %+v err=%v，期望 %+v", got, err, want)
+	}
 }
 
 func TestDispatchByKind(t *testing.T) {

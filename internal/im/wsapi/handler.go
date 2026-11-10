@@ -113,9 +113,17 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 握手帧里的 app 可以是应用 code；从这里起一律换成规范 app_id——连接表、路由、
 	// 撤销都按它做键，不归一的话 code 与 app_id 会变成两个互不相通的应用。
 	af.App = appCfg.AppID
-	sub, rej := s.resolveSubject(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
+	id, rej := s.resolveIdentity(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
 	if rej != nil {
 		s.reject(ctx, ws, rej)
+		return
+	}
+	sub := id.Subject
+	if sub.Group != "" && !s.Hub.GroupAdmit(af.App, sub.Group) {
+		// 必须在握手脚本之前拒：脚本按 replace 跑完，别处的旧连接已经被顶掉了。
+		// 这是业务方回调的问题，按不可用处理让 client 退避，并留日志给运维。
+		slog.Warn("wsapi: 本节点该应用的分组数已达上限", "app", af.App, "group", sub.Group, "max", hub.MaxGroupsPerApp)
+		s.reject(ctx, ws, unavailable())
 		return
 	}
 	osName, mobile := af.OS, af.Mobile != nil && *af.Mobile
@@ -128,7 +136,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta := model.ConnMeta{Node: s.Live.NodeID(), OS: osName, Mobile: mobile, At: time.Now().UnixMilli()}
-	res, err := s.Conns.Handshake(ctx, af.App, sub.String(), connID.String(), meta, appCfg.ConnPolicy, appCfg.ConnLimit, s.Live.LiveNodes())
+	// 分组策略按这一次握手生效：脚本本来就是每次现传策略，换的只是来源。
+	// 再判一次 Group：默认分组只认应用级策略，不能只靠认证器不给它带策略。
+	policy, limit := appCfg.ConnPolicy, appCfg.ConnLimit
+	if id.Subject.Group != "" && id.Policy != "" {
+		policy, limit = id.Policy, id.Limit
+	}
+	res, err := s.Conns.Handshake(ctx, af.App, sub.String(), connID.String(), meta, policy, limit, s.Live.LiveNodes())
 	if err != nil {
 		slog.Warn("wsapi: 握手脚本失败", "app", af.App, "err", err)
 		s.reject(ctx, ws, unavailable())
@@ -250,35 +264,35 @@ func authResultFrame(conn string, result []byte) []byte {
 	return b
 }
 
-// resolveSubject 返回 subject，或一次拒绝。raw 是 readAuthFrame 读到的
+// resolveIdentity 返回身份，或一次拒绝。raw 是 readAuthFrame 读到的
 // 原始帧字节，只有走 token 分支时才会用到；访客分支不经过认证器，用不上它。
-func (s *server) resolveSubject(ctx context.Context, af model.AuthFrame, raw []byte, cfg model.AppConfig, ip string) (model.Subject, *rejection) {
+func (s *server) resolveIdentity(ctx context.Context, af model.AuthFrame, raw []byte, cfg model.AppConfig, ip string) (auth.Identity, *rejection) {
 	switch {
 	case af.Token != "":
-		sub, err := s.Auth.Verify(ctx, auth.VerifyRequest{App: af.App, Kind: af.Kind, Token: af.Token, Raw: raw, IP: ip})
+		id, err := s.Auth.Verify(ctx, auth.VerifyRequest{App: af.App, Kind: af.Kind, Token: af.Token, Raw: raw, IP: ip})
 		var biz *auth.RejectedError
 		switch {
 		case err == nil:
-			return sub, nil
+			return id, nil
 		case errors.As(err, &biz):
-			return model.Subject{}, &rejection{closeCode: model.CloseAuthFailed, result: biz.Result}
+			return auth.Identity{}, &rejection{closeCode: model.CloseAuthFailed, result: biz.Result}
 		case errors.Is(err, auth.ErrUnavailable):
-			return model.Subject{}, unavailable()
+			return auth.Identity{}, unavailable()
 		}
-		return model.Subject{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "身份验证失败")
+		return auth.Identity{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "身份验证失败")
 	case af.Guest != "":
 		if !cfg.AllowGuest {
-			return model.Subject{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "不允许访客")
+			return auth.Identity{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "不允许访客")
 		}
 		if !model.IsUUIDv4(af.Guest) {
-			return model.Subject{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "访客标识非法")
+			return auth.Identity{}, fail(model.CloseAuthFailed, model.CodeAuthFailed, "访客标识非法")
 		}
 		if !s.Guests.Allow(af.App, ip, af.Guest, cfg.GuestIPRate, time.Now()) {
-			return model.Subject{}, fail(model.CloseAuthFailed, model.CodeRateLimited, "访客连接过于频繁")
+			return auth.Identity{}, fail(model.CloseAuthFailed, model.CodeRateLimited, "访客连接过于频繁")
 		}
-		return model.Guest(af.Guest), nil
+		return auth.Identity{Subject: model.Guest(af.Guest)}, nil
 	}
-	return model.Subject{}, fail(model.CloseAuthFailed, model.CodeBadRequest, "缺少令牌")
+	return auth.Identity{}, fail(model.CloseAuthFailed, model.CodeBadRequest, "缺少令牌")
 }
 
 // readLoop 读到连接结束，返回断开原因。

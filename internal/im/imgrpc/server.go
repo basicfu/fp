@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/basicfu/fp/internal/im/hub"
+	"github.com/basicfu/fp/internal/im/registry"
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -36,6 +37,10 @@ type Deps struct {
 	// Workers 是每条流并发处理请求的上限，0 表示用默认值。Push 会等 Redis，
 	// 串行处理会让一条慢请求拖住整条流上后面所有请求。
 	Workers int
+	// ListGroup 读分组在线索引（registry.ListGroup 绑上 Redis 与存活视图）。
+	// 走注入而不是经 hub：hub 只管本节点内存，不直接碰 Redis。nil 时按
+	// "未知请求类型"回，与旧版 fp-im 同一口径。
+	ListGroup func(ctx context.Context, app, group string) ([]registry.SubjectConns, error)
 }
 
 type Server struct {
@@ -156,7 +161,7 @@ func (s *Server) Connect(stream fpimv1.ImService_ConnectServer) error {
 			go func(req *fpimv1.ConnectRequest) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				_ = snd.Send(handle(ctx, s.deps.Hub, app, req))
+				_ = snd.Send(handle(ctx, s.deps, app, req))
 			}(req)
 		}
 	}()

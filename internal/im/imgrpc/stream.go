@@ -2,17 +2,28 @@ package imgrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/model"
+	"github.com/basicfu/fp/internal/im/registry"
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 )
 
 // maxSessionsMany 限制一次批量查询的 subject 数：再多就是一条巨大的 Redis 管道，
 // 拖慢同节点其它请求；业务方分批调用即可。
 const maxSessionsMany = 1000
+
+// 下面两句 Result.error 文案是协议的一部分（见 im.proto 的 Result 注释）：SDK
+// 按它们精确匹配映射成 fpim.ErrUnsupported / fpim.ErrGroupTooLarge，两边不
+// 互相 import，配对由 internal/integration 的 TestListGroupErrorTextParity 守住。
+// errUnknownRequest 还是旧版 fp-im 已经在回的那句，改了旧节点就认不出了。
+const (
+	errUnknownRequest = "未知请求类型"
+	errGroupTooLarge  = "分组在线主体超过 10000 个"
+)
 
 // sender 给 gRPC 流加锁：gRPC 不允许并发 Send，而 hub 会从多个协程往同一条流写
 // （处理请求的多个协程各自回 Result，同时路由器可能在别的协程往这条流写
@@ -30,7 +41,8 @@ func (s *sender) Send(r *fpimv1.ConnectResponse) error {
 
 // handle 执行一条请求并生成 Result。subject 非法或 body 未知都变成 Result.Error，
 // 不断流：一条坏请求不该让整条流上其它请求跟着死。
-func handle(ctx context.Context, h *hub.Hub, app string, req *fpimv1.ConnectRequest) *fpimv1.ConnectResponse {
+func handle(ctx context.Context, d Deps, app string, req *fpimv1.ConnectRequest) *fpimv1.ConnectResponse {
+	h := d.Hub
 	res := &fpimv1.Result{ReqId: req.GetReqId()}
 	fail := func(msg string) *fpimv1.ConnectResponse {
 		res.Error = msg
@@ -101,8 +113,30 @@ func handle(ctx context.Context, h *hub.Hub, app string, req *fpimv1.ConnectRequ
 		}
 	case *fpimv1.ConnectRequest_Ping:
 		// 心跳只要一帧真正穿过代理的应答,空 Result 就够了。
+	case *fpimv1.ConnectRequest_ListGroup:
+		if d.ListGroup == nil {
+			return fail(errUnknownRequest)
+		}
+		group := b.ListGroup.GetGroup()
+		if err := model.ValidateGroup(group); err != nil {
+			return fail(err.Error())
+		}
+		members, err := d.ListGroup(ctx, app, group)
+		if errors.Is(err, registry.ErrGroupTooLarge) {
+			return fail(errGroupTooLarge)
+		}
+		if err != nil {
+			return fail(err.Error())
+		}
+		for _, m := range members {
+			ss := &fpimv1.SubjectSessions{Subject: model.BizGroup(group, m.UID).String()}
+			for cid, s := range m.Conns {
+				ss.Sessions = append(ss.Sessions, &fpimv1.Session{ConnId: cid, NodeId: s.Node, Os: s.OS, Mobile: s.Mobile, ConnectedAtMs: s.At})
+			}
+			res.GroupMembers = append(res.GroupMembers, ss)
+		}
 	default:
-		return fail("未知请求类型")
+		return fail(errUnknownRequest)
 	}
 	return &fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Result{Result: res}}
 }

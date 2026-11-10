@@ -114,7 +114,7 @@ client 可以顺手校时）。失败的 t=2 之后网关立刻关闭连接。�
 | kind | 验证方 | 主体前缀 |
 |---|---|---|
 | 不写或 `fp` | fp，走 SDK | `u:` |
-| `biz` | 回调该应用配置里的 `verify_url` | `b:` |
+| `biz` | 回调该应用配置里的 `verify_url` | `b:`；回调返回分组时 `b.<group>:` |
 | 其它值 | 拒绝，关闭码 4001（不会兜底当成 fp） | — |
 
 应用没配 `biz_auth` 时，`kind: "biz"` 同样是 4001（与令牌本身无效同一个
@@ -124,6 +124,14 @@ client 可以顺手校时）。失败的 t=2 之后网关立刻关闭连接。�
 
 业务方的用户 1001 是 `b:1001`，与 fp 的 `u:1001` 在 Redis 键上天然隔离，
 两者不会互相顶号、不会收到对方的消息。
+
+**分组主体** `b.<group>:<uid>`：业务方回调返回 `group` 时（见下一节），主体写成
+`b.r:n-9f3a…` 这样。分组名 `^[a-z][a-z0-9_]{0,15}$`，只有业务方主体能带分组。
+分组写在冒号前面是因为 uid 不约束字符集：`b.r:a:b` 是分组 `r`、uid `a:b`。不同
+分组是不同的主体——`b:1001`、`b.r:1001`、`b.web:1001` 各有各的连接表，互不顶号，
+Push / Kick / Sessions / 事件都按完整写法寻址。判断"是不是默认分组"要看
+`Kind == biz && Group == ""`（SDK 的 `IsDefaultBiz()`），只看 Kind 会把 uid 是
+纯数字的分组主体误当成默认分组。
 
 ## 业务方验证接口
 
@@ -147,6 +155,24 @@ client 地址（与访客限流同一个来源，信任代理时取 `X-Forwarded
 
     {"code":"success","msg":"","time":1761000000000,"uid":"1001","cache_seconds":60}
 
+可选的分组与分组在线策略（只对分组主体生效）：
+
+    {"code":"success","uid":"n-9f3a…","group":"r","conn_policy":"replace",…}
+    {"code":"success","uid":"1001","group":"web","conn_policy":"limit","conn_limit":5,…}
+
+- `group` 不带或为空就是默认分组 `b:{uid}`，行为与以前逐字相同。
+- `conn_policy` 取 `replace` / `reject` / `limit`，`limit` 时 `conn_limit` 取 1~100；
+  不带就沿用应用级策略（控制台的 `im_conn_policy`）。默认分组**不认**回调给的策略。
+- 策略按"这一次握手"执行：同一分组每次都应返回同一个策略，某次返回 `replace`
+  就会顶掉这个主体已有的全部连接，不管它们当初按什么策略连上。
+- 分组与策略连同 uid 一起进 `cache_seconds` 缓存，缓存键仍是 (app, 令牌, verify_url)，
+  所以分组只能由令牌本身决定。
+- **只在请求带 `X-Fp-Im-Features: group` 头时才返回 `group`**（见升级注意）。fp-im 没发这个头时，
+  响应里的 `group` / `conn_policy` / `conn_limit` 一律当不存在（类型不对也不影响整个响应），
+  业务方现有响应里有同名字段的不受影响。
+- 每个应用在单个 fp-im 节点上同时存在的分组数 ≤ 32，超了新握手按 `auth_unavailable`
+  / 4004 拒绝并打警告日志——防的是回调有 bug、每个连接回一个不同分组。
+
 拒绝时 `code` 填你自己的英文单词错误码，网关把整个 body **原样**作为 t=2 的 `p`
 发给 client，然后 4001 关闭——文案、`detail`、你自加的字段都会到 client 手里：
 
@@ -154,9 +180,10 @@ client 地址（与访客限流同一个来源，信任代理时取 `X-Forwarded
 
 | 响应 | 网关动作 |
 |---|---|
-| 200，`code` 为 `success`，`uid` 合法 | 主体 `b:{uid}`，放行 |
+| 200，`code` 为 `success`，`uid` 合法 | 主体 `b:{uid}`（带合法 `group` 时 `b.<group>:{uid}`），放行 |
 | 200，`code` 是其它值 | body 原样转发给 client，4001 |
 | 200，`code` 为 `success` 但 `uid` 为空、含空字节或超过 128 字节 | `auth_unavailable`，4004 |
+| 200，`code` 为 `success` 但 `group` 格式非法、`conn_policy` 未知、`limit` 缺 `conn_limit` 或越界 | `auth_unavailable`，4004 |
 | 200，body 不是合法 JSON 或缺 `code` | `auth_unavailable`，4004 |
 | 非 200（含 401）、超时、连不上 | `auth_unavailable`，4004 |
 
@@ -181,7 +208,8 @@ client 地址（与访客限流同一个来源，信任代理时取 `X-Forwarded
 在自己的系统里吊销了这个令牌，这条连接也不会因此断开。这与 fp 令牌的路径
 不同：fp 撤销一个令牌会通过 `fpauth.OnRevoke` → `hub.OnRevoked` 当场关掉
 持有它的本地连接，业务方令牌没有对应的撤销通路。**要立刻踢掉某个用户，
-用 server SDK 的 `Kick`（主体写 `b:{uid}`），不能指望令牌撤销生效。**
+用 server SDK 的 `Kick`（主体写 `b:{uid}`，分组主体写 `b.<group>:{uid}`），
+不能指望令牌撤销生效。**
 
 **这个接口对公网是裸的**，网关不带任何凭据，没有东西证明请求来自网关。
 实际风险有限（攻击者要先有令牌才能拿去验，而有了有效令牌本来就能直接
@@ -204,6 +232,13 @@ Result。gRPC 自带的 keepalive 是 HTTP/2 PING，中间隔着 nginx/APISIX �
 server 每 60 秒一次 `RST_STREAM ... PROTOCOL_ERROR` 断流重连）。连续两次心跳没有应答，SDK
 判定这条流卡死并主动重建。旧版 fp-im 对心跳回"未知请求类型"，SDK 照样当作活着，升级顺序不限。
 
+**`srv.ListGroup(ctx, group)`** 一次列出某分组此刻全部在线的主体（`[]SubjectSessions`，
+同一主体在多个节点上的连接合成一条，顺序不定）。结果以连接表核实，与 `SessionsMany` 同一
+口径；`group` 不能为空（默认分组不建索引），超过 10000 个主体时返回 `fpim.ErrGroupTooLarge`、不返回
+部分结果。它是某一刻的快照：刚连上的主体在 fp-im 写进分组索引之前（正常毫秒级，Redis 写失败
+时是退避重试的时间）不在结果里，要实时判断某一个主体用 `Sessions`。流落在旧版 fp-im 上时
+返回 `fpim.ErrUnsupported`，调用方据此回退到 `SessionsMany`。
+
 client：`fpim.Dial` 后 `OnMessage`/`OnClose`/`Send`，握手、心跳（每 25 秒，
 `fpim.PingInterval`）、按上表退避重连全部内部处理。收到 4001/4002/4003 时 SDK 按契约永久停止
 重连——**包括在重连尝试中撞上这三个码**（比如 `reject`/`limit` 策略的应用在节点崩溃窗口里重连
@@ -224,6 +259,13 @@ client：`fpim.Dial` 后 `OnMessage`/`OnClose`/`Send`，握手、心跳（每 25
 
 ## 运维要点
 
+**分组在线索引**：每个（应用, 分组, 节点）一个 set `fp:im:{<app>:grp:<group>:<node>}:idx`，
+成员是裸 uid，只给非默认分组建。每个节点只写自己那份：连接数 0↔1 时标脏，单个写协程写当前
+状态（SADD/SREM，每次都续 `EXPIRE`，取 conn field TTL），失败 1s 起翻倍、封顶 30s 退避
+重试；每个续期周期（10 分钟）和每次节点频道 Gap 时再整份重写一次
+（`MULTI{DEL; SADD…; EXPIRE}`），兜底 Redis 重启、主从切换丢掉的数据。ListGroup 只读存活
+节点的那份再用连接表核实，所以崩溃节点留下的索引不影响结果，最多一个 TTL 后自己消失。
+
 Redis 最低 8.0（`HEXPIRE`/`HTTL`/分片订阅）；心跳 3s、判死 10s；两张心跳表（`fp:im:node`、
 `fp:im:srv:{app}`）的字段带 100 秒过期（判死阈值的 10 倍，每次心跳刷满），优雅关闭时还会主动
 删掉自己的条目；conn 元数据 field TTL 默认 30 分钟、每 10 分钟续期；写管道默认立即发，可配
@@ -233,9 +275,10 @@ Redis 最低 8.0（`HEXPIRE`/`HTTL`/分片订阅）；心跳 3s、判死 10s；�
 的两倍），低于它启动直接失败：配成 20s 会让全网 client 每 20 秒被以 4005 踢一次并立即重连
 （4005 的契约就是不退避），形成稳定的重连风暴。
 
-**优雅关闭（发版、缩容）**：收到 SIGTERM/SIGINT 后依次做四件事——关 HTTP 监听（不再接受新
-握手）→ 以 **4004**、reason `shutdown` 主动关掉本地全部 ws 并等拆连接走完 → 停 gRPC → 删自己
-的心跳条目；每步各有 10 秒预算。client 看到 4004 会退避后重连到别的节点；业务方会收到 reason
+**优雅关闭（发版、缩容）**：收到 SIGTERM/SIGINT 后依次做五件事——关 HTTP 监听（不再接受新
+握手）→ 以 **4004**、reason `shutdown` 主动关掉本地全部 ws 并等拆连接走完 → 把分组索引剩下的
+脏集合写完 → 停 gRPC → 删自己的心跳条目；写分组索引那步预算 3 秒（写不完只是本节点那份
+索引等 TTL 过期，ListGroup 结果不受影响），其余每步各有 10 秒预算。client 看到 4004 会退避后重连到别的节点；业务方会收到 reason
 为 `shutdown` 的断开事件（与 `client`/`timeout` 的区别：与用户行为无关，这条连接马上会回来）。
 关 ws 必须排在停 gRPC 之前，否则断开事件没有出口——改动这段顺序前先看
 `cmd/fp-im/main.go` 里 `shutdown` 的注释和 `TestServeGracefulShutdownClosesWebSockets`。
@@ -256,6 +299,24 @@ proxy_read_timeout 3600s;   # 大于 conn.idle_timeout，别让代理抢在网�
 （fp 令牌与访客不受影响）。
 
 ## 升级注意
+
+**业务方主体分组分两个 fp-im 版本上线，不能一步到位**：
+
+| 步骤 | fp-im 行为 | 为什么 |
+|---|---|---|
+| 第一步（当前版本） | 认 `b.<group>:` 写法、接 ListGroup；回调**不带** `X-Fp-Im-Features` | 业务 server 的 gRPC 流可能落在任意节点上，旧节点的 `imgrpc` 会拒掉对分组主体的 Push / Kick / Sessions |
+| 第二步 | 回调带 `X-Fp-Im-Features: group` | 等全部节点都升到第一步之后再发；滚动期间每个节点都认得两种写法 |
+
+fp-im 的参数除三个环境变量外都写死在代码里，这一项也不例外：第二步是一个把 `bizauth` 的
+`SendFeatures` 默认改为 `true` 的新版本（发特性头的代码在第一步已经写好），不是改配置。业务方这边：
+
+- 先把 server SDK 升到认分组主体的版本（旧 SDK 解析不了，事件和上行会被丢弃），再让回调返回
+  `group`。多实例滚动发布时不能一次发布同时改两样，要加一个配置开关：全部实例升级完再打开，
+  并且只在"开关已开且请求带了 `X-Fp-Im-Features: group`"时返回 `group`。
+- 过渡期同一个主体会有两种写法（例如 `b:r-<id>` 与 `b.r:<id>`），它们是两个主体、互不顶号：
+  推送先发新写法、`NotOnline` 再发旧写法；Kick 与查连接两种都做；判在线以 ListGroup 加旧写法的
+  `SessionsMany` 合起来为准。
+- ListGroup 打到旧 fp-im 节点时 SDK 返回 `ErrUnsupported`，回退到原来的做法。
 
 **ws 协议改为数字帧类型 + 统一鉴权结果（不兼容旧版本）**：外层 `t` 由字符串改为
 1–5，`hello` 换成 t=2 鉴权结果帧，握手拒绝也先发 t=2 再关闭；业务方验证接口改为一律 200
@@ -292,6 +353,9 @@ fp-im、业务方验证接口、所有 client（Go SDK 与各端自写的 ws 客
   几十毫秒量级，属于改善但没有消除。要消除得在拆连接全部走完之后才停订阅，或者关闭第一步
   就先把自己从注册表/存活表里摘掉再拆连接——都涉及重排关闭流程，本批没做。
 - Cluster 无真机集成测试，上线前建议对真实 Cluster 跑一遍 `im_e2e_test.go`。
+- **ListGroup 不分页**，一次最多 10000 个主体；ListGroup 读各节点索引的那一条管道跨多个槽，
+  Cluster 下由客户端按槽拆分，同样没有真机 Cluster 测试。分组数上限（每节点每应用 32）的判断
+  与随后的登记不在同一个临界区，并发握手可能略超，它是防回调失控的护栏，不求精确。
 - `internal/integration/im_e2e_test.go` 的 `startNode` 仍然是**手抄**的装配顺序，与
   `cmd/fp-im` 的 `serve()` 各写一份，只能靠人工保持同步。
 

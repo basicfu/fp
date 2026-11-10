@@ -453,6 +453,17 @@ err = srv.Kick(ctx, fpim.User(userID)) // 不传 connID 表示踢掉该用户全
 分别对应登录用户、访客、业务方自有认证体系的用户，三者在网关侧的存储
 天然隔离。
 
+业务方鉴权回调返回分组时，主体是 `fpim.BizGroup(group, id)`（写法
+`b.<group>:<id>`），与同名 uid 的 `fpim.Biz(id)` 是两个主体。判断默认分组用
+`sub.IsDefaultBiz()`，不要只看 `Kind`。`srv.ListGroup(ctx, group)` 一次列出某分组
+此刻在线的全部主体（上限 10000）；连的 fp-im 太旧时返回 `fpim.ErrUnsupported`，
+回退到 `SessionsMany`；超过上限时返回 `fpim.ErrGroupTooLarge`。细节与一致性边界见
+`docs/im.md`。
+
+**升级注意**：`fpim.Subject` 新增了 `Group` 字段（排在 `Kind` 与 `ID` 之间），按位置写的
+结构体字面量 `fpim.Subject{fpim.KindBiz, id}` 升级后编译不过，要改成带字段名的
+`fpim.Subject{Kind: fpim.KindBiz, ID: id}`，或者直接用 `fpim.Biz(id)`。
+
 `OnMessage`/`OnEvent` 由 Server 内部单独一个协程按投递顺序串行调用，慢
 操作会拖慢排在后面的消息，需要另起 goroutine。
 

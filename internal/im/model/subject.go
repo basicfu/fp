@@ -24,25 +24,58 @@ const (
 )
 
 // Subject 是一条连接归属的主体。同一 Subject 可以有多条连接（多终端）。
+//
+// Group 只对业务方主体有意义，由业务方鉴权回调决定；空串是默认分组。
+// 不同分组是不同的主体：b:1001 与 b.r:1001 各有各的连接表，互不顶号。
 type Subject struct {
-	Kind SubjectKind
-	ID   string
+	Kind  SubjectKind
+	Group string
+	ID    string
 }
 
 func User(id string) Subject  { return Subject{Kind: KindUser, ID: id} }
 func Guest(id string) Subject { return Subject{Kind: KindGuest, ID: id} }
-func Biz(id string) Subject   { return Subject{Kind: KindBiz, ID: id} }
+func Biz(id string) Subject   { return BizGroup("", id) }
 
-func (s Subject) String() string { return string(s.Kind) + ":" + s.ID }
+// BizGroup 构造分组业务方主体。不在这里校验分组名：构造函数没有错误返回，
+// 外部输入的分组名在 bizauth 与 ParseSubject 两个入口校验。
+func BizGroup(group, id string) Subject { return Subject{Kind: KindBiz, Group: group, ID: id} }
+
+// IsDefaultBiz 判断是否默认分组的业务方主体。只判 Kind==KindBiz 不够：
+// uid 是纯数字的分组主体会被误当成默认分组。
+func (s Subject) IsDefaultBiz() bool { return s.Kind == KindBiz && s.Group == "" }
+
+// String 把分组写在冒号前面（b.<group>:<uid>）：uid 不约束字符集、可能含
+// 冒号，写在后面会与现有 uid 撞车；而现有前缀都不含点，kind 段带点就一定
+// 是分组主体。
+func (s Subject) String() string {
+	if s.Group != "" {
+		return string(s.Kind) + "." + s.Group + ":" + s.ID
+	}
+	return string(s.Kind) + ":" + s.ID
+}
 
 var ErrBadSubject = errors.New("model: subject 格式非法")
 
-// ParseSubject 解析 "u:{uid}" / "g:{uuid}"。访客 id 必须是标准写法的 uuid v4，
-// 否则前端拼一个可预测的字符串就能冒充别人。
+// ParseSubject 解析 "u:{uid}" / "g:{uuid}" / "b:{uid}" / "b.{group}:{uid}"。
+// 访客 id 必须是标准写法的 uuid v4，否则前端拼一个可预测的字符串就能冒充别人。
 func ParseSubject(s string) (Subject, error) {
 	kind, id, ok := strings.Cut(s, ":")
 	if !ok || id == "" {
 		return Subject{}, fmt.Errorf("%w: %q", ErrBadSubject, s)
+	}
+	if base, group, dotted := strings.Cut(kind, "."); dotted {
+		// fp 用户与访客的身份不由业务方决定，只有 b 能带分组
+		if SubjectKind(base) != KindBiz {
+			return Subject{}, fmt.Errorf("%w: 只有业务方主体能带分组: %q", ErrBadSubject, s)
+		}
+		if err := ValidateGroup(group); err != nil {
+			return Subject{}, fmt.Errorf("%w: %v", ErrBadSubject, err)
+		}
+		if err := ValidateUserID(id); err != nil {
+			return Subject{}, fmt.Errorf("%w: %v", ErrBadSubject, err)
+		}
+		return BizGroup(group, id), nil
 	}
 	switch SubjectKind(kind) {
 	case KindUser:
@@ -93,6 +126,31 @@ func ValidateUserID(id string) error {
 	// 不同的 (app, subject) 组合切分成同一个键。
 	if strings.ContainsRune(id, 0) {
 		return fmt.Errorf("%w: 不能含空字节", ErrBadUserID)
+	}
+	return nil
+}
+
+// MaxGroupLen 是分组名的长度上限。分组名会进 Redis key 和每条事件的
+// subject，短小才不拖累每一次投递。
+const MaxGroupLen = 16
+
+var ErrBadGroup = errors.New("model: 分组名非法")
+
+// ValidateGroup 校验分组名：^[a-z][a-z0-9_]{0,15}$。只收小写：大小写不同
+// 会生成不同的 key，同一个分组就成了两个。
+func ValidateGroup(g string) error {
+	if g == "" || len(g) > MaxGroupLen {
+		return fmt.Errorf("%w: 长度必须在 1~%d: %q", ErrBadGroup, MaxGroupLen, g)
+	}
+	for i := 0; i < len(g); i++ {
+		c := g[i]
+		ok := c >= 'a' && c <= 'z'
+		if i > 0 {
+			ok = ok || c >= '0' && c <= '9' || c == '_'
+		}
+		if !ok {
+			return fmt.Errorf("%w: 只能是小写字母开头的小写字母、数字、下划线: %q", ErrBadGroup, g)
+		}
 	}
 	return nil
 }
