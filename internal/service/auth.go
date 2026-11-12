@@ -174,6 +174,10 @@ func (s *AuthService) completeLogin(ctx context.Context, app *domain.Application
 	if user.Status == domain.UserStatusPendingDelete {
 		revived, err := s.deps.Users.SetStatus(ctx, user.ID, domain.UserStatusActive)
 		if err != nil {
+			// 撞上了到期清理：注销已经生效，照实回"账号不可用"，而不是一个参数错误。
+			if fresh, gerr := s.deps.Users.GetByID(ctx, user.ID); gerr == nil && !fresh.CanLogin() {
+				err = accountUnavailableError(fresh)
+			}
 			s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 			return nil, err
 		}
@@ -471,11 +475,9 @@ func (s *AuthService) writeLog(ctx context.Context, e domain.LoginLog) {
 
 // accountUnavailableError 按用户状态给出登录被拒的错误。
 //
-// 按 Status 分流而不是一律返回"已冻结"：当前没有任何生产代码会把用户置成
-// DELETED（状态机允许 PENDING_DELETE → DELETED，但没有地方执行该迁移），
-// PENDING_DELETE 在登录时又会被复活成 ACTIVE，所以实践中只会走到 FROZEN
-// 那一支。留着兜底是为了将来真做了注销任务时**不会把已注销的账号谎报成
-// "已冻结"**——那种谎报会让用户和客服都往错的方向排查。
+// 按 Status 分流而不是一律返回"已冻结"：DELETED 只由到期清理任务置上，
+// 那时登录标识已被删掉，登录几乎走不到它；但与清理并发的那次登录会走到，
+// 也不能把已注销的账号谎报成"已冻结"——那种谎报会让用户和客服都往错的方向排查。
 //
 // 安全前提：这个错误只在 conn.Authenticate() 成功之后才可能返回，也就是
 // 调用方已经证明了自己知道密码或持有有效验证码，所以暴露"账号被冻结"

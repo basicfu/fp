@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -298,6 +299,10 @@ func (e *grpcEnv) userServiceCalls(userID string) map[string]func(context.Contex
 			_, err := e.userClient.GetAvatar(ctx, &fpv1.GetAvatarRequest{Hash: domain.AvatarHash(grpcTestPNG)})
 			return err
 		},
+		"RequestDeletion": func(ctx context.Context) error {
+			_, err := e.userClient.RequestDeletion(ctx, &fpv1.RequestDeletionRequest{UserId: userID})
+			return err
+		},
 	}
 }
 
@@ -308,8 +313,8 @@ func (e *grpcEnv) assertUntouched(t *testing.T, userID uuid.UUID) {
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
-	if fresh.Nickname != "小明" || fresh.AvatarHash != domain.AvatarHash(grpcTestPNG) {
-		t.Fatalf("被拒的调用改动了资料: nickname=%q avatar_hash=%q", fresh.Nickname, fresh.AvatarHash)
+	if fresh.Nickname != "小明" || fresh.AvatarHash != domain.AvatarHash(grpcTestPNG) || fresh.Status != domain.UserStatusActive {
+		t.Fatalf("被拒的调用改动了资料: nickname=%q avatar_hash=%q status=%s", fresh.Nickname, fresh.AvatarHash, fresh.Status)
 	}
 }
 
@@ -405,4 +410,88 @@ func TestLoginCarriesAvatarHashAndRecordsRegistrationSource(t *testing.T) {
 	if p.GetRegisteredAppId() != e.appID {
 		t.Fatalf("登录应用 B 之后 registered_app_id = %q, want 仍是 %q", p.GetRegisteredAppId(), e.appID)
 	}
+}
+
+// 提交注销：回冷静期满的时间、作废会话；重复提交不重新计时；冻结与查无此人如实回码。
+func TestRequestDeletionOverGRPC(t *testing.T) {
+	e := newGRPCEnv(t)
+	ctx := context.Background()
+	u := e.newBareUser(t, "小明")
+	sess, err := e.sessions.Issue(ctx, service.IssueInput{UserID: u.ID, App: e.app})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	res, err := e.userClient.RequestDeletion(e.authed(ctx), &fpv1.RequestDeletionRequest{UserId: u.ID.String()})
+	if err != nil {
+		t.Fatalf("RequestDeletion: %v", err)
+	}
+	fresh, err := e.users.GetByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if want := fresh.DeleteSubmittedAt + (15 * 24 * time.Hour).Milliseconds(); res.GetPurgeAt() != want {
+		t.Fatalf("purge_at = %d, want %d", res.GetPurgeAt(), want)
+	}
+	if _, err := e.sessions.Validate(ctx, sess.Token, e.app); err == nil {
+		t.Fatal("提交注销后会话仍然有效")
+	}
+	p, err := e.userClient.GetUser(e.authed(ctx), &fpv1.GetUserRequest{UserId: u.ID.String()})
+	if err != nil || p.GetStatus() != domain.UserStatusPendingDelete {
+		t.Fatalf("GetUser status = %q, err = %v", p.GetStatus(), err)
+	}
+
+	again, err := e.userClient.RequestDeletion(e.authed(ctx), &fpv1.RequestDeletionRequest{UserId: u.ID.String()})
+	if err != nil || again.GetPurgeAt() != res.GetPurgeAt() {
+		t.Fatalf("重复提交 purge_at = %d, err = %v, want %d", again.GetPurgeAt(), err, res.GetPurgeAt())
+	}
+
+	frozen := e.newBareUser(t, "小红")
+	if _, err := e.accounts.SetStatus(ctx, frozen.ID, domain.UserStatusFrozen); err != nil {
+		t.Fatalf("冻结: %v", err)
+	}
+	_, err = e.userClient.RequestDeletion(e.authed(ctx), &fpv1.RequestDeletionRequest{UserId: frozen.ID.String()})
+	wantStatus(t, "冻结的账号", err, codes.PermissionDenied, domain.CodeAccountFrozen)
+
+	for _, id := range []string{uuid.NewString(), "not-a-uuid"} {
+		_, err := e.userClient.RequestDeletion(e.authed(ctx), &fpv1.RequestDeletionRequest{UserId: id})
+		wantStatus(t, "不存在的用户 "+id, err, codes.NotFound, domain.CodeUserNotFound)
+	}
+}
+
+// 注销生效后 GetUser 看到墓碑：DELETED、没有标识；归档期满墓碑删掉后查无此人。
+func TestGetUserAcrossDeletionLifecycle(t *testing.T) {
+	e := newGRPCEnv(t)
+	ctx := context.Background()
+	u := e.newBareUser(t, "小明")
+	if _, err := e.userClient.RequestDeletion(e.authed(ctx), &fpv1.RequestDeletionRequest{UserId: u.ID.String()}); err != nil {
+		t.Fatalf("RequestDeletion: %v", err)
+	}
+	if _, err := e.pool.Exec(ctx,
+		`UPDATE app_user SET delete_submitted_at = now() - interval '15 days' WHERE id = $1`, u.ID); err != nil {
+		t.Fatalf("拨提交时间: %v", err)
+	}
+	if purged, _, err := e.accounts.SweepDeletions(ctx); err != nil || purged != 1 {
+		t.Fatalf("SweepDeletions purged = %d, err = %v", purged, err)
+	}
+
+	p, err := e.userClient.GetUser(e.authed(ctx), &fpv1.GetUserRequest{UserId: u.ID.String()})
+	if err != nil {
+		t.Fatalf("GetUser 墓碑: %v", err)
+	}
+	if p.GetStatus() != domain.UserStatusDeleted || len(p.GetIdentities()) != 0 || p.GetNickname() != "" {
+		t.Fatalf("墓碑 = %+v", p)
+	}
+	_, err = e.userClient.RequestDeletion(e.authed(ctx), &fpv1.RequestDeletionRequest{UserId: u.ID.String()})
+	wantStatus(t, "已注销的账号", err, codes.PermissionDenied, domain.CodeAccountUnavailable)
+
+	if _, err := e.pool.Exec(ctx,
+		`UPDATE user_deletion_archive SET expires_at = now() - interval '1 second' WHERE user_id = $1`, u.ID); err != nil {
+		t.Fatalf("拨到期时间: %v", err)
+	}
+	if _, expired, err := e.accounts.SweepDeletions(ctx); err != nil || expired != 1 {
+		t.Fatalf("SweepDeletions expired = %d, err = %v", expired, err)
+	}
+	_, err = e.userClient.GetUser(e.authed(ctx), &fpv1.GetUserRequest{UserId: u.ID.String()})
+	wantStatus(t, "墓碑删除之后", err, codes.NotFound, domain.CodeUserNotFound)
 }

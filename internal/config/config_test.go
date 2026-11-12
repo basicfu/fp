@@ -216,3 +216,19 @@ func TestParsePublicURL(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAccountDeletion(t *testing.T) {
+	cfg, err := Parse("", "DEV")
+	if err != nil || cfg.AccountDeletion.CoolingOffDays != DefaultCoolingOffDays {
+		t.Fatalf("默认冷静期 = %d, err = %v, want %d", cfg.AccountDeletion.CoolingOffDays, err, DefaultCoolingOffDays)
+	}
+	cfg, err = Parse("account_deletion:\n  cooling_off_days: 30\n", "DEV")
+	if err != nil || cfg.AccountDeletion.CoolingOffDays != 30 {
+		t.Fatalf("冷静期 = %d, err = %v, want 30", cfg.AccountDeletion.CoolingOffDays, err)
+	}
+	for _, bad := range []string{"0", "-1"} {
+		if _, err := Parse("account_deletion:\n  cooling_off_days: "+bad+"\n", "DEV"); err == nil {
+			t.Errorf("cooling_off_days %s 应当被拒绝", bad)
+		}
+	}
+}

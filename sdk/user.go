@@ -21,6 +21,10 @@ const (
 	CodeAvatarInvalid = "AVATAR_INVALID"
 	// CodeAvatarNotFound：没有这个哈希的头像——已被替换或清除。哨兵 ErrNotFound。
 	CodeAvatarNotFound = "AVATAR_NOT_FOUND"
+	// CodeAccountFrozen：账号已被冻结，不能提交注销。哨兵 ErrForbidden。
+	CodeAccountFrozen = "ACCOUNT_FROZEN"
+	// CodeAccountUnavailable：账号已注销（DELETED），不能再提交注销。哨兵 ErrForbidden。
+	CodeAccountUnavailable = "ACCOUNT_UNAVAILABLE"
 )
 
 // 性别取值。空串表示未设置。
@@ -136,6 +140,23 @@ func (u *Users) Avatar(ctx context.Context, hash string) (image []byte, contentT
 	return res.GetImage(), res.GetContentType(), nil
 }
 
+// RequestDeletion 替用户提交注销，返回预计永久删除的时间。
+//
+// 提交后账号进入冷静期（Status 为 PENDING_DELETE），他在所有应用、所有设备上的会话立即作废；
+// 冷静期内用该账号任意方式登录即撤销注销（回到 ACTIVE），期满由 fp 永久删除：登录标识与资料删掉，
+// 手机号、微信释放，Get 看到 Status 为 DELETED、没有 Identities；留存期满后 Get 返回 ErrNotFound。
+//
+// 已在冷静期内时幂等，返回原来的删除时间，不重新计时。
+// 账号已冻结返回 ErrForbidden（Code 为 CodeAccountFrozen），已注销返回 ErrForbidden（CodeAccountUnavailable），
+// 用户不存在返回 ErrNotFound（CodeUserNotFound）。
+func (u *Users) RequestDeletion(ctx context.Context, userID string) (purgeAt time.Time, err error) {
+	res, err := u.c.userRPC.RequestDeletion(ctx, &fpv1.RequestDeletionRequest{UserId: userID})
+	if err != nil {
+		return time.Time{}, translateUser(err)
+	}
+	return time.UnixMilli(res.GetPurgeAt()), nil
+}
+
 func userProfileFrom(p *fpv1.UserProfile) *UserProfile {
 	out := &UserProfile{
 		ID:              p.GetId(),
@@ -167,7 +188,7 @@ func timeFromMs(ms int64) time.Time {
 }
 
 // translateUser 与 translate 不同：NotFound 在这里是"用户不存在 / 头像不存在"，
-// PermissionDenied 是"应用已停用"，都不能归进 ErrUnauthorized——那会让业务方把
+// PermissionDenied 是"应用已停用"或"账号状态不允许注销"，都不能归进 ErrUnauthorized——那会让业务方把
 // "查无此人"当成凭据失效去清会话。
 func translateUser(err error) error {
 	var sentinel error

@@ -480,6 +480,96 @@ func (x *GetAvatarResponse) GetContentType() string {
 	return ""
 }
 
+type RequestDeletionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestDeletionRequest) Reset() {
+	*x = RequestDeletionRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestDeletionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestDeletionRequest) ProtoMessage() {}
+
+func (x *RequestDeletionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestDeletionRequest.ProtoReflect.Descriptor instead.
+func (*RequestDeletionRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RequestDeletionRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type RequestDeletionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// purge_at 是预计永久删除的时间（提交时间 + 冷静期），unix 毫秒。
+	// 清理任务按小时跑，实际删除会晚于这个时间至多一个周期。
+	PurgeAt       int64 `protobuf:"varint,1,opt,name=purge_at,json=purgeAt,proto3" json:"purge_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestDeletionResponse) Reset() {
+	*x = RequestDeletionResponse{}
+	mi := &file_fp_v1_user_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestDeletionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestDeletionResponse) ProtoMessage() {}
+
+func (x *RequestDeletionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestDeletionResponse.ProtoReflect.Descriptor instead.
+func (*RequestDeletionResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RequestDeletionResponse) GetPurgeAt() int64 {
+	if x != nil {
+		return x.PurgeAt
+	}
+	return 0
+}
+
 var File_fp_v1_user_proto protoreflect.FileDescriptor
 
 const file_fp_v1_user_proto_rawDesc = "" +
@@ -523,13 +613,18 @@ const file_fp_v1_user_proto_rawDesc = "" +
 	"\x04hash\x18\x01 \x01(\tR\x04hash\"L\n" +
 	"\x11GetAvatarResponse\x12\x14\n" +
 	"\x05image\x18\x01 \x01(\fR\x05image\x12!\n" +
-	"\fcontent_type\x18\x02 \x01(\tR\vcontentType2\xff\x01\n" +
+	"\fcontent_type\x18\x02 \x01(\tR\vcontentType\"1\n" +
+	"\x16RequestDeletionRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\"4\n" +
+	"\x17RequestDeletionResponse\x12\x19\n" +
+	"\bpurge_at\x18\x01 \x01(\x03R\apurgeAt2\xd1\x02\n" +
 	"\vUserService\x124\n" +
 	"\aGetUser\x12\x15.fp.v1.GetUserRequest\x1a\x12.fp.v1.UserProfile\x12:\n" +
 	"\n" +
 	"UpdateUser\x12\x18.fp.v1.UpdateUserRequest\x1a\x12.fp.v1.UserProfile\x12>\n" +
 	"\fUpdateAvatar\x12\x1a.fp.v1.UpdateAvatarRequest\x1a\x12.fp.v1.UserProfile\x12>\n" +
-	"\tGetAvatar\x12\x17.fp.v1.GetAvatarRequest\x1a\x18.fp.v1.GetAvatarResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
+	"\tGetAvatar\x12\x17.fp.v1.GetAvatarRequest\x1a\x18.fp.v1.GetAvatarResponse\x12P\n" +
+	"\x0fRequestDeletion\x12\x1d.fp.v1.RequestDeletionRequest\x1a\x1e.fp.v1.RequestDeletionResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
 
 var (
 	file_fp_v1_user_proto_rawDescOnce sync.Once
@@ -543,15 +638,17 @@ func file_fp_v1_user_proto_rawDescGZIP() []byte {
 	return file_fp_v1_user_proto_rawDescData
 }
 
-var file_fp_v1_user_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_fp_v1_user_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_fp_v1_user_proto_goTypes = []any{
-	(*UserProfile)(nil),         // 0: fp.v1.UserProfile
-	(*UserIdentity)(nil),        // 1: fp.v1.UserIdentity
-	(*GetUserRequest)(nil),      // 2: fp.v1.GetUserRequest
-	(*UpdateUserRequest)(nil),   // 3: fp.v1.UpdateUserRequest
-	(*UpdateAvatarRequest)(nil), // 4: fp.v1.UpdateAvatarRequest
-	(*GetAvatarRequest)(nil),    // 5: fp.v1.GetAvatarRequest
-	(*GetAvatarResponse)(nil),   // 6: fp.v1.GetAvatarResponse
+	(*UserProfile)(nil),             // 0: fp.v1.UserProfile
+	(*UserIdentity)(nil),            // 1: fp.v1.UserIdentity
+	(*GetUserRequest)(nil),          // 2: fp.v1.GetUserRequest
+	(*UpdateUserRequest)(nil),       // 3: fp.v1.UpdateUserRequest
+	(*UpdateAvatarRequest)(nil),     // 4: fp.v1.UpdateAvatarRequest
+	(*GetAvatarRequest)(nil),        // 5: fp.v1.GetAvatarRequest
+	(*GetAvatarResponse)(nil),       // 6: fp.v1.GetAvatarResponse
+	(*RequestDeletionRequest)(nil),  // 7: fp.v1.RequestDeletionRequest
+	(*RequestDeletionResponse)(nil), // 8: fp.v1.RequestDeletionResponse
 }
 var file_fp_v1_user_proto_depIdxs = []int32{
 	1, // 0: fp.v1.UserProfile.identities:type_name -> fp.v1.UserIdentity
@@ -559,12 +656,14 @@ var file_fp_v1_user_proto_depIdxs = []int32{
 	3, // 2: fp.v1.UserService.UpdateUser:input_type -> fp.v1.UpdateUserRequest
 	4, // 3: fp.v1.UserService.UpdateAvatar:input_type -> fp.v1.UpdateAvatarRequest
 	5, // 4: fp.v1.UserService.GetAvatar:input_type -> fp.v1.GetAvatarRequest
-	0, // 5: fp.v1.UserService.GetUser:output_type -> fp.v1.UserProfile
-	0, // 6: fp.v1.UserService.UpdateUser:output_type -> fp.v1.UserProfile
-	0, // 7: fp.v1.UserService.UpdateAvatar:output_type -> fp.v1.UserProfile
-	6, // 8: fp.v1.UserService.GetAvatar:output_type -> fp.v1.GetAvatarResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
+	7, // 5: fp.v1.UserService.RequestDeletion:input_type -> fp.v1.RequestDeletionRequest
+	0, // 6: fp.v1.UserService.GetUser:output_type -> fp.v1.UserProfile
+	0, // 7: fp.v1.UserService.UpdateUser:output_type -> fp.v1.UserProfile
+	0, // 8: fp.v1.UserService.UpdateAvatar:output_type -> fp.v1.UserProfile
+	6, // 9: fp.v1.UserService.GetAvatar:output_type -> fp.v1.GetAvatarResponse
+	8, // 10: fp.v1.UserService.RequestDeletion:output_type -> fp.v1.RequestDeletionResponse
+	6, // [6:11] is the sub-list for method output_type
+	1, // [1:6] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -582,7 +681,7 @@ func file_fp_v1_user_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_user_proto_rawDesc), len(file_fp_v1_user_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

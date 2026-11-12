@@ -26,6 +26,7 @@ p, err := u.Get(ctx, userID)                                       // 查询个�
 p, err  = u.Update(ctx, userID, fpsdk.UserUpdate{Nickname: &name}) // 改昵称 / 性别，nil 的字段不改
 p, err  = u.UpdateAvatar(ctx, userID, imageBytes)                  // 更新头像；传 nil 清除
 img, contentType, err := u.Avatar(ctx, hash)                       // 按哈希下载头像
+purgeAt, err := u.RequestDeletion(ctx, userID)                     // 提交注销，返回预计永久删除的时间
 ```
 
 `Update` 与 `UpdateAvatar` 都返回改完的完整资料，不必再查一次。登录返回的 `LoginResult.User.GetAvatarHash()` 也带着头像哈希。
@@ -58,6 +59,8 @@ img, contentType, err := u.Avatar(ctx, hash)                       // 按哈希�
 | `AVATAR_INVALID` | `ErrInvalidArgument` | InvalidArgument | 图片超过 1 MB，或不是 JPEG / PNG / WebP |
 | `INVALID_ARGUMENT` | `ErrInvalidArgument` | InvalidArgument | 性别不在取值范围内 |
 | `APP_DISABLED` | `ErrForbidden` | PermissionDenied | 调用方应用已停用 |
+| `ACCOUNT_FROZEN` | `ErrForbidden` | PermissionDenied | `RequestDeletion`：账号已被冻结，不能注销 |
+| `ACCOUNT_UNAVAILABLE` | `ErrForbidden` | PermissionDenied | `RequestDeletion`：账号已注销 |
 | （无） | `ErrForbidden` | PermissionDenied | 用了 fp-im 网关的凭据 |
 | `APP_CREDENTIAL_INVALID` | `ErrUnauthorized` | Unauthenticated | `AppID` / `AppSecret` 不对 |
 | （无） | `ErrUnavailable` | Unavailable 等 | fp 不可达或内部错误 |
@@ -66,7 +69,7 @@ img, contentType, err := u.Avatar(ctx, hash)                       // 按哈希�
 
 超过 1 MB 的图片 SDK 在本地就拒绝（同样是 `AVATAR_INVALID`），不会发给 fp。
 
-这四个方法不重试，也不设自己的超时，由调用方的 `ctx` 控制。
+这些方法不重试，也不设自己的超时，由调用方的 `ctx` 控制。
 
 ## 4. 业务方要写的两个 HTTP 入口
 
@@ -137,3 +140,13 @@ mux.Handle("PUT /api/me/avatar", auth.Middleware(http.HandlerFunc(func(w http.Re
 - 只存业务方给的那一份，没有多种尺寸。
 - 不抓取三方头像（微信等）转存，`avatar_url` 列留给三方登录接入时使用。
 - 两个用户传了同一张图时各存一行，不做去重。
+
+## 8. 注销
+
+`RequestDeletion` 由业务服务端在用户确认注销后调用，fp 不再验身份——身份由业务方的登录态保证。
+
+- 账号进入冷静期（`PENDING_DELETE`），他在**所有应用、所有设备**上的会话立即作废。冷静期默认 15 天，系统配置 `account_deletion.cooling_off_days`（至少 1，改了重启生效）。
+- 冷静期内用该账号任意方式登录即撤销注销，回到 `ACTIVE`，资料原样还在。
+- 已在冷静期内再调一次是幂等的：返回原来的删除时间，不重新计时。
+- 期满由 fp 进程里每小时一轮的清理任务生效（多实例各跑各的，行锁跳过不重复）：删全部登录标识与三方绑定（手机号、微信释放，可以重新注册成新用户）、注册来源、角色、头像，清昵称、密码、性别，状态置 `DELETED`。`Get` 此后返回 `Status = DELETED`、没有 `Identities`。
+- 生效时只把用户 ID、手机号、微信 UnionID、提交与生效时间写进归档表 `user_deletion_archive`，不经任何接口暴露；生效满 6 个月后连同该用户的登录日志、`DELETED` 墓碑一起删除，此后 `Get` 返回 `USER_NOT_FOUND`。业务方把 `DELETED` 与 `USER_NOT_FOUND` 都当成"已注销"。

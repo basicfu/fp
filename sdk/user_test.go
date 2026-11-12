@@ -24,6 +24,7 @@ type userStub struct {
 	profile *fpv1.UserProfile
 	avatar  *fpv1.GetAvatarResponse
 
+	purgeAt    int64
 	calls      int
 	lastUpdate *fpv1.UpdateUserRequest
 	lastAvatar *fpv1.UpdateAvatarRequest
@@ -53,6 +54,15 @@ func (s *userStub) GetAvatar(_ context.Context, req *fpv1.GetAvatarRequest) (*fp
 	s.calls++
 	s.lastHash = req.GetHash()
 	return s.avatar, s.err
+}
+
+func (s *userStub) RequestDeletion(_ context.Context, req *fpv1.RequestDeletionRequest) (*fpv1.RequestDeletionResponse, error) {
+	s.calls++
+	s.lastUserID = req.GetUserId()
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &fpv1.RequestDeletionResponse{PurgeAt: s.purgeAt}, nil
 }
 
 // newUsersForTest 起一个只挂 UserService 桩的真实 gRPC 服务端，返回连着它的 Users。
@@ -233,6 +243,8 @@ func TestUsersErrorMapping(t *testing.T) {
 		{"性别不合规", detailed(codes.InvalidArgument, "INVALID_ARGUMENT", "性别只能是 MALE、FEMALE 或留空"), "INVALID_ARGUMENT", ErrInvalidArgument},
 		{"应用凭据无效", detailed(codes.Unauthenticated, "APP_CREDENTIAL_INVALID", "无效"), "APP_CREDENTIAL_INVALID", ErrUnauthorized},
 		{"应用已停用", detailed(codes.PermissionDenied, "APP_DISABLED", "应用已停用"), "APP_DISABLED", ErrForbidden},
+		{"账号已冻结", detailed(codes.PermissionDenied, "ACCOUNT_FROZEN", "账号已被冻结"), CodeAccountFrozen, ErrForbidden},
+		{"账号已注销", detailed(codes.PermissionDenied, "ACCOUNT_UNAVAILABLE", "账号当前不可用"), CodeAccountUnavailable, ErrForbidden},
 		{"IM 凭据", status.Error(codes.PermissionDenied, "IM 网关凭据不能调用该接口"), "", ErrForbidden},
 		{"fp 不可达", status.Error(codes.Unavailable, "down"), "", ErrUnavailable},
 		{"fp 内部错误", status.Error(codes.Internal, "服务器内部错误"), "", ErrUnavailable},
@@ -250,8 +262,9 @@ func TestUsersErrorMapping(t *testing.T) {
 		_, updateErr := u.Update(ctx, "u-1", UserUpdate{Nickname: &name})
 		_, avatarErr := u.UpdateAvatar(ctx, "u-1", []byte("img"))
 		_, _, downloadErr := u.Avatar(ctx, "h")
+		_, deletionErr := u.RequestDeletion(ctx, "u-1")
 
-		for method, err := range map[string]error{"Get": getErr, "Update": updateErr, "UpdateAvatar": avatarErr, "Avatar": downloadErr} {
+		for method, err := range map[string]error{"Get": getErr, "Update": updateErr, "UpdateAvatar": avatarErr, "Avatar": downloadErr, "RequestDeletion": deletionErr} {
 			if err == nil {
 				t.Errorf("%s/%s: 应返回错误", c.name, method)
 				continue
@@ -274,8 +287,25 @@ func TestUsersErrorMapping(t *testing.T) {
 				t.Errorf("%s/%s: status.Code = %v, want %v", c.name, method, status.Code(err), status.Code(c.err))
 			}
 		}
-		if stub.calls != 4 {
-			t.Errorf("%s: calls = %d, want 4（不重试）", c.name, stub.calls)
+		if stub.calls != 5 {
+			t.Errorf("%s: calls = %d, want 5（不重试）", c.name, stub.calls)
 		}
+	}
+}
+
+func TestUsersRequestDeletion(t *testing.T) {
+	const purgeAt = int64(1761234567890)
+	stub := &userStub{purgeAt: purgeAt}
+	u := newUsersForTest(t, stub)
+
+	got, err := u.RequestDeletion(context.Background(), "u-9")
+	if err != nil {
+		t.Fatalf("RequestDeletion: %v", err)
+	}
+	if stub.lastUserID != "u-9" {
+		t.Fatalf("发出的 user_id = %q, want u-9", stub.lastUserID)
+	}
+	if !got.Equal(time.UnixMilli(purgeAt)) {
+		t.Fatalf("purgeAt = %v, want %v", got, time.UnixMilli(purgeAt))
 	}
 }

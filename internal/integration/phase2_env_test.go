@@ -188,6 +188,7 @@ func (e *phase2Env) startServer(t *testing.T) {
 		Configs: e.configs, ConfigPub: e.configPub, IMCreds: e.imCreds,
 		AccessKeys: e.accessKeys,
 		Users:      e.users,
+		Accounts:   e.accounts,
 	})
 	e.server = srv
 

@@ -26,6 +26,10 @@ import (
 	"github.com/basicfu/fp/web"
 )
 
+// deletionSweepInterval 是注销清理任务的周期。冷静期按天计，一小时的延迟对"15 天后删除"无关紧要，
+// 而更密的周期只是在多数时候空跑一条查询。
+const deletionSweepInterval = time.Hour
+
 func main() {
 	if len(os.Args) > 1 {
 		os.Exit(runSubcommand(os.Args[1:], os.Stdout, os.Stderr))
@@ -193,13 +197,18 @@ func run() error {
 		PublicURL: cfg.PublicURL,
 	})
 
+	accountSvc := service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc,
+		service.WithDeletionCoolingOff(time.Duration(cfg.AccountDeletion.CoolingOffDays)*24*time.Hour))
+	// 每个实例都跑：领取用行锁跳过，多实例并发不会重复处理，也不需要选主。
+	go accountSvc.RunDeletionSweep(ctx, deletionSweepInterval)
+
 	httpSrv := &http.Server{
 		Addr: cfg.HTTP.Addr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Admin:         adminSvc,
 			Apps:          appSvc,
 			Users:         userSvc,
-			Accounts:      service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc),
+			Accounts:      accountSvc,
 			Sessions:      sessionSvc,
 			Logs:          logSvc,
 			Registry:      registry,
@@ -246,6 +255,7 @@ func run() error {
 		AccessKeys: accessKeySvc,
 		Notify:     notifySvc,
 		Users:      userSvc,
+		Accounts:   accountSvc,
 	})
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPC.Addr)

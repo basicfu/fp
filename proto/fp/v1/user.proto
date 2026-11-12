@@ -25,6 +25,12 @@ service UserService {
   rpc UpdateAvatar(UpdateAvatarRequest) returns (UserProfile);
   // GetAvatar 按内容哈希取回头像。
   rpc GetAvatar(GetAvatarRequest) returns (GetAvatarResponse);
+  // RequestDeletion 替用户提交注销：账号进入冷静期（PENDING_DELETE），立即撤销他在所有应用、
+  // 所有设备上的会话。冷静期内用该账号任意方式登录即撤销注销；期满由 fp 永久删除。
+  //
+  // 已在冷静期内时幂等：返回原来的 purge_at，不重新计时。
+  // FROZEN 回 ACCOUNT_FROZEN、DELETED 回 ACCOUNT_UNAVAILABLE（均为 PERMISSION_DENIED），用户不存在回 USER_NOT_FOUND。
+  rpc RequestDeletion(RequestDeletionRequest) returns (RequestDeletionResponse);
 }
 
 // UserProfile 是一个用户的全部个人信息。
@@ -92,4 +98,14 @@ message GetAvatarResponse {
   bytes image = 1;
   // content_type 是存入时按文件头识别出的类型：image/jpeg、image/png 或 image/webp。
   string content_type = 2;
+}
+
+message RequestDeletionRequest {
+  string user_id = 1;
+}
+
+message RequestDeletionResponse {
+  // purge_at 是预计永久删除的时间（提交时间 + 冷静期），unix 毫秒。
+  // 清理任务按小时跑，实际删除会晚于这个时间至多一个周期。
+  int64 purge_at = 1;
 }

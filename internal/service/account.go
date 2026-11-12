@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -37,11 +38,17 @@ type AccountService struct {
 	sessions SessionRevoker
 	epochs   EpochBumper
 	logs     *LoginLogService
+	// coolingOff 是提交注销到永久删除的冷静期，见 RequestDeletion。
+	coolingOff time.Duration
 }
 
 // NewAccountService 构造 AccountService。
-func NewAccountService(users *UserService, sessions SessionRevoker, epochs EpochBumper, logs *LoginLogService) *AccountService {
-	return &AccountService{users: users, sessions: sessions, epochs: epochs, logs: logs}
+func NewAccountService(users *UserService, sessions SessionRevoker, epochs EpochBumper, logs *LoginLogService, opts ...AccountOption) *AccountService {
+	s := &AccountService{users: users, sessions: sessions, epochs: epochs, logs: logs, coolingOff: DefaultDeletionCoolingOff}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // SetStatus 迁移用户状态；迁移到不可登录的状态时连带撤销其全部会话。
@@ -56,6 +63,11 @@ func NewAccountService(users *UserService, sessions SessionRevoker, epochs Epoch
 // 合起来才是签发竞态的围栏"这个论证（见 SDD 简报），而所有测试仍然是绿的——
 // 这个顺序错误没有任何单元测试能直接抓到，只能靠代码审查守住。
 func (s *AccountService) SetStatus(ctx context.Context, userID uuid.UUID, status string) (*domain.User, error) {
+	// DELETED 只能由注销清理任务置上：直接改状态会跳过归档与删标识，留下一个
+	// 手机号永远释放不掉、也永远不会被清理的半截账号。
+	if status == domain.UserStatusDeleted {
+		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "已注销状态只能由注销流程到期生效，不能手动设置")
+	}
 	u, err := s.users.SetStatus(ctx, userID, status)
 	if err != nil {
 		return nil, err

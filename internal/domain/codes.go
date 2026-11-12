@@ -26,11 +26,11 @@ const (
 	// CanLogin 之前），所以暴露冻结原因不构成账号枚举泄露。
 	// 这个顺序是安全前提，不要调换。
 	CodeAccountFrozen = "ACCOUNT_FROZEN"
-	// CodeAccountUnavailable 是 CanLogin() 为假但状态不是 FROZEN 时的兜底。
+	// CodeAccountUnavailable 是 CanLogin() 为假但状态不是 FROZEN 时的兜底，
+	// 实际就是已注销（DELETED）。
 	//
-	// 当前没有任何生产代码会把用户置成 DELETED，PENDING_DELETE 在登录时
-	// 又会被复活成 ACTIVE，所以实践中走不到这里。留着它是为了将来真做了
-	// 注销任务时不会把已注销的账号谎报成"已冻结"。
+	// 登录时几乎走不到：注销生效时登录标识已被删掉，用原手机号登录会注册成新用户。
+	// 对已注销的账号再提交注销（RequestDeletion）回的是它。
 	CodeAccountUnavailable = "ACCOUNT_UNAVAILABLE"
 	// CodeTokenInvalid 覆盖 token 不存在、已过期、以及被强制下线
 	//（改密码/纪元失配）。对使用者而言都是"要重新登录"，不再细分。

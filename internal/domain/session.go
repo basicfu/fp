@@ -70,6 +70,8 @@ const (
 	RevokeReasonKick            = "kick"
 	RevokeReasonFreeze          = "freeze"
 	RevokeReasonPasswordChanged = "password_changed"
+	// RevokeReasonDeletion 是用户提交注销，以及到期清理时的兜底撤销。
+	RevokeReasonDeletion = "account_deletion"
 )
 
 // 撤销频道上承载的事件种类。空串是撤销本身；另两种复用这条频道，

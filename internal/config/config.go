@@ -33,6 +33,8 @@ type Config struct {
 	// PublicURL 是 fp 对公网的地址（如 https://fp.example.com），三方扫码登录用它拼回调地址。
 	// 微信开放平台的「授权回调域」要填它的域名。不用扫码登录可以不填。
 	PublicURL string `yaml:"public_url"`
+	// AccountDeletion 是用户注销的参数。
+	AccountDeletion AccountDeletion `yaml:"account_deletion"`
 	// LegacySMS 只为兼容：Parse 开着 KnownFields(true)，而存量系统配置的第一版是
 	// seedDefaultsYAML 把默认值整份写进去的，里面带着 sms: 段。直接删字段会让这些
 	// 库启动时解析失败；版本快照又不允许改写。读进来、丢掉；omitempty 保证 ToYAML
@@ -43,6 +45,16 @@ type Config struct {
 type Log struct {
 	Level string `yaml:"level"` // debug / info / warn / error
 }
+
+// AccountDeletion 是用户注销的参数。
+type AccountDeletion struct {
+	// CoolingOffDays 是冷静期天数：提交注销后这么多天内用该账号登录即撤销注销，期满永久删除。
+	// 隐私政策承诺"15 个工作日内处理"，默认 15 天落在承诺之内；调长之前先核对对外承诺。
+	CoolingOffDays int `yaml:"cooling_off_days"`
+}
+
+// DefaultCoolingOffDays 是 account_deletion.cooling_off_days 的默认值。
+const DefaultCoolingOffDays = 15
 
 type Listen struct {
 	Addr string `yaml:"addr"`
@@ -79,6 +91,8 @@ func Parse(yamlText string, env string) (*Config, error) {
 		Log:  Log{Level: "info"},
 		HTTP: Listen{Addr: ":8080"},
 		GRPC: Listen{Addr: ":9090"},
+
+		AccountDeletion: AccountDeletion{CoolingOffDays: DefaultCoolingOffDays},
 	}
 
 	dec := yaml.NewDecoder(strings.NewReader(yamlText))
@@ -95,6 +109,10 @@ func Parse(yamlText string, env string) (*Config, error) {
 	c.LegacySMS = nil
 	if c.PublicURL, err = normalizePublicURL(c.PublicURL); err != nil {
 		return nil, err
+	}
+	// 0 天意味着提交即删、登录撤销的口子形同虚设，按写错处理而不是照办。
+	if c.AccountDeletion.CoolingOffDays < 1 {
+		return nil, fmt.Errorf("config: account_deletion.cooling_off_days 至少为 1，收到 %d", c.AccountDeletion.CoolingOffDays)
 	}
 	return c, nil
 }

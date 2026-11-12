@@ -169,7 +169,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	t.Cleanup(cancelRun)
 
-	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub, IMCreds: imCreds, Users: users})
+	srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub, IMCreds: imCreds, Users: users, Accounts: env.accounts})
 	env.server = srv
 
 	lis := bufconn.Listen(1 << 20)

@@ -367,17 +367,32 @@ func (s *UserService) SetStatus(ctx context.Context, userID uuid.UUID, status st
 
 	// 进入注销保护期时记录提交时间；迁移到其他状态时清空，
 	// 这样"保护期内登录撤销注销"之后不会残留一个误导性的时间戳。
+	//
+	// WHERE 带上读到的旧状态：注销清理会在行锁里把 PENDING_DELETE 置成 DELETED，
+	// 与它并发的那次登录若无条件写回 ACTIVE，就把一个标识已删光的墓碑复活了。
 	var row pgx.Row
 	if status == domain.UserStatusPendingDelete {
 		row = s.pool.QueryRow(ctx,
 			`UPDATE app_user SET status = $2, delete_submitted_at = now(), updated_at = now()
-			 WHERE id = $1 RETURNING `+userColumns, userID, status)
+			 WHERE id = $1 AND status = $3 RETURNING `+userColumns, userID, status, current.Status)
 	} else {
 		row = s.pool.QueryRow(ctx,
 			`UPDATE app_user SET status = $2, delete_submitted_at = NULL, updated_at = now()
-			 WHERE id = $1 RETURNING `+userColumns, userID, status)
+			 WHERE id = $1 AND status = $3 RETURNING `+userColumns, userID, status, current.Status)
 	}
 	u, err := scanUser(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 读与写之间状态被别人改了：已是目标状态就当成功（两次并发提交注销），否则按最新状态拒绝。
+		fresh, gerr := s.GetByID(ctx, userID)
+		if gerr != nil {
+			return nil, gerr
+		}
+		if fresh.Status == status {
+			return fresh, nil
+		}
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument,
+			"不允许的状态迁移 %s → %s", fresh.Status, status)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新用户状态: %w", err)
 	}

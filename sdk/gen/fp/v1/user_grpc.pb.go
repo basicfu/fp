@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	UserService_GetUser_FullMethodName      = "/fp.v1.UserService/GetUser"
-	UserService_UpdateUser_FullMethodName   = "/fp.v1.UserService/UpdateUser"
-	UserService_UpdateAvatar_FullMethodName = "/fp.v1.UserService/UpdateAvatar"
-	UserService_GetAvatar_FullMethodName    = "/fp.v1.UserService/GetAvatar"
+	UserService_GetUser_FullMethodName         = "/fp.v1.UserService/GetUser"
+	UserService_UpdateUser_FullMethodName      = "/fp.v1.UserService/UpdateUser"
+	UserService_UpdateAvatar_FullMethodName    = "/fp.v1.UserService/UpdateAvatar"
+	UserService_GetAvatar_FullMethodName       = "/fp.v1.UserService/GetAvatar"
+	UserService_RequestDeletion_FullMethodName = "/fp.v1.UserService/RequestDeletion"
 )
 
 // UserServiceClient is the client API for UserService service.
@@ -50,6 +51,12 @@ type UserServiceClient interface {
 	UpdateAvatar(ctx context.Context, in *UpdateAvatarRequest, opts ...grpc.CallOption) (*UserProfile, error)
 	// GetAvatar 按内容哈希取回头像。
 	GetAvatar(ctx context.Context, in *GetAvatarRequest, opts ...grpc.CallOption) (*GetAvatarResponse, error)
+	// RequestDeletion 替用户提交注销：账号进入冷静期（PENDING_DELETE），立即撤销他在所有应用、
+	// 所有设备上的会话。冷静期内用该账号任意方式登录即撤销注销；期满由 fp 永久删除。
+	//
+	// 已在冷静期内时幂等：返回原来的 purge_at，不重新计时。
+	// FROZEN 回 ACCOUNT_FROZEN、DELETED 回 ACCOUNT_UNAVAILABLE（均为 PERMISSION_DENIED），用户不存在回 USER_NOT_FOUND。
+	RequestDeletion(ctx context.Context, in *RequestDeletionRequest, opts ...grpc.CallOption) (*RequestDeletionResponse, error)
 }
 
 type userServiceClient struct {
@@ -100,6 +107,16 @@ func (c *userServiceClient) GetAvatar(ctx context.Context, in *GetAvatarRequest,
 	return out, nil
 }
 
+func (c *userServiceClient) RequestDeletion(ctx context.Context, in *RequestDeletionRequest, opts ...grpc.CallOption) (*RequestDeletionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RequestDeletionResponse)
+	err := c.cc.Invoke(ctx, UserService_RequestDeletion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // UserServiceServer is the server API for UserService service.
 // All implementations must embed UnimplementedUserServiceServer
 // for forward compatibility.
@@ -125,6 +142,12 @@ type UserServiceServer interface {
 	UpdateAvatar(context.Context, *UpdateAvatarRequest) (*UserProfile, error)
 	// GetAvatar 按内容哈希取回头像。
 	GetAvatar(context.Context, *GetAvatarRequest) (*GetAvatarResponse, error)
+	// RequestDeletion 替用户提交注销：账号进入冷静期（PENDING_DELETE），立即撤销他在所有应用、
+	// 所有设备上的会话。冷静期内用该账号任意方式登录即撤销注销；期满由 fp 永久删除。
+	//
+	// 已在冷静期内时幂等：返回原来的 purge_at，不重新计时。
+	// FROZEN 回 ACCOUNT_FROZEN、DELETED 回 ACCOUNT_UNAVAILABLE（均为 PERMISSION_DENIED），用户不存在回 USER_NOT_FOUND。
+	RequestDeletion(context.Context, *RequestDeletionRequest) (*RequestDeletionResponse, error)
 	mustEmbedUnimplementedUserServiceServer()
 }
 
@@ -146,6 +169,9 @@ func (UnimplementedUserServiceServer) UpdateAvatar(context.Context, *UpdateAvata
 }
 func (UnimplementedUserServiceServer) GetAvatar(context.Context, *GetAvatarRequest) (*GetAvatarResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetAvatar not implemented")
+}
+func (UnimplementedUserServiceServer) RequestDeletion(context.Context, *RequestDeletionRequest) (*RequestDeletionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RequestDeletion not implemented")
 }
 func (UnimplementedUserServiceServer) mustEmbedUnimplementedUserServiceServer() {}
 func (UnimplementedUserServiceServer) testEmbeddedByValue()                     {}
@@ -240,6 +266,24 @@ func _UserService_GetAvatar_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _UserService_RequestDeletion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RequestDeletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).RequestDeletion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_RequestDeletion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).RequestDeletion(ctx, req.(*RequestDeletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // UserService_ServiceDesc is the grpc.ServiceDesc for UserService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -262,6 +306,10 @@ var UserService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetAvatar",
 			Handler:    _UserService_GetAvatar_Handler,
+		},
+		{
+			MethodName: "RequestDeletion",
+			Handler:    _UserService_RequestDeletion_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

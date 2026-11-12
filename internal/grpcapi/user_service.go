@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
@@ -16,15 +18,16 @@ import (
 // 查询、修改任何用户，不检查该用户是否在本应用登录过。
 type userServer struct {
 	fpv1.UnimplementedUserServiceServer
-	svc  *service.UserService
-	apps AppLookup
+	svc      *service.UserService
+	accounts *service.AccountService
+	apps     AppLookup
 }
 
-func newUserServer(svc *service.UserService, apps AppLookup) *userServer {
-	return &userServer{svc: svc, apps: apps}
+func newUserServer(svc *service.UserService, accounts *service.AccountService, apps AppLookup) *userServer {
+	return &userServer{svc: svc, accounts: accounts, apps: apps}
 }
 
-// authorize 是四个 RPC 共用的准入：必须是处于启用状态的业务应用。
+// authorize 是全部 RPC 共用的准入：必须是处于启用状态的业务应用。
 // fp-im 网关的凭据是另一个收窄过的子集，读不到手机号、也改不了任何人的资料。
 func (s *userServer) authorize(ctx context.Context) error {
 	if err := requireNotIM(ctx); err != nil {
@@ -106,6 +109,26 @@ func (s *userServer) GetAvatar(ctx context.Context, req *fpv1.GetAvatarRequest) 
 		return nil, StatusFrom(err)
 	}
 	return &fpv1.GetAvatarResponse{Image: image, ContentType: contentType}, nil
+}
+
+// RequestDeletion 走 AccountService 而不是 UserService：改状态必须连带撤销会话、写审计，
+// 那条耦合只在 AccountService 里实现一次。
+func (s *userServer) RequestDeletion(ctx context.Context, req *fpv1.RequestDeletionRequest) (*fpv1.RequestDeletionResponse, error) {
+	if s.accounts == nil {
+		return nil, status.Error(codes.Unimplemented, "RequestDeletion 未启用")
+	}
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	id, err := parseUserID(req.GetUserId())
+	if err != nil {
+		return nil, err
+	}
+	purgeAt, err := s.accounts.RequestDeletion(ctx, id)
+	if err != nil {
+		return nil, StatusFrom(err)
+	}
+	return &fpv1.RequestDeletionResponse{PurgeAt: purgeAt}, nil
 }
 
 // userProfile 把资料转成传输对象。密码哈希与 identity.credential 绝不出现在响应里，

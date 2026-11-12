@@ -3,10 +3,14 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
@@ -651,5 +655,68 @@ func TestUserListOmitsRegistrationSource(t *testing.T) {
 	rec := do(t, h, token, http.MethodGet, "/admin/api/users", "")
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "registeredApp") {
 		t.Fatalf("status = %d, body = %s——列表里不该出现 registeredApp", rec.Code, rec.Body.String())
+	}
+}
+
+type noopEpochs struct{}
+
+func (noopEpochs) Bump(context.Context, uuid.UUID) (int64, error) { return 0, nil }
+
+// 注销生效后的墓碑在控制台列表、详情、在线设备、登录日志里都照常显示，不报错。
+func TestDeletedTombstoneOverHTTP(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	ctx := context.Background()
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+	seedUser(t, deps, "13900139000", "鲍勃")
+
+	// 冷静期取 1 毫秒：提交后立刻就到期，不必去改库里的提交时间。
+	accounts := service.NewAccountService(deps.Users, deps.Sessions, noopEpochs{}, deps.Logs, service.WithDeletionCoolingOff(time.Millisecond))
+	if _, err := accounts.RequestDeletion(ctx, u.ID); err != nil {
+		t.Fatalf("RequestDeletion: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if purged, _, err := accounts.SweepDeletions(ctx); err != nil || purged != 1 {
+		t.Fatalf("SweepDeletions purged = %d, err = %v", purged, err)
+	}
+
+	var list struct {
+		Items []struct {
+			ID         string            `json:"id"`
+			Status     string            `json:"status"`
+			Identities []json.RawMessage `json:"identities"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	rec := do(t, h, token, http.MethodGet, "/admin/api/users?status=DELETED", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表 status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	decode(t, rec, &list)
+	if list.Total != 1 || list.Items[0].ID != u.ID.String() || list.Items[0].Status != domain.UserStatusDeleted ||
+		list.Items[0].Identities == nil || len(list.Items[0].Identities) != 0 {
+		t.Fatalf("列表 = %s", rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodGet, "/admin/api/users/"+u.ID.String(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("详情 status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		Status     string            `json:"status"`
+		Nickname   string            `json:"nickname"`
+		Identities []json.RawMessage `json:"identities"`
+	}
+	decode(t, rec, &detail)
+	if detail.Status != domain.UserStatusDeleted || detail.Nickname != "" || detail.Identities == nil || len(detail.Identities) != 0 {
+		t.Fatalf("详情 = %s", rec.Body.String())
+	}
+	for _, path := range []string{"/sessions", "/login-logs"} {
+		if rec := do(t, h, token, http.MethodGet, "/admin/api/users/"+u.ID.String()+path, ""); rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	// 控制台不能把墓碑改回去，也不能手动造墓碑。
+	if rec := do(t, h, token, http.MethodPatch, "/admin/api/users/"+u.ID.String()+"/status", `{"status":"ACTIVE"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("墓碑改回 ACTIVE status = %d, want 400", rec.Code)
 	}
 }
