@@ -36,8 +36,8 @@ func TestFromEnvReadsRequiredFieldsAndFillsDefaults(t *testing.T) {
 	if cfg.Env != "dev" || cfg.Log.Level != "info" {
 		t.Errorf("env/log.level = %q/%q, want dev/info", cfg.Env, cfg.Log.Level)
 	}
-	if cfg.HTTP.Addr != ":8081" || cfg.HTTP.TrustProxy {
-		t.Errorf("http = %+v, want addr :8081 且 trust_proxy false", cfg.HTTP)
+	if cfg.HTTP.Addr != ":8081" {
+		t.Errorf("http = %+v, want addr :8081", cfg.HTTP)
 	}
 	if cfg.GRPC.Addr != ":9091" {
 		t.Errorf("grpc.addr = %q, want :9091", cfg.GRPC.Addr)

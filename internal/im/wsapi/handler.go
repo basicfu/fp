@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -35,7 +36,6 @@ type Config struct {
 	IdleTimeout time.Duration // 无任何帧则关闭
 	SendQueue   int
 	MaxFrame    int64
-	TrustProxy  bool // 是否信任 X-Forwarded-For 的第一跳
 }
 
 type Deps struct {
@@ -113,7 +113,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 握手帧里的 app 可以是应用 code；从这里起一律换成规范 app_id——连接表、路由、
 	// 撤销都按它做键，不归一的话 code 与 app_id 会变成两个互不相通的应用。
 	af.App = appCfg.AppID
-	id, rej := s.resolveIdentity(ctx, af, rawFrame, appCfg, clientIP(r, s.Cfg.TrustProxy))
+	id, rej := s.resolveIdentity(ctx, af, rawFrame, appCfg, clientIP(r))
 	if rej != nil {
 		s.reject(ctx, ws, rej)
 		return
@@ -419,47 +419,57 @@ func (s *server) teardown(app string, sub model.Subject, c *wsConn, reason strin
 	_ = c.ws.Close(websocket.StatusCode(code), reason)
 }
 
-// clientIP 取用于访客限流的客户端地址。
+// clientIP 取 client 地址:访客限流的键、biz_auth 回调里的 X-Fp-Client-Ip。
 //
-// 信任代理时取转发头的**最右**一跳，不是最左（乙二）。最左那一跳是
-// client 自己写进请求头的内容：nginx 的默认写法
-// `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` 是
-// **追加**而不是重写，client 发来的 `X-Forwarded-For: 1.2.3.4` 会原样
-// 留在最左边，代理把真实来源追加在它右边。取最左等于把限流键的选择权
-// 交给被限流的人：每个请求换一个伪造值就绕过了按 IP 的访客限流，而设计
-// 文档第四节 4.1 把这条限流称为"im 对访客的唯一防线"。
+// 不用"信任代理"开关, 按直连端自动判断(同 Caddy 的 trusted_proxies private_ranges):
+// 直连本网关的一端是内网地址, 说明前面是自家反代, 才看 X-Forwarded-For;是公网地址说明
+// 网关被直接暴露, client 写的转发头一律不认。这样哪天直接暴露公网、忘了改配置也不会让
+// client 自报 IP;反之只开代理不开开关时拿到的是代理内网地址, 业务方按 IP 查省份全落空。
 //
-// 最右一跳是"直接连上本网关的那一跳"亲手追加的、client 改不了的值，
-// 所以它是安全的选择。代价是多层代理时它是内层代理的地址而不是真实
-// 客户端地址：那一层后面的所有 client 会共用同一个限流桶，结果是**偏严**
-// （可能误伤，不会被绕过），这个方向的错误可以接受，反过来不行。要拿到
-// 多层代理下真实的客户端地址，正确做法是配置"可信代理跳数/网段"再从右
-// 往左剥，那是另一个功能，本版不做——交接文档里写明了部署条件。
-func clientIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		// 用 Values 而不是 Get：HTTP 允许同名头出现多次，语义上等价于按
-		// 顺序逗号拼接，Get 只会返回第一个头——那恰好是最不可信的那一段。
-		if ip := rightmostForwarded(r.Header.Values("X-Forwarded-For")); ip != "" {
-			return ip
+// 转发头从**右**往左看(乙二):nginx/apisix 都是追加, client 自己写的那段在最左边, 取最左
+// 等于把限流键交给被限流的人。跳过内网跳(多层自家代理)取第一个公网地址;遇到解析不了的
+// 跳就停在它右边那一跳——再往左的内容可能是 client 伪造的。
+func clientIP(r *http.Request) string {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		peer = host
+	}
+	pa, err := netip.ParseAddr(peer)
+	if err != nil || !internalAddr(pa.Unmap()) {
+		return peer
+	}
+	hops := forwardedHops(r.Header.Values("X-Forwarded-For"))
+	got := pa.Unmap()
+	for i := len(hops) - 1; i >= 0; i-- {
+		a, err := netip.ParseAddr(hops[i])
+		if err != nil {
+			break
+		}
+		got = a.Unmap()
+		if !internalAddr(got) {
+			break
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return got.String()
 }
 
-// rightmostForwarded 返回若干个 X-Forwarded-For 头里整体最右的那一跳，
-// 全都是空白时返回空串。
-func rightmostForwarded(values []string) string {
-	for i := len(values) - 1; i >= 0; i-- {
-		hops := strings.Split(values[i], ",")
-		for j := len(hops) - 1; j >= 0; j-- {
-			if hop := strings.TrimSpace(hops[j]); hop != "" {
-				return hop
+// cgnat 是 100.64.0.0/10:阿里云 SLB 等转发到后端时的源地址就在这段, 和私网一样算自家代理。
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+func internalAddr(a netip.Addr) bool {
+	return a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || cgnat.Contains(a)
+}
+
+// forwardedHops 把若干个 X-Forwarded-For 头按顺序拼起来拆成各跳, 丢掉空白项。
+// HTTP 允许同名头出现多次, 语义等价于按顺序逗号拼接, 所以用 Values 而不是 Get。
+func forwardedHops(values []string) []string {
+	var hops []string
+	for _, v := range values {
+		for _, h := range strings.Split(v, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				hops = append(hops, h)
 			}
 		}
 	}
-	return ""
+	return hops
 }

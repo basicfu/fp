@@ -383,55 +383,48 @@ func TestIdleTimeoutDisconnects(t *testing.T) {
 	}, "应发 Disconnected(timeout)")
 }
 
-// TestClientIPUsesRightmostForwardedHop 是乙二的回归测试：信任代理时必须
-// 取转发头的最右一跳。
+// TestClientIP 钉住 client 地址的取法:直连本网关的一端是内网地址(前面是自家反代)才看
+// X-Forwarded-For,并从右往左跳过内网跳,取第一个公网地址;直连端是公网地址(网关被直接
+// 暴露)时转发头一律不认。
 //
-// 取最左（原实现）的后果：nginx 默认的
-// `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` 是**追加**
-// 而不是重写，client 自己发来的那一段会原样留在最左边。于是访客限流
-// （设计文档第四节 4.1 称之为"im 对访客的唯一防线"）在标准部署下可以被
-// 一个请求头绕过：每次握手换一个伪造值，限流桶就永远命不中同一个。
-func TestClientIPUsesRightmostForwardedHop(t *testing.T) {
+// 乙二的回归仍在里面:nginx/apisix 是**追加**转发头,client 自己写的那段留在最左边,
+// 取最左会让访客限流("im 对访客的唯一防线")被一个请求头绕过。
+func TestClientIP(t *testing.T) {
 	cases := []struct {
-		name       string
-		xff        []string
-		trustProxy bool
-		want       string
+		name string
+		peer string
+		xff  []string
+		want string
 	}{
+		{name: "客户端伪造的最左跳不能被采信", peer: "10.88.0.1:5000", xff: []string{"1.2.3.4, 203.0.113.9"}, want: "203.0.113.9"},
+		{name: "单层反代", peer: "10.88.0.1:5000", xff: []string{"203.0.113.9"}, want: "203.0.113.9"},
+		{name: "多层反代跳过内网跳", peer: "127.0.0.1:5000", xff: []string{"1.2.3.4, 203.0.113.9, 100.64.3.4, 10.0.0.8"}, want: "203.0.113.9"},
 		{
-			// 这条是绕过限流的实际场景：client 自己带了 1.2.3.4，nginx 把
-			// 真实来源 203.0.113.9 追加在右边。
-			name: "客户端伪造的最左跳不能被采信", xff: []string{"1.2.3.4, 203.0.113.9"},
-			trustProxy: true, want: "203.0.113.9",
+			// HTTP 允许同名头出现多次,语义等价于按顺序拼接;Header.Get 只看得到第一个头。
+			name: "同名头出现多次按顺序拼接", peer: "10.88.0.1:5000", xff: []string{"1.2.3.4", "203.0.113.9, 10.0.0.8"}, want: "203.0.113.9",
 		},
-		{name: "单跳", xff: []string{"203.0.113.9"}, trustProxy: true, want: "203.0.113.9"},
+		{name: "全是内网跳取最左那个", peer: "10.88.0.1:5000", xff: []string{"192.168.1.20, 10.0.0.8"}, want: "192.168.1.20"},
+		{name: "坏掉的跳之前停下", peer: "10.88.0.1:5000", xff: []string{"garbage, 10.1.1.5"}, want: "10.1.1.5"},
+		{name: "最右就坏了用直连端", peer: "10.88.0.1:5000", xff: []string{"203.0.113.9, nonsense"}, want: "10.88.0.1"},
+		{name: "尾部空白项跳过", peer: "10.88.0.1:5000", xff: []string{"203.0.113.9,  "}, want: "203.0.113.9"},
+		{name: "全是空白等于没有转发头", peer: "10.88.0.1:5000", xff: []string{"  "}, want: "10.88.0.1"},
+		{name: "IPv4 映射的 IPv6 按 IPv4 判断", peer: "[::ffff:10.88.0.1]:5000", xff: []string{"::ffff:203.0.113.9"}, want: "203.0.113.9"},
+		{name: "IPv6 唯一本地地址算内网", peer: "[fd00::1]:5000", xff: []string{"2001:db8::7"}, want: "2001:db8::7"},
 		{
-			// 多层代理：最右一跳是内层代理的地址，它后面的 client 共用一个
-			// 限流桶——偏严，可接受；偏松（可被绕过）不可接受。
-			name: "多层代理取最右", xff: []string{"1.2.3.4, 10.0.0.7, 10.0.0.8"},
-			trustProxy: true, want: "10.0.0.8",
+			// 网关被直接暴露到公网:直连端就是 client 本人, 它写的转发头不能当真。
+			name: "直连端是公网时忽略转发头", peer: "192.0.2.5:44444", xff: []string{"1.2.3.4, 203.0.113.9"}, want: "192.0.2.5",
 		},
-		{
-			// HTTP 允许同名头出现多次，语义等价于按顺序拼接，所以整体最右
-			// 一跳在最后一个头里。用 Header.Get 只能看到第一个头，那恰好是
-			// 最不可信的一段。
-			name: "同名头出现多次时取最后一个头的最右跳", xff: []string{"1.2.3.4", "10.0.0.7, 10.0.0.8"},
-			trustProxy: true, want: "10.0.0.8",
-		},
-		{name: "尾部空白项跳过", xff: []string{"10.0.0.8,  "}, trustProxy: true, want: "10.0.0.8"},
-		{name: "全是空白等于没有转发头", xff: []string{"  "}, trustProxy: true, want: "192.0.2.5"},
-		{name: "不信任代理时忽略转发头", xff: []string{"1.2.3.4, 203.0.113.9"}, trustProxy: false, want: "192.0.2.5"},
-		{name: "没有转发头", xff: nil, trustProxy: true, want: "192.0.2.5"},
+		{name: "没有转发头", peer: "10.88.0.1:5000", xff: nil, want: "10.88.0.1"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/ws", nil)
-			r.RemoteAddr = "192.0.2.5:44444"
+			r.RemoteAddr = c.peer
 			for _, v := range c.xff {
 				r.Header.Add("X-Forwarded-For", v)
 			}
-			if got := clientIP(r, c.trustProxy); got != c.want {
-				t.Fatalf("clientIP=%q，期望 %q：访客限流的键必须取 client 改不了的那一跳", got, c.want)
+			if got := clientIP(r); got != c.want {
+				t.Fatalf("clientIP=%q,期望 %q", got, c.want)
 			}
 		})
 	}

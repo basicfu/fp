@@ -40,10 +40,6 @@ type Listen struct {
 
 type HTTP struct {
 	Addr string
-	// TrustProxy 决定访客限流的 IP 取不取 X-Forwarded-For 的最右一跳。
-	// 前面确实有可信反代时才该是 true——开在裸奔的服务上等于让客户端自己
-	// 声明 IP。没有环境变量能改它，需要打开时改 defaultConfig 里的值。
-	TrustProxy bool
 }
 
 type Endpoint struct {

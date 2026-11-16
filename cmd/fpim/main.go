@@ -238,7 +238,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsapi.New(wsapi.Deps{
 		Hub: h, Conns: conns, Live: live, Auth: authn, Apps: appSrc, Guests: guests,
-		Cfg: wsapi.Config{AuthTimeout: cfg.Conn.AuthTimeout.Std(), IdleTimeout: cfg.Conn.IdleTimeout.Std(), SendQueue: cfg.Conn.SendQueue, TrustProxy: cfg.HTTP.TrustProxy},
+		Cfg: wsapi.Config{AuthTimeout: cfg.Conn.AuthTimeout.Std(), IdleTimeout: cfg.Conn.IdleTimeout.Std(), SendQueue: cfg.Conn.SendQueue},
 	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	// /health 与 internal/httpapi 里 fp 的同名接口语义一致：给探活探针

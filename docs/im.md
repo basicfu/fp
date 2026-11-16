@@ -147,7 +147,7 @@ Push / Kick / Sessions / 事件都按完整写法寻址。判断"是不是默认
     {"t":1,"app":"a1","token":"...","kind":"biz","ua":"..."}
 
 client 塞的自定义字段会原样到你手里，可以直接用。`X-Fp-Client-Ip` 是网关判定的
-client 地址（与访客限流同一个来源，信任代理时取 `X-Forwarded-For` 最右一跳），
+client 地址（与访客限流同一个来源，取法见下文"client 地址"），
 可以拿来做按 IP 的风控；它不在请求体里，因为 client 自己填的地址不可信。
 
 响应**一律 HTTP 200**，body 是 Result（见上面 ws 协议一节）。成功时额外带 `uid`，
@@ -283,10 +283,12 @@ Redis 最低 8.0（`HEXPIRE`/`HTTL`/分片订阅）；心跳 3s、判死 10s；�
 关 ws 必须排在停 gRPC 之前，否则断开事件没有出口——改动这段顺序前先看
 `cmd/fp-im/main.go` 里 `shutdown` 的注释和 `TestServeGracefulShutdownClosesWebSockets`。
 
-**`http.trust_proxy`**：开启后访客限流的 IP 取 `X-Forwarded-For` 的**最右一跳**，也就是直连
-本网关的那个代理亲手追加的值（client 改不了）。因此**只在网关前确实有代理时开**：直接对公网
-暴露时开启它，等于把限流键交给所有人伪造。多层代理下最右跳是内层代理的地址，那一层后面的所有
-client 会共用一个限流桶（偏严、可能误伤，但不会被绕过）。nginx 用默认写法即可：
+**client 地址（不用配置）**：直连网关的一端是内网地址（回环、私网、链路本地、`100.64.0.0/10`）
+时，说明前面是自家反代，才看 `X-Forwarded-For`：从**最右**往左跳过内网跳，取第一个公网地址；
+直连端是公网地址说明网关被直接暴露，转发头一律不认、取直连地址。所以挂不挂反代、挂几层都不用改
+配置，直接暴露公网时 client 也没法自报 IP。从右取而不是从左：代理是追加，client 自己写的那段在
+最左边。仍要求网关端口只对反代开放——同一内网里绕过反代直连的机器可以伪造。nginx/apisix 用默认
+的追加写法即可：
 
 ```nginx
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # 追加，最右一跳就是它看到的来源
