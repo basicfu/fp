@@ -7,6 +7,8 @@ test('extractVariables 取出去重后的占位符，支持三种写法', () => 
   expect(extractVariables('验证码 ${code}，{{minutes}} 分钟内有效')).toEqual(['code', 'minutes'])
   // 主题与正文一起提取：邮件的变量要覆盖两处。
   expect(extractVariables('{s}', '{c}')).toEqual(['s', 'c'])
+  // 服务号模板原文的写法。
+  expect(extractVariables('设备：{{thing1.DATA}}\n时间：{{time2.DATA}}')).toEqual(['thing1', 'time2'])
 })
 
 // JSON 的花括号后面是引号，不是占位符。
@@ -30,6 +32,8 @@ test('渠道规则与后端一致', () => {
   expect(needsRecipient('email')).toBe(true)
   expect(needsRecipient('telegram')).toBe(false)
   expect(needsRecipient('webhook')).toBe(false)
+  expect(allowedModes.wechat_mp).toEqual(['vendor'])
+  expect(needsRecipient('wechat_mp')).toBe(true)
 })
 
 // 新建模板默认取第一个允许的模式。内置的邮件类型只有 smtp，它只能发自定义模板：

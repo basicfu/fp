@@ -43,6 +43,8 @@ type Deps struct {
 
 	// Notify 提供通知发送。为 nil 时 NotifyService 不注册（调用得到 Unimplemented）。
 	Notify *service.NotifyService
+	// WechatMP 提供服务号订阅。为 nil 时三个微信订阅 RPC 返回 Unimplemented。
+	WechatMP *service.WechatMPService
 
 	// Users 提供用户资料与头像的读写。为 nil 时 UserService 不注册（调用得到 Unimplemented）。
 	Users *service.UserService
@@ -144,7 +146,7 @@ func New(d Deps) *Server {
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))
 	fpv1.RegisterIMGatewayServiceServer(srv, newIMServer(d.Apps))
 	if d.Notify != nil {
-		fpv1.RegisterNotifyServiceServer(srv, newNotifyServer(d.Notify, d.Apps))
+		fpv1.RegisterNotifyServiceServer(srv, newNotifyServer(d.Notify, d.WechatMP, d.Apps))
 	}
 	if d.Users != nil {
 		fpv1.RegisterUserServiceServer(srv, newUserServer(d.Users, d.Accounts, d.Apps))

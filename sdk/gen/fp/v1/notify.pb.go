@@ -25,7 +25,7 @@ type SendRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// code 是控制台里创建的通知模板的唯一标识，决定渠道、模板与供应商。
 	Code string `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
-	// to 是收件人：sms 是手机号，email 是邮箱；telegram / 企业微信 / 钉钉 / webhook 必须为空。
+	// to 是收件人：sms 是手机号，email 是邮箱，wechat_mp 是 fp 用户 ID；telegram / 企业微信 / 钉钉 / webhook 必须为空。
 	To string `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
 	// params 是模板变量的取值，键集合必须与模板声明的变量完全一致。
 	Params map[string]string `protobuf:"bytes,3,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -131,6 +131,299 @@ func (*SendResponse) Descriptor() ([]byte, []int) {
 	return file_fp_v1_notify_proto_rawDescGZIP(), []int{1}
 }
 
+type CreateWechatSubscribeQRRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateWechatSubscribeQRRequest) Reset() {
+	*x = CreateWechatSubscribeQRRequest{}
+	mi := &file_fp_v1_notify_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateWechatSubscribeQRRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateWechatSubscribeQRRequest) ProtoMessage() {}
+
+func (x *CreateWechatSubscribeQRRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_notify_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateWechatSubscribeQRRequest.ProtoReflect.Descriptor instead.
+func (*CreateWechatSubscribeQRRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_notify_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CreateWechatSubscribeQRRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type CreateWechatSubscribeQRResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// image_url 是微信托管的二维码图片，可以直接放进 <img>。
+	ImageUrl string `protobuf:"bytes,1,opt,name=image_url,json=imageUrl,proto3" json:"image_url,omitempty"`
+	// content 是二维码里编码的内容，想自己画二维码（换颜色、加 logo）时用。
+	Content       string `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	ExpiresInSec  int64  `protobuf:"varint,3,opt,name=expires_in_sec,json=expiresInSec,proto3" json:"expires_in_sec,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateWechatSubscribeQRResponse) Reset() {
+	*x = CreateWechatSubscribeQRResponse{}
+	mi := &file_fp_v1_notify_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateWechatSubscribeQRResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateWechatSubscribeQRResponse) ProtoMessage() {}
+
+func (x *CreateWechatSubscribeQRResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_notify_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateWechatSubscribeQRResponse.ProtoReflect.Descriptor instead.
+func (*CreateWechatSubscribeQRResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_notify_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *CreateWechatSubscribeQRResponse) GetImageUrl() string {
+	if x != nil {
+		return x.ImageUrl
+	}
+	return ""
+}
+
+func (x *CreateWechatSubscribeQRResponse) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *CreateWechatSubscribeQRResponse) GetExpiresInSec() int64 {
+	if x != nil {
+		return x.ExpiresInSec
+	}
+	return 0
+}
+
+type GetWechatSubscriptionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWechatSubscriptionRequest) Reset() {
+	*x = GetWechatSubscriptionRequest{}
+	mi := &file_fp_v1_notify_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWechatSubscriptionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWechatSubscriptionRequest) ProtoMessage() {}
+
+func (x *GetWechatSubscriptionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_notify_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWechatSubscriptionRequest.ProtoReflect.Descriptor instead.
+func (*GetWechatSubscriptionRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_notify_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *GetWechatSubscriptionRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type GetWechatSubscriptionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// bound 表示开启过微信通知（扫过码，或用微信登录过的人自己关注服务号时自动关联）。
+	Bound bool `protobuf:"varint,1,opt,name=bound,proto3" json:"bound,omitempty"`
+	// subscribed 表示绑定的微信当前仍关注着服务号。bound && subscribed 才收得到通知。
+	Subscribed bool `protobuf:"varint,2,opt,name=subscribed,proto3" json:"subscribed,omitempty"`
+	// bound_at_ms 是开启时间（Unix 毫秒），没开启时为 0。
+	BoundAtMs     int64 `protobuf:"varint,3,opt,name=bound_at_ms,json=boundAtMs,proto3" json:"bound_at_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWechatSubscriptionResponse) Reset() {
+	*x = GetWechatSubscriptionResponse{}
+	mi := &file_fp_v1_notify_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWechatSubscriptionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWechatSubscriptionResponse) ProtoMessage() {}
+
+func (x *GetWechatSubscriptionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_notify_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWechatSubscriptionResponse.ProtoReflect.Descriptor instead.
+func (*GetWechatSubscriptionResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_notify_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *GetWechatSubscriptionResponse) GetBound() bool {
+	if x != nil {
+		return x.Bound
+	}
+	return false
+}
+
+func (x *GetWechatSubscriptionResponse) GetSubscribed() bool {
+	if x != nil {
+		return x.Subscribed
+	}
+	return false
+}
+
+func (x *GetWechatSubscriptionResponse) GetBoundAtMs() int64 {
+	if x != nil {
+		return x.BoundAtMs
+	}
+	return 0
+}
+
+type DeleteWechatSubscriptionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteWechatSubscriptionRequest) Reset() {
+	*x = DeleteWechatSubscriptionRequest{}
+	mi := &file_fp_v1_notify_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteWechatSubscriptionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteWechatSubscriptionRequest) ProtoMessage() {}
+
+func (x *DeleteWechatSubscriptionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_notify_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteWechatSubscriptionRequest.ProtoReflect.Descriptor instead.
+func (*DeleteWechatSubscriptionRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_notify_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *DeleteWechatSubscriptionRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type DeleteWechatSubscriptionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteWechatSubscriptionResponse) Reset() {
+	*x = DeleteWechatSubscriptionResponse{}
+	mi := &file_fp_v1_notify_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteWechatSubscriptionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteWechatSubscriptionResponse) ProtoMessage() {}
+
+func (x *DeleteWechatSubscriptionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_notify_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteWechatSubscriptionResponse.ProtoReflect.Descriptor instead.
+func (*DeleteWechatSubscriptionResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_notify_proto_rawDescGZIP(), []int{7}
+}
+
 var File_fp_v1_notify_proto protoreflect.FileDescriptor
 
 const file_fp_v1_notify_proto_rawDesc = "" +
@@ -144,9 +437,29 @@ const file_fp_v1_notify_proto_rawDesc = "" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x0e\n" +
-	"\fSendResponse2@\n" +
+	"\fSendResponse\"9\n" +
+	"\x1eCreateWechatSubscribeQRRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\"~\n" +
+	"\x1fCreateWechatSubscribeQRResponse\x12\x1b\n" +
+	"\timage_url\x18\x01 \x01(\tR\bimageUrl\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\x12$\n" +
+	"\x0eexpires_in_sec\x18\x03 \x01(\x03R\fexpiresInSec\"7\n" +
+	"\x1cGetWechatSubscriptionRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\"u\n" +
+	"\x1dGetWechatSubscriptionResponse\x12\x14\n" +
+	"\x05bound\x18\x01 \x01(\bR\x05bound\x12\x1e\n" +
+	"\n" +
+	"subscribed\x18\x02 \x01(\bR\n" +
+	"subscribed\x12\x1e\n" +
+	"\vbound_at_ms\x18\x03 \x01(\x03R\tboundAtMs\":\n" +
+	"\x1fDeleteWechatSubscriptionRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\"\"\n" +
+	" DeleteWechatSubscriptionResponse2\xfb\x02\n" +
 	"\rNotifyService\x12/\n" +
-	"\x04Send\x12\x12.fp.v1.SendRequest\x1a\x13.fp.v1.SendResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
+	"\x04Send\x12\x12.fp.v1.SendRequest\x1a\x13.fp.v1.SendResponse\x12h\n" +
+	"\x17CreateWechatSubscribeQR\x12%.fp.v1.CreateWechatSubscribeQRRequest\x1a&.fp.v1.CreateWechatSubscribeQRResponse\x12b\n" +
+	"\x15GetWechatSubscription\x12#.fp.v1.GetWechatSubscriptionRequest\x1a$.fp.v1.GetWechatSubscriptionResponse\x12k\n" +
+	"\x18DeleteWechatSubscription\x12&.fp.v1.DeleteWechatSubscriptionRequest\x1a'.fp.v1.DeleteWechatSubscriptionResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
 
 var (
 	file_fp_v1_notify_proto_rawDescOnce sync.Once
@@ -160,18 +473,30 @@ func file_fp_v1_notify_proto_rawDescGZIP() []byte {
 	return file_fp_v1_notify_proto_rawDescData
 }
 
-var file_fp_v1_notify_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_fp_v1_notify_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_fp_v1_notify_proto_goTypes = []any{
-	(*SendRequest)(nil),  // 0: fp.v1.SendRequest
-	(*SendResponse)(nil), // 1: fp.v1.SendResponse
-	nil,                  // 2: fp.v1.SendRequest.ParamsEntry
+	(*SendRequest)(nil),                      // 0: fp.v1.SendRequest
+	(*SendResponse)(nil),                     // 1: fp.v1.SendResponse
+	(*CreateWechatSubscribeQRRequest)(nil),   // 2: fp.v1.CreateWechatSubscribeQRRequest
+	(*CreateWechatSubscribeQRResponse)(nil),  // 3: fp.v1.CreateWechatSubscribeQRResponse
+	(*GetWechatSubscriptionRequest)(nil),     // 4: fp.v1.GetWechatSubscriptionRequest
+	(*GetWechatSubscriptionResponse)(nil),    // 5: fp.v1.GetWechatSubscriptionResponse
+	(*DeleteWechatSubscriptionRequest)(nil),  // 6: fp.v1.DeleteWechatSubscriptionRequest
+	(*DeleteWechatSubscriptionResponse)(nil), // 7: fp.v1.DeleteWechatSubscriptionResponse
+	nil,                                      // 8: fp.v1.SendRequest.ParamsEntry
 }
 var file_fp_v1_notify_proto_depIdxs = []int32{
-	2, // 0: fp.v1.SendRequest.params:type_name -> fp.v1.SendRequest.ParamsEntry
+	8, // 0: fp.v1.SendRequest.params:type_name -> fp.v1.SendRequest.ParamsEntry
 	0, // 1: fp.v1.NotifyService.Send:input_type -> fp.v1.SendRequest
-	1, // 2: fp.v1.NotifyService.Send:output_type -> fp.v1.SendResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
+	2, // 2: fp.v1.NotifyService.CreateWechatSubscribeQR:input_type -> fp.v1.CreateWechatSubscribeQRRequest
+	4, // 3: fp.v1.NotifyService.GetWechatSubscription:input_type -> fp.v1.GetWechatSubscriptionRequest
+	6, // 4: fp.v1.NotifyService.DeleteWechatSubscription:input_type -> fp.v1.DeleteWechatSubscriptionRequest
+	1, // 5: fp.v1.NotifyService.Send:output_type -> fp.v1.SendResponse
+	3, // 6: fp.v1.NotifyService.CreateWechatSubscribeQR:output_type -> fp.v1.CreateWechatSubscribeQRResponse
+	5, // 7: fp.v1.NotifyService.GetWechatSubscription:output_type -> fp.v1.GetWechatSubscriptionResponse
+	7, // 8: fp.v1.NotifyService.DeleteWechatSubscription:output_type -> fp.v1.DeleteWechatSubscriptionResponse
+	5, // [5:9] is the sub-list for method output_type
+	1, // [1:5] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -188,7 +513,7 @@ func file_fp_v1_notify_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_notify_proto_rawDesc), len(file_fp_v1_notify_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

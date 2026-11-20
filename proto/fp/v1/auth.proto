@@ -27,6 +27,10 @@ service AuthService {
   // PollOAuthLogin 是桌面端按 state 轮询，只对应用开启了轮询时以 desktop 模式发起的 state 有效。
   rpc PollOAuthLogin(PollOAuthLoginRequest) returns (PollOAuthLoginResponse);
 
+  // ExchangeAppCode 用移动 App 经三方 SDK（微信 OpenSDK 等）拿到的 code 换结论，结论同 ExchangeOAuthTicket。
+  // 只接受 App 登录方式（如 "wechat_app"）；网页扫码的 code 必须经 fp 回调，不能直接提交。
+  rpc ExchangeAppCode(ExchangeAppCodeRequest) returns (ExchangeAppCodeResponse);
+
   // BindPhoneLogin 用绑手机票据加短信验证码完成首次扫码登录。发码用 SendLoginCode。
   rpc BindPhoneLogin(BindPhoneLoginRequest) returns (BindPhoneLoginResponse);
 
@@ -146,6 +150,21 @@ message PollOAuthLoginRequest {
 
 // PollOAuthLoginResponse 是轮询结果。
 message PollOAuthLoginResponse {
+  OAuthLoginResult result = 1;
+}
+
+// ExchangeAppCodeRequest 用 App 拿到的 code 换结论。ip / user_agent / mobile 同 LoginRequest。
+message ExchangeAppCodeRequest {
+  // connector_type 是 App 登录方式，例如 "wechat_app"。
+  string connector_type = 1;
+  string code = 2;
+  string ip = 3;
+  string user_agent = 4;
+  bool mobile = 5;
+}
+
+// ExchangeAppCodeResponse 是换 code 的结果。
+message ExchangeAppCodeResponse {
   OAuthLoginResult result = 1;
 }
 

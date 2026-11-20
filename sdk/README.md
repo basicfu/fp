@@ -224,7 +224,10 @@ mux.Handle("/auth/wechat/", client.Auth().OAuthHandler(fpsdk.OAuthHandlerOptions
 }))
 ```
 
-各端前端怎么调用、控制台怎么配置、首次登录绑手机的规则，见 [微信扫码登录接入文档](../docs/wechat-login.md)。
+手机 App 用微信 OpenSDK 授权拿到 code 后，POST 给同一个 Handler 的 `app-login`（`{code}`），结论与扫码登录相同；
+不挂 Handler 时直接调 `client.Auth().ExchangeAppCode`。
+
+各端前端怎么调用、控制台怎么配置、首次登录绑手机的规则，见 [微信登录接入文档](../docs/wechat-login.md)。
 
 ### 访客模式
 
@@ -505,7 +508,13 @@ err := client.Notify().Send(ctx, "login_sms", "13800138000", map[string]string{"
 
 // Telegram / 企业微信 / 钉钉 / webhook：发给供应商实例里配好的固定目标，to 传空串
 err = client.Notify().Send(ctx, "order_alert", "", map[string]string{"orderNo": "A1001"})
+
+// 微信服务号模板消息：to 是 fp 用户 ID，fp 换成他开启微信通知时绑的那个微信
+err = client.Notify().Send(ctx, "device_connected", userID, map[string]string{"thing1": "办公室电脑", "time2": "2026-11-20 10:00"})
 ```
+
+微信通知要用户先扫码开启：`Notify().WechatSubscribeQR` 生成二维码，`WechatSubscription` 查状态，
+`DeleteWechatSubscription` 关掉。完整流程见 [微信服务号通知接入文档](../docs/wechat-mp.md)。
 
 `params` 的键必须与模板声明的变量**完全一致**，多了少了都会被拒绝。
 
@@ -517,7 +526,8 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 
 键按应用隔离，只需在本应用内唯一；最长 128 字节。
 
-**错误**：按[错误处理](#错误处理)的方式取 `*fpsdk.Error`，用 `Code` 分支：`NOTIFY_TEMPLATE_NOT_FOUND`、`NOTIFY_TEMPLATE_DISABLED`、`NOTIFY_PARAMS_INVALID`（`Detail` 里有 `missing` / `unexpected`）、`NOTIFY_RECIPIENT_INVALID`、`NOTIFY_PROVIDER_MISSING`、`NOTIFY_IN_PROGRESS`（相同幂等键的请求仍在处理，SDK 已自动重试两次）、`NOTIFY_SEND_FAILED`（全部供应商都失败，原因在控制台「发送记录」，不会回给调用方）。完整列表见 [docs/notify.md](../docs/notify.md)。
+**错误**：按[错误处理](#错误处理)的方式取 `*fpsdk.Error`，用 `Code` 分支：`NOTIFY_TEMPLATE_NOT_FOUND`、`NOTIFY_TEMPLATE_DISABLED`、`NOTIFY_PARAMS_INVALID`（`Detail` 里有 `missing` / `unexpected`）、`NOTIFY_RECIPIENT_INVALID`、`NOTIFY_PROVIDER_MISSING`、`NOTIFY_IN_PROGRESS`（相同幂等键的请求仍在处理，SDK 已自动重试两次）、`NOTIFY_SEND_FAILED`（全部供应商都失败，原因在控制台「发送记录」，不会回给调用方）、
+`NOTIFY_RECIPIENT_UNREACHABLE`（服务号渠道的用户没开启微信通知或已取关，跳过即可）、`WECHAT_MP_UNAVAILABLE`（没配服务号）。完整列表见 [docs/notify.md](../docs/notify.md)。
 
 ## 7. 用户资料与头像（Users）
 

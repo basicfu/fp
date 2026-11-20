@@ -119,3 +119,16 @@ func TestReturnURLAllowed(t *testing.T) {
 		}
 	}
 }
+
+func TestWechatAppExchangeUsesAppIdentityType(t *testing.T) {
+	srv := fakeWechat(t, `{"access_token":"at","openid":"oa","unionid":"u1"}`, `{"nickname":"n"}`)
+	c := connector.NewWechatApp(connector.WithWechatAPIBase(srv.URL))
+	p, err := c.Exchange(context.Background(), wechatCfg, "code1")
+	if err != nil || p.IdentityType != domain.IdentityTypeWechatApp || p.Subject != "oa" || p.UnionKey != "u1" {
+		t.Fatalf("p = %+v, err = %v", p, err)
+	}
+	var _ connector.AppSDKConnector = c
+	if _, ok := any(c).(connector.OAuthConnector); ok {
+		t.Fatal("App 登录方式不能同时是扫码登录方式：两者对 code 的信任前提不同")
+	}
+}

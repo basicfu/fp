@@ -134,6 +134,11 @@ const (
 	CodeNotifyProviderInvalid   = "NOTIFY_PROVIDER_INVALID"
 	CodeNotifyLinkInvalid       = "NOTIFY_LINK_INVALID"
 	CodeNotifySendFailed        = "NOTIFY_SEND_FAILED"
+	// CodeNotifyRecipientUnreachable：服务号渠道的收件人没有开启微信通知，或已取关服务号。
+	// 业务方按"这个人不收微信通知"跳过即可，不是故障。
+	CodeNotifyRecipientUnreachable = "NOTIFY_RECIPIENT_UNREACHABLE"
+	// CodeWechatMPUnavailable：通知中心里没有启用的服务号（wechat_mp 供应商实例），微信通知整体不可用。
+	CodeWechatMPUnavailable = "WECHAT_MP_UNAVAILABLE"
 	// CodeVerifyTemplateUnavailable：应用开放了短信登录，但通知中心里的验证码模板还用不了
 	// （没建、已停用、变量不是 code、没关联供应商）。与 CONNECTOR_DISABLED（应用没开放这种登录）、
 	// NOTIFY_SEND_FAILED（模板配好了但供应商没发出去）是三件要去三个地方处理的事，所以各占一个码。
@@ -230,18 +235,21 @@ var codeSentinels = map[string]error{
 	CodeRoleInUse:         ErrConflict,
 	CodeRoleBuiltin:       ErrInvalidArgument,
 
-	CodeNotifyTemplateNotFound:  ErrNotFound,
-	CodeNotifyTemplateDisabled:  ErrForbidden,
-	CodeNotifyTemplateCodeTaken: ErrConflict,
-	CodeNotifyTemplateInvalid:   ErrInvalidArgument,
-	CodeNotifyParamsInvalid:     ErrInvalidArgument,
-	CodeNotifyRecipientInvalid:  ErrInvalidArgument,
-	CodeNotifyInProgress:        ErrConflict,
-	CodeNotifyProviderNotFound:  ErrNotFound,
-	CodeNotifyProviderInUse:     ErrConflict,
-	CodeNotifyProviderInvalid:   ErrInvalidArgument,
-	CodeNotifyLinkInvalid:       ErrInvalidArgument,
-	CodeNotifySendFailed:        ErrInternal,
+	CodeNotifyTemplateNotFound:     ErrNotFound,
+	CodeNotifyTemplateDisabled:     ErrForbidden,
+	CodeNotifyTemplateCodeTaken:    ErrConflict,
+	CodeNotifyTemplateInvalid:      ErrInvalidArgument,
+	CodeNotifyParamsInvalid:        ErrInvalidArgument,
+	CodeNotifyRecipientInvalid:     ErrInvalidArgument,
+	CodeNotifyInProgress:           ErrConflict,
+	CodeNotifyProviderNotFound:     ErrNotFound,
+	CodeNotifyProviderInUse:        ErrConflict,
+	CodeNotifyProviderInvalid:      ErrInvalidArgument,
+	CodeNotifyLinkInvalid:          ErrInvalidArgument,
+	CodeNotifySendFailed:           ErrInternal,
+	CodeNotifyRecipientUnreachable: ErrNotFound,
+	// 平台侧没配好，同 CodeVerifyTemplateUnavailable 归 Internal。
+	CodeWechatMPUnavailable: ErrInternal,
 	// 平台侧没配好，不是调用方的错：归 Internal，SDK 才会把它当"暂不可用"而不是"未授权"。
 	CodeVerifyTemplateUnavailable: ErrInternal,
 

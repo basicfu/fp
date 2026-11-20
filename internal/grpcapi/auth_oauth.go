@@ -52,6 +52,20 @@ func (s *authServer) PollOAuthLogin(ctx context.Context, req *fpv1.PollOAuthLogi
 	return &fpv1.PollOAuthLoginResponse{Result: oauthResult(out)}, nil
 }
 
+func (s *authServer) ExchangeAppCode(ctx context.Context, req *fpv1.ExchangeAppCodeRequest) (*fpv1.ExchangeAppCodeResponse, error) {
+	appID, err := businessCaller(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.auth.ExchangeAppCode(ctx, service.OAuthClient{
+		AppID: appID, IP: req.GetIp(), UA: req.GetUserAgent(), Mobile: req.GetMobile(),
+	}, req.GetConnectorType(), req.GetCode())
+	if err != nil {
+		return nil, StatusFrom(err)
+	}
+	return &fpv1.ExchangeAppCodeResponse{Result: oauthResult(out)}, nil
+}
+
 func (s *authServer) BindPhoneLogin(ctx context.Context, req *fpv1.BindPhoneLoginRequest) (*fpv1.BindPhoneLoginResponse, error) {
 	appID, err := businessCaller(ctx)
 	if err != nil {

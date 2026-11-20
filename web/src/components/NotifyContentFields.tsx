@@ -233,6 +233,22 @@ export default function NotifyContentFields({ channel, mode, value, onChange }: 
         </>
       )}
 
+      {channel === 'wechat_mp' && (
+        <div className="space-y-2">
+          <Label htmlFor="nc-link">点击跳转链接（可选）</Label>
+          <Input
+            id="nc-link"
+            value={value.link ?? ''}
+            placeholder="https://"
+            onChange={(e) => patch({ link: e.target.value || undefined })}
+          />
+          <p className="text-xs text-muted-foreground">
+            变量填模板里的字段名（thing1、time2 …），可以点「从原文提取」。thing 类字段超过 20 字、character_string 超过 32
+            位时 fp 自动截断。
+          </p>
+        </div>
+      )}
+
       {channel === 'dingtalk_bot' && (
         <>
           <LinesField

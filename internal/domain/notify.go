@@ -16,6 +16,8 @@ const (
 	NotifyChannelWecomBot    NotifyChannel = "wecom_bot"
 	NotifyChannelDingtalkBot NotifyChannel = "dingtalk_bot"
 	NotifyChannelWebhook     NotifyChannel = "webhook"
+	// NotifyChannelWechatMP 是微信服务号模板消息。收件人是 fp 用户 ID，发送时换成该用户绑定的服务号 openid。
+	NotifyChannelWechatMP NotifyChannel = "wechat_mp"
 )
 
 // NotifyMode 区分模板内容由谁渲染。
@@ -33,17 +35,17 @@ const (
 func (c NotifyChannel) Valid() bool {
 	switch c {
 	case NotifyChannelSMS, NotifyChannelEmail, NotifyChannelTelegram,
-		NotifyChannelWecomBot, NotifyChannelDingtalkBot, NotifyChannelWebhook:
+		NotifyChannelWecomBot, NotifyChannelDingtalkBot, NotifyChannelWebhook, NotifyChannelWechatMP:
 		return true
 	}
 	return false
 }
 
-// AllowsMode 报告该渠道是否允许某种模板模式：短信只有供应商侧审核过的模板；
+// AllowsMode 报告该渠道是否允许某种模板模式：短信与服务号只有供应商侧审核过的模板；
 // 邮件两种都行（云厂商邮件要模板、自建 SMTP 不要）；其余渠道没有供应商侧模板。
 func (c NotifyChannel) AllowsMode(m NotifyMode) bool {
 	switch c {
-	case NotifyChannelSMS:
+	case NotifyChannelSMS, NotifyChannelWechatMP:
 		return m == NotifyModeVendor
 	case NotifyChannelEmail:
 		return m == NotifyModeVendor || m == NotifyModeCustom
@@ -53,10 +55,10 @@ func (c NotifyChannel) AllowsMode(m NotifyMode) bool {
 	return false
 }
 
-// NeedsRecipient 报告该渠道是否发给某个具体的人（手机号/邮箱）。
+// NeedsRecipient 报告该渠道是否发给某个具体的人（手机号 / 邮箱 / fp 用户）。
 // IM 与 webhook 发给供应商实例里配置好的固定目标，没有收件人。
 func (c NotifyChannel) NeedsRecipient() bool {
-	return c == NotifyChannelSMS || c == NotifyChannelEmail
+	return c == NotifyChannelSMS || c == NotifyChannelEmail || c == NotifyChannelWechatMP
 }
 
 // NotifyContent 是模板的内容部分，对应 notify_template.template 这一列的 JSON。
@@ -71,6 +73,8 @@ type NotifyContent struct {
 	MentionedMobileList []string `json:"mentionedMobileList,omitempty"`
 	AtMobiles           []string `json:"atMobiles,omitempty"`
 	IsAtAll             bool     `json:"isAtAll,omitempty"`
+	// Link 仅服务号模板消息：用户点开消息后跳转的网页，可选。
+	Link string `json:"link,omitempty"`
 }
 
 // NotifyProvider 是一个供应商实例：一份凭据。

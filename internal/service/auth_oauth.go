@@ -273,7 +273,7 @@ func (s *AuthService) settle(ctx context.Context, app *domain.Application, in OA
 		return &OAuthOutcome{Status: OAuthStatusFailed}, nil
 	}
 	// 回调之后管理员可能关掉了这种登录方式。
-	if _, _, err := s.oauthConnectorFor(ctx, app, connType); err != nil {
+	if _, _, err := s.thirdPartyConnectorFor(ctx, app, connType); err != nil {
 		return nil, err
 	}
 	p := out.Profile
@@ -330,7 +330,7 @@ func (s *AuthService) BindPhone(ctx context.Context, in BindPhoneInput) (*LoginR
 	if t == nil || t.AppID != app.ID || t.Outcome.Profile == nil {
 		return nil, ticketInvalid()
 	}
-	if _, _, err := s.oauthConnectorFor(ctx, app, t.Connector); err != nil {
+	if _, _, err := s.thirdPartyConnectorFor(ctx, app, t.Connector); err != nil {
 		return nil, err
 	}
 	login := loginInputFrom(in.OAuthClient, t.Connector)
@@ -369,6 +369,50 @@ func (s *AuthService) BindPhone(ctx context.Context, in BindPhoneInput) (*LoginR
 	return s.completeLogin(ctx, app, login, profileResult(p), res.User, res.Identity, res.Created, note)
 }
 
+// ExchangeAppCode 用移动 App 经三方 SDK 拿到的 code 换结论，结论与 ExchangeOAuth 相同：
+// 老用户直接签会话，首次登录给绑手机票据。只接受 AppSDKConnector：网页授权的 code 必须走 state 回调。
+//
+// 三方接口失败与扫码登录一样折成 FAILED，原因只进日志：业务方能做的只有让用户重试。
+func (s *AuthService) ExchangeAppCode(ctx context.Context, in OAuthClient, connType, code string) (*OAuthOutcome, error) {
+	app, err := s.activeApp(ctx, in.AppID)
+	if err != nil {
+		return nil, err
+	}
+	conn, cfg, err := s.thirdPartyConnectorFor(ctx, app, connType)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := conn.(connector.AppSDKConnector); !ok {
+		return nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "%s 不是 App 登录方式，code 不能直接提交", connType)
+	}
+	if s.deps.OAuth == nil {
+		return nil, domain.Fail(domain.ErrInternal, domain.CodeInternal, "App 登录暂不可用").WithDesc("没有配置 OAuth 会话存储，签不出绑手机票据")
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "code 不能为空")
+	}
+	p, err := conn.Exchange(ctx, cfg, code)
+	if err != nil {
+		slog.Error("service: 三方 code 换身份失败", "err", err, "detail", detailOf(err), "appId", app.AppID, "connector", connType)
+		return &OAuthOutcome{Status: OAuthStatusFailed}, nil
+	}
+	return s.settle(ctx, app, in, connType, oauthOutcome{Status: oauthOK, Profile: p})
+}
+
+// thirdPartyConnectorFor 取出应用启用的、用三方 code 换身份的登录方式（扫码或 App SDK）。
+func (s *AuthService) thirdPartyConnectorFor(ctx context.Context, app *domain.Application, typ string) (connector.ThirdPartyConnector, map[string]any, error) {
+	conn, cfg, err := s.connectorFor(ctx, app, typ)
+	if err != nil {
+		return nil, nil, err
+	}
+	tc, ok := conn.(connector.ThirdPartyConnector)
+	if !ok {
+		return nil, nil, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "%s 不是三方登录方式", typ)
+	}
+	return tc, cfg, nil
+}
+
 // oauthConnectorFor 取出应用启用的、属于扫码登录一类的登录方式。
 func (s *AuthService) oauthConnectorFor(ctx context.Context, app *domain.Application, typ string) (connector.OAuthConnector, map[string]any, error) {
 	conn, cfg, err := s.connectorFor(ctx, app, typ)
@@ -389,7 +433,7 @@ func (s *AuthService) phoneBindingEnabled(ctx context.Context, app *domain.Appli
 		if err != nil {
 			continue
 		}
-		if _, ok := conn.(connector.OAuthConnector); !ok {
+		if _, ok := conn.(connector.ThirdPartyConnector); !ok {
 			continue
 		}
 		if _, err := s.enabledConnector(ctx, app, typ); err == nil {

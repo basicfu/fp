@@ -239,7 +239,7 @@ export interface AppPermissions {
 // 通知中心（与 internal/httpapi/notify.go 的 DTO 一一对应）
 // ---------------------------------------------------------------------------
 
-export type NotifyChannel = 'sms' | 'email' | 'telegram' | 'wecom_bot' | 'dingtalk_bot' | 'webhook'
+export type NotifyChannel = 'sms' | 'email' | 'telegram' | 'wecom_bot' | 'dingtalk_bot' | 'webhook' | 'wechat_mp'
 
 /** vendor：供应商侧已审核的模板，fp 只存原文供核对；custom：fp 自己渲染。 */
 export type NotifyMode = 'vendor' | 'custom'
@@ -276,6 +276,8 @@ export interface NotifyContent {
   mentionedMobileList?: string[]
   atMobiles?: string[]
   isAtAll?: boolean
+  /** 仅服务号：点开消息后跳转的网页。 */
+  link?: string
 }
 
 export interface NotifyTemplateRow {

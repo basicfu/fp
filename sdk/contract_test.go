@@ -95,6 +95,8 @@ func TestAuthServiceSurface(t *testing.T) {
 		"ExchangeOAuthTicket": {false, false},
 		"PollOAuthLogin":      {false, false},
 		"BindPhoneLogin":      {false, false},
+		// App 经三方 SDK 拿到的 code 直接换结论。
+		"ExchangeAppCode": {false, false},
 	}
 
 	methods := svc.Methods()

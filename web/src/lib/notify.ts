@@ -7,6 +7,7 @@ export const notifyChannelLabels: Record<NotifyChannel, string> = {
   wecom_bot: '企业微信机器人',
   dingtalk_bot: '钉钉机器人',
   webhook: '自定义 Webhook',
+  wechat_mp: '微信服务号',
 }
 
 export const notifyModeLabels: Record<NotifyMode, string> = {
@@ -27,11 +28,19 @@ export const allowedModes: Record<NotifyChannel, NotifyMode[]> = {
   wecom_bot: ['custom'],
   dingtalk_bot: ['custom'],
   webhook: ['custom'],
+  wechat_mp: ['vendor'],
 }
 
-/** sms / email 发给某个具体的人；IM 与 webhook 发给配置好的固定目标。 */
+/** sms / email / 服务号发给某个具体的人；IM 与 webhook 发给配置好的固定目标。 */
 export function needsRecipient(channel: NotifyChannel): boolean {
-  return channel === 'sms' || channel === 'email'
+  return channel === 'sms' || channel === 'email' || channel === 'wechat_mp'
+}
+
+/** recipientLabel 是测试发送时收件人输入框的标签。服务号的收件人是 fp 用户 ID，fp 换成他绑定的 openid。 */
+export function recipientLabel(channel: NotifyChannel): string {
+  if (channel === 'sms') return '手机号'
+  if (channel === 'wechat_mp') return '用户 ID（该用户要已开启微信通知）'
+  return '邮箱'
 }
 
 /**
@@ -39,10 +48,11 @@ export function needsRecipient(channel: NotifyChannel): boolean {
  *
  * 与后端 notify.ExtractPlaceholders 同一个形状：name 是标识符。`${code}`、`{{code}}`、
  * `{code}` 三种写法里的 code 都能取到，所以供应商模板原文也能用它预填变量。
+ * 服务号模板原文写成 `{{thing1.DATA}}`，取出来的是 thing1。
  */
 export function extractVariables(...texts: string[]): string[] {
   const out: string[] = []
-  for (const m of texts.join('\n').matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
+  for (const m of texts.join('\n').matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)(?:\.DATA)?\}/g)) {
     if (!out.includes(m[1])) out.push(m[1])
   }
   return out

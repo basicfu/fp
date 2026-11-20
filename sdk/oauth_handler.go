@@ -12,6 +12,8 @@ import (
 type OAuthHandlerOptions struct {
 	// Connector 为空时取 ConnectorWechatWeb。
 	Connector string
+	// AppConnector 是 app-login 用的 App 登录方式，为空时取 ConnectorWechatApp。
+	AppConnector string
 	// ReturnURL 是网页端登录后回到的业务页面，必须在控制台配的回跳白名单里。
 	// 写死在服务端而不是由前端传：前端可控的回跳地址就是开放重定向。
 	ReturnURL string
@@ -44,12 +46,16 @@ type OAuthHandlerOptions struct {
 //	GET  poll?state=                         → 结论
 //	POST send-code  {phone}                  → 204
 //	POST bind       {bindTicket, phone, code} → 登录成功
+//	POST app-login  {code}                   → 结论（手机 App 经微信 OpenSDK 拿到的 code）
 //
 // 结论是 {status, bindTicket?, nickname?, avatarUrl?}；status 为 SUCCESS 时交给 OnLogin。
 // 失败统一是 {code, msg}，msg 可以直接展示给用户，HTTP 状态码同 WriteError。
 func (a *Auth) OAuthHandler(opts OAuthHandlerOptions) http.Handler {
 	if opts.Connector == "" {
 		opts.Connector = ConnectorWechatWeb
+	}
+	if opts.AppConnector == "" {
+		opts.AppConnector = ConnectorWechatApp
 	}
 	if opts.CookieName == "" {
 		opts.CookieName = DefaultCookieName
@@ -84,6 +90,8 @@ func (h *oauthHandler) serve(w http.ResponseWriter, r *http.Request) {
 		h.sendCode(w, r)
 	case op == "bind":
 		h.bind(w, r)
+	case op == "app-login":
+		h.appLogin(w, r)
 	default:
 		writeOAuthJSON(w, http.StatusNotFound, oauthErrorBody{Msg: "not found"})
 	}
@@ -119,6 +127,22 @@ func (h *oauthHandler) exchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.a.ExchangeOAuth(r.Context(), req.Ticket, h.client(r))
+	h.writeResult(w, r, res, err)
+}
+
+func (h *oauthHandler) appLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if !decodeOAuthBody(w, r, &req) {
+		return
+	}
+	c := h.client(r)
+	// 走到这里的一定是手机 App；业务方配了 Mobile 判断就以它为准。
+	if h.opts.Mobile == nil {
+		c.Mobile = true
+	}
+	res, err := h.a.ExchangeAppCode(r.Context(), AppCodeInput{OAuthClient: c, Connector: h.opts.AppConnector, Code: req.Code})
 	h.writeResult(w, r, res, err)
 }
 

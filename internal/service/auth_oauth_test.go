@@ -35,7 +35,11 @@ func newOAuthEnv(t *testing.T, extra map[string]any) *oauthEnv {
 	users := service.NewUserService(pool)
 	codes := service.NewLoginCodeService(rdb, service.WithLoginCodeRateRules())
 	reg := connector.NewRegistry()
-	for _, c := range []connector.Connector{connector.NewSMSCode(codes), connector.NewWechatWeb(connector.WithWechatAPIBase(wx.URL))} {
+	for _, c := range []connector.Connector{
+		connector.NewSMSCode(codes),
+		connector.NewWechatWeb(connector.WithWechatAPIBase(wx.URL)),
+		connector.NewWechatApp(connector.WithWechatAPIBase(wx.URL)),
+	} {
 		if err := reg.Register(c); err != nil {
 			t.Fatal(err)
 		}
@@ -53,6 +57,10 @@ func newOAuthEnv(t *testing.T, extra map[string]any) *oauthEnv {
 	if err := apps.SetConnector(ctx, app.ID, connector.TypeWechatWeb, true, cfg); err != nil {
 		t.Fatal(err)
 	}
+	// 移动应用与网站应用的 AppID 不同，但假微信只认 AppSecret。
+	if err := apps.SetConnector(ctx, app.ID, connector.TypeWechatApp, true, map[string]any{"appId": "wxmobile", "appSecret": "s3cret"}); err != nil {
+		t.Fatal(err)
+	}
 	sms := &testsupport.FakeLoginSMS{}
 	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), store.NewEpochStore(rdb))
 	return &oauthEnv{
@@ -64,7 +72,9 @@ func newOAuthEnv(t *testing.T, extra map[string]any) *oauthEnv {
 	}
 }
 
-func (e *oauthEnv) client() service.OAuthClient { return service.OAuthClient{AppID: e.app, IP: "1.2.3.4"} }
+func (e *oauthEnv) client() service.OAuthClient {
+	return service.OAuthClient{AppID: e.app, IP: "1.2.3.4"}
+}
 
 func (e *oauthEnv) start(t *testing.T, mode string) *service.OAuthStart {
 	t.Helper()
@@ -311,4 +321,70 @@ func TestWechatDirectLoginRejected(t *testing.T) {
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("err = %v", err)
 	}
+}
+
+func TestAppCodeFirstLoginBindsPhoneThenLogsIn(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	ctx := context.Background()
+	out, err := e.auth.ExchangeAppCode(ctx, e.client(), connector.TypeWechatApp, "oa1:ua1:小红")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != service.OAuthStatusBindPhone || out.Nickname != "小红" {
+		t.Fatalf("out = %+v", out)
+	}
+	first := e.bind(t, out.BindTicket, "13800000001")
+
+	again, err := e.auth.ExchangeAppCode(ctx, e.client(), connector.TypeWechatApp, "oa1:ua1:小红")
+	if err != nil || again.Status != service.OAuthStatusSuccess || again.Login.User.ID != first.User.ID {
+		t.Fatalf("again = %+v, err = %v", again, err)
+	}
+}
+
+// 网页扫码登录过的人第一次用 App 登录：openid 不同、unionid 相同，直接归并到老账号，不再绑手机。
+func TestAppCodeMergesWithWebAccountByUnionID(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	ctx := context.Background()
+	web, err := e.auth.ExchangeOAuth(ctx, e.client(), e.webTicket(t, "ow1:u-same:老王"))
+	if err != nil || web.Status != service.OAuthStatusBindPhone {
+		t.Fatalf("web = %+v, err = %v", web, err)
+	}
+	webUser := e.bind(t, web.BindTicket, "13800000002").User
+
+	app, err := e.auth.ExchangeAppCode(ctx, e.client(), connector.TypeWechatApp, "oa2:u-same:老王")
+	if err != nil || app.Status != service.OAuthStatusSuccess || app.Login.User.ID != webUser.ID {
+		t.Fatalf("app = %+v, err = %v", app, err)
+	}
+	ids, err := e.users.ListIdentities(ctx, webUser.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotApp bool
+	for _, i := range ids {
+		gotApp = gotApp || (i.Type == domain.IdentityTypeWechatApp && i.Subject == "oa2")
+	}
+	if !gotApp {
+		t.Fatalf("App 的 openid 没挂到老账号上：%+v", ids)
+	}
+}
+
+// 网页授权的 code 不能绕过 state 直接提交。
+func TestAppCodeRejectsWebConnector(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	_, err := e.auth.ExchangeAppCode(context.Background(), e.client(), connector.TypeWechatWeb, "o:u:n")
+	wantOAuthCode(t, err, domain.CodeInvalidArgument)
+}
+
+func TestAppCodeUpstreamFailureIsFailedStatus(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	out, err := e.auth.ExchangeAppCode(context.Background(), e.client(), connector.TypeWechatApp, "bad")
+	if err != nil || out.Status != service.OAuthStatusFailed {
+		t.Fatalf("out = %+v, err = %v", out, err)
+	}
+}
+
+func TestAppCodeEmptyCode(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	_, err := e.auth.ExchangeAppCode(context.Background(), e.client(), connector.TypeWechatApp, "  ")
+	wantOAuthCode(t, err, domain.CodeInvalidArgument)
 }

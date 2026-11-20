@@ -19,7 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NotifyService_Send_FullMethodName = "/fp.v1.NotifyService/Send"
+	NotifyService_Send_FullMethodName                     = "/fp.v1.NotifyService/Send"
+	NotifyService_CreateWechatSubscribeQR_FullMethodName  = "/fp.v1.NotifyService/CreateWechatSubscribeQR"
+	NotifyService_GetWechatSubscription_FullMethodName    = "/fp.v1.NotifyService/GetWechatSubscription"
+	NotifyService_DeleteWechatSubscription_FullMethodName = "/fp.v1.NotifyService/DeleteWechatSubscription"
 )
 
 // NotifyServiceClient is the client API for NotifyService service.
@@ -33,6 +36,13 @@ const (
 type NotifyServiceClient interface {
 	// Send 按通知模板 code 发送一条通知。
 	Send(ctx context.Context, in *SendRequest, opts ...grpc.CallOption) (*SendResponse, error)
+	// CreateWechatSubscribeQR 给用户生成开启微信通知的服务号二维码（10 分钟有效、只给第一个扫的微信用）。
+	// 用户扫码后（没关注的先关注），该用户的 wechat_mp 渠道通知就发给这个微信。
+	CreateWechatSubscribeQR(ctx context.Context, in *CreateWechatSubscribeQRRequest, opts ...grpc.CallOption) (*CreateWechatSubscribeQRResponse, error)
+	// GetWechatSubscription 查用户的微信通知状态。展示二维码期间可以轮询它，变成可收到就关掉二维码。
+	GetWechatSubscription(ctx context.Context, in *GetWechatSubscriptionRequest, opts ...grpc.CallOption) (*GetWechatSubscriptionResponse, error)
+	// DeleteWechatSubscription 关掉用户的微信通知（删绑定）。用户在微信里照样关注着服务号，服务端没法替他取关。
+	DeleteWechatSubscription(ctx context.Context, in *DeleteWechatSubscriptionRequest, opts ...grpc.CallOption) (*DeleteWechatSubscriptionResponse, error)
 }
 
 type notifyServiceClient struct {
@@ -53,6 +63,36 @@ func (c *notifyServiceClient) Send(ctx context.Context, in *SendRequest, opts ..
 	return out, nil
 }
 
+func (c *notifyServiceClient) CreateWechatSubscribeQR(ctx context.Context, in *CreateWechatSubscribeQRRequest, opts ...grpc.CallOption) (*CreateWechatSubscribeQRResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateWechatSubscribeQRResponse)
+	err := c.cc.Invoke(ctx, NotifyService_CreateWechatSubscribeQR_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *notifyServiceClient) GetWechatSubscription(ctx context.Context, in *GetWechatSubscriptionRequest, opts ...grpc.CallOption) (*GetWechatSubscriptionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWechatSubscriptionResponse)
+	err := c.cc.Invoke(ctx, NotifyService_GetWechatSubscription_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *notifyServiceClient) DeleteWechatSubscription(ctx context.Context, in *DeleteWechatSubscriptionRequest, opts ...grpc.CallOption) (*DeleteWechatSubscriptionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteWechatSubscriptionResponse)
+	err := c.cc.Invoke(ctx, NotifyService_DeleteWechatSubscription_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NotifyServiceServer is the server API for NotifyService service.
 // All implementations must embed UnimplementedNotifyServiceServer
 // for forward compatibility.
@@ -64,6 +104,13 @@ func (c *notifyServiceClient) Send(ctx context.Context, in *SendRequest, opts ..
 type NotifyServiceServer interface {
 	// Send 按通知模板 code 发送一条通知。
 	Send(context.Context, *SendRequest) (*SendResponse, error)
+	// CreateWechatSubscribeQR 给用户生成开启微信通知的服务号二维码（10 分钟有效、只给第一个扫的微信用）。
+	// 用户扫码后（没关注的先关注），该用户的 wechat_mp 渠道通知就发给这个微信。
+	CreateWechatSubscribeQR(context.Context, *CreateWechatSubscribeQRRequest) (*CreateWechatSubscribeQRResponse, error)
+	// GetWechatSubscription 查用户的微信通知状态。展示二维码期间可以轮询它，变成可收到就关掉二维码。
+	GetWechatSubscription(context.Context, *GetWechatSubscriptionRequest) (*GetWechatSubscriptionResponse, error)
+	// DeleteWechatSubscription 关掉用户的微信通知（删绑定）。用户在微信里照样关注着服务号，服务端没法替他取关。
+	DeleteWechatSubscription(context.Context, *DeleteWechatSubscriptionRequest) (*DeleteWechatSubscriptionResponse, error)
 	mustEmbedUnimplementedNotifyServiceServer()
 }
 
@@ -76,6 +123,15 @@ type UnimplementedNotifyServiceServer struct{}
 
 func (UnimplementedNotifyServiceServer) Send(context.Context, *SendRequest) (*SendResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Send not implemented")
+}
+func (UnimplementedNotifyServiceServer) CreateWechatSubscribeQR(context.Context, *CreateWechatSubscribeQRRequest) (*CreateWechatSubscribeQRResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateWechatSubscribeQR not implemented")
+}
+func (UnimplementedNotifyServiceServer) GetWechatSubscription(context.Context, *GetWechatSubscriptionRequest) (*GetWechatSubscriptionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWechatSubscription not implemented")
+}
+func (UnimplementedNotifyServiceServer) DeleteWechatSubscription(context.Context, *DeleteWechatSubscriptionRequest) (*DeleteWechatSubscriptionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteWechatSubscription not implemented")
 }
 func (UnimplementedNotifyServiceServer) mustEmbedUnimplementedNotifyServiceServer() {}
 func (UnimplementedNotifyServiceServer) testEmbeddedByValue()                       {}
@@ -116,6 +172,60 @@ func _NotifyService_Send_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NotifyService_CreateWechatSubscribeQR_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateWechatSubscribeQRRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NotifyServiceServer).CreateWechatSubscribeQR(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NotifyService_CreateWechatSubscribeQR_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NotifyServiceServer).CreateWechatSubscribeQR(ctx, req.(*CreateWechatSubscribeQRRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _NotifyService_GetWechatSubscription_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWechatSubscriptionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NotifyServiceServer).GetWechatSubscription(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NotifyService_GetWechatSubscription_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NotifyServiceServer).GetWechatSubscription(ctx, req.(*GetWechatSubscriptionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _NotifyService_DeleteWechatSubscription_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteWechatSubscriptionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NotifyServiceServer).DeleteWechatSubscription(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NotifyService_DeleteWechatSubscription_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NotifyServiceServer).DeleteWechatSubscription(ctx, req.(*DeleteWechatSubscriptionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NotifyService_ServiceDesc is the grpc.ServiceDesc for NotifyService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -126,6 +236,18 @@ var NotifyService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Send",
 			Handler:    _NotifyService_Send_Handler,
+		},
+		{
+			MethodName: "CreateWechatSubscribeQR",
+			Handler:    _NotifyService_CreateWechatSubscribeQR_Handler,
+		},
+		{
+			MethodName: "GetWechatSubscription",
+			Handler:    _NotifyService_GetWechatSubscription_Handler,
+		},
+		{
+			MethodName: "DeleteWechatSubscription",
+			Handler:    _NotifyService_DeleteWechatSubscription_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -182,6 +182,8 @@ func TestNotifySendKeyOptionsAndGeneration(t *testing.T) {
 // 不用上面的桩服务端：真实 gRPC 客户端遇到已结束的 ctx 会自己返回 Canceled，而 Canceled 本来就不重试，
 // 重试循环自己认不认 ctx 在那条路上永远测不出来。这里的假客户端无视 ctx、照样返回可重试的 Unavailable。
 type fakeNotifyRPC struct {
+	// 嵌入接口只为补齐微信订阅那几个这里用不到的方法，调到会空指针，说明测试走错了路。
+	fpv1.NotifyServiceClient
 	mu    sync.Mutex
 	calls int
 	fn    func() error

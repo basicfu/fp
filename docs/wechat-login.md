@@ -1,6 +1,13 @@
-# 微信扫码登录接入文档
+# 微信登录接入文档
 
-登录方式 `wechat_web`，对应微信开放平台的「网站应用」登录。网页端、桌面 App 都用它。用户的电脑上登着 PC 微信时，微信官方登录页会自动切成头像加「微信快捷登录」，否则显示二维码。这个检测由微信官方页面完成，接入方不用处理。
+两种登录方式，同一个微信在两边是同一个 fp 账号（按 unionId 归并）：
+
+| 登录方式 | 微信开放平台应用 | 用在哪 |
+|---|---|---|
+| `wechat_web` | 网站应用 | 网页端、桌面 App 扫码，见第 1～6 节 |
+| `wechat_app` | 移动应用 | 手机 App 经微信 OpenSDK 授权，见[第 7 节](#7-手机-app-登录wechat_app) |
+
+`wechat_web` 对应微信开放平台的「网站应用」登录。网页端、桌面 App 都用它。用户的电脑上登着 PC 微信时，微信官方登录页会自动切成头像加「微信快捷登录」，否则显示二维码。这个检测由微信官方页面完成，接入方不用处理。
 
 **首次用微信登录必须绑手机号**。绑定之后，再扫码就直接登录。
 
@@ -145,3 +152,65 @@ const timer = setInterval(async () => {
 | `CODE_INVALID` | 绑手机时验证码错误或已过期 | 让用户重输 |
 
 微信接口本身失败时（比如 AppSecret 配错、code 失效），不会以错误码的形式返回给业务方：网页端回跳时带 `fpError=failed`，轮询拿到 `FAILED`。具体原因写在 fp 的日志里，搜索「三方 code 换身份失败」。
+
+## 7. 手机 App 登录（wechat_app）
+
+手机 App 集成微信 OpenSDK，拉起微信授权、拿到 `code` 后交给业务后端，业务后端转交 fp 换结论。没有浏览器跳转，也没有 state。结论、绑手机规则、错误处理都和扫码登录一样。
+
+### 准备
+
+1. **微信开放平台**：创建「移动应用」并通过审核，拿到移动应用的 AppID / AppSecret（和网站应用不是同一对）。iOS 要配 Universal Links，Android 要登记包名和签名。**移动应用、网站应用、服务号必须挂在同一个开放平台账号下**，否则 unionId 不同，App 登录会被当成另一个人。
+2. **控制台 →「应用」→「登录方式」→「微信 App 登录」**：填移动应用的 AppID、AppSecret，启用。
+3. 首次登录要绑手机，`verify_code` 短信模板同第 2 节。
+
+### 业务后端
+
+挂了第 3 节的 `OAuthHandler` 就已经有这个接口：
+
+| 接口 | 请求 | 响应 |
+|---|---|---|
+| `POST /auth/wechat/app-login` | `{code}` | 结论，同 `exchange` |
+
+- 结论 `SUCCESS` 时默认写 cookie 并返回 `token`；App 一般直接取 `token`，或者传 `OnLogin` 自己交付。
+- `BIND_PHONE` 时带 `bindTicket`、`nickname`、`avatarUrl`，接着走同一个 Handler 的 `send-code` 和 `bind`。
+- `FAILED` 是微信接口失败（`code` 过期或用过、AppSecret 配错），让用户重试；原因在 fp 日志里，搜「三方 code 换身份失败」。
+- `Mobile` 没配时，这个接口按移动端签发会话。
+
+不用 Handler 时直接调 SDK：
+
+```go
+res, err := client.Auth().ExchangeAppCode(ctx, fpsdk.AppCodeInput{
+    Code:        code, // App 从微信 SDK 拿到的
+    OAuthClient: fpsdk.OAuthClient{IP: ip, UserAgent: ua, Mobile: true},
+})
+// res.Status: OAuthSuccess → res.Login；OAuthBindPhone → res.BindTicket 去绑手机；OAuthFailed → 让用户重试
+```
+
+### App 端
+
+```swift
+// iOS：拉起授权
+let req = SendAuthReq()
+req.scope = "snsapi_userinfo"
+req.state = UUID().uuidString // App 自己校验回调里的 state 与发出去的一致
+WXApi.send(req)
+
+// 回调里拿到 resp.code，POST 给业务后端的 /auth/wechat/app-login
+```
+
+```kotlin
+// Android：拉起授权
+val req = SendAuth.Req().apply { scope = "snsapi_userinfo"; state = UUID.randomUUID().toString() }
+api.sendReq(req)
+// WXEntryActivity.onResp 里拿到 (resp as SendAuth.Resp).code，交给业务后端
+```
+
+- `code` 5 分钟过期、只能用一次，拿到后立刻交给后端。
+- 手机没装微信时隐藏入口（iOS `WXApi.isWXAppInstalled()`，Android `api.isWXAppInstalled`）。
+- **只接受移动应用的 code**：`app-login` 只认 `wechat_app` 这类 App 登录方式。网站应用的 code 必须经 fp 回调，不能拿来直接提交，否则 state 那层防钓鱼就失效了。
+
+### 和其他端的关系
+
+- 网页端扫码登录过、绑过手机的人，第一次用 App 登录直接成功，fp 把移动应用的 openid 也挂到他的账号上。
+- 反过来也一样：先用 App 登录的人，网页扫码直接成功。
+- 两边的 openid 都会出现在用户的登录标识里（`wechat_web`、`wechat_app` 各一条）。

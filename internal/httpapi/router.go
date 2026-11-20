@@ -9,6 +9,7 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 )
 
@@ -34,6 +35,8 @@ type Deps struct {
 	Notify *service.NotifyService
 	// Auth 处理三方扫码登录的回调（GET /oauth/callback，对公网）。为 nil 时不挂载。
 	Auth *service.AuthService
+	// WechatMP 处理服务号的事件推送（/wechat/mp/callback，对公网）。为 nil 时不挂载。
+	WechatMP *service.WechatMPService
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -51,7 +54,8 @@ type Deps struct {
 // NewRouter 装配管理 UI 的 HTTP 路由。
 //
 // 这套 API 只服务管理控制台。SDK 走 gRPC（计划二），终端用户的登录接口
-// 由 SDK 代理。唯一直接面向终端用户浏览器的是三方扫码登录的回调 /oauth/callback。
+// 由 SDK 代理。对公网的只有两个回调：三方扫码登录的 /oauth/callback（终端用户浏览器）
+// 与服务号事件推送的 /wechat/mp/callback（微信服务器）。
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -87,6 +91,9 @@ func NewRouter(d Deps) http.Handler {
 
 	if d.Auth != nil {
 		r.Get(service.OAuthCallbackPath, oauthCallback(d.Auth))
+	}
+	if d.WechatMP != nil {
+		r.HandleFunc(notify.WechatMPCallbackPath, wechatMPCallback(d.WechatMP))
 	}
 
 	r.Route("/admin/api", func(r chi.Router) {

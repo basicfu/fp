@@ -16,6 +16,7 @@
 | `wecom_bot` | 自定义 | 无 | 企业微信群机器人；`@` 成员配置属于模板 |
 | `dingtalk_bot` | 自定义 | 无 | 钉钉群机器人；支持加签；`@` 配置属于模板 |
 | `webhook` | 自定义 | 无 | 自定义 HTTP 调用，支持 GET / POST |
+| `wechat_mp` | 供应商模板 | fp 用户 ID | 微信服务号模板消息。用户要先扫码开启微信通知，见 [服务号通知文档](wechat-mp.md) |
 
 **模板变量**：自定义模板里写 `{name}`，发送时按调用方传的变量替换；JSON 模板里的占位符写在字符串里（如 `"{name}"`）。变量值会按目标格式转义（JSON、HTML、URL），不用自己处理。调用方传的变量必须与模板声明的变量**完全一致**，多了少了都会被拒绝。
 
@@ -43,6 +44,9 @@ err = client.Notify().Send(ctx, "login_sms", "13800138000", map[string]string{"c
 
 // IM / webhook：没有收件人，传空串
 err = client.Notify().Send(ctx, "order_alert", "", map[string]string{"orderNo": "A1001"})
+
+// 服务号：收件人是 fp 用户 ID
+err = client.Notify().Send(ctx, "device_connected", userID, map[string]string{"thing1": "办公室电脑", "time2": "2026-11-20 10:00"})
 ```
 
 **幂等与重试**：SDK 默认每次调用自动生成一个幂等键。fp 不可达、超时（单次尝试 30 秒）、或上一次相同请求还在处理（`NOTIFY_IN_PROGRESS`）这类瞬时失败，SDK 最多重试两次（指数退避，200ms 起），**整个调用复用同一个键**，服务端据此避免同一条通知因为重试而发出两次。想让业务自己的重试（重跑任务、重放消息）也不重复发送，用业务事件的 ID 当键：
@@ -62,7 +66,9 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 | `NOTIFY_TEMPLATE_NOT_FOUND` | 模板 code 不存在 | 检查 code |
 | `NOTIFY_TEMPLATE_DISABLED` | 模板已停用 | 在控制台启用 |
 | `NOTIFY_PARAMS_INVALID` | 变量与模板声明的不一致 | `Detail` 里的 `missing` / `unexpected` 列出缺的与多的 |
-| `NOTIFY_RECIPIENT_INVALID` | sms / email 缺收件人，或 IM / webhook 传了收件人，或收件人超过 254 字节 | 按渠道传 |
+| `NOTIFY_RECIPIENT_INVALID` | sms / email / wechat_mp 缺收件人，或 IM / webhook 传了收件人，或收件人超过 254 字节，或 wechat_mp 的收件人不是用户 ID | 按渠道传 |
+| `NOTIFY_RECIPIENT_UNREACHABLE` | wechat_mp：这个用户没开启微信通知，或已取关服务号 | 按"不收微信通知"跳过 |
+| `WECHAT_MP_UNAVAILABLE` | wechat_mp：通知中心里没有启用的服务号 | 控制台建 `wechat_mp` 供应商并启用 |
 | `INVALID_ARGUMENT` | 幂等键超过 128 字节（通用参数错误码，不是通知专属的） | 换一个更短的键 |
 | `NOTIFY_PROVIDER_MISSING` | 模板没有可用的供应商（没关联，或全被禁用） | 去模板详情页检查 |
 | `NOTIFY_IN_PROGRESS` | 相同幂等键的请求还在处理 | SDK 已自动重试两次仍遇到才会返回；上一次的结果未知。想重试又不重复发送，要用 `WithIdempotencyKey` 传自己的键（见第 3 节） |
@@ -79,6 +85,7 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 | `wecom_bot` | wecom_bot | `key`🔒（Webhook 地址里 `key=` 后面那段） |
 | `dingtalk_bot` | dingtalk_bot | `accessToken`🔒、`secret`🔒（机器人安全设置选了「加签」才填） |
 | `webhook` | webhook | `url`（不能含 `#`）、`secret`🔒（可选） |
+| `wechat_mp` | wechat_mp | `appId`、`appSecret`🔒、`token`🔒、`encodingAESKey`🔒（安全模式才填）、`bindReply`、`followReply`。**一个 fp 部署只能建一个**，同时是服务号订阅用的凭据，见 [服务号通知文档](wechat-mp.md) |
 | `log` | 任意 | `channel`；只写服务端日志、不真发，仅供本地开发，`FP_ENV` 为 `prod` 时不可用（见下） |
 
 **`log` 与 `FP_ENV`**：`log` 会把收件人、变量和渲染后的内容都写进服务端日志，绝不能出现在有真实数据的环境里。`FP_ENV` 等于 `prod`（不分大小写）时，它在类型列表里不出现、不能新建；库里已有的 `log` 实例不能再关联，已经关联的在发送时按失败的一次尝试处理、不会被调用。`FP_ENV` 不设时缺省是 `DEV`，写成 `production`、`staging` 之类也算非 prod——生产类部署必须显式设 `FP_ENV=prod`。

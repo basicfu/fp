@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { NativeSelect } from '@/components/NativeSelect'
 import NotifyContentFields from '@/components/NotifyContentFields'
 import { ApiError, api } from '@/lib/api'
-import { needsRecipient, notifyChannelLabels, notifyModeLabels } from '@/lib/notify'
+import { needsRecipient, notifyChannelLabels, notifyModeLabels, recipientLabel } from '@/lib/notify'
 import { errorMessage, useResource } from '@/lib/useResource'
 import type { NotifyContent, NotifyLink, NotifyProvider, NotifyTemplateDetail as Detail } from '@/lib/types'
 
@@ -203,7 +203,7 @@ function TestSendDialog({ detail, open, onOpenChange }: { detail: Detail; open: 
           <p className="text-sm text-muted-foreground">走与业务方调用完全相同的发送路径，会真的发出去。</p>
           {recipient && (
             <div className="space-y-2">
-              <Label htmlFor="ts-to">{detail.channel === 'sms' ? '手机号' : '邮箱'}</Label>
+              <Label htmlFor="ts-to">{recipientLabel(detail.channel)}</Label>
               <Input id="ts-to" value={to} onChange={(e) => setTo(e.target.value)} />
             </div>
           )}

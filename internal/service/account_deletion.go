@@ -179,6 +179,8 @@ func (s *UserService) purgeOneDue(ctx context.Context, coolingOff time.Duration)
 		`DELETE FROM user_extra WHERE user_id = $1`,
 		`DELETE FROM user_role WHERE user_id = $1`,
 		`DELETE FROM user_avatar WHERE user_id = $1`,
+		// 通知去向是"这个账号 ↔ 某个微信"的关联，注销后不能再往那个微信发。
+		`DELETE FROM wechat_mp_binding WHERE user_id = $1`,
 	} {
 		if _, err := tx.Exec(ctx, stmt, id); err != nil {
 			return uuid.Nil, false, fmt.Errorf("service: 注销清理 %q: %w", stmt, err)

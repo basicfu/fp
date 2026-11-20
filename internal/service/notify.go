@@ -31,12 +31,23 @@ type NotifyService struct {
 
 	mu    sync.Mutex
 	cache map[string]notify.Provider // 已构造的供应商，key 是 id@updated_at
+
+	// recipients 把某些渠道的收件人换成供应商认得的地址（服务号：fp 用户 ID → openid）。
+	recipients map[domain.NotifyChannel]RecipientResolver
 }
+
+// RecipientResolver 把调用方给的收件人换成供应商要的地址。换不了时返回 domain.Error。
+type RecipientResolver func(ctx context.Context, to string) (string, error)
 
 type NotifyOption func(*NotifyService)
 
 // WithNotifyProd 让 DevOnly 的供应商类型（log）在 prod 环境不可建、不暴露。
 func WithNotifyProd(isProd bool) NotifyOption { return func(s *NotifyService) { s.isProd = isProd } }
+
+// WithNotifyRecipients 为某个渠道登记收件人换算。服务号渠道没登记时，发送一律按收件人不可达失败。
+func WithNotifyRecipients(ch domain.NotifyChannel, r RecipientResolver) NotifyOption {
+	return func(s *NotifyService) { s.recipients[ch] = r }
+}
 
 // WithNotifyShuffle 注入洗牌函数，测试用它得到确定的"随机"顺序。
 func WithNotifyShuffle(f func(n int, swap func(i, j int))) NotifyOption {
@@ -44,7 +55,8 @@ func WithNotifyShuffle(f func(n int, swap func(i, j int))) NotifyOption {
 }
 
 func NewNotifyService(pool *pgxpool.Pool, rdb *redis.Client, reg *notify.Registry, opts ...NotifyOption) *NotifyService {
-	s := &NotifyService{pool: pool, rdb: rdb, reg: reg, shuffle: rand.Shuffle, cache: map[string]notify.Provider{}}
+	s := &NotifyService{pool: pool, rdb: rdb, reg: reg, shuffle: rand.Shuffle, cache: map[string]notify.Provider{},
+		recipients: map[domain.NotifyChannel]RecipientResolver{}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -142,6 +154,10 @@ func (s *NotifyService) CreateProvider(ctx context.Context, in CreateNotifyProvi
 		INSERT INTO notify_provider (type, description, enabled, config)
 		VALUES ($1, $2, $3, $4) RETURNING `+notifyProviderColumns,
 		in.Type, strings.TrimSpace(in.Description), in.Enabled, raw))
+	if isUniqueViolation(err) && in.Type == notify.TypeWechatMP {
+		return nil, domain.Fail(domain.ErrInvalidArgument, domain.CodeNotifyProviderInvalid,
+			"只能配置一个微信服务号：订阅关系按这个服务号的 openid 记录，换服务号请修改现有实例")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("service: 创建供应商: %w", err)
 	}

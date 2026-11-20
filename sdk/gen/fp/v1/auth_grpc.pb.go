@@ -24,6 +24,7 @@ const (
 	AuthService_StartOAuthLogin_FullMethodName      = "/fp.v1.AuthService/StartOAuthLogin"
 	AuthService_ExchangeOAuthTicket_FullMethodName  = "/fp.v1.AuthService/ExchangeOAuthTicket"
 	AuthService_PollOAuthLogin_FullMethodName       = "/fp.v1.AuthService/PollOAuthLogin"
+	AuthService_ExchangeAppCode_FullMethodName      = "/fp.v1.AuthService/ExchangeAppCode"
 	AuthService_BindPhoneLogin_FullMethodName       = "/fp.v1.AuthService/BindPhoneLogin"
 	AuthService_Logout_FullMethodName               = "/fp.v1.AuthService/Logout"
 	AuthService_ValidateToken_FullMethodName        = "/fp.v1.AuthService/ValidateToken"
@@ -54,6 +55,9 @@ type AuthServiceClient interface {
 	ExchangeOAuthTicket(ctx context.Context, in *ExchangeOAuthTicketRequest, opts ...grpc.CallOption) (*ExchangeOAuthTicketResponse, error)
 	// PollOAuthLogin 是桌面端按 state 轮询，只对应用开启了轮询时以 desktop 模式发起的 state 有效。
 	PollOAuthLogin(ctx context.Context, in *PollOAuthLoginRequest, opts ...grpc.CallOption) (*PollOAuthLoginResponse, error)
+	// ExchangeAppCode 用移动 App 经三方 SDK（微信 OpenSDK 等）拿到的 code 换结论，结论同 ExchangeOAuthTicket。
+	// 只接受 App 登录方式（如 "wechat_app"）；网页扫码的 code 必须经 fp 回调，不能直接提交。
+	ExchangeAppCode(ctx context.Context, in *ExchangeAppCodeRequest, opts ...grpc.CallOption) (*ExchangeAppCodeResponse, error)
 	// BindPhoneLogin 用绑手机票据加短信验证码完成首次扫码登录。发码用 SendLoginCode。
 	BindPhoneLogin(ctx context.Context, in *BindPhoneLoginRequest, opts ...grpc.CallOption) (*BindPhoneLoginResponse, error)
 	// Logout 撤销一个 token。
@@ -130,6 +134,16 @@ func (c *authServiceClient) PollOAuthLogin(ctx context.Context, in *PollOAuthLog
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PollOAuthLoginResponse)
 	err := c.cc.Invoke(ctx, AuthService_PollOAuthLogin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *authServiceClient) ExchangeAppCode(ctx context.Context, in *ExchangeAppCodeRequest, opts ...grpc.CallOption) (*ExchangeAppCodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExchangeAppCodeResponse)
+	err := c.cc.Invoke(ctx, AuthService_ExchangeAppCode_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -239,6 +253,9 @@ type AuthServiceServer interface {
 	ExchangeOAuthTicket(context.Context, *ExchangeOAuthTicketRequest) (*ExchangeOAuthTicketResponse, error)
 	// PollOAuthLogin 是桌面端按 state 轮询，只对应用开启了轮询时以 desktop 模式发起的 state 有效。
 	PollOAuthLogin(context.Context, *PollOAuthLoginRequest) (*PollOAuthLoginResponse, error)
+	// ExchangeAppCode 用移动 App 经三方 SDK（微信 OpenSDK 等）拿到的 code 换结论，结论同 ExchangeOAuthTicket。
+	// 只接受 App 登录方式（如 "wechat_app"）；网页扫码的 code 必须经 fp 回调，不能直接提交。
+	ExchangeAppCode(context.Context, *ExchangeAppCodeRequest) (*ExchangeAppCodeResponse, error)
 	// BindPhoneLogin 用绑手机票据加短信验证码完成首次扫码登录。发码用 SendLoginCode。
 	BindPhoneLogin(context.Context, *BindPhoneLoginRequest) (*BindPhoneLoginResponse, error)
 	// Logout 撤销一个 token。
@@ -285,6 +302,9 @@ func (UnimplementedAuthServiceServer) ExchangeOAuthTicket(context.Context, *Exch
 }
 func (UnimplementedAuthServiceServer) PollOAuthLogin(context.Context, *PollOAuthLoginRequest) (*PollOAuthLoginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PollOAuthLogin not implemented")
+}
+func (UnimplementedAuthServiceServer) ExchangeAppCode(context.Context, *ExchangeAppCodeRequest) (*ExchangeAppCodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExchangeAppCode not implemented")
 }
 func (UnimplementedAuthServiceServer) BindPhoneLogin(context.Context, *BindPhoneLoginRequest) (*BindPhoneLoginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BindPhoneLogin not implemented")
@@ -417,6 +437,24 @@ func _AuthService_PollOAuthLogin_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AuthServiceServer).PollOAuthLogin(ctx, req.(*PollOAuthLoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuthService_ExchangeAppCode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExchangeAppCodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).ExchangeAppCode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_ExchangeAppCode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).ExchangeAppCode(ctx, req.(*ExchangeAppCodeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -580,6 +618,10 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PollOAuthLogin",
 			Handler:    _AuthService_PollOAuthLogin_Handler,
+		},
+		{
+			MethodName: "ExchangeAppCode",
+			Handler:    _AuthService_ExchangeAppCode_Handler,
 		},
 		{
 			MethodName: "BindPhoneLogin",

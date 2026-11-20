@@ -156,6 +156,9 @@ func run() error {
 	if err := registry.Register(connector.NewWechatWeb()); err != nil {
 		return err
 	}
+	if err := registry.Register(connector.NewWechatApp()); err != nil {
+		return err
+	}
 
 	appSvc := service.NewApplicationService(pool, registry, service.WithIMConfigPublisher(configPub))
 
@@ -182,7 +185,9 @@ func run() error {
 		}
 		log.Info("通知模块走开发代理", "proxy", notify.DevProxy)
 	}
-	notifySvc := service.NewNotifyService(pool, rdb, notify.DefaultRegistry(), service.WithNotifyProd(cfg.IsProd()))
+	wechatMPSvc := service.NewWechatMPService(pool, rdb)
+	notifySvc := service.NewNotifyService(pool, rdb, notify.DefaultRegistry(), service.WithNotifyProd(cfg.IsProd()),
+		service.WithNotifyRecipients(domain.NotifyChannelWechatMP, wechatMPSvc.ResolveRecipient))
 
 	authSvc := service.NewAuthService(service.AuthDeps{
 		Apps:      appSvc,
@@ -219,6 +224,7 @@ func run() error {
 			AccessKeys:    accessKeySvc,
 			Notify:        notifySvc,
 			Auth:          authSvc,
+			WechatMP:      wechatMPSvc,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
 			Console:       web.Dist(),
@@ -254,6 +260,7 @@ func run() error {
 		ConfigPub:  configPub,
 		AccessKeys: accessKeySvc,
 		Notify:     notifySvc,
+		WechatMP:   wechatMPSvc,
 		Users:      userSvc,
 		Accounts:   accountSvc,
 	})

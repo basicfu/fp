@@ -103,7 +103,7 @@ func invalid(format string, a ...any) error {
 }
 
 // 渠道 / 模式之外的可选字段名，用于"这个渠道不支持该字段"的报错。固定顺序，报错稳定。
-var optionalFields = []string{"subject", "contentType", "method", "mentionedList", "mentionedMobileList", "atMobiles", "isAtAll"}
+var optionalFields = []string{"subject", "contentType", "method", "mentionedList", "mentionedMobileList", "atMobiles", "isAtAll", "link"}
 
 func presentFields(c domain.NotifyContent) map[string]bool {
 	return map[string]bool{
@@ -114,6 +114,7 @@ func presentFields(c domain.NotifyContent) map[string]bool {
 		"mentionedMobileList": len(c.MentionedMobileList) > 0,
 		"atMobiles":           len(c.AtMobiles) > 0,
 		"isAtAll":             c.IsAtAll,
+		"link":                c.Link != "",
 	}
 }
 
@@ -157,6 +158,19 @@ func ValidateContent(ch domain.NotifyChannel, mode domain.NotifyMode, c domain.N
 
 	var err error
 	switch {
+	case ch == domain.NotifyChannelWechatMP:
+		if err = rejectUnsupported(c, "link"); err != nil {
+			break
+		}
+		if len(c.Variables) == 0 {
+			return c, invalid("服务号模板要列出模板里的字段名（如 thing1、time2）")
+		}
+		c.Link = strings.TrimSpace(c.Link)
+		if c.Link != "" {
+			if u, perr := url.Parse(c.Link); perr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+				return c, invalid("跳转链接必须是 http(s) 网址")
+			}
+		}
 	case mode == domain.NotifyModeVendor:
 		err = rejectUnsupported(c)
 	case ch == domain.NotifyChannelEmail:

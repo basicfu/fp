@@ -11,12 +11,22 @@ option go_package = "github.com/basicfu/fp/sdk/gen/fp/v1;fpv1";
 service NotifyService {
   // Send 按通知模板 code 发送一条通知。
   rpc Send(SendRequest) returns (SendResponse);
+
+  // CreateWechatSubscribeQR 给用户生成开启微信通知的服务号二维码（10 分钟有效、只给第一个扫的微信用）。
+  // 用户扫码后（没关注的先关注），该用户的 wechat_mp 渠道通知就发给这个微信。
+  rpc CreateWechatSubscribeQR(CreateWechatSubscribeQRRequest) returns (CreateWechatSubscribeQRResponse);
+
+  // GetWechatSubscription 查用户的微信通知状态。展示二维码期间可以轮询它，变成可收到就关掉二维码。
+  rpc GetWechatSubscription(GetWechatSubscriptionRequest) returns (GetWechatSubscriptionResponse);
+
+  // DeleteWechatSubscription 关掉用户的微信通知（删绑定）。用户在微信里照样关注着服务号，服务端没法替他取关。
+  rpc DeleteWechatSubscription(DeleteWechatSubscriptionRequest) returns (DeleteWechatSubscriptionResponse);
 }
 
 message SendRequest {
   // code 是控制台里创建的通知模板的唯一标识，决定渠道、模板与供应商。
   string code = 1;
-  // to 是收件人：sms 是手机号，email 是邮箱；telegram / 企业微信 / 钉钉 / webhook 必须为空。
+  // to 是收件人：sms 是手机号，email 是邮箱，wechat_mp 是 fp 用户 ID；telegram / 企业微信 / 钉钉 / webhook 必须为空。
   string to = 2;
   // params 是模板变量的取值，键集合必须与模板声明的变量完全一致。
   map<string, string> params = 3;
@@ -27,3 +37,34 @@ message SendRequest {
 
 // SendResponse 是发送结果。成功即空响应，失败走 gRPC status。
 message SendResponse {}
+
+message CreateWechatSubscribeQRRequest {
+  string user_id = 1;
+}
+
+message CreateWechatSubscribeQRResponse {
+  // image_url 是微信托管的二维码图片，可以直接放进 <img>。
+  string image_url = 1;
+  // content 是二维码里编码的内容，想自己画二维码（换颜色、加 logo）时用。
+  string content = 2;
+  int64 expires_in_sec = 3;
+}
+
+message GetWechatSubscriptionRequest {
+  string user_id = 1;
+}
+
+message GetWechatSubscriptionResponse {
+  // bound 表示开启过微信通知（扫过码，或用微信登录过的人自己关注服务号时自动关联）。
+  bool bound = 1;
+  // subscribed 表示绑定的微信当前仍关注着服务号。bound && subscribed 才收得到通知。
+  bool subscribed = 2;
+  // bound_at_ms 是开启时间（Unix 毫秒），没开启时为 0。
+  int64 bound_at_ms = 3;
+}
+
+message DeleteWechatSubscriptionRequest {
+  string user_id = 1;
+}
+
+message DeleteWechatSubscriptionResponse {}

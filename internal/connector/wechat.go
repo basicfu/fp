@@ -24,27 +24,37 @@ const (
 	wechatAPIBase  = "https://api.weixin.qq.com"
 )
 
-// WechatWebConnector 实现 OAuthConnector。
-type WechatWebConnector struct {
+// wechatOpenAPI 是开放平台「用 code 换身份」那两步。网站应用与移动应用的接口、返回完全相同，
+// 只是 AppID / AppSecret 不同、换出来的 openid 不通用，所以身份类型分开记。
+type wechatOpenAPI struct {
 	apiBase string
 	client  *http.Client
 }
 
-// WechatOption 调整 WechatWebConnector。
-type WechatOption func(*WechatWebConnector)
+// WechatOption 调整微信登录方式。
+type WechatOption func(*wechatOpenAPI)
 
 // WithWechatAPIBase 替换 api.weixin.qq.com，测试指向 httptest 服务器。
 func WithWechatAPIBase(base string) WechatOption {
-	return func(c *WechatWebConnector) { c.apiBase = base }
+	return func(c *wechatOpenAPI) { c.apiBase = base }
+}
+
+func newWechatOpenAPI(opts []WechatOption) wechatOpenAPI {
+	c := wechatOpenAPI{apiBase: wechatAPIBase, client: &http.Client{Timeout: 10 * time.Second}}
+	for _, o := range opts {
+		o(&c)
+	}
+	return c
+}
+
+// WechatWebConnector 实现 OAuthConnector。
+type WechatWebConnector struct {
+	api wechatOpenAPI
 }
 
 // NewWechatWeb 构造微信网站应用登录方式。
 func NewWechatWeb(opts ...WechatOption) *WechatWebConnector {
-	c := &WechatWebConnector{apiBase: wechatAPIBase, client: &http.Client{Timeout: 10 * time.Second}}
-	for _, o := range opts {
-		o(c)
-	}
-	return c
+	return &WechatWebConnector{api: newWechatOpenAPI(opts)}
 }
 
 // Type 实现 Connector。
@@ -105,9 +115,13 @@ type wechatUserResp struct {
 }
 
 // Exchange 实现 OAuthConnector。
-//
-// 取用户信息失败不算登录失败：openid / unionid 已经拿到，昵称头像只是建号时的初始资料。
 func (c *WechatWebConnector) Exchange(ctx context.Context, cfg map[string]any, code string) (*OAuthProfile, error) {
+	return c.api.exchange(ctx, cfg, code, domain.IdentityTypeWechatWeb)
+}
+
+// exchange 用 code 换身份。取用户信息失败不算登录失败：openid / unionid 已经拿到，
+// 昵称头像只是建号时的初始资料。
+func (c *wechatOpenAPI) exchange(ctx context.Context, cfg map[string]any, code, identityType string) (*OAuthProfile, error) {
 	q := url.Values{}
 	q.Set("appid", ConfigString(cfg, "appId", ""))
 	q.Set("secret", ConfigString(cfg, "appSecret", ""))
@@ -121,7 +135,7 @@ func (c *WechatWebConnector) Exchange(ctx context.Context, cfg map[string]any, c
 		return nil, upstreamFailed("换取 access_token: errcode=%d errmsg=%s", tok.ErrCode, tok.ErrMsg)
 	}
 
-	p := &OAuthProfile{IdentityType: domain.IdentityTypeWechatWeb, Subject: tok.OpenID, UnionKey: tok.UnionID}
+	p := &OAuthProfile{IdentityType: identityType, Subject: tok.OpenID, UnionKey: tok.UnionID}
 
 	uq := url.Values{}
 	uq.Set("access_token", tok.AccessToken)
@@ -143,7 +157,7 @@ func (c *WechatWebConnector) Exchange(ctx context.Context, cfg map[string]any, c
 	return p, nil
 }
 
-func (c *WechatWebConnector) getJSON(ctx context.Context, pathAndQuery string, out any) error {
+func (c *wechatOpenAPI) getJSON(ctx context.Context, pathAndQuery string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+pathAndQuery, nil)
 	if err != nil {
 		return err

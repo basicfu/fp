@@ -34,7 +34,11 @@ func TestWechatLoginEndToEnd(t *testing.T) {
 	users := service.NewUserService(pool)
 	codes := service.NewLoginCodeService(rdb, service.WithLoginCodeRateRules())
 	creg := connector.NewRegistry()
-	for _, c := range []connector.Connector{connector.NewSMSCode(codes), connector.NewWechatWeb(connector.WithWechatAPIBase(wx.URL))} {
+	for _, c := range []connector.Connector{
+		connector.NewSMSCode(codes),
+		connector.NewWechatWeb(connector.WithWechatAPIBase(wx.URL)),
+		connector.NewWechatApp(connector.WithWechatAPIBase(wx.URL)),
+	} {
 		if err := creg.Register(c); err != nil {
 			t.Fatal(err)
 		}
@@ -55,6 +59,9 @@ func TestWechatLoginEndToEnd(t *testing.T) {
 	if err := apps.SetConnector(ctx, app.ID, connector.TypeWechatWeb, true, map[string]any{
 		"appId": "wxapp", "appSecret": "s3cret", "returnUrls": returnURL, "desktopPoll": true,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apps.SetConnector(ctx, app.ID, connector.TypeWechatApp, true, map[string]any{"appId": "wxmobile", "appSecret": "s3cret"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,6 +198,26 @@ func TestWechatLoginEndToEnd(t *testing.T) {
 		}
 		if out := get(t, "/auth/wechat/poll?state="+state); out["code"] != "OAUTH_STATE_INVALID" {
 			t.Fatalf("取走后再 poll = %v", out)
+		}
+	})
+
+	// 手机 App 的 openid 和网站应用不同，unionid 相同：直接登录到网页端绑过手机的那个账号。
+	t.Run("手机 App：按 unionid 归并到老账号", func(t *testing.T) {
+		resp, out := post(t, "app-login", map[string]string{"code": "o-mobile:u1:小明"})
+		if resp.StatusCode != http.StatusOK || out["status"] != fpsdk.OAuthSuccess || out["token"] == "" {
+			t.Fatalf("app-login = %d %v", resp.StatusCode, out)
+		}
+		web, _, _ := users.FindByIdentity(ctx, "wechat_web", "o1")
+		user := out["user"].(map[string]any)
+		if web == nil || user["id"] != web.ID.String() {
+			t.Fatalf("App 登录到了另一个账号：%v", user)
+		}
+	})
+
+	t.Run("手机 App：新微信要绑手机", func(t *testing.T) {
+		_, out := post(t, "app-login", map[string]string{"code": "o-new:u-new:小红"})
+		if out["status"] != fpsdk.OAuthBindPhone || out["bindTicket"] == "" || out["nickname"] != "小红" {
+			t.Fatalf("app-login = %v", out)
 		}
 	})
 

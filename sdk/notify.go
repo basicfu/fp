@@ -46,7 +46,8 @@ func WithIdempotencyKey(key string) SendOption {
 
 // Send 按通知模板 code 发送一条通知。
 //
-// to 是收件人：短信是手机号，邮件是邮箱；telegram / 企业微信 / 钉钉 / webhook 传空串。
+// to 是收件人：短信是手机号，邮件是邮箱，服务号（wechat_mp）是 fp 用户 ID；telegram / 企业微信 / 钉钉 / webhook 传空串。
+// 服务号渠道的用户没开启微信通知或已取关时返回 CodeNotifyRecipientUnreachable，按"不收微信通知"跳过即可。
 // params 的键集合必须与模板声明的变量完全一致。
 //
 // 默认每次调用自动生成一个幂等键，并在内部重试时复用它：fp 不可达、超时，以及同键的上一次请求

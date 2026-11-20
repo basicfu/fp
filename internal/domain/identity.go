@@ -10,6 +10,9 @@ const (
 	IdentityTypeWechatMP = "wechat_mp"
 	// IdentityTypeWechatWeb 是微信开放平台「网站应用」扫码登录：subject=openid，union_key=unionid。
 	IdentityTypeWechatWeb = "wechat_web"
+	// IdentityTypeWechatApp 是微信开放平台「移动应用」登录：subject=openid，union_key=unionid。
+	// 同一个人在网站应用、移动应用下的 openid 不同，靠 unionid 归并到同一个用户。
+	IdentityTypeWechatApp = "wechat_app"
 )
 
 // Identity 是一条登录凭据记录。一个 User 可以有多条。

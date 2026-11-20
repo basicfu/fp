@@ -95,6 +95,18 @@ func (s *NotifyService) Send(ctx context.Context, in NotifySendInput) error {
 	if len(in.To) > notifyMaxRecipientBytes {
 		return domain.Failf(domain.ErrInvalidArgument, domain.CodeNotifyRecipientInvalid, "收件人不能超过 %d 字节", notifyMaxRecipientBytes)
 	}
+	// 换算也算校验，同样要在占键之前。发送记录里记的仍是调用方给的收件人（fp 用户 ID），不记 openid。
+	to := in.To
+	if tpl.Channel == domain.NotifyChannelWechatMP {
+		resolve := s.recipients[tpl.Channel]
+		if resolve == nil {
+			return domain.Fail(domain.ErrInternal, domain.CodeWechatMPUnavailable, "微信通知暂未开放")
+		}
+		var err error
+		if to, err = resolve(ctx, in.To); err != nil {
+			return err
+		}
+	}
 
 	lease, done, err := s.acquireIdem(ctx, in)
 	if err != nil {
@@ -103,7 +115,7 @@ func (s *NotifyService) Send(ctx context.Context, in NotifySendInput) error {
 	if done {
 		return nil
 	}
-	sendErr := s.dispatch(ctx, tpl, in, lease)
+	sendErr := s.dispatch(ctx, tpl, in, to, lease)
 	s.settleIdem(ctx, lease, sendErr)
 	return sendErr
 }
@@ -257,8 +269,8 @@ func (s *NotifyService) order(cands []notifyCandidate) {
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].priority > cands[j].priority })
 }
 
-// dispatch 逐个尝试候选供应商。lease 为 nil 表示请求没带幂等键。
-func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate, in NotifySendInput, lease *idemLease) error {
+// dispatch 逐个尝试候选供应商。to 是换算后交给供应商的收件人；lease 为 nil 表示请求没带幂等键。
+func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate, in NotifySendInput, to string, lease *idemLease) error {
 	cands, err := s.candidates(ctx, tpl.Code)
 	if err != nil {
 		return err
@@ -267,7 +279,7 @@ func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate
 		return domain.Failf(domain.ErrNotFound, domain.CodeNotifyProviderMissing, "通知模板 %q 没有可用的供应商", tpl.Code)
 	}
 
-	d := notify.Delivery{To: in.To, Params: in.Params, Template: *tpl}
+	d := notify.Delivery{To: to, Params: in.Params, Template: *tpl}
 	if tpl.Mode == domain.NotifyModeCustom {
 		d.Rendered = notify.Render(*tpl, in.Params)
 	}

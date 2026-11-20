@@ -10,6 +10,10 @@ import (
 // ConnectorWechatWeb 是微信开放平台「网站应用」扫码登录。网页端和桌面 App 都用它。
 const ConnectorWechatWeb = "wechat_web"
 
+// ConnectorWechatApp 是微信开放平台「移动应用」登录：手机 App 集成微信 OpenSDK 拉起微信授权，
+// 拿到 code 交给业务后端，业务后端调 ExchangeAppCode。
+const ConnectorWechatApp = "wechat_app"
+
 // 扫码登录的发起模式，由业务方按自己的运行环境判断。
 const (
 	// OAuthModeWeb：网页，或桌面 App 内嵌的 webview。登录后浏览器回到 ReturnURL?fpTicket=…。
@@ -119,6 +123,30 @@ func (a *Auth) ExchangeOAuth(ctx context.Context, ticket string, c OAuthClient) 
 func (a *Auth) PollOAuth(ctx context.Context, state string, c OAuthClient) (*OAuthResult, error) {
 	res, err := a.c.rpc.PollOAuthLogin(ctx, &fpv1.PollOAuthLoginRequest{
 		State: state, Ip: c.IP, UserAgent: c.UserAgent, Mobile: c.Mobile,
+	})
+	if err != nil {
+		return nil, translate(err)
+	}
+	return oauthResultFrom(res.GetResult()), nil
+}
+
+// AppCodeInput 是一次 App 登录：手机 App 经三方 SDK 授权后拿到的 code。
+type AppCodeInput struct {
+	OAuthClient
+	// Connector 为空时取 ConnectorWechatApp。
+	Connector string
+	Code      string
+}
+
+// ExchangeAppCode 用 App 拿到的 code 换结论，结论同 ExchangeOAuth：OAuthSuccess 直接登录，
+// OAuthBindPhone 首次登录要绑手机号，OAuthFailed 是微信接口失败（code 过期、配置错），让用户重试。
+// code 一次有效、5 分钟过期，App 拿到后应立刻交给后端。
+func (a *Auth) ExchangeAppCode(ctx context.Context, in AppCodeInput) (*OAuthResult, error) {
+	if in.Connector == "" {
+		in.Connector = ConnectorWechatApp
+	}
+	res, err := a.c.rpc.ExchangeAppCode(ctx, &fpv1.ExchangeAppCodeRequest{
+		ConnectorType: in.Connector, Code: in.Code, Ip: in.IP, UserAgent: in.UserAgent, Mobile: in.Mobile,
 	})
 	if err != nil {
 		return nil, translate(err)
