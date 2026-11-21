@@ -83,6 +83,10 @@ const (
 	CodeNicknameInvalid = "NICKNAME_INVALID"
 	// CodeAvatarInvalid：头像超过 1 MB，或按文件头识别不是 JPEG / PNG / WebP。
 	CodeAvatarInvalid = "AVATAR_INVALID"
+	// CodeIdentityTaken：要绑定的手机号、邮箱或微信已属于别的用户。
+	CodeIdentityTaken = "IDENTITY_TAKEN"
+	// CodeLastIdentity：解绑后账号就没有能登录的方式了。
+	CodeLastIdentity = "LAST_IDENTITY"
 
 	// 授权模块。
 
@@ -210,6 +214,8 @@ var codeSentinels = map[string]error{
 	CodeConfigVersionConflict:      ErrConflict,
 	CodeNicknameInvalid:            ErrInvalidArgument,
 	CodeAvatarInvalid:              ErrInvalidArgument,
+	CodeIdentityTaken:              ErrConflict,
+	CodeLastIdentity:               ErrConflict,
 
 	CodeUserNotFound:           ErrNotFound,
 	CodeIdentityNotFound:       ErrNotFound,

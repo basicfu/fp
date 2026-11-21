@@ -19,11 +19,19 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	UserService_GetUser_FullMethodName         = "/fp.v1.UserService/GetUser"
-	UserService_UpdateUser_FullMethodName      = "/fp.v1.UserService/UpdateUser"
-	UserService_UpdateAvatar_FullMethodName    = "/fp.v1.UserService/UpdateAvatar"
-	UserService_GetAvatar_FullMethodName       = "/fp.v1.UserService/GetAvatar"
-	UserService_RequestDeletion_FullMethodName = "/fp.v1.UserService/RequestDeletion"
+	UserService_GetUser_FullMethodName                 = "/fp.v1.UserService/GetUser"
+	UserService_UpdateUser_FullMethodName              = "/fp.v1.UserService/UpdateUser"
+	UserService_UpdateAvatar_FullMethodName            = "/fp.v1.UserService/UpdateAvatar"
+	UserService_GetAvatar_FullMethodName               = "/fp.v1.UserService/GetAvatar"
+	UserService_RequestDeletion_FullMethodName         = "/fp.v1.UserService/RequestDeletion"
+	UserService_SendVerifyCode_FullMethodName          = "/fp.v1.UserService/SendVerifyCode"
+	UserService_VerifyCode_FullMethodName              = "/fp.v1.UserService/VerifyCode"
+	UserService_BindIdentity_FullMethodName            = "/fp.v1.UserService/BindIdentity"
+	UserService_UnbindIdentity_FullMethodName          = "/fp.v1.UserService/UnbindIdentity"
+	UserService_StartBindOAuth_FullMethodName          = "/fp.v1.UserService/StartBindOAuth"
+	UserService_PollBindOAuth_FullMethodName           = "/fp.v1.UserService/PollBindOAuth"
+	UserService_ExchangeBindOAuthTicket_FullMethodName = "/fp.v1.UserService/ExchangeBindOAuthTicket"
+	UserService_SetPassword_FullMethodName             = "/fp.v1.UserService/SetPassword"
 )
 
 // UserServiceClient is the client API for UserService service.
@@ -57,6 +65,40 @@ type UserServiceClient interface {
 	// 已在冷静期内时幂等：返回原来的 purge_at，不重新计时。
 	// FROZEN 回 ACCOUNT_FROZEN、DELETED 回 ACCOUNT_UNAVAILABLE（均为 PERMISSION_DENIED），用户不存在回 USER_NOT_FOUND。
 	RequestDeletion(ctx context.Context, in *RequestDeletionRequest, opts ...grpc.CallOption) (*RequestDeletionResponse, error)
+	// SendVerifyCode 给用户发一条验证码，用于换绑、设密码之前的身份校验。
+	//
+	// target 为空发到该用户当前绑定的同类标识（sms → 手机号，email → 邮箱），没有则 IDENTITY_NOT_FOUND；
+	// 非空是要换绑的新标识，已属别的用户回 IDENTITY_TAKEN。频率限制与登录发码共用同一个计数
+	// （同一目标 30 秒 1 条、1 小时 5 条、1 天 10 条），超出回 RATE_LIMITED。
+	// 短信用通知模板 verify_code，邮件用系统配置 verify_code.email_template（默认 verify_code_email），
+	// 模板没配好回 VERIFY_TEMPLATE_UNAVAILABLE、供应商发送失败回 NOTIFY_SEND_FAILED。
+	//
+	// 码只对这个 user_id 有效，与登录验证码互不相通：发给新手机号的码不能拿去登录，反之亦然。
+	SendVerifyCode(ctx context.Context, in *SendVerifyCodeRequest, opts ...grpc.CallOption) (*SendVerifyCodeResponse, error)
+	// VerifyCode 校验 SendVerifyCode 发出的码，成功即作废，不改任何资料。码错、过期、超过 5 次尝试一律 CODE_INVALID。
+	VerifyCode(ctx context.Context, in *VerifyCodeRequest, opts ...grpc.CallOption) (*VerifyCodeResponse, error)
+	// BindIdentity 校验发到新标识的验证码后，把用户的手机号或邮箱换成它（原来的同类标识删掉，没有则新增）。
+	// 已属别的用户回 IDENTITY_TAKEN；已经是本人的同一个标识时什么都不改，照样成功（码仍会被消费）。
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	BindIdentity(ctx context.Context, in *BindIdentityRequest, opts ...grpc.CallOption) (*UserProfile, error)
+	// UnbindIdentity 删掉用户某一类登录标识。删完没有可登录的方式了回 LAST_IDENTITY，本来就没有回 IDENTITY_NOT_FOUND。
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	UnbindIdentity(ctx context.Context, in *UnbindIdentityRequest, opts ...grpc.CallOption) (*UserProfile, error)
+	// StartBindOAuth 发起一次扫码，把微信绑定到这个用户上。用法与 AuthService.StartOAuthLogin 完全一样
+	// （同一个回调地址、同样的 web / desktop 模式），区别只在结论：不登录，而是挂到 user_id 上。
+	// 发起时就绑定了 user_id：取结论时 user_id 对不上、或拿登录的接口来取，一律当作 state / 票据无效。
+	StartBindOAuth(ctx context.Context, in *StartBindOAuthRequest, opts ...grpc.CallOption) (*StartBindOAuthResponse, error)
+	// PollBindOAuth 是桌面端按 state 轮询，同 PollOAuthLogin，只对以 desktop 轮询方式发起的 state 有效。
+	PollBindOAuth(ctx context.Context, in *PollBindOAuthRequest, opts ...grpc.CallOption) (*PollBindOAuthResponse, error)
+	// ExchangeBindOAuthTicket 用回调交付的一次性 fpTicket 换结论（web 模式、桌面自定义协议），同 ExchangeOAuthTicket。
+	ExchangeBindOAuthTicket(ctx context.Context, in *ExchangeBindOAuthTicketRequest, opts ...grpc.CallOption) (*ExchangeBindOAuthTicketResponse, error)
+	// SetPassword 设置或重置密码。长度 8 个字符起、72 字节封顶（bcrypt 上限），
+	// 否则 PASSWORD_TOO_SHORT / PASSWORD_TOO_LONG；更严的规则（字符种类、32 位上限等）由业务方自己校验。
+	//
+	// 不撤销任何会话：业务方通常是先用 VerifyCode 校验过本人，再在当前登录态下改密。
+	SetPassword(ctx context.Context, in *SetPasswordRequest, opts ...grpc.CallOption) (*SetPasswordResponse, error)
 }
 
 type userServiceClient struct {
@@ -117,6 +159,86 @@ func (c *userServiceClient) RequestDeletion(ctx context.Context, in *RequestDele
 	return out, nil
 }
 
+func (c *userServiceClient) SendVerifyCode(ctx context.Context, in *SendVerifyCodeRequest, opts ...grpc.CallOption) (*SendVerifyCodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendVerifyCodeResponse)
+	err := c.cc.Invoke(ctx, UserService_SendVerifyCode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userServiceClient) VerifyCode(ctx context.Context, in *VerifyCodeRequest, opts ...grpc.CallOption) (*VerifyCodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyCodeResponse)
+	err := c.cc.Invoke(ctx, UserService_VerifyCode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userServiceClient) BindIdentity(ctx context.Context, in *BindIdentityRequest, opts ...grpc.CallOption) (*UserProfile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UserProfile)
+	err := c.cc.Invoke(ctx, UserService_BindIdentity_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userServiceClient) UnbindIdentity(ctx context.Context, in *UnbindIdentityRequest, opts ...grpc.CallOption) (*UserProfile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UserProfile)
+	err := c.cc.Invoke(ctx, UserService_UnbindIdentity_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userServiceClient) StartBindOAuth(ctx context.Context, in *StartBindOAuthRequest, opts ...grpc.CallOption) (*StartBindOAuthResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartBindOAuthResponse)
+	err := c.cc.Invoke(ctx, UserService_StartBindOAuth_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userServiceClient) PollBindOAuth(ctx context.Context, in *PollBindOAuthRequest, opts ...grpc.CallOption) (*PollBindOAuthResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PollBindOAuthResponse)
+	err := c.cc.Invoke(ctx, UserService_PollBindOAuth_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userServiceClient) ExchangeBindOAuthTicket(ctx context.Context, in *ExchangeBindOAuthTicketRequest, opts ...grpc.CallOption) (*ExchangeBindOAuthTicketResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExchangeBindOAuthTicketResponse)
+	err := c.cc.Invoke(ctx, UserService_ExchangeBindOAuthTicket_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *userServiceClient) SetPassword(ctx context.Context, in *SetPasswordRequest, opts ...grpc.CallOption) (*SetPasswordResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetPasswordResponse)
+	err := c.cc.Invoke(ctx, UserService_SetPassword_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // UserServiceServer is the server API for UserService service.
 // All implementations must embed UnimplementedUserServiceServer
 // for forward compatibility.
@@ -148,6 +270,40 @@ type UserServiceServer interface {
 	// 已在冷静期内时幂等：返回原来的 purge_at，不重新计时。
 	// FROZEN 回 ACCOUNT_FROZEN、DELETED 回 ACCOUNT_UNAVAILABLE（均为 PERMISSION_DENIED），用户不存在回 USER_NOT_FOUND。
 	RequestDeletion(context.Context, *RequestDeletionRequest) (*RequestDeletionResponse, error)
+	// SendVerifyCode 给用户发一条验证码，用于换绑、设密码之前的身份校验。
+	//
+	// target 为空发到该用户当前绑定的同类标识（sms → 手机号，email → 邮箱），没有则 IDENTITY_NOT_FOUND；
+	// 非空是要换绑的新标识，已属别的用户回 IDENTITY_TAKEN。频率限制与登录发码共用同一个计数
+	// （同一目标 30 秒 1 条、1 小时 5 条、1 天 10 条），超出回 RATE_LIMITED。
+	// 短信用通知模板 verify_code，邮件用系统配置 verify_code.email_template（默认 verify_code_email），
+	// 模板没配好回 VERIFY_TEMPLATE_UNAVAILABLE、供应商发送失败回 NOTIFY_SEND_FAILED。
+	//
+	// 码只对这个 user_id 有效，与登录验证码互不相通：发给新手机号的码不能拿去登录，反之亦然。
+	SendVerifyCode(context.Context, *SendVerifyCodeRequest) (*SendVerifyCodeResponse, error)
+	// VerifyCode 校验 SendVerifyCode 发出的码，成功即作废，不改任何资料。码错、过期、超过 5 次尝试一律 CODE_INVALID。
+	VerifyCode(context.Context, *VerifyCodeRequest) (*VerifyCodeResponse, error)
+	// BindIdentity 校验发到新标识的验证码后，把用户的手机号或邮箱换成它（原来的同类标识删掉，没有则新增）。
+	// 已属别的用户回 IDENTITY_TAKEN；已经是本人的同一个标识时什么都不改，照样成功（码仍会被消费）。
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	BindIdentity(context.Context, *BindIdentityRequest) (*UserProfile, error)
+	// UnbindIdentity 删掉用户某一类登录标识。删完没有可登录的方式了回 LAST_IDENTITY，本来就没有回 IDENTITY_NOT_FOUND。
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	UnbindIdentity(context.Context, *UnbindIdentityRequest) (*UserProfile, error)
+	// StartBindOAuth 发起一次扫码，把微信绑定到这个用户上。用法与 AuthService.StartOAuthLogin 完全一样
+	// （同一个回调地址、同样的 web / desktop 模式），区别只在结论：不登录，而是挂到 user_id 上。
+	// 发起时就绑定了 user_id：取结论时 user_id 对不上、或拿登录的接口来取，一律当作 state / 票据无效。
+	StartBindOAuth(context.Context, *StartBindOAuthRequest) (*StartBindOAuthResponse, error)
+	// PollBindOAuth 是桌面端按 state 轮询，同 PollOAuthLogin，只对以 desktop 轮询方式发起的 state 有效。
+	PollBindOAuth(context.Context, *PollBindOAuthRequest) (*PollBindOAuthResponse, error)
+	// ExchangeBindOAuthTicket 用回调交付的一次性 fpTicket 换结论（web 模式、桌面自定义协议），同 ExchangeOAuthTicket。
+	ExchangeBindOAuthTicket(context.Context, *ExchangeBindOAuthTicketRequest) (*ExchangeBindOAuthTicketResponse, error)
+	// SetPassword 设置或重置密码。长度 8 个字符起、72 字节封顶（bcrypt 上限），
+	// 否则 PASSWORD_TOO_SHORT / PASSWORD_TOO_LONG；更严的规则（字符种类、32 位上限等）由业务方自己校验。
+	//
+	// 不撤销任何会话：业务方通常是先用 VerifyCode 校验过本人，再在当前登录态下改密。
+	SetPassword(context.Context, *SetPasswordRequest) (*SetPasswordResponse, error)
 	mustEmbedUnimplementedUserServiceServer()
 }
 
@@ -172,6 +328,30 @@ func (UnimplementedUserServiceServer) GetAvatar(context.Context, *GetAvatarReque
 }
 func (UnimplementedUserServiceServer) RequestDeletion(context.Context, *RequestDeletionRequest) (*RequestDeletionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RequestDeletion not implemented")
+}
+func (UnimplementedUserServiceServer) SendVerifyCode(context.Context, *SendVerifyCodeRequest) (*SendVerifyCodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SendVerifyCode not implemented")
+}
+func (UnimplementedUserServiceServer) VerifyCode(context.Context, *VerifyCodeRequest) (*VerifyCodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyCode not implemented")
+}
+func (UnimplementedUserServiceServer) BindIdentity(context.Context, *BindIdentityRequest) (*UserProfile, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindIdentity not implemented")
+}
+func (UnimplementedUserServiceServer) UnbindIdentity(context.Context, *UnbindIdentityRequest) (*UserProfile, error) {
+	return nil, status.Error(codes.Unimplemented, "method UnbindIdentity not implemented")
+}
+func (UnimplementedUserServiceServer) StartBindOAuth(context.Context, *StartBindOAuthRequest) (*StartBindOAuthResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartBindOAuth not implemented")
+}
+func (UnimplementedUserServiceServer) PollBindOAuth(context.Context, *PollBindOAuthRequest) (*PollBindOAuthResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PollBindOAuth not implemented")
+}
+func (UnimplementedUserServiceServer) ExchangeBindOAuthTicket(context.Context, *ExchangeBindOAuthTicketRequest) (*ExchangeBindOAuthTicketResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExchangeBindOAuthTicket not implemented")
+}
+func (UnimplementedUserServiceServer) SetPassword(context.Context, *SetPasswordRequest) (*SetPasswordResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetPassword not implemented")
 }
 func (UnimplementedUserServiceServer) mustEmbedUnimplementedUserServiceServer() {}
 func (UnimplementedUserServiceServer) testEmbeddedByValue()                     {}
@@ -284,6 +464,150 @@ func _UserService_RequestDeletion_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _UserService_SendVerifyCode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendVerifyCodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).SendVerifyCode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_SendVerifyCode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).SendVerifyCode(ctx, req.(*SendVerifyCodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _UserService_VerifyCode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyCodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).VerifyCode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_VerifyCode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).VerifyCode(ctx, req.(*VerifyCodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _UserService_BindIdentity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BindIdentityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).BindIdentity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_BindIdentity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).BindIdentity(ctx, req.(*BindIdentityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _UserService_UnbindIdentity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnbindIdentityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).UnbindIdentity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_UnbindIdentity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).UnbindIdentity(ctx, req.(*UnbindIdentityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _UserService_StartBindOAuth_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartBindOAuthRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).StartBindOAuth(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_StartBindOAuth_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).StartBindOAuth(ctx, req.(*StartBindOAuthRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _UserService_PollBindOAuth_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PollBindOAuthRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).PollBindOAuth(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_PollBindOAuth_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).PollBindOAuth(ctx, req.(*PollBindOAuthRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _UserService_ExchangeBindOAuthTicket_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExchangeBindOAuthTicketRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).ExchangeBindOAuthTicket(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_ExchangeBindOAuthTicket_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).ExchangeBindOAuthTicket(ctx, req.(*ExchangeBindOAuthTicketRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _UserService_SetPassword_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetPasswordRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).SetPassword(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserService_SetPassword_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).SetPassword(ctx, req.(*SetPasswordRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // UserService_ServiceDesc is the grpc.ServiceDesc for UserService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -310,6 +634,38 @@ var UserService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RequestDeletion",
 			Handler:    _UserService_RequestDeletion_Handler,
+		},
+		{
+			MethodName: "SendVerifyCode",
+			Handler:    _UserService_SendVerifyCode_Handler,
+		},
+		{
+			MethodName: "VerifyCode",
+			Handler:    _UserService_VerifyCode_Handler,
+		},
+		{
+			MethodName: "BindIdentity",
+			Handler:    _UserService_BindIdentity_Handler,
+		},
+		{
+			MethodName: "UnbindIdentity",
+			Handler:    _UserService_UnbindIdentity_Handler,
+		},
+		{
+			MethodName: "StartBindOAuth",
+			Handler:    _UserService_StartBindOAuth_Handler,
+		},
+		{
+			MethodName: "PollBindOAuth",
+			Handler:    _UserService_PollBindOAuth_Handler,
+		},
+		{
+			MethodName: "ExchangeBindOAuthTicket",
+			Handler:    _UserService_ExchangeBindOAuthTicket_Handler,
+		},
+		{
+			MethodName: "SetPassword",
+			Handler:    _UserService_SetPassword_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

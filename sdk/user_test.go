@@ -67,7 +67,7 @@ func (s *userStub) RequestDeletion(_ context.Context, req *fpv1.RequestDeletionR
 
 // newUsersForTest 起一个只挂 UserService 桩的真实 gRPC 服务端，返回连着它的 Users。
 // 不走 New()：New 会起 Watch 流等一堆与本测试无关的后台 goroutine。
-func newUsersForTest(t *testing.T, stub *userStub) *Users {
+func newUsersForTest(t *testing.T, stub fpv1.UserServiceServer) *Users {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

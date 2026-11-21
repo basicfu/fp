@@ -170,9 +170,9 @@ func TestUsersRequestDeletionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestDeletion: %v", err)
 	}
-	// 服务端与本机时钟可能有几秒偏差，只核对量级是"约 15 天之后"。
-	if d := purgeAt.Sub(before); d < 15*24*time.Hour-time.Minute || d > 15*24*time.Hour+time.Minute {
-		t.Fatalf("purgeAt 距现在 %v, want 约 15 天", d)
+	// 服务端与本机时钟可能有几秒偏差，只核对量级是"约 7 天之后"。
+	if d := purgeAt.Sub(before); d < 7*24*time.Hour-time.Minute || d > 7*24*time.Hour+time.Minute {
+		t.Fatalf("purgeAt 距现在 %v, want 约 7 天", d)
 	}
 	again, err := users.RequestDeletion(ctx, id)
 	if err != nil || !again.Equal(purgeAt) {

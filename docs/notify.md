@@ -102,6 +102,8 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 2. **关联**：模板详情页关联至少一个短信供应商并填供应商侧的模板 ID；多个供应商时按优先级逐家降级，与第 2 节一致。
 3. **登录方式**：在应用的「登录方式」里启用 `sms_code`（可以关掉「首次登录自动注册」，关掉后没注册过的手机号即使验证码正确也进不来）。
 
+业务方给已登录用户发的身份校验码（`Users().SendVerifyCode`，见 [user.md 第 9 节](user.md)）短信同样用 `verify_code`；邮件用 email 渠道的 **`verify_code_email`** 模板（变量也只有 `code`，code 可在系统配置 `verify_code.email_template` 改）。
+
 业务方调用见 [SDK 文档](../sdk/README.md#登录--登出)：`auth.SendLoginCode(ctx, phone)` 发码，用户收到后 `auth.Login` 用 `ConnectorType: "sms_code"`、`phone` + `code` 登录。
 
 | 规则 | 值 |
@@ -119,7 +121,7 @@ err := client.Notify().Send(ctx, "order_alert", "", params, fpsdk.WithIdempotenc
 | `VERIFY_TEMPLATE_UNAVAILABLE` | 应用开放了，但 `verify_code` 模板用不了：没建、已停用、变量不是 `code`、没关联供应商。`detail.reason` 是具体哪一种（通知中心的 `NOTIFY_*` 码） | 通知中心配好模板 |
 | `NOTIFY_SEND_FAILED` | 模板配好了，供应商全都没发出去 | 看「发送记录」与供应商 |
 
-后两个都是 gRPC `Internal`（SDK 里是带这个码的 `*fpsdk.Error`，同时满足 `ErrUnavailable`，`fpsdk.WriteError` 回 503），不会是 `NOT_FOUND` 或 `FORBIDDEN`：这是平台侧没配好，不是调用方的问题，业务登录页也不该把它显示成"未授权"。具体原因在 fp 的日志里（`登录验证码发送失败`）；供应商逐家尝试的结果另在控制台「发送记录」里，模板缺失、已停用、变量不符这类发送前就失败的情况不写发送记录，只有日志。发送记录的 code 列是 `verify_code`，不含验证码值。
+后两个都是 gRPC `Internal`（SDK 里是带这个码的 `*fpsdk.Error`，同时满足 `ErrUnavailable`，`fpsdk.WriteError` 回 503），不会是 `NOT_FOUND` 或 `FORBIDDEN`：这是平台侧没配好，不是调用方的问题，业务登录页也不该把它显示成"未授权"。具体原因在 fp 的日志里（`验证码发送失败`）；供应商逐家尝试的结果另在控制台「发送记录」里，模板缺失、已停用、变量不符这类发送前就失败的情况不写发送记录，只有日志。发送记录的 code 列是 `verify_code`，不含验证码值。
 
 **本地开发**：建一个 `log` 类型供应商（`channel` 填 `sms`）关联到 `verify_code`，验证码会打在 fp 的日志里，不用真实短信账号，见 [examples/demo](../examples/demo/README.md)。
 

@@ -42,6 +42,9 @@ type oauthState struct {
 	Deliver   string    `json:"deliver"`
 	ReturnURL string    `json:"returnUrl,omitempty"`
 	Scheme    string    `json:"scheme,omitempty"`
+	// BindUser 非空表示这是一次「绑微信到已登录用户」，结论只能经 PollBindOAuth / ExchangeBindOAuth 取，
+	// 且只给这个用户——否则拿登录接口来取，就成了用别人扫的码登录。
+	BindUser uuid.UUID `json:"bindUser"`
 }
 
 type oauthOutcome struct {
@@ -54,6 +57,7 @@ type oauthTicket struct {
 	AppID     uuid.UUID    `json:"appId"`
 	Connector string       `json:"connector"`
 	Outcome   oauthOutcome `json:"outcome"`
+	BindUser  uuid.UUID    `json:"bindUser"`
 }
 
 // OAuthStore 是三方扫码登录在 Redis 里的全部状态。所有读取都是一次性的。

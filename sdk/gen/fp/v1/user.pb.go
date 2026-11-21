@@ -570,6 +570,838 @@ func (x *RequestDeletionResponse) GetPurgeAt() int64 {
 	return 0
 }
 
+type SendVerifyCodeRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	UserId string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// channel 取 sms / email，其余取值 INVALID_ARGUMENT。
+	Channel string `protobuf:"bytes,2,opt,name=channel,proto3" json:"channel,omitempty"`
+	// target 是要发到的手机号 / 邮箱，空表示发到当前绑定的那个。
+	// 手机号须为 11 位中国大陆号码（否则 PHONE_INVALID），邮箱格式不对回 INVALID_ARGUMENT。
+	Target        string `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendVerifyCodeRequest) Reset() {
+	*x = SendVerifyCodeRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendVerifyCodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendVerifyCodeRequest) ProtoMessage() {}
+
+func (x *SendVerifyCodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendVerifyCodeRequest.ProtoReflect.Descriptor instead.
+func (*SendVerifyCodeRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SendVerifyCodeRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *SendVerifyCodeRequest) GetChannel() string {
+	if x != nil {
+		return x.Channel
+	}
+	return ""
+}
+
+func (x *SendVerifyCodeRequest) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+type SendVerifyCodeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendVerifyCodeResponse) Reset() {
+	*x = SendVerifyCodeResponse{}
+	mi := &file_fp_v1_user_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendVerifyCodeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendVerifyCodeResponse) ProtoMessage() {}
+
+func (x *SendVerifyCodeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendVerifyCodeResponse.ProtoReflect.Descriptor instead.
+func (*SendVerifyCodeResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{10}
+}
+
+type VerifyCodeRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	UserId string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// channel、target 同 SendVerifyCodeRequest：校验的是发到这个目标的那个码。
+	Channel       string `protobuf:"bytes,2,opt,name=channel,proto3" json:"channel,omitempty"`
+	Target        string `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
+	Code          string `protobuf:"bytes,4,opt,name=code,proto3" json:"code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyCodeRequest) Reset() {
+	*x = VerifyCodeRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyCodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyCodeRequest) ProtoMessage() {}
+
+func (x *VerifyCodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyCodeRequest.ProtoReflect.Descriptor instead.
+func (*VerifyCodeRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *VerifyCodeRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *VerifyCodeRequest) GetChannel() string {
+	if x != nil {
+		return x.Channel
+	}
+	return ""
+}
+
+func (x *VerifyCodeRequest) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *VerifyCodeRequest) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+type VerifyCodeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyCodeResponse) Reset() {
+	*x = VerifyCodeResponse{}
+	mi := &file_fp_v1_user_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyCodeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyCodeResponse) ProtoMessage() {}
+
+func (x *VerifyCodeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyCodeResponse.ProtoReflect.Descriptor instead.
+func (*VerifyCodeResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{12}
+}
+
+type BindIdentityRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	UserId string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// type 取 phone / email，其余取值 INVALID_ARGUMENT。
+	Type string `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	// subject 是新的手机号 / 邮箱，code 是用 SendVerifyCode 发到它的验证码（phone 对应 channel sms）。
+	Subject       string `protobuf:"bytes,3,opt,name=subject,proto3" json:"subject,omitempty"`
+	Code          string `protobuf:"bytes,4,opt,name=code,proto3" json:"code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BindIdentityRequest) Reset() {
+	*x = BindIdentityRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BindIdentityRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BindIdentityRequest) ProtoMessage() {}
+
+func (x *BindIdentityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BindIdentityRequest.ProtoReflect.Descriptor instead.
+func (*BindIdentityRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *BindIdentityRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *BindIdentityRequest) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *BindIdentityRequest) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
+}
+
+func (x *BindIdentityRequest) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+type UnbindIdentityRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	UserId string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// type 取 phone / email / wechat。wechat 一次删掉全部微信身份（网站应用、移动应用、服务号 openid，
+	// 以及同一 unionId 下的其它身份）——只删一种的话，下次靠 unionId 又会归并回来。
+	// 服务号的通知订阅不受影响，关通知用 NotifyService.UnbindWechat。
+	//
+	// 「可登录」指：还剩手机号或微信，或者还剩邮箱 / 用户名且设过密码。
+	Type          string `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnbindIdentityRequest) Reset() {
+	*x = UnbindIdentityRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnbindIdentityRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnbindIdentityRequest) ProtoMessage() {}
+
+func (x *UnbindIdentityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnbindIdentityRequest.ProtoReflect.Descriptor instead.
+func (*UnbindIdentityRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *UnbindIdentityRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *UnbindIdentityRequest) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+type StartBindOAuthRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	UserId string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// connector_type、mode、return_url 同 StartOAuthLoginRequest。
+	ConnectorType string `protobuf:"bytes,2,opt,name=connector_type,json=connectorType,proto3" json:"connector_type,omitempty"`
+	Mode          string `protobuf:"bytes,3,opt,name=mode,proto3" json:"mode,omitempty"`
+	ReturnUrl     string `protobuf:"bytes,4,opt,name=return_url,json=returnUrl,proto3" json:"return_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartBindOAuthRequest) Reset() {
+	*x = StartBindOAuthRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartBindOAuthRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartBindOAuthRequest) ProtoMessage() {}
+
+func (x *StartBindOAuthRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartBindOAuthRequest.ProtoReflect.Descriptor instead.
+func (*StartBindOAuthRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *StartBindOAuthRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *StartBindOAuthRequest) GetConnectorType() string {
+	if x != nil {
+		return x.ConnectorType
+	}
+	return ""
+}
+
+func (x *StartBindOAuthRequest) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *StartBindOAuthRequest) GetReturnUrl() string {
+	if x != nil {
+		return x.ReturnUrl
+	}
+	return ""
+}
+
+// StartBindOAuthResponse 同 StartOAuthLoginResponse。
+type StartBindOAuthResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         string                 `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	AuthUrl       string                 `protobuf:"bytes,2,opt,name=auth_url,json=authUrl,proto3" json:"auth_url,omitempty"`
+	ProviderAppId string                 `protobuf:"bytes,3,opt,name=provider_app_id,json=providerAppId,proto3" json:"provider_app_id,omitempty"`
+	RedirectUri   string                 `protobuf:"bytes,4,opt,name=redirect_uri,json=redirectUri,proto3" json:"redirect_uri,omitempty"`
+	ExpiresInSec  int64                  `protobuf:"varint,5,opt,name=expires_in_sec,json=expiresInSec,proto3" json:"expires_in_sec,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartBindOAuthResponse) Reset() {
+	*x = StartBindOAuthResponse{}
+	mi := &file_fp_v1_user_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartBindOAuthResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartBindOAuthResponse) ProtoMessage() {}
+
+func (x *StartBindOAuthResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartBindOAuthResponse.ProtoReflect.Descriptor instead.
+func (*StartBindOAuthResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *StartBindOAuthResponse) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *StartBindOAuthResponse) GetAuthUrl() string {
+	if x != nil {
+		return x.AuthUrl
+	}
+	return ""
+}
+
+func (x *StartBindOAuthResponse) GetProviderAppId() string {
+	if x != nil {
+		return x.ProviderAppId
+	}
+	return ""
+}
+
+func (x *StartBindOAuthResponse) GetRedirectUri() string {
+	if x != nil {
+		return x.RedirectUri
+	}
+	return ""
+}
+
+func (x *StartBindOAuthResponse) GetExpiresInSec() int64 {
+	if x != nil {
+		return x.ExpiresInSec
+	}
+	return 0
+}
+
+// BindOAuthResult 是绑微信的结论。
+//
+// 微信已属别的用户不在这里表达，而是整个 RPC 回 IDENTITY_TAKEN（与换绑手机号、邮箱同一个码）；
+// state / 票据无效回 OAUTH_STATE_INVALID / OAUTH_TICKET_INVALID。
+type BindOAuthResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// status 取 SUCCESS / PENDING / CANCELLED / FAILED（没有 BIND_PHONE）。
+	Status string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	// user 仅 SUCCESS：绑完的完整资料。
+	User *UserProfile `protobuf:"bytes,2,opt,name=user,proto3" json:"user,omitempty"`
+	// nickname、avatar_url 仅 SUCCESS：本次扫码的微信昵称与头像地址。fp 不存它们，要展示请业务方自己存。
+	Nickname      string `protobuf:"bytes,3,opt,name=nickname,proto3" json:"nickname,omitempty"`
+	AvatarUrl     string `protobuf:"bytes,4,opt,name=avatar_url,json=avatarUrl,proto3" json:"avatar_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BindOAuthResult) Reset() {
+	*x = BindOAuthResult{}
+	mi := &file_fp_v1_user_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BindOAuthResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BindOAuthResult) ProtoMessage() {}
+
+func (x *BindOAuthResult) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BindOAuthResult.ProtoReflect.Descriptor instead.
+func (*BindOAuthResult) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *BindOAuthResult) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *BindOAuthResult) GetUser() *UserProfile {
+	if x != nil {
+		return x.User
+	}
+	return nil
+}
+
+func (x *BindOAuthResult) GetNickname() string {
+	if x != nil {
+		return x.Nickname
+	}
+	return ""
+}
+
+func (x *BindOAuthResult) GetAvatarUrl() string {
+	if x != nil {
+		return x.AvatarUrl
+	}
+	return ""
+}
+
+type PollBindOAuthRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	State         string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PollBindOAuthRequest) Reset() {
+	*x = PollBindOAuthRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PollBindOAuthRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PollBindOAuthRequest) ProtoMessage() {}
+
+func (x *PollBindOAuthRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PollBindOAuthRequest.ProtoReflect.Descriptor instead.
+func (*PollBindOAuthRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *PollBindOAuthRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *PollBindOAuthRequest) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+type PollBindOAuthResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Result        *BindOAuthResult       `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PollBindOAuthResponse) Reset() {
+	*x = PollBindOAuthResponse{}
+	mi := &file_fp_v1_user_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PollBindOAuthResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PollBindOAuthResponse) ProtoMessage() {}
+
+func (x *PollBindOAuthResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PollBindOAuthResponse.ProtoReflect.Descriptor instead.
+func (*PollBindOAuthResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *PollBindOAuthResponse) GetResult() *BindOAuthResult {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+type ExchangeBindOAuthTicketRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Ticket        string                 `protobuf:"bytes,2,opt,name=ticket,proto3" json:"ticket,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExchangeBindOAuthTicketRequest) Reset() {
+	*x = ExchangeBindOAuthTicketRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExchangeBindOAuthTicketRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExchangeBindOAuthTicketRequest) ProtoMessage() {}
+
+func (x *ExchangeBindOAuthTicketRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExchangeBindOAuthTicketRequest.ProtoReflect.Descriptor instead.
+func (*ExchangeBindOAuthTicketRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ExchangeBindOAuthTicketRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ExchangeBindOAuthTicketRequest) GetTicket() string {
+	if x != nil {
+		return x.Ticket
+	}
+	return ""
+}
+
+type ExchangeBindOAuthTicketResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Result        *BindOAuthResult       `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExchangeBindOAuthTicketResponse) Reset() {
+	*x = ExchangeBindOAuthTicketResponse{}
+	mi := &file_fp_v1_user_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExchangeBindOAuthTicketResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExchangeBindOAuthTicketResponse) ProtoMessage() {}
+
+func (x *ExchangeBindOAuthTicketResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExchangeBindOAuthTicketResponse.ProtoReflect.Descriptor instead.
+func (*ExchangeBindOAuthTicketResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ExchangeBindOAuthTicketResponse) GetResult() *BindOAuthResult {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+type SetPasswordRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Password      string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetPasswordRequest) Reset() {
+	*x = SetPasswordRequest{}
+	mi := &file_fp_v1_user_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetPasswordRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetPasswordRequest) ProtoMessage() {}
+
+func (x *SetPasswordRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetPasswordRequest.ProtoReflect.Descriptor instead.
+func (*SetPasswordRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *SetPasswordRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *SetPasswordRequest) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+type SetPasswordResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetPasswordResponse) Reset() {
+	*x = SetPasswordResponse{}
+	mi := &file_fp_v1_user_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetPasswordResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetPasswordResponse) ProtoMessage() {}
+
+func (x *SetPasswordResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_user_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetPasswordResponse.ProtoReflect.Descriptor instead.
+func (*SetPasswordResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_user_proto_rawDescGZIP(), []int{23}
+}
+
 var File_fp_v1_user_proto protoreflect.FileDescriptor
 
 const file_fp_v1_user_proto_rawDesc = "" +
@@ -617,14 +1449,74 @@ const file_fp_v1_user_proto_rawDesc = "" +
 	"\x16RequestDeletionRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\"4\n" +
 	"\x17RequestDeletionResponse\x12\x19\n" +
-	"\bpurge_at\x18\x01 \x01(\x03R\apurgeAt2\xd1\x02\n" +
+	"\bpurge_at\x18\x01 \x01(\x03R\apurgeAt\"b\n" +
+	"\x15SendVerifyCodeRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x18\n" +
+	"\achannel\x18\x02 \x01(\tR\achannel\x12\x16\n" +
+	"\x06target\x18\x03 \x01(\tR\x06target\"\x18\n" +
+	"\x16SendVerifyCodeResponse\"r\n" +
+	"\x11VerifyCodeRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x18\n" +
+	"\achannel\x18\x02 \x01(\tR\achannel\x12\x16\n" +
+	"\x06target\x18\x03 \x01(\tR\x06target\x12\x12\n" +
+	"\x04code\x18\x04 \x01(\tR\x04code\"\x14\n" +
+	"\x12VerifyCodeResponse\"p\n" +
+	"\x13BindIdentityRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
+	"\asubject\x18\x03 \x01(\tR\asubject\x12\x12\n" +
+	"\x04code\x18\x04 \x01(\tR\x04code\"D\n" +
+	"\x15UnbindIdentityRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\"\x8a\x01\n" +
+	"\x15StartBindOAuthRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12%\n" +
+	"\x0econnector_type\x18\x02 \x01(\tR\rconnectorType\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\tR\x04mode\x12\x1d\n" +
+	"\n" +
+	"return_url\x18\x04 \x01(\tR\treturnUrl\"\xba\x01\n" +
+	"\x16StartBindOAuthResponse\x12\x14\n" +
+	"\x05state\x18\x01 \x01(\tR\x05state\x12\x19\n" +
+	"\bauth_url\x18\x02 \x01(\tR\aauthUrl\x12&\n" +
+	"\x0fprovider_app_id\x18\x03 \x01(\tR\rproviderAppId\x12!\n" +
+	"\fredirect_uri\x18\x04 \x01(\tR\vredirectUri\x12$\n" +
+	"\x0eexpires_in_sec\x18\x05 \x01(\x03R\fexpiresInSec\"\x8c\x01\n" +
+	"\x0fBindOAuthResult\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\x12&\n" +
+	"\x04user\x18\x02 \x01(\v2\x12.fp.v1.UserProfileR\x04user\x12\x1a\n" +
+	"\bnickname\x18\x03 \x01(\tR\bnickname\x12\x1d\n" +
+	"\n" +
+	"avatar_url\x18\x04 \x01(\tR\tavatarUrl\"E\n" +
+	"\x14PollBindOAuthRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\"G\n" +
+	"\x15PollBindOAuthResponse\x12.\n" +
+	"\x06result\x18\x01 \x01(\v2\x16.fp.v1.BindOAuthResultR\x06result\"Q\n" +
+	"\x1eExchangeBindOAuthTicketRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x16\n" +
+	"\x06ticket\x18\x02 \x01(\tR\x06ticket\"Q\n" +
+	"\x1fExchangeBindOAuthTicketResponse\x12.\n" +
+	"\x06result\x18\x01 \x01(\v2\x16.fp.v1.BindOAuthResultR\x06result\"I\n" +
+	"\x12SetPasswordRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1a\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\"\x15\n" +
+	"\x13SetPasswordResponse2\xb2\a\n" +
 	"\vUserService\x124\n" +
 	"\aGetUser\x12\x15.fp.v1.GetUserRequest\x1a\x12.fp.v1.UserProfile\x12:\n" +
 	"\n" +
 	"UpdateUser\x12\x18.fp.v1.UpdateUserRequest\x1a\x12.fp.v1.UserProfile\x12>\n" +
 	"\fUpdateAvatar\x12\x1a.fp.v1.UpdateAvatarRequest\x1a\x12.fp.v1.UserProfile\x12>\n" +
 	"\tGetAvatar\x12\x17.fp.v1.GetAvatarRequest\x1a\x18.fp.v1.GetAvatarResponse\x12P\n" +
-	"\x0fRequestDeletion\x12\x1d.fp.v1.RequestDeletionRequest\x1a\x1e.fp.v1.RequestDeletionResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
+	"\x0fRequestDeletion\x12\x1d.fp.v1.RequestDeletionRequest\x1a\x1e.fp.v1.RequestDeletionResponse\x12M\n" +
+	"\x0eSendVerifyCode\x12\x1c.fp.v1.SendVerifyCodeRequest\x1a\x1d.fp.v1.SendVerifyCodeResponse\x12A\n" +
+	"\n" +
+	"VerifyCode\x12\x18.fp.v1.VerifyCodeRequest\x1a\x19.fp.v1.VerifyCodeResponse\x12>\n" +
+	"\fBindIdentity\x12\x1a.fp.v1.BindIdentityRequest\x1a\x12.fp.v1.UserProfile\x12B\n" +
+	"\x0eUnbindIdentity\x12\x1c.fp.v1.UnbindIdentityRequest\x1a\x12.fp.v1.UserProfile\x12M\n" +
+	"\x0eStartBindOAuth\x12\x1c.fp.v1.StartBindOAuthRequest\x1a\x1d.fp.v1.StartBindOAuthResponse\x12J\n" +
+	"\rPollBindOAuth\x12\x1b.fp.v1.PollBindOAuthRequest\x1a\x1c.fp.v1.PollBindOAuthResponse\x12h\n" +
+	"\x17ExchangeBindOAuthTicket\x12%.fp.v1.ExchangeBindOAuthTicketRequest\x1a&.fp.v1.ExchangeBindOAuthTicketResponse\x12D\n" +
+	"\vSetPassword\x12\x19.fp.v1.SetPasswordRequest\x1a\x1a.fp.v1.SetPasswordResponseB*Z(github.com/basicfu/fp/sdk/gen/fp/v1;fpv1b\x06proto3"
 
 var (
 	file_fp_v1_user_proto_rawDescOnce sync.Once
@@ -638,35 +1530,69 @@ func file_fp_v1_user_proto_rawDescGZIP() []byte {
 	return file_fp_v1_user_proto_rawDescData
 }
 
-var file_fp_v1_user_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_fp_v1_user_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_fp_v1_user_proto_goTypes = []any{
-	(*UserProfile)(nil),             // 0: fp.v1.UserProfile
-	(*UserIdentity)(nil),            // 1: fp.v1.UserIdentity
-	(*GetUserRequest)(nil),          // 2: fp.v1.GetUserRequest
-	(*UpdateUserRequest)(nil),       // 3: fp.v1.UpdateUserRequest
-	(*UpdateAvatarRequest)(nil),     // 4: fp.v1.UpdateAvatarRequest
-	(*GetAvatarRequest)(nil),        // 5: fp.v1.GetAvatarRequest
-	(*GetAvatarResponse)(nil),       // 6: fp.v1.GetAvatarResponse
-	(*RequestDeletionRequest)(nil),  // 7: fp.v1.RequestDeletionRequest
-	(*RequestDeletionResponse)(nil), // 8: fp.v1.RequestDeletionResponse
+	(*UserProfile)(nil),                     // 0: fp.v1.UserProfile
+	(*UserIdentity)(nil),                    // 1: fp.v1.UserIdentity
+	(*GetUserRequest)(nil),                  // 2: fp.v1.GetUserRequest
+	(*UpdateUserRequest)(nil),               // 3: fp.v1.UpdateUserRequest
+	(*UpdateAvatarRequest)(nil),             // 4: fp.v1.UpdateAvatarRequest
+	(*GetAvatarRequest)(nil),                // 5: fp.v1.GetAvatarRequest
+	(*GetAvatarResponse)(nil),               // 6: fp.v1.GetAvatarResponse
+	(*RequestDeletionRequest)(nil),          // 7: fp.v1.RequestDeletionRequest
+	(*RequestDeletionResponse)(nil),         // 8: fp.v1.RequestDeletionResponse
+	(*SendVerifyCodeRequest)(nil),           // 9: fp.v1.SendVerifyCodeRequest
+	(*SendVerifyCodeResponse)(nil),          // 10: fp.v1.SendVerifyCodeResponse
+	(*VerifyCodeRequest)(nil),               // 11: fp.v1.VerifyCodeRequest
+	(*VerifyCodeResponse)(nil),              // 12: fp.v1.VerifyCodeResponse
+	(*BindIdentityRequest)(nil),             // 13: fp.v1.BindIdentityRequest
+	(*UnbindIdentityRequest)(nil),           // 14: fp.v1.UnbindIdentityRequest
+	(*StartBindOAuthRequest)(nil),           // 15: fp.v1.StartBindOAuthRequest
+	(*StartBindOAuthResponse)(nil),          // 16: fp.v1.StartBindOAuthResponse
+	(*BindOAuthResult)(nil),                 // 17: fp.v1.BindOAuthResult
+	(*PollBindOAuthRequest)(nil),            // 18: fp.v1.PollBindOAuthRequest
+	(*PollBindOAuthResponse)(nil),           // 19: fp.v1.PollBindOAuthResponse
+	(*ExchangeBindOAuthTicketRequest)(nil),  // 20: fp.v1.ExchangeBindOAuthTicketRequest
+	(*ExchangeBindOAuthTicketResponse)(nil), // 21: fp.v1.ExchangeBindOAuthTicketResponse
+	(*SetPasswordRequest)(nil),              // 22: fp.v1.SetPasswordRequest
+	(*SetPasswordResponse)(nil),             // 23: fp.v1.SetPasswordResponse
 }
 var file_fp_v1_user_proto_depIdxs = []int32{
-	1, // 0: fp.v1.UserProfile.identities:type_name -> fp.v1.UserIdentity
-	2, // 1: fp.v1.UserService.GetUser:input_type -> fp.v1.GetUserRequest
-	3, // 2: fp.v1.UserService.UpdateUser:input_type -> fp.v1.UpdateUserRequest
-	4, // 3: fp.v1.UserService.UpdateAvatar:input_type -> fp.v1.UpdateAvatarRequest
-	5, // 4: fp.v1.UserService.GetAvatar:input_type -> fp.v1.GetAvatarRequest
-	7, // 5: fp.v1.UserService.RequestDeletion:input_type -> fp.v1.RequestDeletionRequest
-	0, // 6: fp.v1.UserService.GetUser:output_type -> fp.v1.UserProfile
-	0, // 7: fp.v1.UserService.UpdateUser:output_type -> fp.v1.UserProfile
-	0, // 8: fp.v1.UserService.UpdateAvatar:output_type -> fp.v1.UserProfile
-	6, // 9: fp.v1.UserService.GetAvatar:output_type -> fp.v1.GetAvatarResponse
-	8, // 10: fp.v1.UserService.RequestDeletion:output_type -> fp.v1.RequestDeletionResponse
-	6, // [6:11] is the sub-list for method output_type
-	1, // [1:6] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	1,  // 0: fp.v1.UserProfile.identities:type_name -> fp.v1.UserIdentity
+	0,  // 1: fp.v1.BindOAuthResult.user:type_name -> fp.v1.UserProfile
+	17, // 2: fp.v1.PollBindOAuthResponse.result:type_name -> fp.v1.BindOAuthResult
+	17, // 3: fp.v1.ExchangeBindOAuthTicketResponse.result:type_name -> fp.v1.BindOAuthResult
+	2,  // 4: fp.v1.UserService.GetUser:input_type -> fp.v1.GetUserRequest
+	3,  // 5: fp.v1.UserService.UpdateUser:input_type -> fp.v1.UpdateUserRequest
+	4,  // 6: fp.v1.UserService.UpdateAvatar:input_type -> fp.v1.UpdateAvatarRequest
+	5,  // 7: fp.v1.UserService.GetAvatar:input_type -> fp.v1.GetAvatarRequest
+	7,  // 8: fp.v1.UserService.RequestDeletion:input_type -> fp.v1.RequestDeletionRequest
+	9,  // 9: fp.v1.UserService.SendVerifyCode:input_type -> fp.v1.SendVerifyCodeRequest
+	11, // 10: fp.v1.UserService.VerifyCode:input_type -> fp.v1.VerifyCodeRequest
+	13, // 11: fp.v1.UserService.BindIdentity:input_type -> fp.v1.BindIdentityRequest
+	14, // 12: fp.v1.UserService.UnbindIdentity:input_type -> fp.v1.UnbindIdentityRequest
+	15, // 13: fp.v1.UserService.StartBindOAuth:input_type -> fp.v1.StartBindOAuthRequest
+	18, // 14: fp.v1.UserService.PollBindOAuth:input_type -> fp.v1.PollBindOAuthRequest
+	20, // 15: fp.v1.UserService.ExchangeBindOAuthTicket:input_type -> fp.v1.ExchangeBindOAuthTicketRequest
+	22, // 16: fp.v1.UserService.SetPassword:input_type -> fp.v1.SetPasswordRequest
+	0,  // 17: fp.v1.UserService.GetUser:output_type -> fp.v1.UserProfile
+	0,  // 18: fp.v1.UserService.UpdateUser:output_type -> fp.v1.UserProfile
+	0,  // 19: fp.v1.UserService.UpdateAvatar:output_type -> fp.v1.UserProfile
+	6,  // 20: fp.v1.UserService.GetAvatar:output_type -> fp.v1.GetAvatarResponse
+	8,  // 21: fp.v1.UserService.RequestDeletion:output_type -> fp.v1.RequestDeletionResponse
+	10, // 22: fp.v1.UserService.SendVerifyCode:output_type -> fp.v1.SendVerifyCodeResponse
+	12, // 23: fp.v1.UserService.VerifyCode:output_type -> fp.v1.VerifyCodeResponse
+	0,  // 24: fp.v1.UserService.BindIdentity:output_type -> fp.v1.UserProfile
+	0,  // 25: fp.v1.UserService.UnbindIdentity:output_type -> fp.v1.UserProfile
+	16, // 26: fp.v1.UserService.StartBindOAuth:output_type -> fp.v1.StartBindOAuthResponse
+	19, // 27: fp.v1.UserService.PollBindOAuth:output_type -> fp.v1.PollBindOAuthResponse
+	21, // 28: fp.v1.UserService.ExchangeBindOAuthTicket:output_type -> fp.v1.ExchangeBindOAuthTicketResponse
+	23, // 29: fp.v1.UserService.SetPassword:output_type -> fp.v1.SetPasswordResponse
+	17, // [17:30] is the sub-list for method output_type
+	4,  // [4:17] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_fp_v1_user_proto_init() }
@@ -681,7 +1607,7 @@ func file_fp_v1_user_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_user_proto_rawDesc), len(file_fp_v1_user_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

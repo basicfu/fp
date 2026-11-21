@@ -14,7 +14,7 @@ import (
 )
 
 // DefaultDeletionCoolingOff 是没配 account_deletion.cooling_off_days 时的冷静期。
-const DefaultDeletionCoolingOff = 15 * 24 * time.Hour
+const DefaultDeletionCoolingOff = 7 * 24 * time.Hour
 
 // AccountOption 调整 AccountService 的可选参数。
 type AccountOption func(*AccountService)

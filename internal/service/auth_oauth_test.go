@@ -18,6 +18,7 @@ const oauthReturnURL = "https://app.example.com/login/wechat"
 
 type oauthEnv struct {
 	auth  *service.AuthService
+	codes *service.LoginCodeService
 	apps  *service.ApplicationService
 	users *service.UserService
 	sms   *testsupport.FakeLoginSMS
@@ -28,12 +29,18 @@ type oauthEnv struct {
 // newOAuthEnv 只启用 wechat_web，不启用 sms_code：绑手机发码靠的是放宽后的 SendLoginCode。
 func newOAuthEnv(t *testing.T, extra map[string]any) *oauthEnv {
 	t.Helper()
+	return newOAuthEnvWith(t, extra, service.WithLoginCodeRateRules())
+}
+
+// newOAuthEnvWith 同 newOAuthEnv，发码频率规则由调用方定：不传 codeOpts 即默认限流。
+func newOAuthEnvWith(t *testing.T, extra map[string]any, codeOpts ...service.LoginCodeOption) *oauthEnv {
+	t.Helper()
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 	wx := testsupport.NewFakeWechat(t)
 
 	users := service.NewUserService(pool)
-	codes := service.NewLoginCodeService(rdb, service.WithLoginCodeRateRules())
+	codes := service.NewLoginCodeService(rdb, codeOpts...)
 	reg := connector.NewRegistry()
 	for _, c := range []connector.Connector{
 		connector.NewSMSCode(codes),
@@ -68,7 +75,7 @@ func newOAuthEnv(t *testing.T, extra map[string]any) *oauthEnv {
 			Apps: apps, Users: users, Sessions: sessions, Logs: service.NewLoginLogService(pool), Registry: reg,
 			Codes: codes, Notifier: sms, OAuth: service.NewOAuthStore(rdb), PublicURL: "https://fp.example.com",
 		}),
-		apps: apps, users: users, sms: sms, app: app.AppID, appID: app.ID.String(),
+		codes: codes, apps: apps, users: users, sms: sms, app: app.AppID, appID: app.ID.String(),
 	}
 }
 

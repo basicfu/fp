@@ -26,7 +26,7 @@ import (
 	"github.com/basicfu/fp/web"
 )
 
-// deletionSweepInterval 是注销清理任务的周期。冷静期按天计，一小时的延迟对"15 天后删除"无关紧要，
+// deletionSweepInterval 是注销清理任务的周期。冷静期按天计，一小时的延迟对"7 天后删除"无关紧要，
 // 而更密的周期只是在多数时候空跑一条查询。
 const deletionSweepInterval = time.Hour
 
@@ -190,16 +190,18 @@ func run() error {
 		service.WithNotifyRecipients(domain.NotifyChannelWechatMP, wechatMPSvc.ResolveRecipient))
 
 	authSvc := service.NewAuthService(service.AuthDeps{
-		Apps:      appSvc,
-		Users:     userSvc,
-		Sessions:  sessionSvc,
-		Logs:      logSvc,
-		Registry:  registry,
-		Codes:     loginCodes,
-		Notifier:  notifySvc,
-		Authz:     authzSvc,
-		OAuth:     service.NewOAuthStore(rdb),
-		PublicURL: cfg.PublicURL,
+		Apps:     appSvc,
+		Users:    userSvc,
+		Sessions: sessionSvc,
+		Logs:     logSvc,
+		Registry: registry,
+		Codes:    loginCodes,
+		Notifier: notifySvc,
+		// 短信验证码模板固定是 verify_code，邮件的可在系统配置里改。
+		EmailCodeTemplate: cfg.VerifyCode.EmailTemplate,
+		Authz:             authzSvc,
+		OAuth:             service.NewOAuthStore(rdb),
+		PublicURL:         cfg.PublicURL,
 	})
 
 	accountSvc := service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc,

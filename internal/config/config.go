@@ -35,6 +35,8 @@ type Config struct {
 	PublicURL string `yaml:"public_url"`
 	// AccountDeletion 是用户注销的参数。
 	AccountDeletion AccountDeletion `yaml:"account_deletion"`
+	// VerifyCode 是业务方给已登录用户发验证码（换绑、设密码前的身份校验）的参数。
+	VerifyCode VerifyCode `yaml:"verify_code"`
 	// LegacySMS 只为兼容：Parse 开着 KnownFields(true)，而存量系统配置的第一版是
 	// seedDefaultsYAML 把默认值整份写进去的，里面带着 sms: 段。直接删字段会让这些
 	// 库启动时解析失败；版本快照又不允许改写。读进来、丢掉；omitempty 保证 ToYAML
@@ -49,12 +51,21 @@ type Log struct {
 // AccountDeletion 是用户注销的参数。
 type AccountDeletion struct {
 	// CoolingOffDays 是冷静期天数：提交注销后这么多天内用该账号登录即撤销注销，期满永久删除。
-	// 隐私政策承诺"15 个工作日内处理"，默认 15 天落在承诺之内；调长之前先核对对外承诺。
+	// 隐私政策承诺"15 个工作日内处理"，默认 7 天落在承诺之内；调长之前先核对对外承诺。
 	CoolingOffDays int `yaml:"cooling_off_days"`
 }
 
+// VerifyCode 是已登录发码的参数。短信模板固定用 verify_code（与登录共用），邮件模板可配。
+type VerifyCode struct {
+	// EmailTemplate 是邮件验证码用的通知模板 code，控制台「通知中心」里要有一条同名的 email 模板，变量只有 code。
+	EmailTemplate string `yaml:"email_template"`
+}
+
+// DefaultVerifyEmailTemplate 是 verify_code.email_template 的默认值。
+const DefaultVerifyEmailTemplate = "verify_code_email"
+
 // DefaultCoolingOffDays 是 account_deletion.cooling_off_days 的默认值。
-const DefaultCoolingOffDays = 15
+const DefaultCoolingOffDays = 7
 
 type Listen struct {
 	Addr string `yaml:"addr"`
@@ -93,6 +104,7 @@ func Parse(yamlText string, env string) (*Config, error) {
 		GRPC: Listen{Addr: ":9090"},
 
 		AccountDeletion: AccountDeletion{CoolingOffDays: DefaultCoolingOffDays},
+		VerifyCode:      VerifyCode{EmailTemplate: DefaultVerifyEmailTemplate},
 	}
 
 	dec := yaml.NewDecoder(strings.NewReader(yamlText))
@@ -113,6 +125,10 @@ func Parse(yamlText string, env string) (*Config, error) {
 	// 0 天意味着提交即删、登录撤销的口子形同虚设，按写错处理而不是照办。
 	if c.AccountDeletion.CoolingOffDays < 1 {
 		return nil, fmt.Errorf("config: account_deletion.cooling_off_days 至少为 1，收到 %d", c.AccountDeletion.CoolingOffDays)
+	}
+	// 显式写成空串等同没配：模板 code 为空时 Send 只会回"模板不存在"，不如落回默认值。
+	if c.VerifyCode.EmailTemplate = strings.TrimSpace(c.VerifyCode.EmailTemplate); c.VerifyCode.EmailTemplate == "" {
+		c.VerifyCode.EmailTemplate = DefaultVerifyEmailTemplate
 	}
 	return c, nil
 }

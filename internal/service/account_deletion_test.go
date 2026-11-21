@@ -13,7 +13,7 @@ import (
 	"github.com/basicfu/fp/internal/service"
 )
 
-const coolingOffMs = int64(15 * 24 * time.Hour / time.Millisecond)
+const coolingOffMs = int64(7 * 24 * time.Hour / time.Millisecond)
 
 // backdateDeletion 把提交时间往前拨 days 天，模拟冷静期过去。
 func (e *authEnv) backdateDeletion(t *testing.T, userID uuid.UUID, days int) {
@@ -85,7 +85,7 @@ func TestRequestDeletionEntersCoolingOffAndRevokesEverySession(t *testing.T) {
 		t.Fatalf("status = %s, submitted = %d, want PENDING_DELETE 且记下提交时间", u.Status, u.DeleteSubmittedAt)
 	}
 	if purgeAt != u.DeleteSubmittedAt+coolingOffMs {
-		t.Fatalf("purgeAt = %d, want 提交时间 %d + 15 天", purgeAt, u.DeleteSubmittedAt)
+		t.Fatalf("purgeAt = %d, want 提交时间 %d + 7 天", purgeAt, u.DeleteSubmittedAt)
 	}
 	if _, err := e.sess.Validate(ctx, first.Session.Token, e.app); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("登录应用的会话仍有效: %v", err)
@@ -181,7 +181,7 @@ func TestRequestDeletionRejectsFrozenDeletedAndMissing(t *testing.T) {
 	if _, err := e.accounts.RequestDeletion(ctx, gone.User.ID); err != nil {
 		t.Fatalf("RequestDeletion: %v", err)
 	}
-	e.backdateDeletion(t, gone.User.ID, 16)
+	e.backdateDeletion(t, gone.User.ID, 8)
 	e.sweep(t)
 	_, err = e.accounts.RequestDeletion(ctx, gone.User.ID)
 	wantCode(t, err, domain.CodeAccountUnavailable, domain.ErrForbidden)
@@ -210,7 +210,7 @@ func TestLoginDuringCoolingOffSurvivesSweep(t *testing.T) {
 	if _, err := e.accounts.RequestDeletion(ctx, res.User.ID); err != nil {
 		t.Fatalf("RequestDeletion: %v", err)
 	}
-	e.backdateDeletion(t, res.User.ID, 14)
+	e.backdateDeletion(t, res.User.ID, 6)
 
 	again := e.passwordLogin(t, "13800138000")
 	if again.User.ID != res.User.ID || again.User.Status != domain.UserStatusActive {
@@ -266,9 +266,9 @@ func TestSweepPurgesDueDeletionAndArchives(t *testing.T) {
 	if purged, _ := e.sweep(t); purged != 0 {
 		t.Fatalf("冷静期没满就清理了 %d 个", purged)
 	}
-	e.backdateDeletion(t, uid, 14)
+	e.backdateDeletion(t, uid, 6)
 	if purged, _ := e.sweep(t); purged != 0 {
-		t.Fatalf("第 14 天就清理了 %d 个", purged)
+		t.Fatalf("第 6 天就清理了 %d 个", purged)
 	}
 	e.backdateDeletion(t, uid, 1)
 	submitted, _ := e.users.GetByID(ctx, uid)
@@ -359,7 +359,7 @@ func TestSweepExpiresArchive(t *testing.T) {
 		if _, err := e.accounts.RequestDeletion(ctx, res.User.ID); err != nil {
 			t.Fatalf("RequestDeletion: %v", err)
 		}
-		e.backdateDeletion(t, res.User.ID, 15)
+		e.backdateDeletion(t, res.User.ID, 7)
 		ids = append(ids, res.User.ID)
 	}
 	if purged, expired := e.sweep(t); purged != 2 || expired != 0 {
@@ -407,7 +407,7 @@ func TestSweepIsSafeAcrossConcurrentInstances(t *testing.T) {
 		}
 	}
 	if _, err := e.pool.Exec(ctx,
-		`UPDATE app_user SET delete_submitted_at = now() - interval '16 days' WHERE status = $1`, domain.UserStatusPendingDelete); err != nil {
+		`UPDATE app_user SET delete_submitted_at = now() - interval '8 days' WHERE status = $1`, domain.UserStatusPendingDelete); err != nil {
 		t.Fatalf("拨提交时间: %v", err)
 	}
 

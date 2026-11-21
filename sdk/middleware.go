@@ -246,6 +246,9 @@ func classifyError(err error) (int, string) {
 		// 404：用户或头像不存在。落进 default 回 401 的话，一张被换掉的旧头像地址会让客户端
 		// 以为登录态失效。
 		return http.StatusNotFound, "not found"
+	case errors.Is(err, ErrConflict):
+		// 409：号码已被别人绑定、解绑后无法登录。同样不能落进 default 的 401。
+		return http.StatusConflict, "conflict"
 	case errors.Is(err, ErrBodyTooLarge):
 		// 413：签名请求的 body 超过 Options.MaxSignedBodyBytes。
 		return http.StatusRequestEntityTooLarge, "request entity too large"

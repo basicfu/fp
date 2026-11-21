@@ -303,6 +303,38 @@ func (e *grpcEnv) userServiceCalls(userID string) map[string]func(context.Contex
 			_, err := e.userClient.RequestDeletion(ctx, &fpv1.RequestDeletionRequest{UserId: userID})
 			return err
 		},
+		"SendVerifyCode": func(ctx context.Context) error {
+			_, err := e.userClient.SendVerifyCode(ctx, &fpv1.SendVerifyCodeRequest{UserId: userID, Channel: service.VerifyChannelSMS})
+			return err
+		},
+		"VerifyCode": func(ctx context.Context) error {
+			_, err := e.userClient.VerifyCode(ctx, &fpv1.VerifyCodeRequest{UserId: userID, Channel: service.VerifyChannelSMS, Code: "123456"})
+			return err
+		},
+		"BindIdentity": func(ctx context.Context) error {
+			_, err := e.userClient.BindIdentity(ctx, &fpv1.BindIdentityRequest{UserId: userID, Type: domain.IdentityTypePhone, Subject: randomPhone(), Code: "123456"})
+			return err
+		},
+		"UnbindIdentity": func(ctx context.Context) error {
+			_, err := e.userClient.UnbindIdentity(ctx, &fpv1.UnbindIdentityRequest{UserId: userID, Type: domain.IdentityTypePhone})
+			return err
+		},
+		"StartBindOAuth": func(ctx context.Context) error {
+			_, err := e.userClient.StartBindOAuth(ctx, &fpv1.StartBindOAuthRequest{UserId: userID, ConnectorType: connector.TypeWechatWeb, Mode: service.OAuthModeWeb})
+			return err
+		},
+		"PollBindOAuth": func(ctx context.Context) error {
+			_, err := e.userClient.PollBindOAuth(ctx, &fpv1.PollBindOAuthRequest{UserId: userID, State: "s"})
+			return err
+		},
+		"ExchangeBindOAuthTicket": func(ctx context.Context) error {
+			_, err := e.userClient.ExchangeBindOAuthTicket(ctx, &fpv1.ExchangeBindOAuthTicketRequest{UserId: userID, Ticket: "t"})
+			return err
+		},
+		"SetPassword": func(ctx context.Context) error {
+			_, err := e.userClient.SetPassword(ctx, &fpv1.SetPasswordRequest{UserId: userID, Password: "hunter2hunter2"})
+			return err
+		},
 	}
 }
 
@@ -430,7 +462,7 @@ func TestRequestDeletionOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
-	if want := fresh.DeleteSubmittedAt + (15 * 24 * time.Hour).Milliseconds(); res.GetPurgeAt() != want {
+	if want := fresh.DeleteSubmittedAt + (7 * 24 * time.Hour).Milliseconds(); res.GetPurgeAt() != want {
 		t.Fatalf("purge_at = %d, want %d", res.GetPurgeAt(), want)
 	}
 	if _, err := e.sessions.Validate(ctx, sess.Token, e.app); err == nil {
@@ -468,7 +500,7 @@ func TestGetUserAcrossDeletionLifecycle(t *testing.T) {
 		t.Fatalf("RequestDeletion: %v", err)
 	}
 	if _, err := e.pool.Exec(ctx,
-		`UPDATE app_user SET delete_submitted_at = now() - interval '15 days' WHERE id = $1`, u.ID); err != nil {
+		`UPDATE app_user SET delete_submitted_at = now() - interval '7 days' WHERE id = $1`, u.ID); err != nil {
 		t.Fatalf("拨提交时间: %v", err)
 	}
 	if purged, _, err := e.accounts.SweepDeletions(ctx); err != nil || purged != 1 {

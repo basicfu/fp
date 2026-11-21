@@ -23,14 +23,18 @@ func oauthCallback(auth *service.AuthService) http.HandlerFunc {
 			return
 		}
 
-		page := oauthPage{Title: "登录已过期", Msg: "请回到应用重新发起登录。"}
+		verb := "登录"
+		if res.Bind {
+			verb = "绑定"
+		}
+		page := oauthPage{Title: verb + "已过期", Msg: "请回到应用重新发起" + verb + "。"}
 		switch res.Status {
 		case "ok":
-			page = oauthPage{Title: "登录成功", Msg: "请回到应用继续。"}
+			page = oauthPage{Title: verb + "成功", Msg: "请回到应用继续。"}
 		case "cancelled":
-			page = oauthPage{Title: "已取消登录", Msg: "可以关闭此页面。"}
+			page = oauthPage{Title: "已取消" + verb, Msg: "可以关闭此页面。"}
 		case "failed":
-			page = oauthPage{Title: "登录失败", Msg: "请回到应用重试。"}
+			page = oauthPage{Title: verb + "失败", Msg: "请回到应用重试。"}
 		}
 		if safeAppLink(res.AppLink) {
 			// 自定义协议不在 html/template 认可的安全协议里，校验过形状后显式放行。

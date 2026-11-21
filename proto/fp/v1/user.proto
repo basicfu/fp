@@ -31,6 +31,46 @@ service UserService {
   // 已在冷静期内时幂等：返回原来的 purge_at，不重新计时。
   // FROZEN 回 ACCOUNT_FROZEN、DELETED 回 ACCOUNT_UNAVAILABLE（均为 PERMISSION_DENIED），用户不存在回 USER_NOT_FOUND。
   rpc RequestDeletion(RequestDeletionRequest) returns (RequestDeletionResponse);
+
+  // ---- 账号管理：业务方替已登录用户换绑手机号 / 邮箱、绑定微信、设置密码。----
+  //
+  // 这些 RPC 不认 token，只认 user_id：「这个人是不是已登录、改的是不是自己」由业务方把关。
+  // 用户状态不是 ACTIVE / PENDING_DELETE 时一律拒绝：FROZEN 回 ACCOUNT_FROZEN、DELETED 回 ACCOUNT_UNAVAILABLE。
+
+  // SendVerifyCode 给用户发一条验证码，用于换绑、设密码之前的身份校验。
+  //
+  // target 为空发到该用户当前绑定的同类标识（sms → 手机号，email → 邮箱），没有则 IDENTITY_NOT_FOUND；
+  // 非空是要换绑的新标识，已属别的用户回 IDENTITY_TAKEN。频率限制与登录发码共用同一个计数
+  //（同一目标 30 秒 1 条、1 小时 5 条、1 天 10 条），超出回 RATE_LIMITED。
+  // 短信用通知模板 verify_code，邮件用系统配置 verify_code.email_template（默认 verify_code_email），
+  // 模板没配好回 VERIFY_TEMPLATE_UNAVAILABLE、供应商发送失败回 NOTIFY_SEND_FAILED。
+  //
+  // 码只对这个 user_id 有效，与登录验证码互不相通：发给新手机号的码不能拿去登录，反之亦然。
+  rpc SendVerifyCode(SendVerifyCodeRequest) returns (SendVerifyCodeResponse);
+  // VerifyCode 校验 SendVerifyCode 发出的码，成功即作废，不改任何资料。码错、过期、超过 5 次尝试一律 CODE_INVALID。
+  rpc VerifyCode(VerifyCodeRequest) returns (VerifyCodeResponse);
+  // BindIdentity 校验发到新标识的验证码后，把用户的手机号或邮箱换成它（原来的同类标识删掉，没有则新增）。
+  // 已属别的用户回 IDENTITY_TAKEN；已经是本人的同一个标识时什么都不改，照样成功（码仍会被消费）。
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc BindIdentity(BindIdentityRequest) returns (UserProfile);
+  // UnbindIdentity 删掉用户某一类登录标识。删完没有可登录的方式了回 LAST_IDENTITY，本来就没有回 IDENTITY_NOT_FOUND。
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc UnbindIdentity(UnbindIdentityRequest) returns (UserProfile);
+  // StartBindOAuth 发起一次扫码，把微信绑定到这个用户上。用法与 AuthService.StartOAuthLogin 完全一样
+  //（同一个回调地址、同样的 web / desktop 模式），区别只在结论：不登录，而是挂到 user_id 上。
+  // 发起时就绑定了 user_id：取结论时 user_id 对不上、或拿登录的接口来取，一律当作 state / 票据无效。
+  rpc StartBindOAuth(StartBindOAuthRequest) returns (StartBindOAuthResponse);
+  // PollBindOAuth 是桌面端按 state 轮询，同 PollOAuthLogin，只对以 desktop 轮询方式发起的 state 有效。
+  rpc PollBindOAuth(PollBindOAuthRequest) returns (PollBindOAuthResponse);
+  // ExchangeBindOAuthTicket 用回调交付的一次性 fpTicket 换结论（web 模式、桌面自定义协议），同 ExchangeOAuthTicket。
+  rpc ExchangeBindOAuthTicket(ExchangeBindOAuthTicketRequest) returns (ExchangeBindOAuthTicketResponse);
+  // SetPassword 设置或重置密码。长度 8 个字符起、72 字节封顶（bcrypt 上限），
+  // 否则 PASSWORD_TOO_SHORT / PASSWORD_TOO_LONG；更严的规则（字符种类、32 位上限等）由业务方自己校验。
+  //
+  // 不撤销任何会话：业务方通常是先用 VerifyCode 校验过本人，再在当前登录态下改密。
+  rpc SetPassword(SetPasswordRequest) returns (SetPasswordResponse);
 }
 
 // UserProfile 是一个用户的全部个人信息。
@@ -109,3 +149,99 @@ message RequestDeletionResponse {
   // 清理任务按小时跑，实际删除会晚于这个时间至多一个周期。
   int64 purge_at = 1;
 }
+
+message SendVerifyCodeRequest {
+  string user_id = 1;
+  // channel 取 sms / email，其余取值 INVALID_ARGUMENT。
+  string channel = 2;
+  // target 是要发到的手机号 / 邮箱，空表示发到当前绑定的那个。
+  // 手机号须为 11 位中国大陆号码（否则 PHONE_INVALID），邮箱格式不对回 INVALID_ARGUMENT。
+  string target = 3;
+}
+
+message SendVerifyCodeResponse {}
+
+message VerifyCodeRequest {
+  string user_id = 1;
+  // channel、target 同 SendVerifyCodeRequest：校验的是发到这个目标的那个码。
+  string channel = 2;
+  string target = 3;
+  string code = 4;
+}
+
+message VerifyCodeResponse {}
+
+message BindIdentityRequest {
+  string user_id = 1;
+  // type 取 phone / email，其余取值 INVALID_ARGUMENT。
+  string type = 2;
+  // subject 是新的手机号 / 邮箱，code 是用 SendVerifyCode 发到它的验证码（phone 对应 channel sms）。
+  string subject = 3;
+  string code = 4;
+}
+
+message UnbindIdentityRequest {
+  string user_id = 1;
+  // type 取 phone / email / wechat。wechat 一次删掉全部微信身份（网站应用、移动应用、服务号 openid，
+  // 以及同一 unionId 下的其它身份）——只删一种的话，下次靠 unionId 又会归并回来。
+  // 服务号的通知订阅不受影响，关通知用 NotifyService.UnbindWechat。
+  //
+  // 「可登录」指：还剩手机号或微信，或者还剩邮箱 / 用户名且设过密码。
+  string type = 2;
+}
+
+message StartBindOAuthRequest {
+  string user_id = 1;
+  // connector_type、mode、return_url 同 StartOAuthLoginRequest。
+  string connector_type = 2;
+  string mode = 3;
+  string return_url = 4;
+}
+
+// StartBindOAuthResponse 同 StartOAuthLoginResponse。
+message StartBindOAuthResponse {
+  string state = 1;
+  string auth_url = 2;
+  string provider_app_id = 3;
+  string redirect_uri = 4;
+  int64 expires_in_sec = 5;
+}
+
+// BindOAuthResult 是绑微信的结论。
+//
+// 微信已属别的用户不在这里表达，而是整个 RPC 回 IDENTITY_TAKEN（与换绑手机号、邮箱同一个码）；
+// state / 票据无效回 OAUTH_STATE_INVALID / OAUTH_TICKET_INVALID。
+message BindOAuthResult {
+  // status 取 SUCCESS / PENDING / CANCELLED / FAILED（没有 BIND_PHONE）。
+  string status = 1;
+  // user 仅 SUCCESS：绑完的完整资料。
+  UserProfile user = 2;
+  // nickname、avatar_url 仅 SUCCESS：本次扫码的微信昵称与头像地址。fp 不存它们，要展示请业务方自己存。
+  string nickname = 3;
+  string avatar_url = 4;
+}
+
+message PollBindOAuthRequest {
+  string user_id = 1;
+  string state = 2;
+}
+
+message PollBindOAuthResponse {
+  BindOAuthResult result = 1;
+}
+
+message ExchangeBindOAuthTicketRequest {
+  string user_id = 1;
+  string ticket = 2;
+}
+
+message ExchangeBindOAuthTicketResponse {
+  BindOAuthResult result = 1;
+}
+
+message SetPasswordRequest {
+  string user_id = 1;
+  string password = 2;
+}
+
+message SetPasswordResponse {}

@@ -85,10 +85,17 @@ type OAuthCallbackResult struct {
 	AppLink string
 	// Status 给结果页选文案：ok / cancelled / failed / expired。
 	Status string
+	// Bind 为真时这是一次绑微信，结果页说「绑定」而不是「登录」。
+	Bind bool
 }
 
 // StartOAuth 发起一次扫码登录。
 func (s *AuthService) StartOAuth(ctx context.Context, in OAuthStartInput) (*OAuthStart, error) {
+	return s.startOAuth(ctx, in, uuid.Nil)
+}
+
+// startOAuth 的 bindUser 非空时发起的是绑定而不是登录，见 oauthState.BindUser。
+func (s *AuthService) startOAuth(ctx context.Context, in OAuthStartInput, bindUser uuid.UUID) (*OAuthStart, error) {
 	app, err := s.activeApp(ctx, in.AppID)
 	if err != nil {
 		return nil, err
@@ -102,7 +109,7 @@ func (s *AuthService) StartOAuth(ctx context.Context, in OAuthStartInput) (*OAut
 			WithDesc("系统配置没填 public_url，拼不出三方回调地址")
 	}
 
-	st := oauthState{AppID: app.ID, Connector: in.ConnectorType}
+	st := oauthState{AppID: app.ID, Connector: in.ConnectorType, BindUser: bindUser}
 	switch in.Mode {
 	case OAuthModeWeb:
 		if !connector.ReturnURLAllowed(connector.OAuthReturnURLs(cfg), in.ReturnURL) {
@@ -169,12 +176,12 @@ func (s *AuthService) HandleOAuthCallback(ctx context.Context, state, code strin
 			slog.Error("service: 写入 oauth 轮询结果失败", "err", err)
 			return &OAuthCallbackResult{Status: oauthFailed}
 		}
-		return &OAuthCallbackResult{Status: out.Status}
+		return &OAuthCallbackResult{Status: out.Status, Bind: st.BindUser != uuid.Nil}
 	case oauthDeliverWeb, oauthDeliverScheme:
 		s.deps.OAuth.deleteState(ctx, state)
 		q := url.Values{}
 		if out.Status == oauthOK {
-			ticket, err := s.deps.OAuth.putTicket(ctx, oauthTicket{AppID: st.AppID, Connector: st.Connector, Outcome: out})
+			ticket, err := s.deps.OAuth.putTicket(ctx, oauthTicket{AppID: st.AppID, Connector: st.Connector, Outcome: out, BindUser: st.BindUser})
 			if err != nil {
 				slog.Error("service: 写入 oauth 票据失败", "err", err)
 				out.Status = oauthFailed
@@ -186,9 +193,9 @@ func (s *AuthService) HandleOAuthCallback(ctx context.Context, state, code strin
 			q.Set("fpError", out.Status)
 		}
 		if st.Deliver == oauthDeliverWeb {
-			return &OAuthCallbackResult{Status: out.Status, Redirect: appendQuery(st.ReturnURL, q)}
+			return &OAuthCallbackResult{Status: out.Status, Bind: st.BindUser != uuid.Nil, Redirect: appendQuery(st.ReturnURL, q)}
 		}
-		return &OAuthCallbackResult{Status: out.Status, AppLink: st.Scheme + "://oauth?" + q.Encode()}
+		return &OAuthCallbackResult{Status: out.Status, Bind: st.BindUser != uuid.Nil, AppLink: st.Scheme + "://oauth?" + q.Encode()}
 	}
 	return &OAuthCallbackResult{Status: oauthFailed}
 }
@@ -229,7 +236,7 @@ func (s *AuthService) ExchangeOAuth(ctx context.Context, in OAuthClient, ticket 
 	if err != nil {
 		return nil, err
 	}
-	if t == nil || t.AppID != app.ID {
+	if t == nil || t.AppID != app.ID || t.BindUser != uuid.Nil {
 		return nil, ticketInvalid()
 	}
 	return s.settle(ctx, app, in, t.Connector, t.Outcome)
@@ -250,7 +257,7 @@ func (s *AuthService) PollOAuth(ctx context.Context, in OAuthClient, state strin
 	if err != nil {
 		return nil, err
 	}
-	if st == nil || st.AppID != app.ID || st.Deliver != oauthDeliverPoll {
+	if st == nil || st.AppID != app.ID || st.Deliver != oauthDeliverPoll || st.BindUser != uuid.Nil {
 		return nil, invalid
 	}
 	out, err := s.deps.OAuth.takeResult(ctx, state)

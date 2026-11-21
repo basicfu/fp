@@ -145,8 +145,42 @@ mux.Handle("PUT /api/me/avatar", auth.Middleware(http.HandlerFunc(func(w http.Re
 
 `RequestDeletion` 由业务服务端在用户确认注销后调用，fp 不再验身份——身份由业务方的登录态保证。
 
-- 账号进入冷静期（`PENDING_DELETE`），他在**所有应用、所有设备**上的会话立即作废。冷静期默认 15 天，系统配置 `account_deletion.cooling_off_days`（至少 1，改了重启生效）。
+- 账号进入冷静期（`PENDING_DELETE`），他在**所有应用、所有设备**上的会话立即作废。冷静期默认 7 天，系统配置 `account_deletion.cooling_off_days`（至少 1，改了重启生效）。
 - 冷静期内用该账号任意方式登录即撤销注销，回到 `ACTIVE`，资料原样还在。
 - 已在冷静期内再调一次是幂等的：返回原来的删除时间，不重新计时。
 - 期满由 fp 进程里每小时一轮的清理任务生效（多实例各跑各的，行锁跳过不重复）：删全部登录标识与三方绑定（手机号、微信释放，可以重新注册成新用户）、注册来源、角色、头像，清昵称、密码、性别，状态置 `DELETED`。`Get` 此后返回 `Status = DELETED`、没有 `Identities`。
 - 生效时只把用户 ID、手机号、微信 UnionID、提交与生效时间写进归档表 `user_deletion_archive`，不经任何接口暴露；生效满 6 个月后连同该用户的登录日志、`DELETED` 墓碑一起删除，此后 `Get` 返回 `USER_NOT_FOUND`。业务方把 `DELETED` 与 `USER_NOT_FOUND` 都当成"已注销"。
+
+## 9. 账号管理：换绑手机号 / 邮箱、绑微信、设密码
+
+给业务方的「个人中心」用。和别的方法一样只认 `userID`，「是本人、已登录」由业务方把关；账号 `FROZEN` 回 `ACCOUNT_FROZEN`、`DELETED` 回 `ACCOUNT_UNAVAILABLE`。
+
+```go
+u.SendVerifyCode(ctx, userID, fpsdk.VerifyChannelSMS, "")         // 发到当前手机号；target 非空 = 发到要换绑的新号码 / 邮箱
+u.VerifyCode(ctx, userID, fpsdk.VerifyChannelSMS, "", code)       // 校验，成功即作废，不改资料
+p, err := u.BindIdentity(ctx, userID, fpsdk.IdentityPhone, newPhone, code) // 验发到新号的码，替换同类标识
+p, err  = u.UnbindIdentity(ctx, userID, fpsdk.IdentityWechat)     // 删掉一类标识（phone / email / wechat）
+st, err := u.StartBindOAuth(ctx, userID, fpsdk.OAuthStartInput{Mode: fpsdk.OAuthModeWeb, ReturnURL: ret})
+r, err := u.ExchangeBindOAuth(ctx, userID, fpTicket)              // 或 PollBindOAuth(ctx, userID, state)
+err = u.SetPassword(ctx, userID, password)
+```
+
+- **验证码**：6 位、5 分钟、最多试 5 次，只对这个 `userID` 有效、不能拿去登录。限流与 `SendLoginCode` 共用按收件人的计数（30 秒 1 条、1 小时 5 条、1 天 10 条）。短信用模板 `verify_code`，邮件用系统配置 `verify_code.email_template`（默认 `verify_code_email`，email 渠道、变量只有 `code`）。
+- **先验旧、再换新**这类流程由业务方编排：`VerifyCode` 旧号码通过后自己记一张短期票据，再 `BindIdentity` 新号码。
+- **绑微信**与扫码登录同一套：同一个回调地址、同样的 web / desktop 模式。发起时就绑定了 `userID`，绑定的票据 / state 不能拿去登录，也不能给别的用户用。微信昵称头像只在本次结论里给一次，fp 不存。
+- **解绑**：`wechat` 一次删掉全部微信身份（网站应用、移动应用、服务号 openid 及同 unionId 的身份），不影响服务号通知订阅。删完要还能登录：还剩手机号或微信，或者还剩邮箱 / 用户名且设过密码。
+- **设密码**：8 个字符起、72 字节封顶，更严的规则业务方自己校验。不撤销任何会话。
+
+| 码 | 哨兵 | 何时 |
+|---|---|---|
+| `IDENTITY_TAKEN` | `ErrConflict` | 新号码 / 邮箱 / 微信已属别的用户（发码时就会拦） |
+| `LAST_IDENTITY` | `ErrConflict` | 解绑后没有可登录的方式 |
+| `IDENTITY_NOT_FOUND` | `ErrNotFound` | 发码 target 为空但没绑这类标识；解绑的本来就没有 |
+| `CODE_INVALID` | `ErrInvalidArgument` | 验证码不对、过期或次数用完 |
+| `RATE_LIMITED` | `ErrRateLimited` | 发码太频繁，`Detail` 带 `retryAfterMs` |
+| `PHONE_INVALID` / `INVALID_ARGUMENT` | `ErrInvalidArgument` | 手机号 / 邮箱格式不对，channel、type 取值不对 |
+| `PASSWORD_TOO_SHORT` / `PASSWORD_TOO_LONG` | `ErrInvalidArgument` | 密码长度 |
+| `OAUTH_STATE_INVALID` / `OAUTH_TICKET_INVALID` | `ErrInvalidArgument` | 绑微信的 state / 票据无效、过期、不属于这个用户 |
+| `VERIFY_TEMPLATE_UNAVAILABLE` / `NOTIFY_SEND_FAILED` | `ErrUnavailable` | 模板没配好 / 供应商没发出去 |
+
+验证码、票据不对在这里归 `ErrInvalidArgument` 而不是 `ErrUnauthorized`，`fpsdk.WriteError` 回 400，客户端不会因此被踢回登录页；`ErrConflict` 回 409。

@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/basicfu/fp/internal/domain"
@@ -144,12 +145,25 @@ func (s *LoginCodeService) Issue(ctx context.Context, phone string) (string, err
 	if phone == "" {
 		return "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "手机号不能为空")
 	}
+	return s.issue(ctx, loginCodeKey(phone), loginCodeTryKey(phone))
+}
+
+// IssueAccount 同 Issue，签的是给已登录用户做身份校验的码。键里带 userID：发到新手机号的码
+// 只能由发起换绑的那个用户消费，也不能拿去登录。
+func (s *LoginCodeService) IssueAccount(ctx context.Context, userID uuid.UUID, target string) (string, error) {
+	if target == "" {
+		return "", domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "验证码接收方不能为空")
+	}
+	return s.issue(ctx, accountCodeKey(userID, target), accountCodeTryKey(userID, target))
+}
+
+func (s *LoginCodeService) issue(ctx context.Context, key, tryKey string) (string, error) {
 	fresh, err := randomDigits(loginCodeLength)
 	if err != nil {
 		return "", err
 	}
 	code, err := issueScript.Run(ctx, s.rdb,
-		[]string{loginCodeKey(phone), loginCodeTryKey(phone)}, fresh, loginCodeTTL.Milliseconds(), MaxVerifyAttempts).Text()
+		[]string{key, tryKey}, fresh, loginCodeTTL.Milliseconds(), MaxVerifyAttempts).Text()
 	if err != nil {
 		return "", fmt.Errorf("service: 签发验证码: %w", err)
 	}
@@ -159,11 +173,20 @@ func (s *LoginCodeService) Issue(ctx context.Context, phone string) (string, err
 // Verify 校验验证码。成功后该验证码立即作废。
 // 码错误、码不存在、尝试超限一律返回 domain.ErrInvalidCredential，不向调用方区分。
 func (s *LoginCodeService) Verify(ctx context.Context, phone, code string) error {
+	return s.verify(ctx, loginCodeKey(phone), loginCodeTryKey(phone), code)
+}
+
+// VerifyAccount 校验 IssueAccount 签的码，规则同 Verify。
+func (s *LoginCodeService) VerifyAccount(ctx context.Context, userID uuid.UUID, target, code string) error {
+	return s.verify(ctx, accountCodeKey(userID, target), accountCodeTryKey(userID, target), code)
+}
+
+func (s *LoginCodeService) verify(ctx context.Context, key, tryKey, code string) error {
 	if code == "" {
 		return domain.Failf(domain.ErrInvalidCredential, domain.CodeCodeInvalid, "验证码不正确")
 	}
 	res, err := verifyScript.Run(ctx, s.rdb,
-		[]string{loginCodeKey(phone), loginCodeTryKey(phone)},
+		[]string{key, tryKey},
 		code, loginCodeTTL.Milliseconds(), MaxVerifyAttempts).Int64()
 	if err != nil {
 		return fmt.Errorf("service: 执行验证码校验脚本: %w", err)
@@ -176,6 +199,14 @@ func (s *LoginCodeService) Verify(ctx context.Context, phone, code string) error
 
 func loginCodeKey(phone string) string    { return "fp:code:login:" + phone }
 func loginCodeTryKey(phone string) string { return "fp:code:try:login:" + phone }
+
+func accountCodeKey(userID uuid.UUID, target string) string {
+	return "fp:code:acct:" + userID.String() + ":" + target
+}
+
+func accountCodeTryKey(userID uuid.UUID, target string) string {
+	return "fp:code:try:acct:" + userID.String() + ":" + target
+}
 
 // randomDigits 生成 n 位密码学随机数字串。
 func randomDigits(n int) (string, error) {

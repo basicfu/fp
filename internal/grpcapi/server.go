@@ -149,7 +149,7 @@ func New(d Deps) *Server {
 		fpv1.RegisterNotifyServiceServer(srv, newNotifyServer(d.Notify, d.WechatMP, d.Apps))
 	}
 	if d.Users != nil {
-		fpv1.RegisterUserServiceServer(srv, newUserServer(d.Users, d.Accounts, d.Apps))
+		fpv1.RegisterUserServiceServer(srv, newUserServer(d.Users, d.Accounts, d.Auth, d.Apps))
 	}
 
 	return &Server{grpc: srv, hub: hub, configHub: configHub}

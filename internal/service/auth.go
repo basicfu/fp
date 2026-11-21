@@ -30,9 +30,11 @@ type AuthDeps struct {
 	Sessions *SessionService
 	Logs     *LoginLogService
 	Registry *connector.Registry
-	// Codes、Notifier 只有 SendLoginCode 用得到；没有启用 sms_code 的部署（含大部分测试）可以不给。
+	// Codes、Notifier 只有发码（SendLoginCode / SendVerifyCode）用得到；没有启用 sms_code 的部署（含大部分测试）可以不给。
 	Codes    *LoginCodeService
 	Notifier LoginCodeSender
+	// EmailCodeTemplate 是 SendVerifyCode 发邮件用的通知模板 code，空取 DefaultEmailCodeTemplate。
+	EmailCodeTemplate string
 	// Authz 解析用户在本应用的有效角色，签发会话时刻进去。
 	// 可为 nil——授权模块未启用时会话不带角色，判定一律拒绝（默认拒绝）。
 	Authz *AuthzService
@@ -94,26 +96,32 @@ func (s *AuthService) SendLoginCode(ctx context.Context, appID, phone string) er
 	if err != nil {
 		return err
 	}
-	if err := s.deps.Notifier.Send(ctx, NotifySendInput{
+	return s.sendVerifyCode(ctx, app, VerifyCodeTemplate, "短信", phone, code)
+}
+
+// sendVerifyCode 经通知中心把验证码发出去。kind 只进错误文案（短信 / 邮件）。
+func (s *AuthService) sendVerifyCode(ctx context.Context, app *domain.Application, template, kind, to, code string) error {
+	err := s.deps.Notifier.Send(ctx, NotifySendInput{
 		AppID:  app.AppID,
-		Code:   VerifyCodeTemplate,
-		To:     phone,
+		Code:   template,
+		To:     to,
 		Params: map[string]string{"code": code},
-	}); err != nil {
-		// 走到这里的失败都是平台侧的——手机号和参数前面已经校验过。不能直接透传：模板缺失
-		// 以 NotFound、被停用以 PermissionDenied 出去，SDK 会把它们归成 ErrUnauthorized，
-		// 业务方的登录页就把"通知中心没配好"显示成了"未授权"。统一换成 Internal，
-		// 但"模板没配好"与"供应商没发出去"分两个码：前者要去控制台配，后者要查供应商。
-		if reason := verifyTemplateProblem(err); reason != "" {
-			slog.Error("验证码模板不可用", "template", VerifyCodeTemplate, "appId", appID, "reason", reason, "err", err)
-			return domain.Failf(domain.ErrInternal, domain.CodeVerifyTemplateUnavailable,
-				"短信验证码模板 %s 未配置好，暂时无法发送验证码", VerifyCodeTemplate).
-				WithField("template", VerifyCodeTemplate).WithField("reason", reason)
-		}
-		slog.Error("登录验证码发送失败", "template", VerifyCodeTemplate, "appId", appID, "err", err)
-		return domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "验证码发送失败，请稍后重试")
+	})
+	if err == nil {
+		return nil
 	}
-	return nil
+	// 走到这里的失败都是平台侧的——收件人和参数前面已经校验过。不能直接透传：模板缺失
+	// 以 NotFound、被停用以 PermissionDenied 出去，SDK 会把它们归成 ErrUnauthorized，
+	// 业务方的登录页就把"通知中心没配好"显示成了"未授权"。统一换成 Internal，
+	// 但"模板没配好"与"供应商没发出去"分两个码：前者要去控制台配，后者要查供应商。
+	if reason := verifyTemplateProblem(err); reason != "" {
+		slog.Error("验证码模板不可用", "template", template, "appId", app.AppID, "reason", reason, "err", err)
+		return domain.Failf(domain.ErrInternal, domain.CodeVerifyTemplateUnavailable,
+			"%s验证码模板 %s 未配置好，暂时无法发送验证码", kind, template).
+			WithField("template", template).WithField("reason", reason)
+	}
+	slog.Error("验证码发送失败", "template", template, "appId", app.AppID, "err", err)
+	return domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "验证码发送失败，请稍后重试")
 }
 
 // verifyTemplateProblem 认出"验证码模板本身没配好"的那几种通知中心错误，返回其错误码；

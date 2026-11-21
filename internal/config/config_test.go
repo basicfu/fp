@@ -232,3 +232,19 @@ func TestParseAccountDeletion(t *testing.T) {
 		}
 	}
 }
+
+func TestParseVerifyCodeEmailTemplate(t *testing.T) {
+	for text, want := range map[string]string{
+		"": DefaultVerifyEmailTemplate,
+		"verify_code:\n  email_template: \"  \"\n":       DefaultVerifyEmailTemplate,
+		"verify_code:\n  email_template: kk_mail_code\n": "kk_mail_code",
+	} {
+		cfg, err := Parse(text, "DEV")
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", text, err)
+		}
+		if cfg.VerifyCode.EmailTemplate != want {
+			t.Errorf("Parse(%q) 邮件模板 = %q, want %q", text, cfg.VerifyCode.EmailTemplate, want)
+		}
+	}
+}
