@@ -304,6 +304,10 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 					},
 				}
 			} else {
+				// IM 网关的通配流不关心用户的微信通知，也没有作用域可言，不该看到别的应用用户的这类状态。
+				if isIM && ev.Revoke.Kind == domain.EventKindWechatSubscriptionChanged {
+					continue
+				}
 				msg = eventMessage(ev.Revoke)
 				if rv := msg.GetRevoke(); isIM && rv != nil && rv.AppId != "" {
 					rv.AppId = s.externalAppID(ctx, imAppIDs, ev.Revoke.AppID)
@@ -393,6 +397,12 @@ func eventMessage(ev domain.RevokeEvent) *fpv1.WatchResponse {
 		return &fpv1.WatchResponse{Event: &fpv1.WatchResponse_PolicyChanged{
 			PolicyChanged: &fpv1.PolicyChanged{Version: ev.At},
 		}}
+	case domain.EventKindWechatSubscriptionChanged:
+		out := &fpv1.WechatSubscriptionChanged{Subscribed: ev.Subscribed, AtMs: ev.At}
+		if len(ev.UserIDs) > 0 {
+			out.UserId = ev.UserIDs[0].String()
+		}
+		return &fpv1.WatchResponse{Event: &fpv1.WatchResponse_WechatSubscriptionChanged{WechatSubscriptionChanged: out}}
 	default:
 		return &fpv1.WatchResponse{Event: &fpv1.WatchResponse_Revoke{Revoke: revokeEvent(ev)}}
 	}

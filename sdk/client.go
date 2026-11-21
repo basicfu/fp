@@ -458,6 +458,11 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 		case msg.GetAccessKeyChanged() != nil:
 			// 丢掉这把 key 的缓存，下次请求重新向 fp 取：停用、删除、改角色、改白名单都靠它立即生效。
 			c.auth.cache.drop(accessKeyCacheKey(msg.GetAccessKeyChanged().GetAccessKeyId()))
+		case msg.GetWechatSubscriptionChanged() != nil:
+			if cb := c.opts.OnWechatSubscriptionChanged; cb != nil {
+				ev := msg.GetWechatSubscriptionChanged()
+				cb(WechatSubscriptionEvent{UserID: ev.GetUserId(), Subscribed: ev.GetSubscribed(), At: time.UnixMilli(ev.GetAtMs())})
+			}
 		case msg.GetConfigChanged() != nil:
 			// 无差别重载全部绑定，不按 Type 分派：一个进程最多两份绑定，
 			// 多拉一次 GetConfig 的代价可以忽略，而"快照没变就不触发

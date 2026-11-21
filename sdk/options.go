@@ -101,6 +101,13 @@ type Options struct {
 	// 为 nil 表示不关心，是绝大多数 SDK 使用方的默认状态，不会因此崩溃。
 	OnRevoke func(RevokeEvent)
 
+	// OnWechatSubscriptionChanged 在 fp 推来某个用户的微信通知状态变化时被调用，业务方据此通知自己的客户端，
+	// 不必让客户端轮询 GetWechatSubscription。推送范围是该用户登录过的应用与发起扫码的应用。
+	//
+	// 状态没变也可能收到，按幂等处理；同一用户收到多条时以 At 最大的为准。断线期间的变化不补推，
+	// 要准确状态的在客户端重连时重取即可。与 OnRevoke 一样在读循环里同步执行，必须快。为 nil 表示不关心。
+	OnWechatSubscriptionChanged func(WechatSubscriptionEvent)
+
 	// MaxSignedBodyBytes 是访问密钥签名请求的 body 上限，超出回 413。默认 10MB。
 	MaxSignedBodyBytes int64
 	// NonceCapacity 是本进程记住的 nonce 条数上限。满了拒绝新的签名请求（503），

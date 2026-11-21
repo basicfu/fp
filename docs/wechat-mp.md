@@ -11,7 +11,7 @@ fp 负责的部分：生成二维码、接收服务号的事件推送、维护�
   │ 用户扫码（没关注的先关注）────────────────────────────────────────────────────→  推送 subscribe / SCAN
   │                                                     ←── /wechat/mp/callback ──  （带场景值）
   │                                                     记下：userID → openid
-  │ 轮询状态 ───────────→  WechatSubscription(userID) ──→  Receivable() = true
+  │ ←── 推给客户端 ─────── OnWechatSubscriptionChanged ←── Watch 流推送状态变化
   │ 关掉二维码，显示「已开启」
   │
   │                       有事发生时：
@@ -71,7 +71,7 @@ n := client.Notify()
 qr, err := n.WechatSubscribeQR(ctx, userID)
 // qr.ImageURL 直接放进 <img>；想自己画二维码（换颜色、加 logo）就用 qr.Content
 
-// 查询：展示二维码期间客户端每 2 秒问一次，Receivable() 变 true 就关掉二维码
+// 查询：客户端打开面板、重连时取一次准确状态
 sub, err := n.WechatSubscription(ctx, userID)
 // sub.Bound：开启过；sub.Subscribed：绑的微信还关注着服务号；sub.Receivable() = 两者都是
 
@@ -89,6 +89,17 @@ if errors.As(err, &fe) && fe.Code == fpsdk.CodeNotifyRecipientUnreachable {
 }
 ```
 
+**状态变化是推过来的，不用轮询。** 扫码开启、按 unionId 自动开启、关注 / 取关服务号、`DeleteWechatSubscription` 之后，fp 经 Watch 流推一条 `WechatSubscriptionChanged`，给该用户登录过的应用和发起扫码的应用。业务后端在 `fpsdk.Options.OnWechatSubscriptionChanged` 里收，转给这个用户的客户端：
+
+```go
+opts.OnWechatSubscriptionChanged = func(ev fpsdk.WechatSubscriptionEvent) {
+    // ev.Subscribed 即 Receivable()；回调在推送流的读循环里，重活另起 goroutine
+    go pushToDevices(ev.UserID, ev.Subscribed)
+}
+```
+
+状态没变也可能推，按幂等处理，同一用户多条以 `At` 最大的为准。断线期间的变化不补推，客户端重连时重取一次状态即可。
+
 这三个 RPC 和 `Send` 一样，要用应用的 AppID / AppSecret 认证，应用必须处于启用状态。用户全局互通，不检查他是否登录过本应用。
 
 **二维码只能给本人看**。谁扫了这张码，这个账号的通知就发给谁，所以只在已登录的客户端里展示，不要放进能分享出去的页面。
@@ -97,7 +108,7 @@ if errors.As(err, &fe) && fe.Code == fpsdk.CodeNotifyRecipientUnreachable {
 
 参考 ToDesk 的做法：账号面板里放一行「微信通知」。
 
-- **未开启**：点开弹出二维码，下面写「微信扫码关注，接收安全通知」；同时每 2 秒查一次状态，开启后自动收起，这一行变成「已开启」。二维码过期就提示刷新。
+- **未开启**：点开弹出二维码，下面写「微信扫码关注，接收安全通知」；等服务端推来状态变化，开启后自动收起，这一行变成「已开启」。二维码过期就提示刷新。
 - **已开启**（`Receivable()`）：点开问「是否关闭微信通知」，确认后调 `DeleteWechatSubscription`。
 - **已开启但取关了**（`Bound && !Subscribed`）：显示「已失效」，点开重新出二维码。用户在微信里重新关注也会自动恢复，不用重新扫码。
 - **`WECHAT_MP_UNAVAILABLE`**：整行隐藏。

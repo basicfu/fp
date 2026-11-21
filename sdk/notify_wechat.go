@@ -71,3 +71,11 @@ func (n *Notify) DeleteWechatSubscription(ctx context.Context, userID string) er
 	_, err := n.c.notifyRPC.DeleteWechatSubscription(ctx, &fpv1.DeleteWechatSubscriptionRequest{UserId: userID})
 	return translate(err)
 }
+
+// WechatSubscriptionEvent 是 Options.OnWechatSubscriptionChanged 收到的事件。
+type WechatSubscriptionEvent struct {
+	UserID string
+	// Subscribed 是 fp 发布那一刻「收不收得到微信通知」，即 WechatSubscription 的 Bound && Subscribed。
+	Subscribed bool
+	At         time.Time
+}

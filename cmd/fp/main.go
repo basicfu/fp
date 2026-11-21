@@ -185,7 +185,7 @@ func run() error {
 		}
 		log.Info("通知模块走开发代理", "proxy", notify.DevProxy)
 	}
-	wechatMPSvc := service.NewWechatMPService(pool, rdb)
+	wechatMPSvc := service.NewWechatMPService(pool, rdb, service.WithWechatMPPublisher(revokePub))
 	notifySvc := service.NewNotifyService(pool, rdb, notify.DefaultRegistry(), service.WithNotifyProd(cfg.IsProd()),
 		service.WithNotifyRecipients(domain.NotifyChannelWechatMP, wechatMPSvc.ResolveRecipient))
 

@@ -79,6 +79,9 @@ const (
 const (
 	EventKindAccessKeyChanged = "access_key_changed"
 	EventKindPolicyChanged    = "policy_changed"
+	// EventKindWechatSubscriptionChanged：某个用户的微信通知状态（GetWechatSubscription 的 bound && subscribed）
+	// 可能变了。UserIDs 只有一个元素，Subscribed 是发布那一刻的状态，AppID 是要通知的那个应用。
+	EventKindWechatSubscriptionChanged = "wechat_subscription_changed"
 )
 
 // RevokeEvent 是一次撤销的广播消息。
@@ -104,4 +107,6 @@ type RevokeEvent struct {
 	Kind string `json:"kind,omitempty"`
 	// AccessKeyID 只在 Kind 为 EventKindAccessKeyChanged 时有值。
 	AccessKeyID string `json:"accessKeyId,omitempty"`
+	// Subscribed 只在 Kind 为 EventKindWechatSubscriptionChanged 时有意义。
+	Subscribed bool `json:"subscribed,omitempty"`
 }

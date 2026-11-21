@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
@@ -85,6 +86,8 @@ type mpEnv struct {
 	notify *service.NotifyService
 	users  *service.UserService
 	prov   uuid.UUID
+	pub    *recordingPublisher
+	apps   *service.ApplicationService
 }
 
 func newMPEnv(t *testing.T) *mpEnv {
@@ -96,7 +99,8 @@ func newMPEnv(t *testing.T) *mpEnv {
 	if err := reg.Register(notify.WechatMPSpec(srv.URL)); err != nil {
 		t.Fatal(err)
 	}
-	wechat := service.NewWechatMPService(pool, rdb, service.WithWechatMPAPIBase(srv.URL))
+	pub := &recordingPublisher{}
+	wechat := service.NewWechatMPService(pool, rdb, service.WithWechatMPAPIBase(srv.URL), service.WithWechatMPPublisher(pub))
 	ns := service.NewNotifyService(pool, rdb, reg, service.WithNotifyRecipients(domain.NotifyChannelWechatMP, wechat.ResolveRecipient))
 	p, err := ns.CreateProvider(context.Background(), service.CreateNotifyProviderInput{
 		Type: notify.TypeWechatMP, Enabled: true,
@@ -105,7 +109,8 @@ func newMPEnv(t *testing.T) *mpEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &mpEnv{mp: mp, wechat: wechat, notify: ns, users: service.NewUserService(pool), prov: p.ID}
+	return &mpEnv{mp: mp, wechat: wechat, notify: ns, users: service.NewUserService(pool), prov: p.ID,
+		pub: pub, apps: service.NewApplicationService(pool, connector.NewRegistry())}
 }
 
 func (e *mpEnv) newUser(t *testing.T, phone, unionID string) uuid.UUID {

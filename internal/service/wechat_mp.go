@@ -38,6 +38,8 @@ type WechatMPService struct {
 	pool    *pgxpool.Pool
 	rdb     *redis.Client
 	apiBase string
+	// pub 推送 WechatSubscriptionChanged。为 nil 时不推送。
+	pub EventPublisher
 
 	mu    sync.Mutex
 	cache map[string]*notify.WechatMPAccount // key 是 id@updated_at，改配置自然换新
@@ -49,6 +51,11 @@ type WechatMPOption func(*WechatMPService)
 // WithWechatMPAPIBase 替换 api.weixin.qq.com，测试指向 httptest。
 func WithWechatMPAPIBase(base string) WechatMPOption {
 	return func(s *WechatMPService) { s.apiBase = base }
+}
+
+// WithWechatMPPublisher 让微信通知状态的变化经 Watch 流推给业务方。
+func WithWechatMPPublisher(pub EventPublisher) WechatMPOption {
+	return func(s *WechatMPService) { s.pub = pub }
 }
 
 // NewWechatMPService 构造 WechatMPService。
@@ -189,9 +196,17 @@ func (s *WechatMPService) Subscription(ctx context.Context, userID uuid.UUID) (*
 
 // Unbind 关掉用户的微信通知：删绑定，不碰关注状态——服务端没法替用户取关，他照样关注着服务号。
 func (s *WechatMPService) Unbind(ctx context.Context, userID uuid.UUID) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM wechat_mp_binding WHERE user_id = $1`, userID); err != nil {
+	var creator string
+	err := s.pool.QueryRow(ctx, `DELETE FROM wechat_mp_binding WHERE user_id = $1 RETURNING app_id`, userID).Scan(&creator)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 本来就没开：状态没变，但业务方可能刚从别的入口看到旧状态，照推一次无害。
+		err = nil
+	}
+	if err != nil {
 		return fmt.Errorf("service: 删除微信通知绑定: %w", err)
 	}
+	// 绑定行已删，发起扫码的应用要显式带上，否则它只在没登录过时会漏掉。
+	s.announce(ctx, userID, creator)
 	return nil
 }
 
@@ -309,6 +324,67 @@ func (s *WechatMPService) setFollow(ctx context.Context, openid string, subscrib
 			updated_at = now()`, openid, unionID, subscribed, at)
 	if err != nil {
 		slog.Error("service: 记录服务号关注状态失败", "err", err)
+		return
+	}
+	s.announceOpenID(ctx, openid)
+}
+
+// announceOpenID 给绑着这个 openid 的每个用户推一次当前状态。同一个微信可以给多个 fp 用户开通知。
+//
+// 不比较前后状态：乱序推送、重复关注事件都可能让状态其实没变，多推一次的代价远小于漏推。
+func (s *WechatMPService) announceOpenID(ctx context.Context, openid string) {
+	if s.pub == nil {
+		return
+	}
+	rows, err := s.pool.Query(ctx, `SELECT user_id FROM wechat_mp_binding WHERE openid = $1`, openid)
+	if err != nil {
+		slog.Error("service: 查询微信通知绑定失败", "err", err)
+		return
+	}
+	users, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		slog.Error("service: 查询微信通知绑定失败", "err", err)
+		return
+	}
+	for _, u := range users {
+		s.announce(ctx, u)
+	}
+}
+
+// announce 把用户当前的微信通知状态推给他登录过的应用，以及发起扫码的应用（extraAppIDs 是对外 app_id）。
+// 推的是发布那一刻查到的状态而不是"变成了什么"：并发的两次变化各推一次，后到的那条就是最新状态。
+// 失败只记日志：推送只是让客户端不必轮询，业务方仍可随时调 GetWechatSubscription 取准。
+func (s *WechatMPService) announce(ctx context.Context, userID uuid.UUID, extraAppIDs ...string) {
+	if s.pub == nil {
+		return
+	}
+	sub, err := s.Subscription(ctx, userID)
+	if err != nil {
+		slog.Error("service: 推送前查询微信通知状态失败", "err", err, "userId", userID)
+		return
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT application_id FROM user_extra WHERE user_id = $1
+		UNION
+		SELECT a.id FROM application a
+		WHERE a.app_id = ANY($2) OR a.app_id IN (SELECT app_id FROM wechat_mp_binding WHERE user_id = $1)`,
+		userID, extraAppIDs)
+	if err != nil {
+		slog.Error("service: 查询要通知的应用失败", "err", err, "userId", userID)
+		return
+	}
+	apps, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		slog.Error("service: 查询要通知的应用失败", "err", err, "userId", userID)
+		return
+	}
+	now := time.Now().UnixMilli()
+	for _, app := range apps {
+		// 每个应用一条：撤销频道按 AppID 过滤，uuid.Nil 会推给所有应用。
+		publishEvent(ctx, s.pub, domain.RevokeEvent{
+			Kind: domain.EventKindWechatSubscriptionChanged, AppID: app,
+			UserIDs: []uuid.UUID{userID}, Subscribed: sub.Bound && sub.Subscribed, At: now,
+		})
 	}
 }
 
@@ -373,6 +449,7 @@ func (s *WechatMPService) bindScene(ctx context.Context, a *notify.WechatMPAccou
 		return wechatReplyFailed
 	}
 	slog.Info("service: 用户开启微信通知", "userId", userID, "appId", sc.AppID, "serviceAppId", a.Client.AppID())
+	s.announce(ctx, userID)
 	return a.BindReply
 }
 
@@ -392,15 +469,19 @@ func (s *WechatMPService) autoBind(ctx context.Context, a *notify.WechatMPAccoun
 		return
 	}
 	s.setFollow(ctx, openid, true, createTime, info.UnionID)
-	tag, err := s.pool.Exec(ctx, `
+	var userID uuid.UUID
+	err = s.pool.QueryRow(ctx, `
 		INSERT INTO wechat_mp_binding (user_id, openid, app_id)
 		SELECT u.user_id, $2, '' FROM (SELECT user_id FROM identity WHERE union_key = $1 LIMIT 1) u
-		ON CONFLICT (user_id) DO NOTHING`, info.UnionID, openid)
+		ON CONFLICT (user_id) DO NOTHING
+		RETURNING user_id`, info.UnionID, openid).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return
+	}
 	if err != nil {
 		slog.Error("service: 按 unionid 自动关联微信通知失败", "err", err)
 		return
 	}
-	if tag.RowsAffected() > 0 {
-		slog.Info("service: 按 unionid 自动开启微信通知", "serviceAppId", a.Client.AppID())
-	}
+	slog.Info("service: 按 unionid 自动开启微信通知", "serviceAppId", a.Client.AppID())
+	s.announce(ctx, userID)
 }

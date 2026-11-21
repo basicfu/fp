@@ -43,6 +43,8 @@ type grpcEnv struct {
 	accounts *service.AccountService
 	users    *service.UserService
 	sms      *testsupport.FakeLoginSMS
+	// pub 是服务端订阅的那条撤销频道，测试直接往里发事件。
+	pub *store.RevokePublisher
 
 	// apps 用于创建/操纵应用（newApplication、setRotateInterval）；pool 用于绕过
 	// service 层直接改库（disableApplication——第一阶段没有停用应用的管理接口，
@@ -139,6 +141,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 		clock:    clk,
 		configs:  configs,
 		imCreds:  imCreds,
+		pub:      revokePub,
 	}
 
 	// 生成一份 IM 凭据，供 imAuthed 构造 fp-caller-type: im 的调用。

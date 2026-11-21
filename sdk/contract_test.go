@@ -139,3 +139,11 @@ func TestWatchResponseCarriesAccessKeyChanged(t *testing.T) {
 		t.Fatalf("WatchResponse.access_key_changed 缺失或字段号不是 8: %v", f)
 	}
 }
+
+// TestWatchResponseCarriesWechatSubscriptionChanged 同上，钉住字段号 9。
+func TestWatchResponseCarriesWechatSubscriptionChanged(t *testing.T) {
+	f := fpv1.File_fp_v1_auth_proto.Messages().ByName("WatchResponse").Fields().ByName("wechat_subscription_changed")
+	if f == nil || f.Number() != 9 {
+		t.Fatalf("WatchResponse.wechat_subscription_changed 缺失或字段号不是 9: %v", f)
+	}
+}

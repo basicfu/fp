@@ -283,7 +283,22 @@ message WatchResponse {
     AppIMConfigChanged app_im_config_changed = 7;
     // access_key_changed 表示某把访问密钥被修改、停用或删除，SDK 应丢掉它的缓存。
     AccessKeyChanged access_key_changed = 8;
+    // wechat_subscription_changed 表示某个用户的微信通知状态可能变了。fp-im 的流不会收到。
+    WechatSubscriptionChanged wechat_subscription_changed = 9;
   }
+}
+
+// WechatSubscriptionChanged 是一次微信通知状态变化的通知，推给该用户登录过的应用和发起扫码的应用。
+//
+// 触发：扫订阅码开启、按 unionId 自动开启、关注 / 取关服务号、DeleteWechatSubscription。
+// 状态没变也可能推（重复的关注事件、关掉本来就没开的通知），业务方按幂等处理。
+// 断线期间的变化不补推：重连后收到 ready（或 purge）时，需要准确状态的请自行 GetWechatSubscription。
+message WechatSubscriptionChanged {
+  string user_id = 1;
+  // subscribed 是发布那一刻 GetWechatSubscription 的 bound && subscribed，即「现在收不收得到通知」。
+  bool subscribed = 2;
+  // at_ms 是发布时间，同一用户收到多条时以最大的为准。
+  int64 at_ms = 3;
 }
 
 // AppIMConfigChanged 是一次 IM 接入配置变更的通知。
