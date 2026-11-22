@@ -146,55 +146,14 @@ func (s *UserService) GetAvatar(ctx context.Context, hash string) (contentType s
 	return contentType, image, nil
 }
 
-// FillEmptyProfile 用三方资料补齐空着的昵称、头像，用户已有的一律不覆盖。
-// nickname 须已规整，为空表示不补昵称；avatar 为空表示不补头像。
-func (s *UserService) FillEmptyProfile(ctx context.Context, id uuid.UUID, nickname string, avatar []byte) (*domain.User, error) {
-	var hash, contentType string
-	if len(avatar) > 0 {
-		var err error
-		if contentType, err = domain.CheckAvatar(avatar); err != nil {
-			return nil, err
-		}
-		hash = domain.AvatarHash(avatar)
+// FillEmptyNickname 用户昵称为空时写入 nickname（须已规整），已有昵称不覆盖。返回写完的用户。
+func (s *UserService) FillEmptyNickname(ctx context.Context, id uuid.UUID, nickname string) (*domain.User, error) {
+	// 「为空才写」放进 WHERE：调用方读到空到这里写入之间，用户可能刚好自己改了昵称。
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE app_user SET nickname = $2, updated_at = now() WHERE id = $1 AND nickname = ''`, id, nickname); err != nil {
+		return nil, fmt.Errorf("service: 补昵称: %w", err)
 	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("service: 开启事务: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	// 「为空才写」放进 WHERE：调用方读到空到这里写入之间，用户可能刚好自己改了资料。
-	if nickname != "" {
-		if _, err := tx.Exec(ctx,
-			`UPDATE app_user SET nickname = $2, updated_at = now() WHERE id = $1 AND nickname = ''`, id, nickname); err != nil {
-			return nil, fmt.Errorf("service: 补昵称: %w", err)
-		}
-	}
-	if hash != "" {
-		tag, err := tx.Exec(ctx,
-			`UPDATE app_user SET avatar_hash = $2, updated_at = now() WHERE id = $1 AND avatar_hash = ''`, id, hash)
-		if err != nil {
-			return nil, fmt.Errorf("service: 补头像哈希: %w", err)
-		}
-		if tag.RowsAffected() == 1 {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO user_avatar (user_id, hash, content_type, data) VALUES ($1, $2, $3, $4)
-				ON CONFLICT (user_id) DO UPDATE
-				SET hash = EXCLUDED.hash, content_type = EXCLUDED.content_type, data = EXCLUDED.data, updated_at = now()`,
-				id, hash, contentType, avatar); err != nil {
-				return nil, fmt.Errorf("service: 写入头像: %w", err)
-			}
-		}
-	}
-	u, err := getUserTx(ctx, tx, id)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("service: 提交事务: %w", err)
-	}
-	return u, nil
+	return s.GetByID(ctx, id)
 }
 
 // thirdPartyNickname 把三方昵称规整成合法昵称：超长截断，含控制字符等规整不了的返回空串（不补）。

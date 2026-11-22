@@ -74,8 +74,6 @@ func newOAuthEnvWith(t *testing.T, extra map[string]any, codeOpts ...service.Log
 		auth: service.NewAuthService(service.AuthDeps{
 			Apps: apps, Users: users, Sessions: sessions, Logs: service.NewLoginLogService(pool), Registry: reg,
 			Codes: codes, Notifier: sms, OAuth: service.NewOAuthStore(rdb), PublicURL: "https://fp.example.com",
-			// 假微信的头像地址在 httptest 上。
-			Avatars: connector.NewAvatarFetcher("127.0.0.1"),
 		}),
 		codes: codes, apps: apps, users: users, sms: sms, app: app.AppID, appID: app.ID.String(),
 	}
@@ -150,7 +148,7 @@ func TestOAuthFirstLoginBindsPhoneThenLogsInDirectly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Status != service.OAuthStatusBindPhone || out.BindTicket == "" || out.Nickname != "小明" || !strings.HasSuffix(out.AvatarURL, "/headimg/o1") {
+	if out.Status != service.OAuthStatusBindPhone || out.BindTicket == "" || out.Nickname != "小明" || out.AvatarURL != "https://img/o1" {
 		t.Fatalf("out = %+v", out)
 	}
 

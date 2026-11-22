@@ -285,7 +285,7 @@ func (s *AuthService) settleBind(ctx context.Context, app *domain.Application, u
 	if err != nil {
 		return nil, err
 	}
-	s.fillProfileFrom(ctx, u, p)
+	s.fillNicknameFrom(ctx, u, p)
 	prof, err := s.deps.Users.GetProfile(ctx, userID)
 	if err != nil {
 		return nil, err
