@@ -305,6 +305,7 @@ func (s *AuthService) settle(ctx context.Context, app *domain.Application, in OA
 				}); err != nil {
 					return nil, err
 				}
+				user = s.fillProfileFrom(ctx, user, p)
 			}
 			res, err := s.completeLogin(ctx, app, loginInputFrom(in, connType), profileResult(p), user, identity, false, "")
 			if err != nil {
@@ -358,13 +359,15 @@ func (s *AuthService) BindPhone(ctx context.Context, in BindPhoneInput) (*LoginR
 	}
 
 	p := t.Outcome.Profile
+	// 昵称不在建号时写：新号与挂到老号都交给 fillProfileFrom，规整规则只有一处。
 	res, err := s.deps.Users.LinkPhone(ctx, LinkPhoneInput{Phone: phone, Identity: EnsureIdentityInput{
-		Type: p.IdentityType, Subject: p.Subject, UnionKey: p.UnionKey, Nickname: p.Nickname, AvatarURL: p.AvatarURL,
+		Type: p.IdentityType, Subject: p.Subject, UnionKey: p.UnionKey, AvatarURL: p.AvatarURL,
 	}})
 	if err != nil {
 		s.logFailure(ctx, app, login, p.IdentityType, p.Subject, err)
 		return nil, err
 	}
+	res.User = s.fillProfileFrom(ctx, res.User, p)
 	var note string
 	if len(res.Replaced) > 0 {
 		olds := make([]string, 0, len(res.Replaced))
@@ -495,4 +498,32 @@ func detailOf(err error) string {
 		return de.DetailJSON()
 	}
 	return ""
+}
+
+// fillProfileFrom 用三方资料补齐用户空着的昵称、头像（已有的不覆盖），返回补完的用户。
+//
+// 尽力而为：身份已经挂上，补资料失败只记日志，登录 / 绑定照常成功，此时原样返回 u。
+// 同步执行，是为了绑定接口返回的资料和紧接着的 GetUser 立刻就是新的。
+func (s *AuthService) fillProfileFrom(ctx context.Context, u *domain.User, p *connector.OAuthProfile) *domain.User {
+	nickname := ""
+	if u.Nickname == "" {
+		nickname = thirdPartyNickname(p.Nickname)
+	}
+	var avatar []byte
+	if u.AvatarHash == "" && p.AvatarURL != "" {
+		img, err := s.deps.Avatars.Fetch(ctx, p.AvatarURL)
+		if err != nil {
+			slog.Warn("service: 下载三方头像失败，不补头像", "err", err, "userId", u.ID, "type", p.IdentityType)
+		}
+		avatar = img
+	}
+	if nickname == "" && avatar == nil {
+		return u
+	}
+	filled, err := s.deps.Users.FillEmptyProfile(ctx, u.ID, nickname, avatar)
+	if err != nil {
+		slog.Warn("service: 用三方资料补昵称头像失败", "err", err, "userId", u.ID, "type", p.IdentityType)
+		return u
+	}
+	return filled
 }

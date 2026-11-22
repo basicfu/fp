@@ -42,6 +42,8 @@ type AuthDeps struct {
 	// 不用扫码登录的部署（含大部分测试）可以不给。
 	OAuth     *OAuthStore
 	PublicURL string
+	// Avatars 下载三方头像补到空头像的账号上；nil 时只放行微信头像域名。
+	Avatars *connector.AvatarFetcher
 }
 
 // AuthService 编排登录流程。它是唯一知道"登录该按什么顺序发生"的地方：
@@ -52,6 +54,9 @@ type AuthService struct {
 
 // NewAuthService 构造 AuthService。
 func NewAuthService(d AuthDeps) *AuthService {
+	if d.Avatars == nil {
+		d.Avatars = connector.NewAvatarFetcher(connector.WechatAvatarHosts...)
+	}
 	return &AuthService{deps: d}
 }
 

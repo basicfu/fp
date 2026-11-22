@@ -313,7 +313,7 @@ func TestBindWechatWebAttachesToUserAndLoginUsesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExchangeBindOAuth: %v", err)
 	}
-	if out.Status != service.OAuthStatusSuccess || out.Nickname != "小红" || out.AvatarURL != "https://img/ob" {
+	if out.Status != service.OAuthStatusSuccess || out.Nickname != "小红" || !strings.HasSuffix(out.AvatarURL, "/headimg/ob") {
 		t.Fatalf("out = %+v", out)
 	}
 	if got := profileTypes(out.Profile); got[domain.IdentityTypeWechatWeb] != "ob" || got[domain.IdentityTypePhone] != "13800138040" {
