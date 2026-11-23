@@ -224,9 +224,10 @@ func TestWechatLoginFirstBindsPhoneThenDirect(t *testing.T) {
 		return wantOK(t, e.do(t, "POST", "/wechat/start", `{"purpose":"login"}`))
 	}
 	st := start()
-	// 回调走产品域名而不是 fp 的 public_url:微信只认登记过的授权回调域,也不该把 fp 的域名暴露给终端。
+	// 回调统一走 fp 的 public_url,不随请求域名变:业务方 SDK 发起的扫码也用它,两条路必须落在同一个
+	// 微信授权回调域上;多个产品共用 fp 的回调域,不必各自在微信开放平台改登记。
 	if st["state"] == "" || !strings.Contains(st["auth_url"].(string), "state=") || st["expires_in"] != float64(300) ||
-		st["redirect_uri"] != "https://"+testHost+"/oauth/callback" || !strings.Contains(st["auth_url"].(string), url.QueryEscape("https://"+testHost)) {
+		st["redirect_uri"] != "https://id.example.com/oauth/callback" || !strings.Contains(st["auth_url"].(string), url.QueryEscape("https://id.example.com")) {
 		t.Fatalf("start: %v", st)
 	}
 	ticket := e.wechatTicket(t, st["state"].(string), "oxA:unA:小白")

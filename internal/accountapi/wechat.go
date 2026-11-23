@@ -3,9 +3,7 @@ package accountapi
 import (
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
-	"strings"
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
@@ -86,20 +84,7 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) (service.OA
 	}
 	// 没开微信登录时照常往下走,由 StartOAuth 报 CONNECTOR_DISABLED,登录与绑定各按自己的映射回。
 	return service.OAuthStartInput{AppID: app.AppID, ConnectorType: connector.TypeWechatWeb, Mode: service.OAuthModeWeb,
-		ReturnURL: returnURL, CallbackBase: callbackBase(r)}, true
-}
-
-// callbackBase 是三方回调的前缀：用已认定应用的请求 Host（走到这里 withApp 已按它认出了应用），固定 https——
-// 对外只经网关的 TLS。认不出 Host 时返回空，退回 fp 的 public_url。
-func callbackBase(r *http.Request) string {
-	host := strings.ToLower(r.Host)
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if !domain.ValidDomain(host) {
-		return ""
-	}
-	return "https://" + host
+		ReturnURL: returnURL}, true
 }
 
 func (h *handler) startWechatLogin(w http.ResponseWriter, r *http.Request) (*service.OAuthStart, bool) {

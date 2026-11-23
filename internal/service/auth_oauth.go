@@ -39,9 +39,6 @@ type OAuthStartInput struct {
 	Mode string
 	// ReturnURL 仅 web 模式：登录完成后浏览器回到的业务页面，必须命中白名单。
 	ReturnURL string
-	// CallbackBase 非空时三方回调拼在它后面（如 https://产品域名），否则用 PublicURL。
-	// 账号接口经产品域名对外：三方只认登记过的授权回调域，也不该把 fp 自己的域名暴露给终端。
-	CallbackBase string
 }
 
 // OAuthStart 是发起结果。业务方要么跳转 AuthURL，要么拿后三项嵌入官方登录组件。
@@ -110,10 +107,9 @@ func (s *AuthService) startOAuth(ctx context.Context, in OAuthStartInput, bindUs
 	if err != nil {
 		return nil, err
 	}
-	base := in.CallbackBase
-	if base == "" {
-		base = s.deps.PublicURL
-	}
+	// 回调一律拼在 public_url 后面:不管扫码是终端直接调账号接口发起、还是业务方经 SDK 发起,
+	// 都落在同一个微信授权回调域上;按请求域名拼会让两条路落到不同域名,微信只认登记的那一个。
+	base := s.deps.PublicURL
 	if base == "" || s.deps.OAuth == nil {
 		return nil, domain.Fail(domain.ErrInternal, domain.CodePublicURLMissing, "扫码登录暂不可用").
 			WithDesc("系统配置没填 public_url，拼不出三方回调地址")
