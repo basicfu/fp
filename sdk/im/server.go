@@ -43,8 +43,10 @@ var (
 	// 合法 JSON，从而让 client 完全解不出这一帧——所以校验必须在 SDK 这层
 	// 做在发送之前，而不是指望 fp-im 或 client 兜底。
 	ErrBadPayload = errors.New("fpim: payload 必须是合法 JSON")
-	// ErrUnsupported 表示这条流所在的 fp-im 节点版本太旧、不认识该请求
-	// （目前只有 ListGroup）。调用方据此回退到老办法（比如 SessionsMany）。
+	// ErrUnsupported 表示这条流所在的 fp-im 节点版本太旧、不认识该请求。
+	// ListGroup 是发过去后对端回"未知请求类型"才知道；PushBatch、Drain 看
+	// Ready 里声明的能力（见 Supports），没声明就不发送、直接返回它。调用方
+	// 据此回退到老办法（比如 SessionsMany、逐条 Push）。
 	ErrUnsupported = errors.New("fpim: 对端 fp-im 不支持该请求")
 	// ErrGroupTooLarge 表示 ListGroup 的分组在线主体超过 10000 个。fp-im 不返回
 	// 部分结果；到这个量级该改用分页（尚未提供）或按业务自己的 id 走 SessionsMany。
@@ -58,6 +60,18 @@ const (
 	unknownRequest = "未知请求类型"
 	groupTooLarge  = "分组在线主体超过 10000 个"
 )
+
+// fp-im 在 Ready.features 里声明的可选能力名，传给 Supports。与 internal/im/imgrpc
+// 里的同名常量逐字相同，两边不互相 import，由 internal/integration 的
+// TestFeatureNamesParity 守住。
+const (
+	FeaturePushBatch = "push_batch"
+	FeatureDrain     = "drain"
+)
+
+// maxPushBatch 与 fp-im 一侧的上限相同。在本地先拦：noResult 的请求超限时
+// 对端的拒绝没人接，推送会悄无声息地丢掉。
+const maxPushBatch = 1000
 
 // ServerConfig 是 Server 的全部配置。用普通结构体按值传入，不用函数式
 // 选项——与 sdk/options.go 的 Options 是同样的先例。
@@ -82,6 +96,11 @@ type ServerConfig struct {
 	// 默认 5 秒。
 	RequestTimeout time.Duration
 
+	// FrameQueueCap 是入站帧(Inbound 与连接事件)队列的容量,0 取默认 256。
+	// 回调处理不过来、队列满时新帧被丢弃并计入 DroppedFrames;上行量大的应用
+	// (每台设备定时上报)按峰值帧率 × 能容忍的处理停顿来设。
+	FrameQueueCap int
+
 	// Logger 是 SDK 内部日志。为 nil 时用 slog.Default()。
 	Logger *slog.Logger
 }
@@ -91,6 +110,9 @@ const defaultRequestTimeout = 5 * time.Second
 func (c *ServerConfig) applyDefaults() {
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = defaultRequestTimeout
+	}
+	if c.FrameQueueCap == 0 {
+		c.FrameQueueCap = defaultFrameQueueCap
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
@@ -107,6 +129,8 @@ func (c ServerConfig) validate() error {
 		return errors.New("fpim: ServerConfig.AppSecret 不能为空")
 	case c.RequestTimeout < 0:
 		return errors.New("fpim: ServerConfig.RequestTimeout 不能为负")
+	case c.FrameQueueCap < 0:
+		return errors.New("fpim: ServerConfig.FrameQueueCap 不能为负")
 	}
 	return nil
 }
@@ -264,6 +288,9 @@ type Server struct {
 	mu      sync.Mutex
 	stream  fpimv1.ImService_ConnectClient // 当前可用的流；nil 表示未就绪或已断开
 	pending map[string]chan *fpimv1.Result
+	// features 是当前流的 Ready 声明的能力，与 stream 同生同灭：重连可能连到
+	// 另一个版本的 fp-im 节点，不能沿用上一条流的声明。
+	features map[string]bool
 
 	// sendMu 序列化对同一条流的 Send 调用。
 	//
@@ -279,6 +306,8 @@ type Server struct {
 	sendMu sync.Mutex
 
 	up atomic.Bool
+	// drained 为 true 后每条新流就绪都自动再发一次 Drain，见 Drain。
+	drained atomic.Bool
 
 	// frames 是 Inbound 与 Event 共用的唯一入站队列，由 runOnce 的读循环
 	// 非阻塞写入、由单独一个消费协程（consumeLoop）按序取出后调用业务
@@ -313,8 +342,8 @@ type queuedFrame struct {
 	ev  *fpimv1.Event
 }
 
-// frameQueueCap 是 frames 队列的容量。
-const frameQueueCap = 256
+// defaultFrameQueueCap 是 frames 队列的默认容量(ServerConfig.FrameQueueCap 为 0 时)。
+const defaultFrameQueueCap = 256
 
 // NewServer 建立与 fp-im 的连接并启动接入流。
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -349,7 +378,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		rpc:     fpimv1.NewImServiceClient(conn),
 		log:     cfg.Logger,
 		pending: map[string]chan *fpimv1.Result{},
-		frames:  make(chan queuedFrame, frameQueueCap),
+		frames:  make(chan queuedFrame, cfg.FrameQueueCap),
 		cancel:  cancel,
 	}
 	s.wg.Add(1)
@@ -487,8 +516,13 @@ func (s *Server) runOnce(ctx context.Context) (gotReady bool) {
 		}
 		switch b := resp.GetBody().(type) {
 		case *fpimv1.ConnectResponse_Ready:
+			feats := make(map[string]bool, len(b.Ready.GetFeatures()))
+			for _, f := range b.Ready.GetFeatures() {
+				feats[f] = true
+			}
 			s.mu.Lock()
 			s.stream = stream
+			s.features = feats
 			s.mu.Unlock()
 			s.up.Store(true)
 			if !gotReady {
@@ -496,6 +530,14 @@ func (s *Server) runOnce(ctx context.Context) (gotReady bool) {
 				go func() {
 					defer hb.Done()
 					s.heartbeat(sctx, cancel)
+				}()
+			}
+			if s.drained.Load() {
+				// 另起协程：call 要等的 Result 只能由这个读循环读到。
+				hb.Add(1)
+				go func() {
+					defer hb.Done()
+					s.redrain(sctx)
 				}()
 			}
 			gotReady = true
@@ -678,6 +720,7 @@ func (s *Server) dropStream() {
 	s.up.Store(false)
 	s.mu.Lock()
 	s.stream = nil
+	s.features = nil
 	for id, ch := range s.pending {
 		close(ch)
 		delete(s.pending, id)
@@ -685,16 +728,58 @@ func (s *Server) dropStream() {
 	s.mu.Unlock()
 }
 
+// Supports 报告当前流所在的 fp-im 是否在 Ready 里声明了该能力（FeaturePushBatch、
+// FeatureDrain）。没有可用的流时为 false；断流重连后以新流的声明为准。
+func (s *Server) Supports(feature string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.features[feature]
+}
+
+// streamFor 取当前流；need 非空时要求这条流声明过该能力。能力检查与取流在同一把锁下，
+// 否则检查完之后流换成了旧版节点，请求照样发到不认识它的对端。
+func (s *Server) streamFor(need string) (fpimv1.ImService_ConnectClient, error) {
+	if s.stream == nil {
+		return nil, ErrUnavailable
+	}
+	if need != "" && !s.features[need] {
+		return nil, fmt.Errorf("%w: 对端没有声明 %s", ErrUnsupported, need)
+	}
+	return s.stream, nil
+}
+
+// send 只发不等：不登记 pending，对端也不会回 Result。
+func (s *Server) send(need string, req *fpimv1.ConnectRequest) error {
+	s.mu.Lock()
+	stream, err := s.streamFor(need)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.sendMu.Lock()
+	err = stream.Send(req)
+	s.sendMu.Unlock()
+	if err != nil {
+		return errors.Join(ErrUnavailable, err)
+	}
+	return nil
+}
+
 // call 发一帧请求并等待与之配对的 Result。
 func (s *Server) call(ctx context.Context, body func(reqID string) *fpimv1.ConnectRequest) (*fpimv1.Result, error) {
+	return s.callNeeding(ctx, "", body)
+}
+
+// callNeeding 同 call，但要求当前流声明过 need 这个能力，否则不发送、返回 ErrUnsupported。
+func (s *Server) callNeeding(ctx context.Context, need string, body func(reqID string) *fpimv1.ConnectRequest) (*fpimv1.Result, error) {
 	id := uuid.NewString()
 	ch := make(chan *fpimv1.Result, 1)
 
 	s.mu.Lock()
-	stream := s.stream
-	if stream == nil {
+	stream, err := s.streamFor(need)
+	if err != nil {
 		s.mu.Unlock()
-		return nil, ErrUnavailable
+		return nil, err
 	}
 	s.pending[id] = ch
 	s.mu.Unlock()
@@ -768,6 +853,10 @@ func (s *Server) PushMany(ctx context.Context, subs []Subject, payload []byte) (
 	if err != nil {
 		return nil, err
 	}
+	return s.pushResults(res), nil
+}
+
+func (s *Server) pushResults(res *fpimv1.Result) []PushResult {
 	out := make([]PushResult, len(res.GetPushes()))
 	for i, p := range res.GetPushes() {
 		sub, parseErr := Parse(p.GetSubject())
@@ -783,7 +872,51 @@ func (s *Server) PushMany(ctx context.Context, subs []Subject, payload []byte) (
 		}
 		out[i] = PushResult{Subject: sub, Status: status, Nodes: int(p.GetNodes())}
 	}
-	return out, nil
+	return out
+}
+
+// PushItem 是 PushBatch 的一条：推给 Sub 的 Payload。
+type PushItem struct {
+	Sub     Subject
+	Payload []byte
+}
+
+// PushBatch 一次推多条各不相同的消息，fp-im 把连接查找合并成一次往返。一次最多 1000 条。
+//
+// noResult 为假时结果与 items 一一对应。noResult 为真时发出即返回 (nil, nil)：fp-im 不回
+// Result，所以既不知道送没送达，流在发出后断开也不会报错——给回执这类丢了由对端重发、
+// 量又大的推送用。
+//
+// 任何一条 payload 不是合法 JSON 时整批不发、返回 ErrBadPayload。当前流所在的 fp-im
+// 没有声明 FeaturePushBatch（旧版）时不发送、返回 ErrUnsupported，调用方退回逐条 Push。
+func (s *Server) PushBatch(ctx context.Context, items []PushItem, noResult bool) ([]PushResult, error) {
+	if len(items) > maxPushBatch {
+		return nil, fmt.Errorf("fpim: 批量推送一次最多 %d 条，实际 %d 条", maxPushBatch, len(items))
+	}
+	reqs := make([]*fpimv1.PushRequest, len(items))
+	for i, it := range items {
+		if !json.Valid(it.Payload) {
+			return nil, ErrBadPayload
+		}
+		reqs[i] = &fpimv1.PushRequest{Subject: it.Sub.String(), Payload: it.Payload}
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	build := func(id string) *fpimv1.ConnectRequest {
+		return &fpimv1.ConnectRequest{ReqId: id, Body: &fpimv1.ConnectRequest_PushBatch{PushBatch: &fpimv1.PushBatchRequest{Items: reqs, NoResult: noResult}}}
+	}
+	if noResult {
+		return nil, s.send(FeaturePushBatch, build(uuid.NewString()))
+	}
+	res, err := s.callNeeding(ctx, FeaturePushBatch, build)
+	if err != nil {
+		return nil, err
+	}
+	if len(res.GetPushes()) != len(items) {
+		return nil, fmt.Errorf("fpim: PushBatch 返回 %d 条结果, 请求了 %d 条", len(res.GetPushes()), len(items))
+	}
+	return s.pushResults(res), nil
 }
 
 // Sessions 查询某个 subject 名下当前的全部连接。
@@ -884,6 +1017,34 @@ func (s *Server) ListGroup(ctx context.Context, group string) ([]SubjectSessions
 		out = append(out, ss)
 	}
 	return out, nil
+}
+
+// Drain 让 fp-im 不再往本实例投上行帧和连接事件，用于停服前先摘流、再处理完手上剩下的帧。
+// 流保持打开，之后 Push、PushBatch、Sessions 等照常可用。当前流所在的 fp-im 没有声明
+// FeatureDrain（旧版）时不发送、返回 ErrUnsupported。
+//
+// 调用之后 Server 就处于"已摘流"状态（不论这次是否成功，比如恰好在重连中返回了
+// ErrUnavailable）：之后流断开重连，SDK 在新流的 Ready 之后自动再发一次 Drain。新流在
+// fp-im 那边是一条全新的、会被投递的流，从 Ready 到这次补发生效之间仍可能收到少量帧。
+//
+// fp-im 摘掉一条流后，本节点上该应用的主体按剩下的流数重新哈希，同一主体的帧可能换到
+// 另一个实例；被摘的是该应用在本节点的最后一条流时，本节点不再对其他节点宣告可投递。
+func (s *Server) Drain(ctx context.Context) error {
+	s.drained.Store(true)
+	_, err := s.callNeeding(ctx, FeatureDrain, drainRequest)
+	return err
+}
+
+func drainRequest(id string) *fpimv1.ConnectRequest {
+	return &fpimv1.ConnectRequest{ReqId: id, Body: &fpimv1.ConnectRequest_Drain{Drain: &fpimv1.DrainRequest{}}}
+}
+
+// redrain 在已摘流状态下给新流补发 Drain。
+func (s *Server) redrain(ctx context.Context) {
+	_, err := s.callNeeding(ctx, FeatureDrain, drainRequest)
+	if err != nil && ctx.Err() == nil {
+		s.log.Warn("fpim: 重连后补发 Drain 失败，这条流会继续收到上行帧", "err", err)
+	}
 }
 
 // Kick 踢掉某个 subject 的连接。connIDs 为空表示踢掉该 subject 的全部连接。

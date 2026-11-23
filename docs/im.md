@@ -229,7 +229,7 @@ client 地址（与访客限流同一个来源，取法见下文"client 地址"�
 server：`srv.OnMessage`/`OnEvent` 由 `Server` 内部一个独立的消费协程按入队顺序
 调用，不是在读 gRPC 流的那条循环里同步执行——回调里可以直接同步调用
 `Push`/`PushMany`/`Sessions`/`Kick` 等它们的 Result 返回，不会自死锁。Inbound 与
-Event 共用同一条容量 256 的队列（单消费者保证同一 subject 的处理顺序与投递顺序
+Event 共用同一条队列（容量默认 256，`ServerConfig.FrameQueueCap` 可调大；单消费者保证同一 subject 的处理顺序与投递顺序
 一致，且事件与消息的相对顺序也不变），队列满了会丢弃并计数（`srv.DroppedFrames()`
 查询）、同时打一条警告日志，不会阻塞读循环。`Close()` 会等这个消费协程真正退出
 再返回，之后不会再有回调被调用。最小接入示例、可以直接照抄的同步写法见
@@ -247,6 +247,30 @@ server 每 60 秒一次 `RST_STREAM ... PROTOCOL_ERROR` 断流重连）。连续
 部分结果。它是某一刻的快照：刚连上的主体在 fp-im 写进分组索引之前（正常毫秒级，Redis 写失败
 时是退避重试的时间）不在结果里，要实时判断某一个主体用 `Sessions`。流落在旧版 fp-im 上时
 返回 `fpim.ErrUnsupported`，调用方据此回退到 `SessionsMany`。
+
+**能力声明**：fp-im 在 Ready 的 `features` 里列出它支持的可选请求，目前是 `push_batch`、`drain`，
+SDK 用 `srv.Supports(fpim.FeaturePushBatch)` 等查询。能力跟着流走：流断开时清空，重连后以新流
+的 Ready 为准（可能连到另一个版本的节点）。旧版 fp-im 没有这个字段，SDK 一律当不支持，
+`PushBatch`、`Drain` 不发送、直接返回 `fpim.ErrUnsupported`。不像 ListGroup 那样"发过去等对端
+回未知请求类型"：`no_result` 的批量推送对端不回 Result，连这句都等不到。
+
+**`srv.PushBatch(ctx, items, noResult)`** 一次推多条各不相同的消息（每条自己的主体与 payload），
+连接查找合并成一次注册表往返，一次最多 1000 条（超过时 fp-im 整批回
+"批量推送超过 1000 条"，SDK 在本地就先拦下）。某条主体不合法只让那一条失败。`noResult` 为真时
+fp-im 不回 Result，SDK 发出即返回 `(nil, nil)`——不知道送没送达，给回执这类丢了由对端重发、
+量又大的推送用。
+
+**`srv.Drain(ctx)`（摘流）**：让 fp-im 不再往这条流投上行帧和连接事件，流本身保持打开，之后
+`Push`、`Sessions` 等照常可用。业务 server 停服时先摘流、处理完手上剩下的帧、推完回执再关闭。
+两点要知道：
+
+- 摘掉一条流后，本节点上该应用的全部主体按剩下的流数重新哈希，同一主体的上行帧可能换到另一条
+  流（另一个业务实例）。
+- 被摘的是该应用在本节点的最后一条流时，本节点立即撤销"可投递"声明，其他节点不再把该应用的
+  上行帧转过来；本节点自己收到的上行帧按没有本地流处理，转给别的节点。
+
+调用过 `Drain` 之后 SDK 记住"已摘流"：流断开重连，新流就绪后自动再发一次 `Drain`。从新流
+Ready 到这次补发生效之间仍可能收到少量帧。
 
 client：`fpim.Dial` 后 `OnMessage`/`OnClose`/`Send`，握手、心跳（每 25 秒，
 `fpim.PingInterval`）、按上表退避重连全部内部处理。收到 4001/4002/4003 时 SDK 按契约永久停止
@@ -333,6 +357,11 @@ fp-im 的参数除三个环境变量外都写死在代码里，这一项也不�
 1–5，`hello` 换成 t=2 鉴权结果帧，握手拒绝也先发 t=2 再关闭；业务方验证接口改为一律 200
 + Result，`user_id` 更名为 `uid`，401 不再表示令牌无效（拒绝改用非 success 的 code）。
 fp-im、业务方验证接口、所有 client（Go SDK 与各端自写的 ws 客户端）必须一起升级。
+
+**批量推送与摘流不分升级顺序**：新 SDK 连旧 fp-im 时 `Supports` 为 false、`PushBatch`/`Drain`
+返回 `ErrUnsupported`，业务方退回逐条 `Push` 并跳过摘流即可；旧 SDK 不认识 Ready 里的新字段，
+直接忽略。fp-im 滚动升级期间，业务 server 的不同流可能落在新旧不同的节点上，要按每次调用的返回
+处理，不能在启动时查一次 `Supports` 就定死。
 
 **消息信封线路格式变过两次**（插入转发候选列表、游标 1→2 字节），新旧节点互相
 解不出对方的信封。**升级必须整批替换，不能滚动。**

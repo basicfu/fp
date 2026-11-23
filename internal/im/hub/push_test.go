@@ -202,3 +202,42 @@ func TestOnRevokedClosesConnsByToken(t *testing.T) {
 		t.Fatal("其他 token 的连接不能被误关")
 	}
 }
+
+// 每条各推各的 payload,结果与入参一一对应:调用方按下标把结果对回自己的回执。
+func TestPushEachAlignsResults(t *testing.T) {
+	h, reg, _, pub, _ := hubtest.NewHub()
+	reg.Table["u:1"] = map[string]model.ConnMeta{"c1": {Node: "im-b"}}
+	reg.Table["u:3"] = map[string]model.ConnMeta{"c3": {Node: "im-c"}}
+	res := h.PushEach(context.Background(), "a1", []hub.PushItem{
+		{Sub: model.User("1"), Payload: []byte(`1`)},
+		{Sub: model.User("2"), Payload: []byte(`2`)},
+		{Sub: model.User("3"), Payload: []byte(`3`)},
+	})
+	if len(res) != 3 || res[0].Subject != "u:1" || res[0].Status != hub.PushSent ||
+		res[1].Subject != "u:2" || res[1].Status != hub.PushNotOnline ||
+		res[2].Subject != "u:3" || res[2].Status != hub.PushSent {
+		t.Fatalf("PushEach 结果不对：%+v", res)
+	}
+	if len(pub.Published) != 2 {
+		t.Fatalf("u:1→im-b、u:3→im-c 共 2 次喊，实际 %+v", pub.Published)
+	}
+	for _, p := range pub.Published {
+		if want := map[string]string{"im-b": "1", "im-c": "3"}[p.Node]; string(p.Env.Payload) != want {
+			t.Fatalf("发给 %s 的应是自己那条的 payload %q，实际 %q", p.Node, want, p.Env.Payload)
+		}
+	}
+}
+
+// 与 PushMany 同理:批量推送存在的意义就是把查表合成一次往返。
+func TestPushEachSingleLookup(t *testing.T) {
+	h, reg, _, _, _ := hubtest.NewHub()
+	reg.Table["u:1"] = map[string]model.ConnMeta{"c1": {Node: "im-b"}}
+	h.PushEach(context.Background(), "a1", []hub.PushItem{
+		{Sub: model.User("1"), Payload: []byte(`1`)},
+		{Sub: model.User("2"), Payload: []byte(`2`)},
+		{Sub: model.User("3"), Payload: []byte(`3`)},
+	})
+	if reg.LookupManyCalls != 1 {
+		t.Fatalf("3 条应合并成一次注册表查询，实际 %d 次", reg.LookupManyCalls)
+	}
+}

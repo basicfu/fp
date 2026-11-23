@@ -46,18 +46,36 @@ func (h *Hub) Push(ctx context.Context, app string, sub model.Subject, payload [
 // 不要退化成循环调 Push——那样每个 subject 各自一次注册表往返，PushMany
 // 存在的唯一意义（把多次查询合并成一次）就没了。
 func (h *Hub) PushMany(ctx context.Context, app string, subs []model.Subject, payload []byte) []PushResult {
-	results := h.pushMany(ctx, app, subs, payload)
+	results := h.push(ctx, app, subs, func(int) []byte { return payload })
 	h.countPush(results)
 	return results
 }
 
-func (h *Hub) pushMany(ctx context.Context, app string, subs []model.Subject, payload []byte) []PushResult {
+// PushItem 是 PushEach 的一条：发给 Sub 的 Payload。
+type PushItem struct {
+	Sub     model.Subject
+	Payload []byte
+}
+
+// PushEach 每条各推各的 payload，结果与 items 一一对应。与 PushMany 走同一条路径，
+// 连接查找同样合并成一次 LookupMany。
+func (h *Hub) PushEach(ctx context.Context, app string, items []PushItem) []PushResult {
+	subs := make([]model.Subject, len(items))
+	for i, it := range items {
+		subs[i] = it.Sub
+	}
+	results := h.push(ctx, app, subs, func(i int) []byte { return items[i].Payload })
+	h.countPush(results)
+	return results
+}
+
+func (h *Hub) push(ctx context.Context, app string, subs []model.Subject, payloadOf func(i int) []byte) []PushResult {
 	results := make([]PushResult, len(subs))
 	localHits := make([]int, len(subs))
 	var pending []int // 还需要查注册表的下标
 	for i, s := range subs {
 		results[i].Subject = s.String()
-		localHits[i] = h.sendLocal(app, s.String(), payload)
+		localHits[i] = h.sendLocal(app, s.String(), payloadOf(i))
 		if localHits[i] > 0 && h.singleConn(app) {
 			// replace/reject 策略下全网最多一条连接，本地命中就是唯一的一条，
 			// 没有必要再为了"还有没有别的节点"去查一次注册表。
@@ -95,7 +113,7 @@ func (h *Hub) pushMany(ctx context.Context, app string, subs []model.Subject, pa
 			total++
 		}
 		for n := range nodes {
-			env := bus.Envelope{Type: bus.TypeMsg, App: app, Subject: subs[i].String(), Payload: payload}
+			env := bus.Envelope{Type: bus.TypeMsg, App: app, Subject: subs[i].String(), Payload: payloadOf(i)}
 			got, err := h.pub.Publish(ctx, n, env)
 			if err != nil {
 				slog.Warn("hub: 喊节点失败", "node", n, "err", err)

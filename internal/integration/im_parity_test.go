@@ -250,3 +250,28 @@ func TestListGroupErrorTextParity(t *testing.T) {
 		})
 	}
 }
+
+// TestFeatureNamesParity 守住 Ready.features 里的能力名:imgrpc 声明、SDK 按名字查,
+// 两边各一份常量互不 import。任何一边拼错,SDK 都会把新版 fp-im 当成旧版、
+// 悄悄退回逐条推送并跳过摘流——各自包内的测试照样全绿。
+func TestFeatureNamesParity(t *testing.T) {
+	h, _, _, _, _ := hubtest.NewHub()
+	g := imgrpc.New(imgrpc.Deps{Hub: h, Creds: imCreds{"a1": "s1"}})
+	lis := listenAddr(t, "127.0.0.1:0")
+	go g.Serve(lis)
+	t.Cleanup(func() { g.Stop(context.Background()) })
+	srv, err := fpim.NewServer(fpim.ServerConfig{Addr: "grpc://" + lis.Addr().String(), AppID: "a1", AppSecret: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	waitUntil(t, srv.StreamHealthy, "流应就绪")
+	for _, f := range []string{fpim.FeaturePushBatch, fpim.FeatureDrain} {
+		if !srv.Supports(f) {
+			t.Fatalf("真 fp-im 声明的能力里应有 %q", f)
+		}
+	}
+	if fpim.FeaturePushBatch != imgrpc.FeaturePushBatch || fpim.FeatureDrain != imgrpc.FeatureDrain {
+		t.Fatal("SDK 与 imgrpc 的能力名常量不一致")
+	}
+}

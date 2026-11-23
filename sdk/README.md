@@ -450,6 +450,12 @@ result, err := srv.Push(ctx, fpim.User(userID), []byte(`{"type":"notify"}`))
 results, err := srv.PushMany(ctx, []fpim.Subject{fpim.User(id1), fpim.Guest(id2)}, payload)
 sessions, err := srv.Sessions(ctx, fpim.User(userID))
 err = srv.Kick(ctx, fpim.User(userID)) // 不传 connID 表示踢掉该用户全部连接
+
+// 每条各自的主体与 payload，一次最多 1000 条；noResult=true 发出即返回、不等结果
+_, err = srv.PushBatch(ctx, []fpim.PushItem{{Sub: fpim.Biz(id1), Payload: ack1}, {Sub: fpim.Biz(id2), Payload: ack2}}, true)
+
+// 停服：先摘流，不再收上行帧和连接事件，处理完手上的再 Close
+err = srv.Drain(ctx)
 ```
 
 **`NewServer` 不会因为凭据不对而报错。** 它只做参数校验，gRPC 是懒连接，
@@ -481,6 +487,11 @@ err = srv.Kick(ctx, fpim.User(userID)) // 不传 connID 表示踢掉该用户全
 此刻在线的全部主体（上限 10000）；连的 fp-im 太旧时返回 `fpim.ErrUnsupported`，
 回退到 `SessionsMany`；超过上限时返回 `fpim.ErrGroupTooLarge`。细节与一致性边界见
 `docs/im.md`。
+
+`PushBatch` 和 `Drain` 需要 fp-im 在 Ready 里声明对应能力（`srv.Supports(fpim.FeaturePushBatch)`、
+`srv.Supports(fpim.FeatureDrain)`）。连的 fp-im 太旧时两者都不发送、返回 `fpim.ErrUnsupported`：
+批量推送退回逐条 `Push`，摘流直接跳过。调用过 `Drain` 后流断开重连，SDK 会在新流上自动再摘一次。
+入站帧上行量大时用 `ServerConfig.FrameQueueCap` 调大入站队列（默认 256）。
 
 **升级注意**：`fpim.Subject` 新增了 `Group` 字段（排在 `Kind` 与 `ID` 之间），按位置写的
 结构体字面量 `fpim.Subject{fpim.KindBiz, id}` 升级后编译不过，要改成带字段名的

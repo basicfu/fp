@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/hub/hubtest"
 	"github.com/basicfu/fp/internal/im/model"
@@ -312,5 +313,141 @@ func TestConnectReadySentBeforeStreamIsRoutable(t *testing.T) {
 	}
 	if first.GetReady().NodeId != "im-a" {
 		t.Fatalf("Ready.NodeId 应为 im-a，实际 %q", first.GetReady().NodeId)
+	}
+}
+
+// openStream 建流并读掉 Ready,返回流与 Ready。
+func openStream(t *testing.T, c fpimv1.ImServiceClient) (fpimv1.ImService_ConnectClient, *fpimv1.Ready) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	stream, err := c.Connect(authed(ctx, "a1", "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := stream.Recv()
+	if err != nil || first.GetReady() == nil {
+		t.Fatalf("第一帧应是 Ready，实际 %+v %v", first, err)
+	}
+	return stream, first.GetReady()
+}
+
+// recvResult 一直读到 reqId 对应的 Result,其间的 Inbound/Event 忽略;读到别的 Result 交给 other。
+func recvResult(t *testing.T, stream fpimv1.ImService_ConnectClient, reqID string, other func(*fpimv1.Result)) *fpimv1.Result {
+	t.Helper()
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("等 %s 的 Result 时 Recv 失败: %v", reqID, err)
+		}
+		r := resp.GetResult()
+		if r == nil {
+			continue
+		}
+		if r.ReqId == reqID {
+			return r
+		}
+		if other != nil {
+			other(r)
+		}
+	}
+}
+
+func ping(id string) *fpimv1.ConnectRequest {
+	return &fpimv1.ConnectRequest{ReqId: id, Body: &fpimv1.ConnectRequest_Ping{Ping: &fpimv1.PingRequest{}}}
+}
+
+func pushBatch(id string, noResult bool, items ...*fpimv1.PushRequest) *fpimv1.ConnectRequest {
+	return &fpimv1.ConnectRequest{ReqId: id, Body: &fpimv1.ConnectRequest_PushBatch{PushBatch: &fpimv1.PushBatchRequest{Items: items, NoResult: noResult}}}
+}
+
+// SDK 靠 Ready 里的能力名决定发不发新请求:老节点没有这个字段,一律当不支持。
+func TestReadyDeclaresFeatures(t *testing.T) {
+	c, _, _ := newClient(t)
+	_, ready := openStream(t, c)
+	got := ready.GetFeatures()
+	if len(got) != 2 || got[0] != FeaturePushBatch || got[1] != FeatureDrain || FeaturePushBatch != "push_batch" || FeatureDrain != "drain" {
+		t.Fatalf("Ready.features 应为 [push_batch drain]，实际 %v", got)
+	}
+}
+
+func TestPushBatchWithResult(t *testing.T) {
+	c, _, reg := newClient(t)
+	reg.Table["u:1"] = map[string]model.ConnMeta{"c1": {Node: "im-b"}}
+	stream, _ := openStream(t, c)
+	_ = stream.Send(pushBatch("b1", false,
+		&fpimv1.PushRequest{Subject: "u:1", Payload: []byte(`1`)},
+		&fpimv1.PushRequest{Subject: "bogus", Payload: []byte(`2`)},
+		&fpimv1.PushRequest{Subject: "u:2", Payload: []byte(`3`)},
+	))
+	r := recvResult(t, stream, "b1", nil)
+	if r.Error != "" || len(r.Pushes) != 3 {
+		t.Fatalf("应逐条回结果，实际 %+v", r)
+	}
+	// 坏 subject 只让自己那条失败,不连累同批的其它条。
+	if r.Pushes[0].Subject != "u:1" || r.Pushes[0].Status != fpimv1.PushStatus_PUSH_STATUS_SENT ||
+		r.Pushes[1].Subject != "bogus" || r.Pushes[1].Status == fpimv1.PushStatus_PUSH_STATUS_SENT ||
+		r.Pushes[2].Subject != "u:2" || r.Pushes[2].Status != fpimv1.PushStatus_PUSH_STATUS_NOT_ONLINE {
+		t.Fatalf("结果与请求没有一一对应：%+v", r.Pushes)
+	}
+}
+
+// no_result 的批量推送不回 Result:回执这类量大的推送省掉回程那一帧。
+func TestPushBatchNoResult(t *testing.T) {
+	c, h, _ := newClient(t)
+	conn := &hubtest.Conn{ConnID: "c1"}
+	h.AddConn(context.Background(), "a1", model.User("1"), conn, model.ConnMeta{Node: "im-a"}, "")
+	stream, _ := openStream(t, c)
+	unexpected := func(r *fpimv1.Result) { t.Fatalf("no_result 的批量推送不该回 Result，收到 %+v", r) }
+	_ = stream.Send(pushBatch("b1", true, &fpimv1.PushRequest{Subject: "u:1", Payload: []byte(`{"a":1}`)}))
+	_ = stream.Send(ping("p1"))
+	recvResult(t, stream, "p1", unexpected)
+	deadline := time.Now().Add(5 * time.Second)
+	for conn.SentCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("目标连接应收到推送")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 推送已落到连接上,b1 的处理协程随即结束;再来一个 Ping 兜住"晚到的 b1 Result"。
+	_ = stream.Send(ping("p2"))
+	recvResult(t, stream, "p2", unexpected)
+}
+
+func TestPushBatchTooLarge(t *testing.T) {
+	c, _, _ := newClient(t)
+	stream, _ := openStream(t, c)
+	items := make([]*fpimv1.PushRequest, 1001)
+	for i := range items {
+		items[i] = &fpimv1.PushRequest{Subject: "u:1", Payload: []byte(`1`)}
+	}
+	_ = stream.Send(pushBatch("b1", false, items...))
+	if r := recvResult(t, stream, "b1", nil); r.Error != "批量推送超过 1000 条" || len(r.Pushes) != 0 {
+		t.Fatalf("超过 1000 条应整批失败，实际 error=%q pushes=%d", r.Error, len(r.Pushes))
+	}
+}
+
+// 摘流只停止往这条流投上行帧和事件,流本身照常收发请求:停服过程中还要靠它推完剩下的回执。
+func TestDrainKeepsStreamUsable(t *testing.T) {
+	c, h, _ := newClient(t)
+	stream, _ := openStream(t, c)
+	_ = stream.Send(&fpimv1.ConnectRequest{ReqId: "d1", Body: &fpimv1.ConnectRequest_Drain{Drain: &fpimv1.DrainRequest{}}})
+	if r := recvResult(t, stream, "d1", nil); r.Error != "" {
+		t.Fatalf("Drain 应回空 Result，实际 %+v", r)
+	}
+	// Deliver 是同步写流的:要是还投给本流,这一帧会排在下面 Ping 的 Result 前面。
+	h.Deliver(context.Background(), bus.Envelope{Type: bus.TypeUp, App: "a1", Subject: "u:1", ConnID: "c1", Payload: []byte(`1`)})
+	_ = stream.Send(ping("p1"))
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetInbound() != nil || resp.GetEvent() != nil {
+			t.Fatalf("摘流后本流不该再收到上行帧或事件，收到 %+v", resp)
+		}
+		if r := resp.GetResult(); r != nil && r.ReqId == "p1" {
+			break
+		}
 	}
 }

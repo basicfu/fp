@@ -2,6 +2,7 @@ package hub_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/hub/hubtest"
+	"github.com/basicfu/fp/internal/im/model"
 )
 
 func up(subject string) bus.Envelope {
@@ -254,5 +256,64 @@ func TestDeliverRouteLargerThan255DoesNotWrapAround(t *testing.T) {
 		if int(pub.Published[i].Env.Hop) != i+1 {
 			t.Fatalf("第 %d 次发布的信封里 Hop 应该是 %d，实际是 %d：游标回绕了", i, i+1, pub.Published[i].Env.Hop)
 		}
+	}
+}
+
+func evt(subject string) bus.Envelope {
+	body, _ := json.Marshal(model.EventBody{Kind: model.EventConnected, OS: "linux"})
+	return bus.Envelope{Type: bus.TypeEvt, App: "a1", Subject: subject, ConnID: "c1", Payload: body}
+}
+
+// 摘流就是提前调 AddStream 返回的 remove:之后上行帧和连接事件只按剩下的流哈希。
+func TestDrainedStreamGetsNoDeliveries(t *testing.T) {
+	h, _, live, _, _ := hubtest.NewHub()
+	kept, drained := &hubtest.Stream{}, &hubtest.Stream{}
+	h.AddStream(context.Background(), "a1", kept)
+	drain := h.AddStream(context.Background(), "a1", drained)
+	drain()
+	if !live.IsServing("a1") {
+		t.Fatal("还剩一条流，本节点仍应声明在服务 a1")
+	}
+	const n = 20
+	for i := 0; i < n; i++ {
+		sub := fmt.Sprintf("u:%d", i)
+		if !h.Deliver(context.Background(), up(sub)) || !h.Deliver(context.Background(), evt(sub)) {
+			t.Fatalf("%s 应投递成功", sub)
+		}
+	}
+	if got := len(drained.GotSnapshot()); got != 0 {
+		t.Fatalf("被摘的流不该再收到任何帧，实际 %d 帧", got)
+	}
+	if got := len(kept.GotSnapshot()); got != 2*n {
+		t.Fatalf("帧和事件应全部落到剩下的那条流，实际 %d 帧", got)
+	}
+}
+
+// 被摘的是本节点上该应用的最后一条流:别的节点不能再把上行帧转给本节点。
+func TestDrainLastStreamStopsServing(t *testing.T) {
+	h, _, live, pub, _ := hubtest.NewHub()
+	live.Servers["a1"] = []string{"im-b"}
+	s := &hubtest.Stream{}
+	drain := h.AddStream(context.Background(), "a1", s)
+	drain()
+	if live.IsServing("a1") {
+		t.Fatal("唯一一条流被摘后应 SetServing(false)")
+	}
+	if !h.Deliver(context.Background(), up("u:1")) {
+		t.Fatal("应转发给 im-b")
+	}
+	if len(s.GotSnapshot()) != 0 || len(pub.Published) != 1 || pub.Published[0].Node != "im-b" {
+		t.Fatalf("本地已无流，应走转发分支：stream=%d pub=%+v", len(s.GotSnapshot()), pub.Published)
+	}
+}
+
+// 摘流后流断开,Connect 的 defer 会再调一次 remove。
+func TestDrainThenDisconnectIdempotent(t *testing.T) {
+	h, _, live, _, _ := hubtest.NewHub()
+	remove := h.AddStream(context.Background(), "a1", &hubtest.Stream{})
+	remove()
+	remove()
+	if n := live.ServingOffCalls(); n != 1 {
+		t.Fatalf("撤销声明应只发一次，实际 %d 次", n)
 	}
 }

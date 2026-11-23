@@ -6,7 +6,8 @@ option go_package = "github.com/basicfu/fp/sdk/gen/fpim/v1;fpimv1";
 
 // ImService 是业务 server 接入 fp-im 的唯一入口。
 //
-// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions / Ping / ListGroup），
+// 只有一条双向流：server→im 发请求（Push / PushMany / Kick / Sessions / Ping / ListGroup /
+// PushBatch / Drain），
 // im→server 发结果、client 上来的消息和连接事件。
 // 不拆成一元 RPC 的原因与 fp.v1.AuthService.Watch 相同：一条永不空闲的流
 // 让所有调用都走热连接，而且 Inbound/Event 本来就只能推。
@@ -26,8 +27,23 @@ message ConnectRequest {
     PingRequest     ping      = 6;
     SessionsManyRequest sessions_many = 7;
     ListGroupRequest    list_group    = 8;
+    PushBatchRequest    push_batch    = 9;
+    DrainRequest        drain         = 10;
   }
 }
+
+// PushBatchRequest 一次推多条各不相同的消息（每条自己的 subject 与 payload），
+// 连接查找合并成一次注册表往返。一次最多 1000 条。
+// no_result 为真时 im 不回 Result：给回执这类发出即忘、量又大的推送用，省掉回程那一帧。
+// 能力名 "push_batch"，见 Ready.features。
+message PushBatchRequest {
+  repeated PushRequest items     = 1;
+  bool                 no_result = 2;
+}
+
+// DrainRequest 让 im 不再往这条流投上行帧和连接事件（发版停服前先摘流），回空 Result。
+// 流本身保持打开，之后的 Push、Sessions 等照常处理。能力名 "drain"。
+message DrainRequest {}
 
 // PingRequest 是 SDK 在流上的应用层心跳，im 回一个空 Result。
 // gRPC 自带的 keepalive（HTTP/2 PING）只在相邻两跳之间往返，中间隔着 nginx/APISIX
@@ -48,8 +64,12 @@ message ConnectResponse {
 }
 
 // Ready 是流建立后 im 发的第一帧，此后 Push 才会被处理。
+// features 是这个 im 节点支持的可选请求（"push_batch"、"drain"）。旧版 im 没有这个字段，
+// SDK 一律按不支持处理、不发送：旧节点对不认识的请求只回"未知请求类型"，
+// 而 no_result 的批量推送连这句都等不到。
 message Ready {
-  string node_id = 1;
+  string          node_id  = 1;
+  repeated string features = 2;
 }
 
 message PushRequest {

@@ -105,12 +105,13 @@ func (s *Server) Connect(stream fpimv1.ImService_ConnectServer) error {
 	// 重连时，该 app 下大量在线连接正持续产生事件，很容易撞上这个窗口。
 	// 反过来，注册不依赖"Ready 已发出"这件事——Ready 发送失败直接返回错误，
 	// 连注册都不必做，交换顺序是安全的。
-	if err := snd.Send(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Ready{Ready: &fpimv1.Ready{NodeId: s.deps.Hub.NodeID()}}}); err != nil {
+	if err := snd.Send(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Ready{Ready: &fpimv1.Ready{NodeId: s.deps.Hub.NodeID(), Features: features}}}); err != nil {
 		return err
 	}
 	// remove 必须可靠地在流结束时被调用——不管是 Recv 出错、client 主动关闭、
 	// 还是这个函数以任何路径返回，否则路由器里会残留一条死流，之后投给它
 	// 的消息全部落空。defer 是唯一能覆盖所有返回路径（含 panic）的写法。
+	// Drain 请求提前调的也是它；remove 自身幂等，摘流后这里再调一次无害。
 	remove := s.deps.Hub.AddStream(ctx, app, snd)
 	defer remove()
 	// sem 是并发上限的信号量：拿不到令牌就阻塞等待而不是丢弃请求。
@@ -161,7 +162,9 @@ func (s *Server) Connect(stream fpimv1.ImService_ConnectServer) error {
 			go func(req *fpimv1.ConnectRequest) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				_ = snd.Send(handle(ctx, s.deps, app, req))
+				if resp := handle(ctx, s.deps, app, req, remove); resp != nil {
+					_ = snd.Send(resp)
+				}
 			}(req)
 		}
 	}()

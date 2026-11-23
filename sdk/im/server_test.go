@@ -30,6 +30,18 @@ type stubIm struct {
 	pings    atomic.Int64
 	// oldIm 模拟不认识 PingRequest / ListGroupRequest 的旧版 fp-im:回"未知请求类型"的错误结果。
 	oldIm atomic.Bool
+	// features 写进每条新流的 Ready;为空等同不带这个字段的旧版 fp-im。用 setFeatures 改。
+	features []string
+	// hangup 为 true 时,下一条请求到来就结束这条流(只触发一次),用来制造"断流后重连"。
+	hangup      atomic.Bool
+	pushBatches atomic.Int64
+	drains      atomic.Int64
+}
+
+func (s *stubIm) setFeatures(f ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.features = f
 }
 
 func (s *stubIm) streamCount() int {
@@ -43,8 +55,9 @@ func (s *stubIm) Connect(st fpimv1.ImService_ConnectServer) error {
 	s.mu.Lock()
 	s.seenMD = md
 	s.streams = append(s.streams, st)
+	features := s.features
 	s.mu.Unlock()
-	if err := st.Send(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Ready{Ready: &fpimv1.Ready{NodeId: "stub"}}}); err != nil {
+	if err := st.Send(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Ready{Ready: &fpimv1.Ready{NodeId: "stub", Features: features}}}); err != nil {
 		return err
 	}
 	for {
@@ -52,9 +65,18 @@ func (s *stubIm) Connect(st fpimv1.ImService_ConnectServer) error {
 		if err != nil {
 			return nil
 		}
+		if s.hangup.CompareAndSwap(true, false) {
+			return nil
+		}
 		s.received.Add(1)
 		if req.GetPing() != nil {
 			s.pings.Add(1)
+		}
+		if req.GetPushBatch() != nil {
+			s.pushBatches.Add(1)
+		}
+		if req.GetDrain() != nil {
+			s.drains.Add(1)
 		}
 		if s.swallow.Load() {
 			continue // 故意不回 Result，让这个请求停在"在途"状态
@@ -70,6 +92,17 @@ func (s *stubIm) Connect(st fpimv1.ImService_ConnectServer) error {
 		case *fpimv1.ConnectRequest_PushMany:
 			for _, sub := range b.PushMany.Subjects {
 				res.Pushes = append(res.Pushes, &fpimv1.PushResult{Subject: sub, Status: fpimv1.PushStatus_PUSH_STATUS_SENT, Nodes: 1})
+			}
+		case *fpimv1.ConnectRequest_PushBatch:
+			if b.PushBatch.NoResult {
+				continue
+			}
+			for _, it := range b.PushBatch.Items {
+				res.Pushes = append(res.Pushes, &fpimv1.PushResult{Subject: it.Subject, Status: fpimv1.PushStatus_PUSH_STATUS_SENT, Nodes: 1})
+			}
+		case *fpimv1.ConnectRequest_Drain:
+			if s.oldIm.Load() {
+				res.Error = "未知请求类型"
 			}
 		case *fpimv1.ConnectRequest_Sessions:
 			res.Sessions = []*fpimv1.Session{{ConnId: "c1", NodeId: "stub", Os: "ios", Mobile: true, ConnectedAtMs: 9}}
@@ -512,9 +545,25 @@ func TestServerPreservesMessageBeforeEventOrder(t *testing.T) {
 // 就能观测到丢弃"。改回 select+default 后复测转绿。过程记在
 // fix-batch-2-report.md。
 func TestServerDropsFramesWhenQueueFull(t *testing.T) {
+	dropsWhenQueueFull(t, 0, defaultFrameQueueCap)
+}
+
+// 业务方可以把入站队列调大:上行帧量大的应用(每台设备定时上报)用默认的 256 一个抖动就会丢帧。
+func TestServerFrameQueueCapConfigured(t *testing.T) {
+	dropsWhenQueueFull(t, 1024, 1024)
+}
+
+func TestServerConfigRejectsNegativeQueueCap(t *testing.T) {
+	if _, err := NewServer(ServerConfig{Addr: "grpc://127.0.0.1:1", AppID: "a1", AppSecret: "sec", FrameQueueCap: -1}); err == nil {
+		t.Fatal("负的队列容量应报错")
+	}
+}
+
+func dropsWhenQueueFull(t *testing.T, cfgCap, queueCap int) {
+	t.Helper()
 	stub, addr, stop := startStub(t)
 	defer stop()
-	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
+	s, _ := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec", FrameQueueCap: cfgCap})
 	defer s.Close()
 
 	started := make(chan struct{})
@@ -550,11 +599,11 @@ func TestServerDropsFramesWhenQueueFull(t *testing.T) {
 	// 消费协程卡住不动，队列此刻是空的（第一条已经被取走，只是回调没
 	// 返回）。再推 frameQueueCap+一批，前 frameQueueCap 条能填满队列，
 	// 剩下的应该被丢弃。
-	const extra = frameQueueCap + 40
+	extra := queueCap + 40
 	for i := 0; i < extra; i++ {
 		stub.push(&fpimv1.ConnectResponse{Body: &fpimv1.ConnectResponse_Inbound{Inbound: &fpimv1.Inbound{Subject: "u:1", ConnId: "c", Payload: []byte(`1`)}}})
 	}
-	wantDropped := int64(extra - frameQueueCap)
+	wantDropped := int64(extra - queueCap)
 	waitUntil(t, func() bool { return s.DroppedFrames() >= wantDropped }, "队列打满后应该有帧被丢弃并计数")
 	if got := s.DroppedFrames(); got != wantDropped {
 		t.Fatalf("丢弃计数不对：want %d, got %d", wantDropped, got)
@@ -801,5 +850,167 @@ func TestServerListGroup(t *testing.T) {
 	stub.oldIm.Store(true)
 	if _, err := s.ListGroup(ctx, "r"); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("旧版 fp-im 回\"未知请求类型\"时应返回 ErrUnsupported，实际 %v", err)
+	}
+}
+
+func startServer(t *testing.T, addr string) *Server {
+	t.Helper()
+	s, err := NewServer(ServerConfig{Addr: addr, AppID: "a1", AppSecret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	waitUntil(t, s.StreamHealthy, "流应就绪")
+	return s
+}
+
+var batchItems = []PushItem{{Sub: User("1"), Payload: []byte(`{"a":1}`)}, {Sub: User("2"), Payload: []byte(`{"a":2}`)}}
+
+// 旧版 fp-im 的 Ready 不带 features:不能发过去试——no_result 的请求连"未知请求类型"都等不到,
+// 推送就悄无声息地没了。
+func TestPushBatchUnsupportedWithoutFeature(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	s := startServer(t, addr)
+	if s.Supports(FeaturePushBatch) {
+		t.Fatal("Ready 没声明 push_batch 时 Supports 应为 false")
+	}
+	for _, noResult := range []bool{false, true} {
+		if _, err := s.PushBatch(context.Background(), batchItems, noResult); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("noResult=%v: 应返回 ErrUnsupported，实际 %v", noResult, err)
+		}
+	}
+	if n := stub.pushBatches.Load(); n != 0 {
+		t.Fatalf("不支持时不该发送，stub 收到 %d 条", n)
+	}
+}
+
+func TestPushBatchNoResultReturnsImmediately(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeaturePushBatch)
+	s := startServer(t, addr)
+	stub.swallow.Store(true)
+	done := make(chan struct{})
+	var (
+		res []PushResult
+		err error
+	)
+	go func() { res, err = s.PushBatch(context.Background(), batchItems, true); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("noResult 的 PushBatch 发出即应返回，不等 Result")
+	}
+	if res != nil || err != nil {
+		t.Fatalf("noResult 应返回 (nil, nil)，实际 %+v %v", res, err)
+	}
+	waitUntil(t, func() bool { return stub.pushBatches.Load() == 1 }, "stub 应收到 1 条 PushBatch")
+}
+
+func TestPushBatchWithResult(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeaturePushBatch)
+	s := startServer(t, addr)
+	res, err := s.PushBatch(context.Background(), batchItems, false)
+	if err != nil || len(res) != len(batchItems) || res[0].Subject != User("1") || res[1].Subject != User("2") || res[1].Status != Sent {
+		t.Fatalf("结果应与 items 一一对应，实际 %+v %v", res, err)
+	}
+}
+
+func TestPushBatchRejectsBadPayload(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeaturePushBatch)
+	s := startServer(t, addr)
+	items := []PushItem{{Sub: User("1"), Payload: []byte(`{"a":1}`)}, {Sub: User("2"), Payload: []byte(`not json`)}}
+	if _, err := s.PushBatch(context.Background(), items, true); !errors.Is(err, ErrBadPayload) {
+		t.Fatalf("有一条不是合法 JSON 就应整批拒绝，实际 %v", err)
+	}
+	if n := stub.pushBatches.Load(); n != 0 {
+		t.Fatalf("payload 非法时不该发送，stub 收到 %d 条", n)
+	}
+}
+
+// 能力跟着流走:断流后新流可能连到另一个(旧版)fp-im 节点,不能沿用上一条流的声明。
+func TestFeaturesClearedOnStreamDrop(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeaturePushBatch, FeatureDrain)
+	s := startServer(t, addr)
+	if !s.Supports(FeaturePushBatch) || !s.Supports(FeatureDrain) {
+		t.Fatal("Ready 声明了的能力 Supports 应为 true")
+	}
+	stub.setFeatures()
+	stub.hangup.Store(true)
+	_, _ = s.Push(context.Background(), User("1"), []byte(`1`)) // 触发 stub 掐流
+	waitUntil(t, func() bool { return !s.StreamHealthy() }, "stub 掐流后流应断开")
+	if s.Supports(FeaturePushBatch) {
+		t.Fatal("断流后 Supports 应为 false")
+	}
+	waitUntil(t, s.StreamHealthy, "应重连")
+	if s.Supports(FeaturePushBatch) || s.Supports(FeatureDrain) {
+		t.Fatal("新流的 Ready 没声明能力，Supports 应为 false")
+	}
+}
+
+func TestDrainUnsupportedWithoutFeature(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeaturePushBatch)
+	s := startServer(t, addr)
+	if err := s.Drain(context.Background()); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("Ready 没声明 drain 时应返回 ErrUnsupported，实际 %v", err)
+	}
+	if n := stub.drains.Load(); n != 0 {
+		t.Fatalf("不支持时不该发送，stub 收到 %d 条", n)
+	}
+}
+
+func TestDrainSendsRequest(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeatureDrain)
+	s := startServer(t, addr)
+	if err := s.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := stub.drains.Load(); n != 1 {
+		t.Fatalf("stub 应收到 1 条 Drain，实际 %d", n)
+	}
+}
+
+// 停服途中流断了重连,新流在 fp-im 那边是一条全新的、会被投递的流;不再摘一次,
+// 正在收尾的实例又会开始收上行帧。
+func TestDrainReappliedAfterReconnect(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeatureDrain)
+	s := startServer(t, addr)
+	if err := s.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stub.hangup.Store(true)
+	_, _ = s.Push(context.Background(), User("1"), []byte(`1`)) // 触发 stub 掐流
+	waitUntil(t, func() bool { return stub.streamCount() >= 2 }, "应重连")
+	waitUntil(t, func() bool { return stub.drains.Load() == 2 }, "新流就绪后应自动再发一次 Drain")
+}
+
+func TestDrainNotReappliedIfNeverCalled(t *testing.T) {
+	stub, addr, stop := startStub(t)
+	defer stop()
+	stub.setFeatures(FeatureDrain)
+	s := startServer(t, addr)
+	stub.hangup.Store(true)
+	_, _ = s.Push(context.Background(), User("1"), []byte(`1`))
+	waitUntil(t, func() bool { return stub.streamCount() >= 2 }, "应重连")
+	waitUntil(t, s.StreamHealthy, "新流应就绪")
+	// 新流上发一个有应答的请求:stub 按序处理,它回来时 SDK 若在 Ready 后补发过 Drain 也早已到了。
+	if _, err := s.Push(context.Background(), User("1"), []byte(`1`)); err != nil {
+		t.Fatal(err)
+	}
+	if n := stub.drains.Load(); n != 0 {
+		t.Fatalf("没调过 Drain，重连后不该发 Drain，实际 %d 条", n)
 	}
 }

@@ -16,6 +16,19 @@ import (
 // 拖慢同节点其它请求；业务方分批调用即可。
 const maxSessionsMany = 1000
 
+// maxPushBatch 限制一次批量推送的条数，理由同 maxSessionsMany。
+const maxPushBatch = 1000
+
+// Ready.features 里声明的能力名。SDK 那边另有一份同名常量（sdk/ 不 import internal/），
+// 一致性由 internal/integration 的 TestFeatureNamesParity 守住。
+const (
+	FeaturePushBatch = "push_batch"
+	FeatureDrain     = "drain"
+)
+
+// features 是本节点在 Ready 里声明的全部能力。
+var features = []string{FeaturePushBatch, FeatureDrain}
+
 // 下面两句 Result.error 文案是协议的一部分（见 im.proto 的 Result 注释）：SDK
 // 按它们精确匹配映射成 fpim.ErrUnsupported / fpim.ErrGroupTooLarge，两边不
 // 互相 import，配对由 internal/integration 的 TestListGroupErrorTextParity 守住。
@@ -40,8 +53,9 @@ func (s *sender) Send(r *fpimv1.ConnectResponse) error {
 }
 
 // handle 执行一条请求并生成 Result。subject 非法或 body 未知都变成 Result.Error，
-// 不断流：一条坏请求不该让整条流上其它请求跟着死。
-func handle(ctx context.Context, d Deps, app string, req *fpimv1.ConnectRequest) *fpimv1.ConnectResponse {
+// 不断流：一条坏请求不该让整条流上其它请求跟着死。返回 nil 表示不回 Result
+// （no_result 的批量推送）。drain 把这条流从路由器里摘掉（AddStream 返回的 remove）。
+func handle(ctx context.Context, d Deps, app string, req *fpimv1.ConnectRequest, drain func()) *fpimv1.ConnectResponse {
 	h := d.Hub
 	res := &fpimv1.Result{ReqId: req.GetReqId()}
 	fail := func(msg string) *fpimv1.ConnectResponse {
@@ -66,6 +80,32 @@ func handle(ctx context.Context, d Deps, app string, req *fpimv1.ConnectRequest)
 		}
 		for _, r := range h.PushMany(ctx, app, subs, b.PushMany.GetPayload()) {
 			res.Pushes = append(res.Pushes, toProto(r))
+		}
+	case *fpimv1.ConnectRequest_PushBatch:
+		raw := b.PushBatch.GetItems()
+		if len(raw) > maxPushBatch {
+			// 整批失败即使 no_result 也照回：调用方没有登记这个 reqId，回了也只是被忽略，
+			// 但抓包、日志里看得到为什么没推出去。
+			return fail(fmt.Sprintf("批量推送超过 %d 条", maxPushBatch))
+		}
+		// 坏 subject 只让那一条失败：整批里其它条是别的设备的回执，不该陪着丢。
+		items := make([]hub.PushItem, 0, len(raw))
+		idx := make([]int, 0, len(raw))
+		res.Pushes = make([]*fpimv1.PushResult, len(raw))
+		for i, it := range raw {
+			sub, err := model.ParseSubject(it.GetSubject())
+			if err != nil {
+				res.Pushes[i] = &fpimv1.PushResult{Subject: it.GetSubject(), Status: fpimv1.PushStatus_PUSH_STATUS_UNAVAILABLE}
+				continue
+			}
+			items = append(items, hub.PushItem{Sub: sub, Payload: it.GetPayload()})
+			idx = append(idx, i)
+		}
+		for j, r := range h.PushEach(ctx, app, items) {
+			res.Pushes[idx[j]] = toProto(r)
+		}
+		if b.PushBatch.GetNoResult() {
+			return nil
 		}
 	case *fpimv1.ConnectRequest_Kick:
 		sub, err := model.ParseSubject(b.Kick.GetSubject())
@@ -111,6 +151,9 @@ func handle(ctx context.Context, d Deps, app string, req *fpimv1.ConnectRequest)
 			}
 			res.SessionsMany = append(res.SessionsMany, ss)
 		}
+	case *fpimv1.ConnectRequest_Drain:
+		// 只摘路由、不断流：业务 server 停服时还要靠这条流推完剩下的回执。
+		drain()
 	case *fpimv1.ConnectRequest_Ping:
 		// 心跳只要一帧真正穿过代理的应答,空 Result 就够了。
 	case *fpimv1.ConnectRequest_ListGroup:

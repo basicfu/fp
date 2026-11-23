@@ -54,6 +54,13 @@ func (c *Conn) Send(p []byte) bool {
 	return true
 }
 
+// SentCount 加锁返回已收到的条数：Send 在处理请求的协程里被调用，测试轮询时不能裸读 Sent。
+func (c *Conn) SentCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.Sent)
+}
+
 func (c *Conn) Close(code int, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -151,6 +158,9 @@ type Live struct {
 	// OnSetServing 在 SetServing 生效前调用（不持 l.mu），测试借此人为制造
 	// 注册与注销的交错顺序。
 	OnSetServing func(app string, on bool)
+	// servingOff 记录 SetServing(_, false) 的调用次数：摘流和断流各调一次 remove 时，
+	// 撤销声明只能发一次。
+	servingOff int
 }
 
 func (l *Live) LiveNodes() []string             { return l.Nodes }
@@ -167,7 +177,17 @@ func (l *Live) SetServing(_ context.Context, app string, on bool) error {
 		l.Serving = map[string]bool{}
 	}
 	l.Serving[app] = on
+	if !on {
+		l.servingOff++
+	}
 	return nil
+}
+
+// ServingOffCalls 加锁返回 SetServing(_, false) 被调用的次数。
+func (l *Live) ServingOffCalls() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.servingOff
 }
 
 func (l *Live) DropLocal(node string) {
