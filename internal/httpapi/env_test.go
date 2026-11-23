@@ -10,6 +10,7 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/httpapi"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -21,7 +22,7 @@ func newAdminEnv(t *testing.T) (http.Handler, string, httpapi.Deps) {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
-	users := service.NewUserService(pool)
+	users := service.NewUserService(pool, service.WithObjectStore(objstore.NewMemory()))
 	codes := service.NewLoginCodeService(rdb)
 	reg := connector.NewRegistry()
 	if err := reg.Register(connector.NewPassword(users)); err != nil {

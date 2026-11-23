@@ -2,7 +2,10 @@ package grpcapi
 
 import (
 	"context"
+	"encoding/hex"
 	"log/slog"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,13 +47,17 @@ type AuthServerDeps struct {
 	Authz *service.AuthzService
 	// AccessKeys 提供访问密钥的校验材料与使用时间记录。为 nil 时两个 RPC 返回 Unimplemented。
 	AccessKeys *service.AccessKeyService
+	// Events 投递业务事件。为 nil 时声明了 app_events 的流也收不到业务事件。
+	Events *EventDispatcher
+	// LoginCheck 承接登录校验。为 nil 时声明了 login_check 的流不进登记。
+	LoginCheck *LoginCheckRelay
 }
 
 // NewAuthServer 构造 gRPC 认证服务。
 func NewAuthServer(d AuthServerDeps) fpv1.AuthServiceServer {
 	return &authServer{
 		auth: d.Auth, hub: d.Hub, configHub: d.ConfigHub, apps: d.Apps, authz: d.Authz,
-		accessKeys: d.AccessKeys,
+		accessKeys: d.AccessKeys, events: d.Events, loginCheck: d.LoginCheck,
 	}
 }
 
@@ -62,6 +69,8 @@ type authServer struct {
 	apps       AppLookup
 	authz      *service.AuthzService
 	accessKeys *service.AccessKeyService
+	events     *EventDispatcher
+	loginCheck *LoginCheckRelay
 }
 
 // callerAppID 取出拦截器已认证的 appId。
@@ -135,6 +144,9 @@ func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.L
 	if err != nil {
 		return nil, err
 	}
+	if err := checkDevicePub(req.GetDevicePub()); err != nil {
+		return nil, err
+	}
 	res, err := s.auth.Login(ctx, service.LoginInput{
 		AppID:         appID,
 		ConnectorType: req.GetConnectorType(),
@@ -142,6 +154,8 @@ func (s *authServer) Login(ctx context.Context, req *fpv1.LoginRequest) (*fpv1.L
 		IP:            req.GetIp(),
 		UA:            req.GetUserAgent(),
 		Mobile:        req.GetMobile(),
+		DevicePub:     req.GetDevicePub(),
+		ClientRef:     req.GetClientRef(),
 	})
 	if err != nil {
 		return nil, StatusFrom(err)
@@ -161,6 +175,25 @@ func (s *authServer) Logout(ctx context.Context, req *fpv1.LogoutRequest) (*fpv1
 		return nil, StatusFrom(err)
 	}
 	return &fpv1.LogoutResponse{}, nil
+}
+
+func (s *authServer) RevokeSession(ctx context.Context, req *fpv1.RevokeSessionRequest) (*fpv1.RevokeSessionResponse, error) {
+	if err := requireNotIM(ctx); err != nil {
+		return nil, err
+	}
+	appID, err := callerAppID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	userID, err := parseUserID(req.GetUserId())
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.auth.RevokeSession(ctx, appID, userID, req.GetSessionId(), req.GetReason())
+	if err != nil {
+		return nil, StatusFrom(err)
+	}
+	return &fpv1.RevokeSessionResponse{Revoked: int32(n)}, nil
 }
 
 func (s *authServer) ValidateToken(ctx context.Context, req *fpv1.ValidateTokenRequest) (*fpv1.ValidateTokenResponse, error) {
@@ -187,7 +220,9 @@ func (s *authServer) ValidateToken(ctx context.Context, req *fpv1.ValidateTokenR
 		// 角色随身份一起回来：SDK 的鉴权判定因此完全不碰网络，本地只需
 		// 一份很小的策略表（角色 → 权限点）。把 casbin 的 g 规则（用户 →
 		// 角色）全量下发给每个 SDK 实例是不现实的——它随用户数增长。
-		Roles: res.Session.Roles,
+		Roles:     res.Session.Roles,
+		ClientRef: res.Session.ClientRef,
+		DevicePub: res.Session.DevicePub,
 	}, nil
 }
 
@@ -279,6 +314,18 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	// 创建后不可变，所以不需要失效。
 	imAppIDs := map[uuid.UUID]string{}
 
+	// 读客户端消息另起 goroutine：hello 交回本循环登记（注销跟着本函数的 defer 走），ack、reply 直接处理。
+	// 老 SDK 什么都不发，它就一直阻塞在 Recv 上，流结束时随之返回。
+	var hellos chan *fpv1.WatchHello
+	var lc atomic.Pointer[lcStream]
+	if !isIM && (s.events != nil || s.loginCheck != nil) {
+		hellos = make(chan *fpv1.WatchHello, 1)
+		go s.recvWatch(stream, app.ID, hellos, &lc)
+	}
+	// appEvents、loginChecks 在 hello 声明对应能力之前为 nil，select 不会选中它们。
+	var appEvents <-chan *fpv1.AppEvent
+	var loginChecks <-chan *fpv1.LoginCheck
+
 	if err := stream.Send(&fpv1.WatchResponse{
 		Event: &fpv1.WatchResponse_Ready{Ready: &fpv1.WatchReady{}},
 	}); err != nil {
@@ -289,6 +336,30 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 		select {
 		case <-ctx.Done():
 			return nil
+		case h := <-hellos:
+			if appEvents == nil && s.events != nil && slices.Contains(h.GetCaps(), CapAppEvents) {
+				es, unregister := s.events.Register(app.ID)
+				defer unregister()
+				appEvents = es.out
+			}
+			if loginChecks == nil && s.loginCheck != nil && slices.Contains(h.GetCaps(), CapLoginCheck) {
+				ls := s.loginCheck.Register(app.ID)
+				defer s.loginCheck.Unregister(ls)
+				lc.Store(ls)
+				loginChecks = ls.out
+			}
+		case m := <-loginChecks:
+			if err := stream.Send(&fpv1.WatchResponse{
+				Event: &fpv1.WatchResponse_LoginCheck{LoginCheck: m},
+			}); err != nil {
+				return err
+			}
+		case ev := <-appEvents:
+			if err := stream.Send(&fpv1.WatchResponse{
+				Event: &fpv1.WatchResponse_AppEvent{AppEvent: ev},
+			}); err != nil {
+				return err
+			}
 		case ev, ok := <-events:
 			if !ok {
 				// hub 关闭（进程退出），或本订阅者因缓冲满且需要 purge
@@ -340,6 +411,33 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 				},
 			}); err != nil {
 				return err
+			}
+		}
+	}
+}
+
+// recvWatch 读一条 Watch 流上客户端发来的消息，直到流结束。
+func (s *authServer) recvWatch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fpv1.WatchResponse], appID uuid.UUID,
+	hellos chan<- *fpv1.WatchHello, lc *atomic.Pointer[lcStream]) {
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			return
+		}
+		switch {
+		case req.GetHello() != nil:
+			select {
+			case hellos <- req.GetHello():
+			default:
+			}
+		case req.GetAck() != nil:
+			if s.events != nil {
+				s.events.Ack(stream.Context(), appID, req.GetAck().GetIds())
+			}
+		case req.GetReply() != nil:
+			// 没声明 login_check 就回答的忽略：它的回答对不上任何一次校验。
+			if ls := lc.Load(); ls != nil {
+				s.loginCheck.Reply(ls, req.GetReply())
 			}
 		}
 	}
@@ -553,4 +651,16 @@ func (s *authServer) ReportAccessKeyUsage(ctx context.Context, req *fpv1.ReportA
 		return nil, StatusFrom(err)
 	}
 	return &fpv1.ReportAccessKeyUsageResponse{}, nil
+}
+
+// checkDevicePub 要求 device_pub 为空（不绑设备）或 32 字节公钥的 hex：随便什么串刻进会话，之后每次请求都比对不上，
+// 用户登录成功却什么都用不了，错得越早越好查。
+func checkDevicePub(pub string) error {
+	if pub == "" {
+		return nil
+	}
+	if b, err := hex.DecodeString(pub); err != nil || len(b) != 32 {
+		return StatusFrom(domain.Fail(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "device_pub 必须是 32 字节公钥的 hex（64 个字符）"))
+	}
+	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/httpapi"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -46,7 +47,7 @@ func newEnv(t *testing.T) *env {
 	rdb := testsupport.NewTestRedis(t)
 	ctx := context.Background()
 
-	users := service.NewUserService(pool)
+	users := service.NewUserService(pool, service.WithObjectStore(objstore.NewMemory()))
 	logs := service.NewLoginLogService(pool)
 
 	sessionStore := store.NewSessionStore(rdb)

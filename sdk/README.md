@@ -213,6 +213,25 @@ err = auth.Logout(ctx, token)
 模板配好了但供应商全挂是 `NOTIFY_SEND_FAILED`。后两个同时满足 `ErrUnavailable`
 （`WriteError` 回 503），具体原因在 fp 的日志里。
 
+### 退出登录事件
+
+应用在控制台开了业务事件时，`Options.OnAppEvent` 会收到 `fpsdk.EventLoggedOut`，Payload 为
+`{"session_id","client_ref","reason"}`。reason 取值（`fpsdk.LoggedOut*`）：
+
+| reason | 含义 |
+|---|---|
+| `logout` | 用户主动退出 |
+| `kick` | 被业务方或管理员踢下线（`Auth().RevokeSession`、踢全部设备） |
+| `freeze` | 账号被冻结 |
+| `password_changed` | 改了密码 |
+| `account_deletion` | 提交注销 |
+| `expired` | 空闲超时或到达绝对上限 |
+| `revoked` | fp 事后才发现会话已被撤销（撤销当时没能写完事件，原因已不可考），或登录中途作废（登录成功事件已发出、会话没签成） |
+
+以后可能新增 reason，**不认识的一律按 `kick` 处理**。同一会话偶尔可能收到不止一条 logged_out，按 `session_id` 幂等处理；
+偶尔也会收到一个没见过（或登录接口报了失败）的会话的 logged_out，照样按退出处理即可。
+同一用户的事件按顺序投递：前一条没确认（回调返回错误），后一条不会发出，所以 `login_succeeded` 与随后的 `logged_out` 不会倒序。
+
 ### 微信扫码登录
 
 网页端和桌面 App 都可以用。挂一个 Handler 就能得到全部后端接口（发起、换票据、轮询、发码、绑手机）：
@@ -539,8 +558,13 @@ u := client.Users()
 p, err := u.Get(ctx, userID)                                       // 个人信息，含登录标识（手机号不脱敏）
 p, err  = u.Update(ctx, userID, fpsdk.UserUpdate{Nickname: &name}) // 改昵称 / 性别，nil 的字段不改
 p, err  = u.UpdateAvatar(ctx, userID, imageBytes)                  // 更新头像，返回的 p.AvatarHash 即新哈希；传 nil 清除
-img, contentType, err := u.Avatar(ctx, hash)                       // 按哈希下载头像
+img, err := u.Avatar(ctx, hash)                                    // 按哈希取头像：img.URL 非空可 302 过去，img.Image 非空是字节
 ```
+
+**升级注意**：`Users().Avatar` 的签名由 `(image []byte, contentType string, err error)` 改为 `(*fpsdk.AvatarImage, error)`，
+升级后原来的写法编译不过。新上传的头像只在对象存储上，结果只有 `URL`、没有 `Image`，转发 `/avatar/{hash}` 的代码要处理
+`URL`（302 过去）；迁移期 PG 里还有字节的老头像 `Image`、`ContentType`、`URL` 都有。未升级的老 SDK 只认字节，取老头像照常可用，
+取新上传的头像会拿到空字节，所以要先升级 SDK 再开对象存储上传。
 
 - **用户全局互通**：任何应用都能查、改任何用户，改了之后所有应用随之变化。"只让用户改自己的资料"由业务方在自己的入口把关。
 - **fp 对图片只存不处理**：不解码、不裁剪、不压缩。只接受 JPEG / PNG / WebP（按文件头识别），兜底上限 1 MB（`fpsdk.AvatarMaxBytes`）；规格与压缩由业务方在上传前处理。

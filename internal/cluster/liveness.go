@@ -1,4 +1,4 @@
-package registry
+package cluster
 
 import (
 	"context"
@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/basicfu/fp/internal/im/model"
 	"github.com/redis/go-redis/v9"
 )
 
-// Liveness 维护两张心跳表的本地快照：fp:im:node 与每个 app 的 fp:im:srv:{app}。
+// Liveness 维护两张心跳表的本地快照：节点表（Keys.Nodes）与每个 app 的服务表（Keys.Srv）。
 // 热路径只读快照，不碰 Redis；快照每 heartbeat 刷一次，最多滞后一个周期。
 type Liveness struct {
 	c         redis.UniversalClient
+	keys      Keys
 	nodeID    string
 	heartbeat time.Duration
 	deadAfter time.Duration
@@ -43,9 +43,9 @@ type Liveness struct {
 	servingSig chan struct{}
 }
 
-func NewLiveness(c redis.UniversalClient, nodeID string, heartbeat, deadAfter time.Duration) *Liveness {
+func NewLiveness(c redis.UniversalClient, k Keys, nodeID string, heartbeat, deadAfter time.Duration) *Liveness {
 	return &Liveness{
-		c: c, nodeID: nodeID, heartbeat: heartbeat, deadAfter: deadAfter, now: time.Now,
+		c: c, keys: k, nodeID: nodeID, heartbeat: heartbeat, deadAfter: deadAfter, now: time.Now,
 		live: map[string]int64{}, srv: map[string]map[string]int64{}, serving: map[string]bool{},
 		tracked: map[string]bool{}, everSrv: map[string]bool{},
 		servingSig: make(chan struct{}, 1),
@@ -92,11 +92,11 @@ func (l *Liveness) Beat(ctx context.Context) error {
 	l.mu.RUnlock()
 	ttl := l.fieldTTL()
 	_, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
-		p.HSet(ctx, model.KeyNodes, l.nodeID, ts)
-		p.HExpire(ctx, model.KeyNodes, ttl, l.nodeID)
+		p.HSet(ctx, l.keys.Nodes(), l.nodeID, ts)
+		p.HExpire(ctx, l.keys.Nodes(), ttl, l.nodeID)
 		for _, a := range apps {
-			p.HSet(ctx, model.SrvKey(a), l.nodeID, ts)
-			p.HExpire(ctx, model.SrvKey(a), ttl, l.nodeID)
+			p.HSet(ctx, l.keys.Srv(a), l.nodeID, ts)
+			p.HExpire(ctx, l.keys.Srv(a), ttl, l.nodeID)
 		}
 		return nil
 	})
@@ -110,7 +110,7 @@ func (l *Liveness) Beat(ctx context.Context) error {
 // 全量重登记"。调用方必须在补写心跳**之前**调用它，否则那次心跳会把条目
 // 重新创建出来，这个判断就永远返回 true。
 func (l *Liveness) SelfPresent(ctx context.Context) (bool, error) {
-	return l.c.HExists(ctx, model.KeyNodes, l.nodeID).Result()
+	return l.c.HExists(ctx, l.keys.Nodes(), l.nodeID).Result()
 }
 
 // Deregister 删掉本节点在两张心跳表里的条目，优雅关闭时调用。
@@ -128,9 +128,9 @@ func (l *Liveness) Deregister(ctx context.Context) error {
 	}
 	l.mu.RUnlock()
 	_, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
-		p.HDel(ctx, model.KeyNodes, l.nodeID)
+		p.HDel(ctx, l.keys.Nodes(), l.nodeID)
 		for _, a := range apps {
-			p.HDel(ctx, model.SrvKey(a), l.nodeID)
+			p.HDel(ctx, l.keys.Srv(a), l.nodeID)
 		}
 		return nil
 	})
@@ -149,9 +149,9 @@ func (l *Liveness) Refresh(ctx context.Context) error {
 	var nodeCmd *redis.MapStringStringCmd
 	srvCmds := make([]*redis.MapStringStringCmd, len(apps))
 	_, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
-		nodeCmd = p.HGetAll(ctx, model.KeyNodes)
+		nodeCmd = p.HGetAll(ctx, l.keys.Nodes())
 		for i, a := range apps {
-			srvCmds[i] = p.HGetAll(ctx, model.SrvKey(a))
+			srvCmds[i] = p.HGetAll(ctx, l.keys.Srv(a))
 		}
 		return nil
 	})
@@ -231,10 +231,10 @@ func (l *Liveness) Run(ctx context.Context) {
 // 只会让每次发版的日志里都出现一条无意义的告警。
 func (l *Liveness) beatAndRefresh(ctx context.Context) {
 	if err := l.Beat(ctx); err != nil && ctx.Err() == nil {
-		slog.Warn("registry: 写心跳失败，本节点可能被其它节点判死", "node", l.nodeID, "err", err)
+		slog.Warn("cluster: 写心跳失败，本节点可能被其它节点判死", "node", l.nodeID, "err", err)
 	}
 	if err := l.Refresh(ctx); err != nil && ctx.Err() == nil {
-		slog.Warn("registry: 刷新存活视图失败，本节点的存活视图已陈旧", "node", l.nodeID, "err", err)
+		slog.Warn("cluster: 刷新存活视图失败，本节点的存活视图已陈旧", "node", l.nodeID, "err", err)
 	}
 }
 
@@ -268,14 +268,14 @@ func (l *Liveness) writeServingTable(ctx context.Context) {
 	if _, err := l.c.Pipelined(ctx, func(p redis.Pipeliner) error {
 		for _, a := range apps {
 			if on[a] {
-				p.HSet(ctx, model.SrvKey(a), l.nodeID, ts)
+				p.HSet(ctx, l.keys.Srv(a), l.nodeID, ts)
 				// 与 Beat 里同样的字段级过期：这条路径（serving 信号触发）
 				// 可能在两次心跳之间单独写一次服务表，不挂 TTL 的话，
 				// 一个 HSET 出去而下一次心跳之前就崩掉的进程，会在服务表
 				// 里留下一个永不过期的条目。
-				p.HExpire(ctx, model.SrvKey(a), ttl, l.nodeID)
+				p.HExpire(ctx, l.keys.Srv(a), ttl, l.nodeID)
 			} else {
-				p.HDel(ctx, model.SrvKey(a), l.nodeID)
+				p.HDel(ctx, l.keys.Srv(a), l.nodeID)
 			}
 		}
 		return nil
@@ -285,7 +285,7 @@ func (l *Liveness) writeServingTable(ctx context.Context) {
 		// "Redis 持续写失败"。至少要留一条日志，让运维能定位到是这里在丢写，
 		// 而不是无声无息。下一次心跳或下一次 serving 信号会重试，这里不用
 		// 自己做退避重试。
-		slog.Warn("registry: 写服务表失败", "err", err, "apps", apps)
+		slog.Warn("cluster: 写服务表失败", "err", err, "apps", apps)
 	}
 }
 
@@ -376,4 +376,13 @@ func (l *Liveness) ServerNodes(app string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

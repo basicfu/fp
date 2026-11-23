@@ -40,6 +40,8 @@ type WechatMPService struct {
 	apiBase string
 	// pub 推送 WechatSubscriptionChanged。为 nil 时不推送。
 	pub EventPublisher
+	// events 写可靠投递的 wechat_subscription 事件。为 nil 时不写。
+	events AppEventAppender
 
 	mu    sync.Mutex
 	cache map[string]*notify.WechatMPAccount // key 是 id@updated_at，改配置自然换新
@@ -56,6 +58,12 @@ func WithWechatMPAPIBase(base string) WechatMPOption {
 // WithWechatMPPublisher 让微信通知状态的变化经 Watch 流推给业务方。
 func WithWechatMPPublisher(pub EventPublisher) WechatMPOption {
 	return func(s *WechatMPService) { s.pub = pub }
+}
+
+// WithWechatMPEvents 让微信通知状态的变化同时写进事件表（开了事件的应用经 Watch 可靠收到）。
+// 原来的即时推送保留：老 SDK 只认 WechatSubscriptionChanged。
+func WithWechatMPEvents(ev AppEventAppender) WechatMPOption {
+	return func(s *WechatMPService) { s.events = ev }
 }
 
 // NewWechatMPService 构造 WechatMPService。
@@ -333,7 +341,7 @@ func (s *WechatMPService) setFollow(ctx context.Context, openid string, subscrib
 //
 // 不比较前后状态：乱序推送、重复关注事件都可能让状态其实没变，多推一次的代价远小于漏推。
 func (s *WechatMPService) announceOpenID(ctx context.Context, openid string) {
-	if s.pub == nil {
+	if s.pub == nil && s.events == nil {
 		return
 	}
 	rows, err := s.pool.Query(ctx, `SELECT user_id FROM wechat_mp_binding WHERE openid = $1`, openid)
@@ -355,7 +363,7 @@ func (s *WechatMPService) announceOpenID(ctx context.Context, openid string) {
 // 推的是发布那一刻查到的状态而不是"变成了什么"：并发的两次变化各推一次，后到的那条就是最新状态。
 // 失败只记日志：推送只是让客户端不必轮询，业务方仍可随时调 GetWechatSubscription 取准。
 func (s *WechatMPService) announce(ctx context.Context, userID uuid.UUID, extraAppIDs ...string) {
-	if s.pub == nil {
+	if s.pub == nil && s.events == nil {
 		return
 	}
 	sub, err := s.Subscription(ctx, userID)
@@ -379,12 +387,20 @@ func (s *WechatMPService) announce(ctx context.Context, userID uuid.UUID, extraA
 		return
 	}
 	now := time.Now().UnixMilli()
+	subscribed := sub.Bound && sub.Subscribed
 	for _, app := range apps {
 		// 每个应用一条：撤销频道按 AppID 过滤，uuid.Nil 会推给所有应用。
 		publishEvent(ctx, s.pub, domain.RevokeEvent{
 			Kind: domain.EventKindWechatSubscriptionChanged, AppID: app,
-			UserIDs: []uuid.UUID{userID}, Subscribed: sub.Bound && sub.Subscribed, At: now,
+			UserIDs: []uuid.UUID{userID}, Subscribed: subscribed, At: now,
 		})
+		// 状态已经落库，这里只是通知：写失败记日志，业务方仍可随时 GetWechatSubscription 取准。
+		if s.events != nil {
+			if err := s.events.Append(ctx, app, userID, domain.EventWechatSubscription,
+				WechatSubscriptionPayload{Subscribed: subscribed}); err != nil {
+				slog.Error("service: 写微信订阅事件失败", "err", err, "userId", userID, "appId", app)
+			}
+		}
 	}
 }
 

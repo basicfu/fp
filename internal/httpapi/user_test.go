@@ -15,6 +15,7 @@ import (
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/httpapi"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -359,7 +360,7 @@ func TestListSessionsOverHTTPDeduplicatesRotationGraceSibling(t *testing.T) {
 	sessions := service.NewSessionServiceWithClock(
 		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, func() int64 { return nowMs })
 
-	users := service.NewUserService(pool)
+	users := service.NewUserService(pool, service.WithObjectStore(objstore.NewMemory()))
 	logs := service.NewLoginLogService(pool)
 	reg := connector.NewRegistry()
 	deps := httpapi.Deps{
@@ -552,11 +553,34 @@ func TestUserDetailShowsAvatarAndRegistrationSource(t *testing.T) {
 	}
 }
 
+// 新上传的头像只在对象存储里，控制台的取图地址 302 到它的公开地址。
+func TestAdminAvatarRedirectsToObjectStore(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	u := seedUser(t, deps, "13800138000", "阿里斯")
+	p, err := deps.Users.UpdateAvatar(context.Background(), u.ID, adminTestPNG)
+	if err != nil {
+		t.Fatalf("UpdateAvatar: %v", err)
+	}
+	rec := do(t, h, token, http.MethodGet, "/admin/api/avatars/"+domain.AvatarHash(adminTestPNG), "")
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != p.AvatarURL || p.AvatarURL == "" {
+		t.Fatalf("status = %d, Location = %q, want 302 → %q", rec.Code, rec.Header().Get("Location"), p.AvatarURL)
+	}
+}
+
 func TestAdminAvatarDownload(t *testing.T) {
 	h, token, deps := newAdminEnv(t)
 	u := seedUser(t, deps, "13800138000", "阿里斯")
 	if _, err := deps.Users.UpdateAvatar(context.Background(), u.ID, adminTestPNG); err != nil {
 		t.Fatalf("UpdateAvatar: %v", err)
+	}
+	// 模拟 avatar-migrate 之后的行：key 已回填，data 仍在，控制台直接回字节。
+	pool, err := store.OpenPostgres(context.Background(), testsupport.PostgresURL(t))
+	if err != nil {
+		t.Fatalf("连库: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(context.Background(), `UPDATE user_avatar SET data = $2 WHERE user_id = $1`, u.ID, adminTestPNG); err != nil {
+		t.Fatalf("保留字节: %v", err)
 	}
 	path := "/admin/api/avatars/" + domain.AvatarHash(adminTestPNG)
 
@@ -718,5 +742,54 @@ func TestDeletedTombstoneOverHTTP(t *testing.T) {
 	// 控制台不能把墓碑改回去，也不能手动造墓碑。
 	if rec := do(t, h, token, http.MethodPatch, "/admin/api/users/"+u.ID.String()+"/status", `{"status":"ACTIVE"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("墓碑改回 ACTIVE status = %d, want 400", rec.Code)
+	}
+}
+
+// 按用户 ID 搜索：带横杠与 32 位两种写法都认；写错是 400，不是"没有结果"。
+func TestUserListSearchByUserID(t *testing.T) {
+	h, token, deps := newAdminEnv(t)
+	a := seedUser(t, deps, "13800138000", "阿里斯")
+	seedUser(t, deps, "13900139000", "鲍勃")
+
+	compact := strings.ReplaceAll(a.ID.String(), "-", "")
+	for name, id := range map[string]string{"带横杠": a.ID.String(), "32 位": compact, "大写": strings.ToUpper(compact)} {
+		rec := do(t, h, token, http.MethodGet, "/admin/api/users?userId="+id, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, body = %s", name, rec.Code, rec.Body.String())
+		}
+		var list struct {
+			Items []struct {
+				ID string `json:"id"`
+			} `json:"items"`
+			Total int `json:"total"`
+		}
+		decode(t, rec, &list)
+		// 接口里的 ID 仍是带横杠的标准写法，只有控制台界面显示 32 位。
+		if list.Total != 1 || len(list.Items) != 1 || list.Items[0].ID != a.ID.String() {
+			t.Fatalf("%s: total=%d items=%+v, want 只命中 %s", name, list.Total, list.Items, a.ID)
+		}
+	}
+
+	// 与其他条件取交集。
+	rec := do(t, h, token, http.MethodGet, "/admin/api/users?userId="+compact+"&keyword=鲍勃", "")
+	var none struct {
+		Total int `json:"total"`
+	}
+	decode(t, rec, &none)
+	if none.Total != 0 {
+		t.Fatalf("userId 与不符的 keyword 取交集应无结果, total = %d", none.Total)
+	}
+
+	for _, bad := range []string{"not-a-uuid", "0190a1b2", compact + "0"} {
+		rec := do(t, h, token, http.MethodGet, "/admin/api/users?userId="+bad, "")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("userId=%q: status = %d, want 400", bad, rec.Code)
+		}
+	}
+	// 不存在的合法 ID：空结果，不是错误。
+	rec = do(t, h, token, http.MethodGet, "/admin/api/users?userId="+uuid.NewString(), "")
+	decode(t, rec, &none)
+	if rec.Code != http.StatusOK || none.Total != 0 {
+		t.Fatalf("不存在的 ID: status = %d total = %d", rec.Code, none.Total)
 	}
 }

@@ -51,3 +51,18 @@ export function formatMinute(ms: number, fallback = '-'): string {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })
 }
+
+const UUID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$/i
+
+/** isUuidLike 判断是不是 UUID 的标准 36 位或 32 位两种写法；横杠缺一部分的半截写法不算。 */
+export function isUuidLike(s: string): boolean {
+  return UUID_RE.test(s)
+}
+
+/**
+ * compactId 把用户 ID 显示成不带横杠的 32 位：双击即可整串选中。
+ * 接口与存储里仍是带横杠的标准写法，只有界面这样显示；不是 UUID 的原样返回。
+ */
+export function compactId(id: string): string {
+  return isUuidLike(id) ? id.replace(/-/g, '') : id
+}

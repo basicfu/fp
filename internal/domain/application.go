@@ -1,6 +1,9 @@
 package domain
 
 import (
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -115,7 +118,12 @@ type Application struct {
 	RedirectURIs   []string // OIDC 预留
 	GrantTypes     []string // OIDC 预留
 	// IM 是该应用在 fp-im 里的接入配置。默认关。
-	IM        IMConfig
+	IM IMConfig
+	// Domains 是该应用的对外域名（小写、不含端口）；终端用户账号接口按请求
+	// Host 精确匹配它来识别应用。
+	Domains []string
+	// Account 是对终端用户开放的账号接口配置。
+	Account   AccountConfig
 	CreatedAt int64
 	UpdatedAt int64
 }
@@ -206,4 +214,96 @@ func (c IMConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+// 账号接口可用的登录方式与可编辑资料字段。
+const (
+	AccountLoginSMS         = "sms"
+	AccountLoginPassword    = "password"
+	AccountLoginWechat      = "wechat"
+	AccountLoginWechatPhone = "wechat_phone"
+
+	AccountFieldNickname = "nickname"
+	AccountFieldAvatar   = "avatar"
+)
+
+// AccountConfig 是应用对终端用户开放的账号接口配置。零值即全关，
+// 新应用在有人明确打开之前不对外暴露任何账号接口。
+type AccountConfig struct {
+	Enabled bool `json:"enabled"`
+	// LoginTypes 是允许的 /login type，空表示一种都不允许。
+	LoginTypes []string `json:"login_types"`
+	// EditableFields 是 PUT /profile 允许改的字段。
+	EditableFields []string `json:"editable_fields"`
+	// DeviceBinding 开启后会话绑定设备公钥，每个请求都验设备签名。
+	DeviceBinding bool `json:"device_binding"`
+	// DeviceHeader 是设备头的名字，DeviceBinding 开着时必填。
+	DeviceHeader string `json:"device_header"`
+	// Events 开启后该应用经 Watch 流收到业务事件。
+	Events bool `json:"events"`
+	// WechatReturnURL 是 /wechat/start 发起网页扫码时的回跳地址（如桌面端的自定义协议），
+	// 必须同时在微信登录方式的回跳白名单里；空表示账号接口不开放扫码。
+	WechatReturnURL string `json:"wechat_return_url,omitempty"`
+}
+
+// HasLoginType 报告 /login 的这种 type 是否被允许。
+func (c AccountConfig) HasLoginType(t string) bool {
+	return slices.Contains(c.LoginTypes, t)
+}
+
+// CanEdit 报告 PUT /profile 是否允许改这个字段。
+func (c AccountConfig) CanEdit(field string) bool {
+	return slices.Contains(c.EditableFields, field)
+}
+
+// Validate 校验账号配置。关着时放行，理由同 IMConfig.Validate：
+// 不逼人一次填全才能存草稿。
+func (c AccountConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	for _, t := range c.LoginTypes {
+		switch t {
+		case AccountLoginSMS, AccountLoginPassword, AccountLoginWechat, AccountLoginWechatPhone:
+		default:
+			return Failf(ErrInvalidArgument, CodeInvalidArgument, "未知的登录方式 %q", t)
+		}
+	}
+	for _, f := range c.EditableFields {
+		switch f {
+		case AccountFieldNickname, AccountFieldAvatar:
+		default:
+			return Failf(ErrInvalidArgument, CodeInvalidArgument, "未知的可编辑字段 %q", f)
+		}
+	}
+	if c.DeviceBinding && strings.TrimSpace(c.DeviceHeader) == "" {
+		return Failf(ErrInvalidArgument, CodeInvalidArgument, "开启设备绑定时必须填写设备头名称")
+	}
+	return nil
+}
+
+var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// ValidDomain 报告 d（已转小写）是不是能登记的域名写法。
+func ValidDomain(d string) bool {
+	return d != "" && len(d) <= 253 && domainRe.MatchString(d)
+}
+
+// NormalizeDomains 把域名统一成小写并去重，拒绝带协议、端口、路径的写法。
+// 存储形态与 Host 匹配形态必须一致，否则 "API.X.com" 这类写法永远命中不了。
+func NormalizeDomains(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, d := range in {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if !ValidDomain(d) {
+			return nil, Failf(ErrInvalidArgument, CodeInvalidArgument, "域名 %q 不合法，只填主机名，不带协议、端口和路径", d)
+		}
+		if seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out, nil
 }

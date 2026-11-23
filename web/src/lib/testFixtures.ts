@@ -1,4 +1,4 @@
-import type { IMConfig } from '@/lib/types'
+import type { AccountConfig, IMConfig } from '@/lib/types'
 
 /**
  * disabledIMConfig 是新建应用的 IM 接入默认值：关着。
@@ -14,4 +14,15 @@ export const disabledIMConfig: IMConfig = {
   allowGuest: false,
   guestIpRate: 20,
   bizAuth: null,
+}
+
+/** disabledAccountConfig 是新建应用的账号接口默认值：全关。 */
+export const disabledAccountConfig: AccountConfig = {
+  enabled: false,
+  loginTypes: [],
+  editableFields: [],
+  deviceBinding: false,
+  deviceHeader: '',
+  events: false,
+  wechatReturnUrl: '',
 }

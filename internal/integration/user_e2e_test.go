@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,10 @@ func TestUsersEndToEnd(t *testing.T) {
 		if hash != domain.AvatarHash(png) {
 			t.Fatalf("AvatarHash = %q, want %q", hash, domain.AvatarHash(png))
 		}
+		// 新上传的图只在对象存储里；模拟 avatar-migrate 之后的行（回填了 key、data 还留着）。
+		if _, err := e.pool.Exec(ctx, `UPDATE user_avatar SET data = $2 WHERE user_id = $1`, userID, png); err != nil {
+			t.Fatalf("保留字节: %v", err)
+		}
 
 		res, err := e.sdk.Auth().Login(ctx, fpsdk.LoginInput{
 			ConnectorType: connector.TypePassword,
@@ -101,9 +106,28 @@ func TestUsersEndToEnd(t *testing.T) {
 			t.Fatalf("LoginResult.User.AvatarHash = %q, want %q", res.User.GetAvatarHash(), hash)
 		}
 
-		image, contentType, err := users.Avatar(ctx, hash)
-		if err != nil || contentType != "image/png" || !bytes.Equal(image, png) {
-			t.Fatalf("Avatar: type=%q err=%v 字节相同=%v", contentType, err, bytes.Equal(image, png))
+		// 迁移后字节还留在 PG：字节与地址一起给，只认字节的老 SDK 照常可用。
+		img, err := users.Avatar(ctx, hash)
+		if err != nil || !strings.HasPrefix(img.URL, "https://memory.test/avatar/") || !bytes.Equal(img.Image, png) {
+			t.Fatalf("Avatar: %+v err=%v", img, err)
+		}
+		// 纯对象存储上的：只给地址（老路径据此 302）。
+		if _, err := e.pool.Exec(ctx, `UPDATE user_avatar SET data = '' WHERE user_id = $1`, userID); err != nil {
+			t.Fatal(err)
+		}
+		if img, err = users.Avatar(ctx, hash); err != nil || !strings.HasPrefix(img.URL, "https://memory.test/avatar/") || len(img.Image) != 0 {
+			t.Fatalf("Avatar(纯对象存储): %+v err=%v", img, err)
+		}
+		if _, err := e.pool.Exec(ctx, `UPDATE user_avatar SET data = $2 WHERE user_id = $1`, userID, png); err != nil {
+			t.Fatal(err)
+		}
+		// 没迁到对象存储的老头像照旧给字节。
+		if _, err := e.pool.Exec(ctx, `UPDATE user_avatar SET object_key = '' WHERE user_id = $1`, userID); err != nil {
+			t.Fatalf("模拟未迁移: %v", err)
+		}
+		img, err = users.Avatar(ctx, hash)
+		if err != nil || img.ContentType != "image/png" || !bytes.Equal(img.Image, png) || img.URL != "" {
+			t.Fatalf("Avatar(PG): type=%q err=%v 字节相同=%v", img.ContentType, err, bytes.Equal(img.Image, png))
 		}
 
 		p, err = users.UpdateAvatar(ctx, id, nil)
@@ -113,7 +137,7 @@ func TestUsersEndToEnd(t *testing.T) {
 		if p.AvatarHash != "" {
 			t.Fatalf("清除后 AvatarHash = %q", p.AvatarHash)
 		}
-		_, _, err = users.Avatar(ctx, hash)
+		_, err = users.Avatar(ctx, hash)
 		wantSDKError(t, err, fpsdk.CodeAvatarNotFound, fpsdk.ErrNotFound)
 	})
 

@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -836,5 +837,211 @@ func TestConnectorSecretMaskedAndPreserved(t *testing.T) {
 	cur, err := svc.GetConnector(ctx, app.ID, "wx")
 	if err != nil || cur.Config["appSecret"] != "real" || !cur.Enabled {
 		t.Fatalf("cur = %+v, err = %v", cur, err)
+	}
+}
+
+func newAppWithAccount(t *testing.T, svc *service.ApplicationService, code string, domains []string) *domain.Application {
+	t.Helper()
+	app, _, err := svc.Create(context.Background(), code, code)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	out, err := svc.SetAccount(context.Background(), app.ID, domains, domain.AccountConfig{
+		Enabled: true, LoginTypes: []string{"sms"}, EditableFields: []string{"nickname"},
+		DeviceBinding: true, DeviceHeader: "X-Device", Events: true,
+	})
+	if err != nil {
+		t.Fatalf("SetAccount: %v", err)
+	}
+	return out
+}
+
+func TestSetAccountRoundTripAndDefaults(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	app, _, _ := svc.Create(ctx, "A", "a")
+	if app.Account.Enabled || len(app.Domains) != 0 {
+		t.Fatalf("新应用的账号配置应全关: %+v %v", app.Account, app.Domains)
+	}
+	got := newAppWithAccount(t, svc, "b", []string{" API.Example.com ", "api.example.com", "m.example.com"})
+	if !reflect.DeepEqual(got.Domains, []string{"api.example.com", "m.example.com"}) {
+		t.Fatalf("Domains = %v", got.Domains)
+	}
+	re, err := svc.GetByID(ctx, got.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := domain.AccountConfig{Enabled: true, LoginTypes: []string{"sms"}, EditableFields: []string{"nickname"},
+		DeviceBinding: true, DeviceHeader: "X-Device", Events: true}
+	if !reflect.DeepEqual(re.Account, want) || !reflect.DeepEqual(re.Domains, got.Domains) {
+		t.Fatalf("round trip: %+v %v", re.Account, re.Domains)
+	}
+}
+
+func TestSetAccountDomainConflict(t *testing.T) {
+	svc := newAppService(t)
+	newAppWithAccount(t, svc, "a", []string{"api.example.com"})
+	app2, _, _ := svc.Create(context.Background(), "B", "b")
+	_, err := svc.SetAccount(context.Background(), app2.ID, []string{"API.EXAMPLE.COM"}, domain.AccountConfig{})
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	// 失败的保存不能留下半截域名。
+	re, _ := svc.GetByID(context.Background(), app2.ID)
+	if len(re.Domains) != 0 {
+		t.Fatalf("冲突后域名应保持原样, got %v", re.Domains)
+	}
+}
+
+func TestSetAccountReplacesDomainsAndFreesOld(t *testing.T) {
+	svc := newAppService(t)
+	a := newAppWithAccount(t, svc, "a", []string{"old.example.com"})
+	if _, err := svc.SetAccount(context.Background(), a.ID, []string{"new.example.com"}, a.Account); err != nil {
+		t.Fatal(err)
+	}
+	b, _, _ := svc.Create(context.Background(), "B", "b")
+	if _, err := svc.SetAccount(context.Background(), b.ID, []string{"old.example.com"}, domain.AccountConfig{}); err != nil {
+		t.Fatalf("旧域名应已释放: %v", err)
+	}
+}
+
+func TestSetAccountRejectsInvalid(t *testing.T) {
+	svc := newAppService(t)
+	app, _, _ := svc.Create(context.Background(), "A", "a")
+	for name, tc := range map[string]struct {
+		domains []string
+		cfg     domain.AccountConfig
+	}{
+		"带端口":    {[]string{"a.com:443"}, domain.AccountConfig{}},
+		"带协议":    {[]string{"https://a.com"}, domain.AccountConfig{}},
+		"未知登录方式": {nil, domain.AccountConfig{Enabled: true, LoginTypes: []string{"qq"}}},
+		"未知字段":   {nil, domain.AccountConfig{Enabled: true, EditableFields: []string{"age"}}},
+		"设备绑定缺头": {nil, domain.AccountConfig{Enabled: true, DeviceBinding: true}},
+	} {
+		if _, err := svc.SetAccount(context.Background(), app.ID, tc.domains, tc.cfg); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}
+
+func TestGetActiveByHost(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	a := newAppWithAccount(t, svc, "a", []string{"api.kkdesk.com"})
+
+	got, err := svc.GetActiveByHost(ctx, "API.KKDESK.COM:443")
+	if err != nil || got.ID != a.ID {
+		t.Fatalf("GetActiveByHost = %v, %v", got, err)
+	}
+	if _, err := svc.GetActiveByHost(ctx, "other.kkdesk.com"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("未知域名 err = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.SetStatus(ctx, a.ID, domain.ApplicationStatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetActiveByHost(ctx, "api.kkdesk.com"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("停用应用 err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetActiveByHostSeesChangesOnSameInstance(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	a := newAppWithAccount(t, svc, "a", []string{"api.kkdesk.com"})
+	if _, err := svc.GetActiveByHost(ctx, "api.kkdesk.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetAccount(ctx, a.ID, []string{"x.kkdesk.com"}, a.Account); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetActiveByHost(ctx, "api.kkdesk.com"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("改域名后旧域名应立刻失效, err = %v", err)
+	}
+	if _, err := svc.GetActiveByHost(ctx, "x.kkdesk.com"); err != nil {
+		t.Fatalf("新域名应命中: %v", err)
+	}
+}
+
+// 不像域名的 Host（乱填、带非法字符）直接判不存在，不查库也不进缓存。
+func TestGetActiveByHostInvalidHostNotCached(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	for _, h := range []string{"bad host", "a_b.com", "x..y", "-x.com", strings.Repeat("a", 300) + ".com", ""} {
+		if _, err := svc.GetActiveByHost(ctx, h); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("Host %q err = %v", h, err)
+		}
+	}
+	if hosts, _ := service.AppCacheLenForTest(svc); hosts != 0 {
+		t.Fatalf("非法 Host 进了缓存: %d 条", hosts)
+	}
+}
+
+// 负缓存有上限：乱填的合法域名不能把缓存撑到无限大，真实域名照样能缓存。
+func TestGetActiveByHostNegativeCacheBounded(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	a := newAppWithAccount(t, svc, "a", []string{"api.kkdesk.com"})
+	service.SetAppCacheForTest(svc, 4, nil)
+	for i := 0; i < 10; i++ {
+		if _, err := svc.GetActiveByHost(ctx, fmt.Sprintf("n%d.example.com", i)); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatal(err)
+		}
+	}
+	if hosts, _ := service.AppCacheLenForTest(svc); hosts > 4 {
+		t.Fatalf("缓存 %d 条，超过上限 4", hosts)
+	}
+	if got, err := svc.GetActiveByHost(ctx, "api.kkdesk.com"); err != nil || got.ID != a.ID {
+		t.Fatalf("真实域名: %v, %v", got, err)
+	}
+}
+
+// 查库读到旧值、写缓存之前同实例改了配置并清了缓存：旧值不能被写回去缓存一个 TTL。
+func TestGetActiveByHostStaleLoadNotWrittenBack(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	a := newAppWithAccount(t, svc, "a", []string{"api.kkdesk.com"})
+	fired := false
+	service.SetAppCacheForTest(svc, 0, func() {
+		if fired {
+			return
+		}
+		fired = true
+		if _, err := svc.SetAccount(ctx, a.ID, []string{"x.kkdesk.com"}, a.Account); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := svc.GetActiveByHost(ctx, "api.kkdesk.com"); err != nil {
+		t.Fatalf("这一次读到的是改之前的值，应命中: %v", err)
+	}
+	if _, err := svc.GetActiveByHost(ctx, "api.kkdesk.com"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("改域名后旧域名仍命中缓存: %v", err)
+	}
+}
+
+// GetByIDCached 在本实例缓存应用：库里被绕过服务改掉也照旧返回缓存值，经服务改动后立刻看到新值。
+func TestGetByIDCachedInvalidatedOnChange(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	svc := newAppServiceWith(t, pool)
+	ctx := context.Background()
+	a := newAppWithAccount(t, svc, "a", []string{"api.kkdesk.com"})
+	if got, err := svc.GetByIDCached(ctx, a.ID); err != nil || got.Name != a.Name {
+		t.Fatalf("GetByIDCached = %+v, %v", got, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE application SET name = 'bypass' WHERE id = $1`, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := svc.GetByIDCached(ctx, a.ID); got.Name == "bypass" {
+		t.Fatal("每次都查库，没走缓存")
+	}
+	cfg := a.Account
+	cfg.Events = !cfg.Events
+	if _, err := svc.SetAccount(ctx, a.ID, a.Domains, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := svc.GetByIDCached(ctx, a.ID); err != nil || got.Account.Events != cfg.Events || got.Name != "bypass" {
+		t.Fatalf("改动后仍是旧值: %+v, %v", got, err)
+	}
+	if _, err := svc.GetByIDCached(ctx, uuid.New()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("不存在的应用 err = %v", err)
 	}
 }

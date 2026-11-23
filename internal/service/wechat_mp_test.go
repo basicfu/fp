@@ -88,6 +88,8 @@ type mpEnv struct {
 	prov   uuid.UUID
 	pub    *recordingPublisher
 	apps   *service.ApplicationService
+	// appended 记下写进事件表的 wechat_subscription。
+	appended *recordingAppender
 }
 
 func newMPEnv(t *testing.T) *mpEnv {
@@ -100,7 +102,9 @@ func newMPEnv(t *testing.T) *mpEnv {
 		t.Fatal(err)
 	}
 	pub := &recordingPublisher{}
-	wechat := service.NewWechatMPService(pool, rdb, service.WithWechatMPAPIBase(srv.URL), service.WithWechatMPPublisher(pub))
+	appended := &recordingAppender{}
+	wechat := service.NewWechatMPService(pool, rdb, service.WithWechatMPAPIBase(srv.URL), service.WithWechatMPPublisher(pub),
+		service.WithWechatMPEvents(appended))
 	ns := service.NewNotifyService(pool, rdb, reg, service.WithNotifyRecipients(domain.NotifyChannelWechatMP, wechat.ResolveRecipient))
 	p, err := ns.CreateProvider(context.Background(), service.CreateNotifyProviderInput{
 		Type: notify.TypeWechatMP, Enabled: true,
@@ -110,7 +114,7 @@ func newMPEnv(t *testing.T) *mpEnv {
 		t.Fatal(err)
 	}
 	return &mpEnv{mp: mp, wechat: wechat, notify: ns, users: service.NewUserService(pool), prov: p.ID,
-		pub: pub, apps: service.NewApplicationService(pool, connector.NewRegistry())}
+		pub: pub, apps: service.NewApplicationService(pool, connector.NewRegistry()), appended: appended}
 }
 
 func (e *mpEnv) newUser(t *testing.T, phone, unionID string) uuid.UUID {

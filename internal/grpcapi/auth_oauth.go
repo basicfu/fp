@@ -29,8 +29,12 @@ func (s *authServer) ExchangeOAuthTicket(ctx context.Context, req *fpv1.Exchange
 	if err != nil {
 		return nil, err
 	}
+	if err := checkDevicePub(req.GetDevicePub()); err != nil {
+		return nil, err
+	}
 	out, err := s.auth.ExchangeOAuth(ctx, service.OAuthClient{
 		AppID: appID, IP: req.GetIp(), UA: req.GetUserAgent(), Mobile: req.GetMobile(),
+		DevicePub: req.GetDevicePub(), ClientRef: req.GetClientRef(),
 	}, req.GetTicket())
 	if err != nil {
 		return nil, StatusFrom(err)
@@ -43,8 +47,12 @@ func (s *authServer) PollOAuthLogin(ctx context.Context, req *fpv1.PollOAuthLogi
 	if err != nil {
 		return nil, err
 	}
+	if err := checkDevicePub(req.GetDevicePub()); err != nil {
+		return nil, err
+	}
 	out, err := s.auth.PollOAuth(ctx, service.OAuthClient{
 		AppID: appID, IP: req.GetIp(), UA: req.GetUserAgent(), Mobile: req.GetMobile(),
+		DevicePub: req.GetDevicePub(), ClientRef: req.GetClientRef(),
 	}, req.GetState())
 	if err != nil {
 		return nil, StatusFrom(err)
@@ -57,8 +65,12 @@ func (s *authServer) ExchangeAppCode(ctx context.Context, req *fpv1.ExchangeAppC
 	if err != nil {
 		return nil, err
 	}
+	if err := checkDevicePub(req.GetDevicePub()); err != nil {
+		return nil, err
+	}
 	out, err := s.auth.ExchangeAppCode(ctx, service.OAuthClient{
 		AppID: appID, IP: req.GetIp(), UA: req.GetUserAgent(), Mobile: req.GetMobile(),
+		DevicePub: req.GetDevicePub(), ClientRef: req.GetClientRef(),
 	}, req.GetConnectorType(), req.GetCode())
 	if err != nil {
 		return nil, StatusFrom(err)
@@ -71,9 +83,13 @@ func (s *authServer) BindPhoneLogin(ctx context.Context, req *fpv1.BindPhoneLogi
 	if err != nil {
 		return nil, err
 	}
+	if err := checkDevicePub(req.GetDevicePub()); err != nil {
+		return nil, err
+	}
 	res, err := s.auth.BindPhone(ctx, service.BindPhoneInput{
-		OAuthClient: service.OAuthClient{AppID: appID, IP: req.GetIp(), UA: req.GetUserAgent(), Mobile: req.GetMobile()},
-		BindTicket:  req.GetBindTicket(), Phone: req.GetPhone(), Code: req.GetCode(),
+		OAuthClient: service.OAuthClient{AppID: appID, IP: req.GetIp(), UA: req.GetUserAgent(), Mobile: req.GetMobile(),
+			DevicePub: req.GetDevicePub(), ClientRef: req.GetClientRef()},
+		BindTicket: req.GetBindTicket(), Phone: req.GetPhone(), Code: req.GetCode(),
 	})
 	if err != nil {
 		return nil, StatusFrom(err)

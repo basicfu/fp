@@ -115,7 +115,12 @@ type LoginRequest struct {
 	Ip        string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
 	UserAgent string `protobuf:"bytes,4,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
 	// mobile 决定适用哪一档空闲超时。
-	Mobile        bool `protobuf:"varint,5,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	Mobile bool `protobuf:"varint,5,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	// device_pub（32 字节公钥的 hex，64 个字符，别的写法回 INVALID_ARGUMENT）与 client_ref 刻进会话：
+	// 应用开了会话绑定设备时，之后每次请求按 device_pub 验签，
+	// client_ref 是应用侧的设备 id，随 ValidateToken 带回。不绑设备的应用不填。
+	DevicePub     string `protobuf:"bytes,6,opt,name=device_pub,json=devicePub,proto3" json:"device_pub,omitempty"`
+	ClientRef     string `protobuf:"bytes,7,opt,name=client_ref,json=clientRef,proto3" json:"client_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -183,6 +188,20 @@ func (x *LoginRequest) GetMobile() bool {
 		return x.Mobile
 	}
 	return false
+}
+
+func (x *LoginRequest) GetDevicePub() string {
+	if x != nil {
+		return x.DevicePub
+	}
+	return ""
+}
+
+func (x *LoginRequest) GetClientRef() string {
+	if x != nil {
+		return x.ClientRef
+	}
+	return ""
 }
 
 // LoginResponse 是登录成功的结果。
@@ -474,11 +493,14 @@ func (x *OAuthLoginResult) GetAvatarUrl() string {
 
 // ExchangeOAuthTicketRequest 用 fpTicket 换结论。ip / user_agent / mobile 同 LoginRequest。
 type ExchangeOAuthTicketRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ticket        string                 `protobuf:"bytes,1,opt,name=ticket,proto3" json:"ticket,omitempty"`
-	Ip            string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
-	UserAgent     string                 `protobuf:"bytes,3,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
-	Mobile        bool                   `protobuf:"varint,4,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Ticket    string                 `protobuf:"bytes,1,opt,name=ticket,proto3" json:"ticket,omitempty"`
+	Ip        string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
+	UserAgent string                 `protobuf:"bytes,3,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
+	Mobile    bool                   `protobuf:"varint,4,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	// device_pub / client_ref 同 LoginRequest。
+	DevicePub     string `protobuf:"bytes,5,opt,name=device_pub,json=devicePub,proto3" json:"device_pub,omitempty"`
+	ClientRef     string `protobuf:"bytes,6,opt,name=client_ref,json=clientRef,proto3" json:"client_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -541,6 +563,20 @@ func (x *ExchangeOAuthTicketRequest) GetMobile() bool {
 	return false
 }
 
+func (x *ExchangeOAuthTicketRequest) GetDevicePub() string {
+	if x != nil {
+		return x.DevicePub
+	}
+	return ""
+}
+
+func (x *ExchangeOAuthTicketRequest) GetClientRef() string {
+	if x != nil {
+		return x.ClientRef
+	}
+	return ""
+}
+
 // ExchangeOAuthTicketResponse 是换票据结果。
 type ExchangeOAuthTicketResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -588,11 +624,14 @@ func (x *ExchangeOAuthTicketResponse) GetResult() *OAuthLoginResult {
 
 // PollOAuthLoginRequest 按 state 轮询。ip / user_agent / mobile 同 LoginRequest。
 type PollOAuthLoginRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	State         string                 `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
-	Ip            string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
-	UserAgent     string                 `protobuf:"bytes,3,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
-	Mobile        bool                   `protobuf:"varint,4,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	State     string                 `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	Ip        string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
+	UserAgent string                 `protobuf:"bytes,3,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
+	Mobile    bool                   `protobuf:"varint,4,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	// device_pub / client_ref 同 LoginRequest。
+	DevicePub     string `protobuf:"bytes,5,opt,name=device_pub,json=devicePub,proto3" json:"device_pub,omitempty"`
+	ClientRef     string `protobuf:"bytes,6,opt,name=client_ref,json=clientRef,proto3" json:"client_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -655,6 +694,20 @@ func (x *PollOAuthLoginRequest) GetMobile() bool {
 	return false
 }
 
+func (x *PollOAuthLoginRequest) GetDevicePub() string {
+	if x != nil {
+		return x.DevicePub
+	}
+	return ""
+}
+
+func (x *PollOAuthLoginRequest) GetClientRef() string {
+	if x != nil {
+		return x.ClientRef
+	}
+	return ""
+}
+
 // PollOAuthLoginResponse 是轮询结果。
 type PollOAuthLoginResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -709,6 +762,9 @@ type ExchangeAppCodeRequest struct {
 	Ip            string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
 	UserAgent     string `protobuf:"bytes,4,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
 	Mobile        bool   `protobuf:"varint,5,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	// device_pub / client_ref 同 LoginRequest。
+	DevicePub     string `protobuf:"bytes,6,opt,name=device_pub,json=devicePub,proto3" json:"device_pub,omitempty"`
+	ClientRef     string `protobuf:"bytes,7,opt,name=client_ref,json=clientRef,proto3" json:"client_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -778,6 +834,20 @@ func (x *ExchangeAppCodeRequest) GetMobile() bool {
 	return false
 }
 
+func (x *ExchangeAppCodeRequest) GetDevicePub() string {
+	if x != nil {
+		return x.DevicePub
+	}
+	return ""
+}
+
+func (x *ExchangeAppCodeRequest) GetClientRef() string {
+	if x != nil {
+		return x.ClientRef
+	}
+	return ""
+}
+
 // ExchangeAppCodeResponse 是换 code 的结果。
 type ExchangeAppCodeResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -825,13 +895,16 @@ func (x *ExchangeAppCodeResponse) GetResult() *OAuthLoginResult {
 
 // BindPhoneLoginRequest 是一次绑手机登录。ip / user_agent / mobile 同 LoginRequest。
 type BindPhoneLoginRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	BindTicket    string                 `protobuf:"bytes,1,opt,name=bind_ticket,json=bindTicket,proto3" json:"bind_ticket,omitempty"`
-	Phone         string                 `protobuf:"bytes,2,opt,name=phone,proto3" json:"phone,omitempty"`
-	Code          string                 `protobuf:"bytes,3,opt,name=code,proto3" json:"code,omitempty"`
-	Ip            string                 `protobuf:"bytes,4,opt,name=ip,proto3" json:"ip,omitempty"`
-	UserAgent     string                 `protobuf:"bytes,5,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
-	Mobile        bool                   `protobuf:"varint,6,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	BindTicket string                 `protobuf:"bytes,1,opt,name=bind_ticket,json=bindTicket,proto3" json:"bind_ticket,omitempty"`
+	Phone      string                 `protobuf:"bytes,2,opt,name=phone,proto3" json:"phone,omitempty"`
+	Code       string                 `protobuf:"bytes,3,opt,name=code,proto3" json:"code,omitempty"`
+	Ip         string                 `protobuf:"bytes,4,opt,name=ip,proto3" json:"ip,omitempty"`
+	UserAgent  string                 `protobuf:"bytes,5,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
+	Mobile     bool                   `protobuf:"varint,6,opt,name=mobile,proto3" json:"mobile,omitempty"`
+	// device_pub / client_ref 同 LoginRequest。
+	DevicePub     string `protobuf:"bytes,7,opt,name=device_pub,json=devicePub,proto3" json:"device_pub,omitempty"`
+	ClientRef     string `protobuf:"bytes,8,opt,name=client_ref,json=clientRef,proto3" json:"client_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -906,6 +979,20 @@ func (x *BindPhoneLoginRequest) GetMobile() bool {
 		return x.Mobile
 	}
 	return false
+}
+
+func (x *BindPhoneLoginRequest) GetDevicePub() string {
+	if x != nil {
+		return x.DevicePub
+	}
+	return ""
+}
+
+func (x *BindPhoneLoginRequest) GetClientRef() string {
+	if x != nil {
+		return x.ClientRef
+	}
+	return ""
 }
 
 // BindPhoneLoginResponse 是绑手机登录成功的结果。
@@ -1126,6 +1213,115 @@ func (*LogoutResponse) Descriptor() ([]byte, []int) {
 	return file_fp_v1_auth_proto_rawDescGZIP(), []int{17}
 }
 
+// RevokeSessionRequest 是一次按会话撤销。
+type RevokeSessionRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	UserId string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// session_id 不属于该用户、或会话已不存在时什么都不做，revoked 为 0。
+	SessionId string `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// reason 目前只接受 "kick"。
+	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeSessionRequest) Reset() {
+	*x = RevokeSessionRequest{}
+	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeSessionRequest) ProtoMessage() {}
+
+func (x *RevokeSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeSessionRequest.ProtoReflect.Descriptor instead.
+func (*RevokeSessionRequest) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RevokeSessionRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *RevokeSessionRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *RevokeSessionRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// RevokeSessionResponse 是撤销结果。
+type RevokeSessionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// revoked 是作废的 token 数：轮换过渡期内一个会话可能有新旧两个。
+	Revoked       int32 `protobuf:"varint,1,opt,name=revoked,proto3" json:"revoked,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeSessionResponse) Reset() {
+	*x = RevokeSessionResponse{}
+	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeSessionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeSessionResponse) ProtoMessage() {}
+
+func (x *RevokeSessionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeSessionResponse.ProtoReflect.Descriptor instead.
+func (*RevokeSessionResponse) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *RevokeSessionResponse) GetRevoked() int32 {
+	if x != nil {
+		return x.Revoked
+	}
+	return 0
+}
+
 // ValidateTokenRequest 是一次回源校验。
 type ValidateTokenRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1136,7 +1332,7 @@ type ValidateTokenRequest struct {
 
 func (x *ValidateTokenRequest) Reset() {
 	*x = ValidateTokenRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	mi := &file_fp_v1_auth_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1148,7 +1344,7 @@ func (x *ValidateTokenRequest) String() string {
 func (*ValidateTokenRequest) ProtoMessage() {}
 
 func (x *ValidateTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[18]
+	mi := &file_fp_v1_auth_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1161,7 +1357,7 @@ func (x *ValidateTokenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateTokenRequest.ProtoReflect.Descriptor instead.
 func (*ValidateTokenRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{18}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ValidateTokenRequest) GetToken() string {
@@ -1204,14 +1400,18 @@ type ValidateTokenResponse struct {
 	// 这样 SDK 的鉴权判定完全不碰网络：本地只需一份很小的策略表（角色 →
 	// 权限点），用户的角色跟着身份一起来。把 casbin 的 g 规则（用户 → 角色）
 	// 全量下发给每个 SDK 实例是不现实的——它随用户数增长。
-	Roles         []string `protobuf:"bytes,6,rep,name=roles,proto3" json:"roles,omitempty"`
+	Roles []string `protobuf:"bytes,6,rep,name=roles,proto3" json:"roles,omitempty"`
+	// client_ref / device_pub 是登录时刻进会话的设备信息，没绑设备的会话为空。
+	// 业务方用 client_ref 核对「这个 token 是不是这台设备的」。
+	ClientRef     string `protobuf:"bytes,7,opt,name=client_ref,json=clientRef,proto3" json:"client_ref,omitempty"`
+	DevicePub     string `protobuf:"bytes,8,opt,name=device_pub,json=devicePub,proto3" json:"device_pub,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ValidateTokenResponse) Reset() {
 	*x = ValidateTokenResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	mi := &file_fp_v1_auth_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1223,7 +1423,7 @@ func (x *ValidateTokenResponse) String() string {
 func (*ValidateTokenResponse) ProtoMessage() {}
 
 func (x *ValidateTokenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[19]
+	mi := &file_fp_v1_auth_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1236,7 +1436,7 @@ func (x *ValidateTokenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateTokenResponse.ProtoReflect.Descriptor instead.
 func (*ValidateTokenResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{19}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ValidateTokenResponse) GetUserId() string {
@@ -1281,19 +1481,38 @@ func (x *ValidateTokenResponse) GetRoles() []string {
 	return nil
 }
 
-// WatchRequest 是建流请求。
+func (x *ValidateTokenResponse) GetClientRef() string {
+	if x != nil {
+		return x.ClientRef
+	}
+	return ""
+}
+
+func (x *ValidateTokenResponse) GetDevicePub() string {
+	if x != nil {
+		return x.DevicePub
+	}
+	return ""
+}
+
+// WatchRequest 是客户端在 Watch 流上发的消息。应用身份来自 metadata，不在消息体里重复。
 //
-// 目前无字段：应用身份来自 metadata，不在消息体里重复。
-// 保留消息本身是为了将来能在同一条流上订阅更多事件类型。
+// 什么都不发的老 SDK 照旧只收广播类事件（撤销、配置变更等）。
 type WatchRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*WatchRequest_Hello
+	//	*WatchRequest_Ack
+	//	*WatchRequest_Reply
+	Msg           isWatchRequest_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[20]
+	mi := &file_fp_v1_auth_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1305,7 +1524,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[20]
+	mi := &file_fp_v1_auth_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1318,7 +1537,392 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{20}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *WatchRequest) GetMsg() isWatchRequest_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *WatchRequest) GetHello() *WatchHello {
+	if x != nil {
+		if x, ok := x.Msg.(*WatchRequest_Hello); ok {
+			return x.Hello
+		}
+	}
+	return nil
+}
+
+func (x *WatchRequest) GetAck() *EventAck {
+	if x != nil {
+		if x, ok := x.Msg.(*WatchRequest_Ack); ok {
+			return x.Ack
+		}
+	}
+	return nil
+}
+
+func (x *WatchRequest) GetReply() *LoginCheckReply {
+	if x != nil {
+		if x, ok := x.Msg.(*WatchRequest_Reply); ok {
+			return x.Reply
+		}
+	}
+	return nil
+}
+
+type isWatchRequest_Msg interface {
+	isWatchRequest_Msg()
+}
+
+type WatchRequest_Hello struct {
+	// hello 声明本流能处理的能力，建流后发一次。
+	Hello *WatchHello `protobuf:"bytes,1,opt,name=hello,proto3,oneof"`
+}
+
+type WatchRequest_Ack struct {
+	// ack 确认已处理完的业务事件。
+	Ack *EventAck `protobuf:"bytes,2,opt,name=ack,proto3,oneof"`
+}
+
+type WatchRequest_Reply struct {
+	// reply 回答一次登录校验（WatchResponse.login_check）。
+	Reply *LoginCheckReply `protobuf:"bytes,3,opt,name=reply,proto3,oneof"`
+}
+
+func (*WatchRequest_Hello) isWatchRequest_Msg() {}
+
+func (*WatchRequest_Ack) isWatchRequest_Msg() {}
+
+func (*WatchRequest_Reply) isWatchRequest_Msg() {}
+
+// WatchHello 是能力声明。
+type WatchHello struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// caps 取 "app_events"（收业务事件并确认）、"login_check"（回答登录校验）。不认识的能力服务端忽略。
+	Caps          []string `protobuf:"bytes,1,rep,name=caps,proto3" json:"caps,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchHello) Reset() {
+	*x = WatchHello{}
+	mi := &file_fp_v1_auth_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchHello) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchHello) ProtoMessage() {}
+
+func (x *WatchHello) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchHello.ProtoReflect.Descriptor instead.
+func (*WatchHello) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *WatchHello) GetCaps() []string {
+	if x != nil {
+		return x.Caps
+	}
+	return nil
+}
+
+// EventAck 确认一批业务事件，ids 是 AppEvent.id。
+type EventAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ids           []string               `protobuf:"bytes,1,rep,name=ids,proto3" json:"ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EventAck) Reset() {
+	*x = EventAck{}
+	mi := &file_fp_v1_auth_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventAck) ProtoMessage() {}
+
+func (x *EventAck) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventAck.ProtoReflect.Descriptor instead.
+func (*EventAck) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *EventAck) GetIds() []string {
+	if x != nil {
+		return x.Ids
+	}
+	return nil
+}
+
+// LoginCheck 是登录前 fp 同步问应用「这台设备能不能登录」，只发给 hello 里声明了 "login_check" 的流。
+//
+// 应用须在 3 秒内经同一条流回 LoginCheckReply，超时按登录失败处理。
+type LoginCheck struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	CallId string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
+	// device_header 是客户端设备头原文（应用配置的请求头），由应用自己解析。
+	DeviceHeader  string `protobuf:"bytes,2,opt,name=device_header,json=deviceHeader,proto3" json:"device_header,omitempty"`
+	Ip            string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LoginCheck) Reset() {
+	*x = LoginCheck{}
+	mi := &file_fp_v1_auth_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LoginCheck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LoginCheck) ProtoMessage() {}
+
+func (x *LoginCheck) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LoginCheck.ProtoReflect.Descriptor instead.
+func (*LoginCheck) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *LoginCheck) GetCallId() string {
+	if x != nil {
+		return x.CallId
+	}
+	return ""
+}
+
+func (x *LoginCheck) GetDeviceHeader() string {
+	if x != nil {
+		return x.DeviceHeader
+	}
+	return ""
+}
+
+func (x *LoginCheck) GetIp() string {
+	if x != nil {
+		return x.Ip
+	}
+	return ""
+}
+
+// LoginCheckReply 是应用对 LoginCheck 的回答。
+type LoginCheckReply struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	CallId string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
+	Allow  bool                   `protobuf:"varint,2,opt,name=allow,proto3" json:"allow,omitempty"`
+	// client_ref 是应用给这台设备的标识，放行时必填，刻进会话、随 ValidateToken 带回。
+	ClientRef string `protobuf:"bytes,3,opt,name=client_ref,json=clientRef,proto3" json:"client_ref,omitempty"`
+	// code / msg 仅拒绝时：原样作为登录错误返回给客户端（如 version_too_low）。
+	Code          string `protobuf:"bytes,4,opt,name=code,proto3" json:"code,omitempty"`
+	Msg           string `protobuf:"bytes,5,opt,name=msg,proto3" json:"msg,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LoginCheckReply) Reset() {
+	*x = LoginCheckReply{}
+	mi := &file_fp_v1_auth_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LoginCheckReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LoginCheckReply) ProtoMessage() {}
+
+func (x *LoginCheckReply) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LoginCheckReply.ProtoReflect.Descriptor instead.
+func (*LoginCheckReply) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *LoginCheckReply) GetCallId() string {
+	if x != nil {
+		return x.CallId
+	}
+	return ""
+}
+
+func (x *LoginCheckReply) GetAllow() bool {
+	if x != nil {
+		return x.Allow
+	}
+	return false
+}
+
+func (x *LoginCheckReply) GetClientRef() string {
+	if x != nil {
+		return x.ClientRef
+	}
+	return ""
+}
+
+func (x *LoginCheckReply) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *LoginCheckReply) GetMsg() string {
+	if x != nil {
+		return x.Msg
+	}
+	return ""
+}
+
+// AppEvent 是一条业务事件（登录成功、退出登录、账号删除、微信订阅变化）。
+//
+// 与其它推送不同，它持久化在 fp、要确认：一条事件只投给本应用的一条流，确认前会重投
+// （10 秒没确认就换流重投），断线重连后补发。业务方按 id 幂等处理。
+type AppEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// seq 是本应用内递增的序号。同一用户的事件按 seq 先后到达（换流重投时可能少量乱序）。
+	Seq int64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	// kind 取 login_succeeded / logged_out / account_deleted / wechat_subscription，
+	// 用字符串而不是 enum：新增种类时老 SDK 能原样透传。
+	Kind   string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	UserId string `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// payload 是该种类的 JSON 内容。
+	Payload       []byte `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"`
+	CreatedAtMs   int64  `protobuf:"varint,6,opt,name=created_at_ms,json=createdAtMs,proto3" json:"created_at_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppEvent) Reset() {
+	*x = AppEvent{}
+	mi := &file_fp_v1_auth_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppEvent) ProtoMessage() {}
+
+func (x *AppEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_fp_v1_auth_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppEvent.ProtoReflect.Descriptor instead.
+func (*AppEvent) Descriptor() ([]byte, []int) {
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *AppEvent) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AppEvent) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *AppEvent) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *AppEvent) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *AppEvent) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *AppEvent) GetCreatedAtMs() int64 {
+	if x != nil {
+		return x.CreatedAtMs
+	}
+	return 0
 }
 
 // WatchResponse 是一条推送事件。
@@ -1338,6 +1942,8 @@ type WatchResponse struct {
 	//	*WatchResponse_AppImConfigChanged
 	//	*WatchResponse_AccessKeyChanged
 	//	*WatchResponse_WechatSubscriptionChanged
+	//	*WatchResponse_AppEvent
+	//	*WatchResponse_LoginCheck
 	Event         isWatchResponse_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1345,7 +1951,7 @@ type WatchResponse struct {
 
 func (x *WatchResponse) Reset() {
 	*x = WatchResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[21]
+	mi := &file_fp_v1_auth_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1357,7 +1963,7 @@ func (x *WatchResponse) String() string {
 func (*WatchResponse) ProtoMessage() {}
 
 func (x *WatchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[21]
+	mi := &file_fp_v1_auth_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1370,7 +1976,7 @@ func (x *WatchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchResponse.ProtoReflect.Descriptor instead.
 func (*WatchResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{21}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *WatchResponse) GetEvent() isWatchResponse_Event {
@@ -1461,6 +2067,24 @@ func (x *WatchResponse) GetWechatSubscriptionChanged() *WechatSubscriptionChange
 	return nil
 }
 
+func (x *WatchResponse) GetAppEvent() *AppEvent {
+	if x != nil {
+		if x, ok := x.Event.(*WatchResponse_AppEvent); ok {
+			return x.AppEvent
+		}
+	}
+	return nil
+}
+
+func (x *WatchResponse) GetLoginCheck() *LoginCheck {
+	if x != nil {
+		if x, ok := x.Event.(*WatchResponse_LoginCheck); ok {
+			return x.LoginCheck
+		}
+	}
+	return nil
+}
+
 type isWatchResponse_Event interface {
 	isWatchResponse_Event()
 }
@@ -1515,6 +2139,16 @@ type WatchResponse_WechatSubscriptionChanged struct {
 	WechatSubscriptionChanged *WechatSubscriptionChanged `protobuf:"bytes,9,opt,name=wechat_subscription_changed,json=wechatSubscriptionChanged,proto3,oneof"`
 }
 
+type WatchResponse_AppEvent struct {
+	// app_event 是一条要确认的业务事件，只发给 hello 里声明了 "app_events" 的流。
+	AppEvent *AppEvent `protobuf:"bytes,10,opt,name=app_event,json=appEvent,proto3,oneof"`
+}
+
+type WatchResponse_LoginCheck struct {
+	// login_check 是一次登录校验，只发给 hello 里声明了 "login_check" 的流。
+	LoginCheck *LoginCheck `protobuf:"bytes,11,opt,name=login_check,json=loginCheck,proto3,oneof"`
+}
+
 func (*WatchResponse_Revoke) isWatchResponse_Event() {}
 
 func (*WatchResponse_Ready) isWatchResponse_Event() {}
@@ -1532,6 +2166,10 @@ func (*WatchResponse_AppImConfigChanged) isWatchResponse_Event() {}
 func (*WatchResponse_AccessKeyChanged) isWatchResponse_Event() {}
 
 func (*WatchResponse_WechatSubscriptionChanged) isWatchResponse_Event() {}
+
+func (*WatchResponse_AppEvent) isWatchResponse_Event() {}
+
+func (*WatchResponse_LoginCheck) isWatchResponse_Event() {}
 
 // WechatSubscriptionChanged 是一次微信通知状态变化的通知，推给该用户登录过的应用和发起扫码的应用。
 //
@@ -1551,7 +2189,7 @@ type WechatSubscriptionChanged struct {
 
 func (x *WechatSubscriptionChanged) Reset() {
 	*x = WechatSubscriptionChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[22]
+	mi := &file_fp_v1_auth_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1563,7 +2201,7 @@ func (x *WechatSubscriptionChanged) String() string {
 func (*WechatSubscriptionChanged) ProtoMessage() {}
 
 func (x *WechatSubscriptionChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[22]
+	mi := &file_fp_v1_auth_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1576,7 +2214,7 @@ func (x *WechatSubscriptionChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WechatSubscriptionChanged.ProtoReflect.Descriptor instead.
 func (*WechatSubscriptionChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{22}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *WechatSubscriptionChanged) GetUserId() string {
@@ -1614,7 +2252,7 @@ type AppIMConfigChanged struct {
 
 func (x *AppIMConfigChanged) Reset() {
 	*x = AppIMConfigChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[23]
+	mi := &file_fp_v1_auth_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1626,7 +2264,7 @@ func (x *AppIMConfigChanged) String() string {
 func (*AppIMConfigChanged) ProtoMessage() {}
 
 func (x *AppIMConfigChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[23]
+	mi := &file_fp_v1_auth_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1639,7 +2277,7 @@ func (x *AppIMConfigChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppIMConfigChanged.ProtoReflect.Descriptor instead.
 func (*AppIMConfigChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{23}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *AppIMConfigChanged) GetAppId() string {
@@ -1659,7 +2297,7 @@ type PolicyChanged struct {
 
 func (x *PolicyChanged) Reset() {
 	*x = PolicyChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[24]
+	mi := &file_fp_v1_auth_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1671,7 +2309,7 @@ func (x *PolicyChanged) String() string {
 func (*PolicyChanged) ProtoMessage() {}
 
 func (x *PolicyChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[24]
+	mi := &file_fp_v1_auth_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1684,7 +2322,7 @@ func (x *PolicyChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyChanged.ProtoReflect.Descriptor instead.
 func (*PolicyChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{24}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *PolicyChanged) GetVersion() int64 {
@@ -1703,7 +2341,7 @@ type UserRoleChanged struct {
 
 func (x *UserRoleChanged) Reset() {
 	*x = UserRoleChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[25]
+	mi := &file_fp_v1_auth_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1715,7 +2353,7 @@ func (x *UserRoleChanged) String() string {
 func (*UserRoleChanged) ProtoMessage() {}
 
 func (x *UserRoleChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[25]
+	mi := &file_fp_v1_auth_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1728,7 +2366,7 @@ func (x *UserRoleChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserRoleChanged.ProtoReflect.Descriptor instead.
 func (*UserRoleChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{25}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *UserRoleChanged) GetUserId() string {
@@ -1751,7 +2389,7 @@ type WatchReady struct {
 
 func (x *WatchReady) Reset() {
 	*x = WatchReady{}
-	mi := &file_fp_v1_auth_proto_msgTypes[26]
+	mi := &file_fp_v1_auth_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1763,7 +2401,7 @@ func (x *WatchReady) String() string {
 func (*WatchReady) ProtoMessage() {}
 
 func (x *WatchReady) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[26]
+	mi := &file_fp_v1_auth_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1776,7 +2414,7 @@ func (x *WatchReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchReady.ProtoReflect.Descriptor instead.
 func (*WatchReady) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{26}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{33}
 }
 
 // WatchPurge 要求 SDK 丢弃**全部**缓存条目。
@@ -1798,7 +2436,7 @@ type WatchPurge struct {
 
 func (x *WatchPurge) Reset() {
 	*x = WatchPurge{}
-	mi := &file_fp_v1_auth_proto_msgTypes[27]
+	mi := &file_fp_v1_auth_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1810,7 +2448,7 @@ func (x *WatchPurge) String() string {
 func (*WatchPurge) ProtoMessage() {}
 
 func (x *WatchPurge) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[27]
+	mi := &file_fp_v1_auth_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1823,7 +2461,7 @@ func (x *WatchPurge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchPurge.ProtoReflect.Descriptor instead.
 func (*WatchPurge) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{27}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *WatchPurge) GetReason() string {
@@ -1848,7 +2486,7 @@ type ReportPermissionsRequest struct {
 
 func (x *ReportPermissionsRequest) Reset() {
 	*x = ReportPermissionsRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[28]
+	mi := &file_fp_v1_auth_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1860,7 +2498,7 @@ func (x *ReportPermissionsRequest) String() string {
 func (*ReportPermissionsRequest) ProtoMessage() {}
 
 func (x *ReportPermissionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[28]
+	mi := &file_fp_v1_auth_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1873,7 +2511,7 @@ func (x *ReportPermissionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportPermissionsRequest.ProtoReflect.Descriptor instead.
 func (*ReportPermissionsRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{28}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ReportPermissionsRequest) GetPoints() []*PermissionPoint {
@@ -1900,7 +2538,7 @@ type PermissionPoint struct {
 
 func (x *PermissionPoint) Reset() {
 	*x = PermissionPoint{}
-	mi := &file_fp_v1_auth_proto_msgTypes[29]
+	mi := &file_fp_v1_auth_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1912,7 +2550,7 @@ func (x *PermissionPoint) String() string {
 func (*PermissionPoint) ProtoMessage() {}
 
 func (x *PermissionPoint) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[29]
+	mi := &file_fp_v1_auth_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1925,7 +2563,7 @@ func (x *PermissionPoint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PermissionPoint.ProtoReflect.Descriptor instead.
 func (*PermissionPoint) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{29}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *PermissionPoint) GetKey() string {
@@ -1964,7 +2602,7 @@ type ReportPermissionsResponse struct {
 
 func (x *ReportPermissionsResponse) Reset() {
 	*x = ReportPermissionsResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[30]
+	mi := &file_fp_v1_auth_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1976,7 +2614,7 @@ func (x *ReportPermissionsResponse) String() string {
 func (*ReportPermissionsResponse) ProtoMessage() {}
 
 func (x *ReportPermissionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[30]
+	mi := &file_fp_v1_auth_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1989,7 +2627,7 @@ func (x *ReportPermissionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportPermissionsResponse.ProtoReflect.Descriptor instead.
 func (*ReportPermissionsResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{30}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{37}
 }
 
 type GetPolicyRequest struct {
@@ -2000,7 +2638,7 @@ type GetPolicyRequest struct {
 
 func (x *GetPolicyRequest) Reset() {
 	*x = GetPolicyRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[31]
+	mi := &file_fp_v1_auth_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2012,7 +2650,7 @@ func (x *GetPolicyRequest) String() string {
 func (*GetPolicyRequest) ProtoMessage() {}
 
 func (x *GetPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[31]
+	mi := &file_fp_v1_auth_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2025,7 +2663,7 @@ func (x *GetPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPolicyRequest.ProtoReflect.Descriptor instead.
 func (*GetPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{31}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{38}
 }
 
 type GetPolicyResponse struct {
@@ -2037,7 +2675,7 @@ type GetPolicyResponse struct {
 
 func (x *GetPolicyResponse) Reset() {
 	*x = GetPolicyResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[32]
+	mi := &file_fp_v1_auth_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2049,7 +2687,7 @@ func (x *GetPolicyResponse) String() string {
 func (*GetPolicyResponse) ProtoMessage() {}
 
 func (x *GetPolicyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[32]
+	mi := &file_fp_v1_auth_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2062,7 +2700,7 @@ func (x *GetPolicyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPolicyResponse.ProtoReflect.Descriptor instead.
 func (*GetPolicyResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{32}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *GetPolicyResponse) GetPolicy() *AppPolicy {
@@ -2094,7 +2732,7 @@ type ConfigChanged struct {
 
 func (x *ConfigChanged) Reset() {
 	*x = ConfigChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[33]
+	mi := &file_fp_v1_auth_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2106,7 +2744,7 @@ func (x *ConfigChanged) String() string {
 func (*ConfigChanged) ProtoMessage() {}
 
 func (x *ConfigChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[33]
+	mi := &file_fp_v1_auth_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2119,7 +2757,7 @@ func (x *ConfigChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigChanged.ProtoReflect.Descriptor instead.
 func (*ConfigChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{33}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ConfigChanged) GetType() string {
@@ -2145,7 +2783,7 @@ type AccessKeyChanged struct {
 
 func (x *AccessKeyChanged) Reset() {
 	*x = AccessKeyChanged{}
-	mi := &file_fp_v1_auth_proto_msgTypes[34]
+	mi := &file_fp_v1_auth_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2157,7 +2795,7 @@ func (x *AccessKeyChanged) String() string {
 func (*AccessKeyChanged) ProtoMessage() {}
 
 func (x *AccessKeyChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[34]
+	mi := &file_fp_v1_auth_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2170,7 +2808,7 @@ func (x *AccessKeyChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccessKeyChanged.ProtoReflect.Descriptor instead.
 func (*AccessKeyChanged) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{34}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *AccessKeyChanged) GetAccessKeyId() string {
@@ -2189,7 +2827,7 @@ type GetAccessKeyRequest struct {
 
 func (x *GetAccessKeyRequest) Reset() {
 	*x = GetAccessKeyRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[35]
+	mi := &file_fp_v1_auth_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2201,7 +2839,7 @@ func (x *GetAccessKeyRequest) String() string {
 func (*GetAccessKeyRequest) ProtoMessage() {}
 
 func (x *GetAccessKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[35]
+	mi := &file_fp_v1_auth_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2214,7 +2852,7 @@ func (x *GetAccessKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAccessKeyRequest.ProtoReflect.Descriptor instead.
 func (*GetAccessKeyRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{35}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *GetAccessKeyRequest) GetAccessKeyId() string {
@@ -2240,7 +2878,7 @@ type GetAccessKeyResponse struct {
 
 func (x *GetAccessKeyResponse) Reset() {
 	*x = GetAccessKeyResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[36]
+	mi := &file_fp_v1_auth_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2252,7 +2890,7 @@ func (x *GetAccessKeyResponse) String() string {
 func (*GetAccessKeyResponse) ProtoMessage() {}
 
 func (x *GetAccessKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[36]
+	mi := &file_fp_v1_auth_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2265,7 +2903,7 @@ func (x *GetAccessKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAccessKeyResponse.ProtoReflect.Descriptor instead.
 func (*GetAccessKeyResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{36}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *GetAccessKeyResponse) GetSecret() string {
@@ -2312,7 +2950,7 @@ type ReportAccessKeyUsageRequest struct {
 
 func (x *ReportAccessKeyUsageRequest) Reset() {
 	*x = ReportAccessKeyUsageRequest{}
-	mi := &file_fp_v1_auth_proto_msgTypes[37]
+	mi := &file_fp_v1_auth_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2324,7 +2962,7 @@ func (x *ReportAccessKeyUsageRequest) String() string {
 func (*ReportAccessKeyUsageRequest) ProtoMessage() {}
 
 func (x *ReportAccessKeyUsageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[37]
+	mi := &file_fp_v1_auth_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2337,7 +2975,7 @@ func (x *ReportAccessKeyUsageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportAccessKeyUsageRequest.ProtoReflect.Descriptor instead.
 func (*ReportAccessKeyUsageRequest) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{37}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ReportAccessKeyUsageRequest) GetUsages() []*AccessKeyUsage {
@@ -2357,7 +2995,7 @@ type AccessKeyUsage struct {
 
 func (x *AccessKeyUsage) Reset() {
 	*x = AccessKeyUsage{}
-	mi := &file_fp_v1_auth_proto_msgTypes[38]
+	mi := &file_fp_v1_auth_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2369,7 +3007,7 @@ func (x *AccessKeyUsage) String() string {
 func (*AccessKeyUsage) ProtoMessage() {}
 
 func (x *AccessKeyUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[38]
+	mi := &file_fp_v1_auth_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2382,7 +3020,7 @@ func (x *AccessKeyUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccessKeyUsage.ProtoReflect.Descriptor instead.
 func (*AccessKeyUsage) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{38}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *AccessKeyUsage) GetAccessKeyId() string {
@@ -2407,7 +3045,7 @@ type ReportAccessKeyUsageResponse struct {
 
 func (x *ReportAccessKeyUsageResponse) Reset() {
 	*x = ReportAccessKeyUsageResponse{}
-	mi := &file_fp_v1_auth_proto_msgTypes[39]
+	mi := &file_fp_v1_auth_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2419,7 +3057,7 @@ func (x *ReportAccessKeyUsageResponse) String() string {
 func (*ReportAccessKeyUsageResponse) ProtoMessage() {}
 
 func (x *ReportAccessKeyUsageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fp_v1_auth_proto_msgTypes[39]
+	mi := &file_fp_v1_auth_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2432,7 +3070,7 @@ func (x *ReportAccessKeyUsageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportAccessKeyUsageResponse.ProtoReflect.Descriptor instead.
 func (*ReportAccessKeyUsageResponse) Descriptor() ([]byte, []int) {
-	return file_fp_v1_auth_proto_rawDescGZIP(), []int{39}
+	return file_fp_v1_auth_proto_rawDescGZIP(), []int{46}
 }
 
 var File_fp_v1_auth_proto protoreflect.FileDescriptor
@@ -2442,14 +3080,18 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x10fp/v1/auth.proto\x12\x05fp.v1\x1a\x12fp/v1/common.proto\",\n" +
 	"\x14SendLoginCodeRequest\x12\x14\n" +
 	"\x05phone\x18\x01 \x01(\tR\x05phone\"\x17\n" +
-	"\x15SendLoginCodeResponse\"\x84\x02\n" +
+	"\x15SendLoginCodeResponse\"\xc2\x02\n" +
 	"\fLoginRequest\x12%\n" +
 	"\x0econnector_type\x18\x01 \x01(\tR\rconnectorType\x12F\n" +
 	"\vcredentials\x18\x02 \x03(\v2$.fp.v1.LoginRequest.CredentialsEntryR\vcredentials\x12\x0e\n" +
 	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x1d\n" +
 	"\n" +
 	"user_agent\x18\x04 \x01(\tR\tuserAgent\x12\x16\n" +
-	"\x06mobile\x18\x05 \x01(\bR\x06mobile\x1a>\n" +
+	"\x06mobile\x18\x05 \x01(\bR\x06mobile\x12\x1d\n" +
+	"\n" +
+	"device_pub\x18\x06 \x01(\tR\tdevicePub\x12\x1d\n" +
+	"\n" +
+	"client_ref\x18\a \x01(\tR\tclientRef\x1a>\n" +
 	"\x10CredentialsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"i\n" +
@@ -2476,32 +3118,44 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"bindTicket\x12\x1a\n" +
 	"\bnickname\x18\x04 \x01(\tR\bnickname\x12\x1d\n" +
 	"\n" +
-	"avatar_url\x18\x05 \x01(\tR\tavatarUrl\"{\n" +
+	"avatar_url\x18\x05 \x01(\tR\tavatarUrl\"\xb9\x01\n" +
 	"\x1aExchangeOAuthTicketRequest\x12\x16\n" +
 	"\x06ticket\x18\x01 \x01(\tR\x06ticket\x12\x0e\n" +
 	"\x02ip\x18\x02 \x01(\tR\x02ip\x12\x1d\n" +
 	"\n" +
 	"user_agent\x18\x03 \x01(\tR\tuserAgent\x12\x16\n" +
-	"\x06mobile\x18\x04 \x01(\bR\x06mobile\"N\n" +
+	"\x06mobile\x18\x04 \x01(\bR\x06mobile\x12\x1d\n" +
+	"\n" +
+	"device_pub\x18\x05 \x01(\tR\tdevicePub\x12\x1d\n" +
+	"\n" +
+	"client_ref\x18\x06 \x01(\tR\tclientRef\"N\n" +
 	"\x1bExchangeOAuthTicketResponse\x12/\n" +
-	"\x06result\x18\x01 \x01(\v2\x17.fp.v1.OAuthLoginResultR\x06result\"t\n" +
+	"\x06result\x18\x01 \x01(\v2\x17.fp.v1.OAuthLoginResultR\x06result\"\xb2\x01\n" +
 	"\x15PollOAuthLoginRequest\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\tR\x05state\x12\x0e\n" +
 	"\x02ip\x18\x02 \x01(\tR\x02ip\x12\x1d\n" +
 	"\n" +
 	"user_agent\x18\x03 \x01(\tR\tuserAgent\x12\x16\n" +
-	"\x06mobile\x18\x04 \x01(\bR\x06mobile\"I\n" +
+	"\x06mobile\x18\x04 \x01(\bR\x06mobile\x12\x1d\n" +
+	"\n" +
+	"device_pub\x18\x05 \x01(\tR\tdevicePub\x12\x1d\n" +
+	"\n" +
+	"client_ref\x18\x06 \x01(\tR\tclientRef\"I\n" +
 	"\x16PollOAuthLoginResponse\x12/\n" +
-	"\x06result\x18\x01 \x01(\v2\x17.fp.v1.OAuthLoginResultR\x06result\"\x9a\x01\n" +
+	"\x06result\x18\x01 \x01(\v2\x17.fp.v1.OAuthLoginResultR\x06result\"\xd8\x01\n" +
 	"\x16ExchangeAppCodeRequest\x12%\n" +
 	"\x0econnector_type\x18\x01 \x01(\tR\rconnectorType\x12\x12\n" +
 	"\x04code\x18\x02 \x01(\tR\x04code\x12\x0e\n" +
 	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x1d\n" +
 	"\n" +
 	"user_agent\x18\x04 \x01(\tR\tuserAgent\x12\x16\n" +
-	"\x06mobile\x18\x05 \x01(\bR\x06mobile\"J\n" +
+	"\x06mobile\x18\x05 \x01(\bR\x06mobile\x12\x1d\n" +
+	"\n" +
+	"device_pub\x18\x06 \x01(\tR\tdevicePub\x12\x1d\n" +
+	"\n" +
+	"client_ref\x18\a \x01(\tR\tclientRef\"J\n" +
 	"\x17ExchangeAppCodeResponse\x12/\n" +
-	"\x06result\x18\x01 \x01(\v2\x17.fp.v1.OAuthLoginResultR\x06result\"\xa9\x01\n" +
+	"\x06result\x18\x01 \x01(\v2\x17.fp.v1.OAuthLoginResultR\x06result\"\xe7\x01\n" +
 	"\x15BindPhoneLoginRequest\x12\x1f\n" +
 	"\vbind_ticket\x18\x01 \x01(\tR\n" +
 	"bindTicket\x12\x14\n" +
@@ -2510,7 +3164,11 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x02ip\x18\x04 \x01(\tR\x02ip\x12\x1d\n" +
 	"\n" +
 	"user_agent\x18\x05 \x01(\tR\tuserAgent\x12\x16\n" +
-	"\x06mobile\x18\x06 \x01(\bR\x06mobile\"D\n" +
+	"\x06mobile\x18\x06 \x01(\bR\x06mobile\x12\x1d\n" +
+	"\n" +
+	"device_pub\x18\a \x01(\tR\tdevicePub\x12\x1d\n" +
+	"\n" +
+	"client_ref\x18\b \x01(\tR\tclientRef\"D\n" +
 	"\x16BindPhoneLoginResponse\x12*\n" +
 	"\x05login\x18\x01 \x01(\v2\x14.fp.v1.LoginResponseR\x05login\"\xa6\x01\n" +
 	"\bUserInfo\x12\x0e\n" +
@@ -2524,9 +3182,16 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"avatarHash\"%\n" +
 	"\rLogoutRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\"\x10\n" +
-	"\x0eLogoutResponse\",\n" +
+	"\x0eLogoutResponse\"f\n" +
+	"\x14RevokeSessionRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"1\n" +
+	"\x15RevokeSessionResponse\x12\x18\n" +
+	"\arevoked\x18\x01 \x01(\x05R\arevoked\",\n" +
 	"\x14ValidateTokenRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"\xbe\x01\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\"\xfc\x01\n" +
 	"\x15ValidateTokenResponse\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1d\n" +
 	"\n" +
@@ -2535,8 +3200,40 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"cacheTtlMs\x12\x18\n" +
 	"\arotated\x18\x04 \x01(\bR\arotated\x12\x1b\n" +
 	"\tnew_token\x18\x05 \x01(\tR\bnewToken\x12\x14\n" +
-	"\x05roles\x18\x06 \x03(\tR\x05roles\"\x0e\n" +
-	"\fWatchRequest\"\xdd\x04\n" +
+	"\x05roles\x18\x06 \x03(\tR\x05roles\x12\x1d\n" +
+	"\n" +
+	"client_ref\x18\a \x01(\tR\tclientRef\x12\x1d\n" +
+	"\n" +
+	"device_pub\x18\b \x01(\tR\tdevicePub\"\x95\x01\n" +
+	"\fWatchRequest\x12)\n" +
+	"\x05hello\x18\x01 \x01(\v2\x11.fp.v1.WatchHelloH\x00R\x05hello\x12#\n" +
+	"\x03ack\x18\x02 \x01(\v2\x0f.fp.v1.EventAckH\x00R\x03ack\x12.\n" +
+	"\x05reply\x18\x03 \x01(\v2\x16.fp.v1.LoginCheckReplyH\x00R\x05replyB\x05\n" +
+	"\x03msg\" \n" +
+	"\n" +
+	"WatchHello\x12\x12\n" +
+	"\x04caps\x18\x01 \x03(\tR\x04caps\"\x1c\n" +
+	"\bEventAck\x12\x10\n" +
+	"\x03ids\x18\x01 \x03(\tR\x03ids\"Z\n" +
+	"\n" +
+	"LoginCheck\x12\x17\n" +
+	"\acall_id\x18\x01 \x01(\tR\x06callId\x12#\n" +
+	"\rdevice_header\x18\x02 \x01(\tR\fdeviceHeader\x12\x0e\n" +
+	"\x02ip\x18\x03 \x01(\tR\x02ip\"\x85\x01\n" +
+	"\x0fLoginCheckReply\x12\x17\n" +
+	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x14\n" +
+	"\x05allow\x18\x02 \x01(\bR\x05allow\x12\x1d\n" +
+	"\n" +
+	"client_ref\x18\x03 \x01(\tR\tclientRef\x12\x12\n" +
+	"\x04code\x18\x04 \x01(\tR\x04code\x12\x10\n" +
+	"\x03msg\x18\x05 \x01(\tR\x03msg\"\x97\x01\n" +
+	"\bAppEvent\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
+	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x12\x17\n" +
+	"\auser_id\x18\x04 \x01(\tR\x06userId\x12\x18\n" +
+	"\apayload\x18\x05 \x01(\fR\apayload\x12\"\n" +
+	"\rcreated_at_ms\x18\x06 \x01(\x03R\vcreatedAtMs\"\xc3\x05\n" +
 	"\rWatchResponse\x12,\n" +
 	"\x06revoke\x18\x01 \x01(\v2\x12.fp.v1.RevokeEventH\x00R\x06revoke\x12)\n" +
 	"\x05ready\x18\x02 \x01(\v2\x11.fp.v1.WatchReadyH\x00R\x05ready\x12)\n" +
@@ -2546,7 +3243,11 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x0econfig_changed\x18\x06 \x01(\v2\x14.fp.v1.ConfigChangedH\x00R\rconfigChanged\x12N\n" +
 	"\x15app_im_config_changed\x18\a \x01(\v2\x19.fp.v1.AppIMConfigChangedH\x00R\x12appImConfigChanged\x12G\n" +
 	"\x12access_key_changed\x18\b \x01(\v2\x17.fp.v1.AccessKeyChangedH\x00R\x10accessKeyChanged\x12b\n" +
-	"\x1bwechat_subscription_changed\x18\t \x01(\v2 .fp.v1.WechatSubscriptionChangedH\x00R\x19wechatSubscriptionChangedB\a\n" +
+	"\x1bwechat_subscription_changed\x18\t \x01(\v2 .fp.v1.WechatSubscriptionChangedH\x00R\x19wechatSubscriptionChanged\x12.\n" +
+	"\tapp_event\x18\n" +
+	" \x01(\v2\x0f.fp.v1.AppEventH\x00R\bappEvent\x124\n" +
+	"\vlogin_check\x18\v \x01(\v2\x11.fp.v1.LoginCheckH\x00R\n" +
+	"loginCheckB\a\n" +
 	"\x05event\"i\n" +
 	"\x19WechatSubscriptionChanged\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1e\n" +
@@ -2596,7 +3297,7 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x0eAccessKeyUsage\x12\"\n" +
 	"\raccess_key_id\x18\x01 \x01(\tR\vaccessKeyId\x12%\n" +
 	"\x0flast_used_at_ms\x18\x02 \x01(\x03R\flastUsedAtMs\"\x1e\n" +
-	"\x1cReportAccessKeyUsageResponse2\xaa\b\n" +
+	"\x1cReportAccessKeyUsageResponse2\xf6\b\n" +
 	"\vAuthService\x12J\n" +
 	"\rSendLoginCode\x12\x1b.fp.v1.SendLoginCodeRequest\x1a\x1c.fp.v1.SendLoginCodeResponse\x122\n" +
 	"\x05Login\x12\x13.fp.v1.LoginRequest\x1a\x14.fp.v1.LoginResponse\x12P\n" +
@@ -2606,6 +3307,7 @@ const file_fp_v1_auth_proto_rawDesc = "" +
 	"\x0fExchangeAppCode\x12\x1d.fp.v1.ExchangeAppCodeRequest\x1a\x1e.fp.v1.ExchangeAppCodeResponse\x12M\n" +
 	"\x0eBindPhoneLogin\x12\x1c.fp.v1.BindPhoneLoginRequest\x1a\x1d.fp.v1.BindPhoneLoginResponse\x125\n" +
 	"\x06Logout\x12\x14.fp.v1.LogoutRequest\x1a\x15.fp.v1.LogoutResponse\x12J\n" +
+	"\rRevokeSession\x12\x1b.fp.v1.RevokeSessionRequest\x1a\x1c.fp.v1.RevokeSessionResponse\x12J\n" +
 	"\rValidateToken\x12\x1b.fp.v1.ValidateTokenRequest\x1a\x1c.fp.v1.ValidateTokenResponse\x126\n" +
 	"\x05Watch\x12\x13.fp.v1.WatchRequest\x1a\x14.fp.v1.WatchResponse(\x010\x01\x12V\n" +
 	"\x11ReportPermissions\x12\x1f.fp.v1.ReportPermissionsRequest\x1a .fp.v1.ReportPermissionsResponse\x12>\n" +
@@ -2625,7 +3327,7 @@ func file_fp_v1_auth_proto_rawDescGZIP() []byte {
 	return file_fp_v1_auth_proto_rawDescData
 }
 
-var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
+var file_fp_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
 var file_fp_v1_auth_proto_goTypes = []any{
 	(*SendLoginCodeRequest)(nil),         // 0: fp.v1.SendLoginCodeRequest
 	(*SendLoginCodeResponse)(nil),        // 1: fp.v1.SendLoginCodeResponse
@@ -2645,85 +3347,99 @@ var file_fp_v1_auth_proto_goTypes = []any{
 	(*UserInfo)(nil),                     // 15: fp.v1.UserInfo
 	(*LogoutRequest)(nil),                // 16: fp.v1.LogoutRequest
 	(*LogoutResponse)(nil),               // 17: fp.v1.LogoutResponse
-	(*ValidateTokenRequest)(nil),         // 18: fp.v1.ValidateTokenRequest
-	(*ValidateTokenResponse)(nil),        // 19: fp.v1.ValidateTokenResponse
-	(*WatchRequest)(nil),                 // 20: fp.v1.WatchRequest
-	(*WatchResponse)(nil),                // 21: fp.v1.WatchResponse
-	(*WechatSubscriptionChanged)(nil),    // 22: fp.v1.WechatSubscriptionChanged
-	(*AppIMConfigChanged)(nil),           // 23: fp.v1.AppIMConfigChanged
-	(*PolicyChanged)(nil),                // 24: fp.v1.PolicyChanged
-	(*UserRoleChanged)(nil),              // 25: fp.v1.UserRoleChanged
-	(*WatchReady)(nil),                   // 26: fp.v1.WatchReady
-	(*WatchPurge)(nil),                   // 27: fp.v1.WatchPurge
-	(*ReportPermissionsRequest)(nil),     // 28: fp.v1.ReportPermissionsRequest
-	(*PermissionPoint)(nil),              // 29: fp.v1.PermissionPoint
-	(*ReportPermissionsResponse)(nil),    // 30: fp.v1.ReportPermissionsResponse
-	(*GetPolicyRequest)(nil),             // 31: fp.v1.GetPolicyRequest
-	(*GetPolicyResponse)(nil),            // 32: fp.v1.GetPolicyResponse
-	(*ConfigChanged)(nil),                // 33: fp.v1.ConfigChanged
-	(*AccessKeyChanged)(nil),             // 34: fp.v1.AccessKeyChanged
-	(*GetAccessKeyRequest)(nil),          // 35: fp.v1.GetAccessKeyRequest
-	(*GetAccessKeyResponse)(nil),         // 36: fp.v1.GetAccessKeyResponse
-	(*ReportAccessKeyUsageRequest)(nil),  // 37: fp.v1.ReportAccessKeyUsageRequest
-	(*AccessKeyUsage)(nil),               // 38: fp.v1.AccessKeyUsage
-	(*ReportAccessKeyUsageResponse)(nil), // 39: fp.v1.ReportAccessKeyUsageResponse
-	nil,                                  // 40: fp.v1.LoginRequest.CredentialsEntry
-	(*RevokeEvent)(nil),                  // 41: fp.v1.RevokeEvent
-	(*AppPolicy)(nil),                    // 42: fp.v1.AppPolicy
+	(*RevokeSessionRequest)(nil),         // 18: fp.v1.RevokeSessionRequest
+	(*RevokeSessionResponse)(nil),        // 19: fp.v1.RevokeSessionResponse
+	(*ValidateTokenRequest)(nil),         // 20: fp.v1.ValidateTokenRequest
+	(*ValidateTokenResponse)(nil),        // 21: fp.v1.ValidateTokenResponse
+	(*WatchRequest)(nil),                 // 22: fp.v1.WatchRequest
+	(*WatchHello)(nil),                   // 23: fp.v1.WatchHello
+	(*EventAck)(nil),                     // 24: fp.v1.EventAck
+	(*LoginCheck)(nil),                   // 25: fp.v1.LoginCheck
+	(*LoginCheckReply)(nil),              // 26: fp.v1.LoginCheckReply
+	(*AppEvent)(nil),                     // 27: fp.v1.AppEvent
+	(*WatchResponse)(nil),                // 28: fp.v1.WatchResponse
+	(*WechatSubscriptionChanged)(nil),    // 29: fp.v1.WechatSubscriptionChanged
+	(*AppIMConfigChanged)(nil),           // 30: fp.v1.AppIMConfigChanged
+	(*PolicyChanged)(nil),                // 31: fp.v1.PolicyChanged
+	(*UserRoleChanged)(nil),              // 32: fp.v1.UserRoleChanged
+	(*WatchReady)(nil),                   // 33: fp.v1.WatchReady
+	(*WatchPurge)(nil),                   // 34: fp.v1.WatchPurge
+	(*ReportPermissionsRequest)(nil),     // 35: fp.v1.ReportPermissionsRequest
+	(*PermissionPoint)(nil),              // 36: fp.v1.PermissionPoint
+	(*ReportPermissionsResponse)(nil),    // 37: fp.v1.ReportPermissionsResponse
+	(*GetPolicyRequest)(nil),             // 38: fp.v1.GetPolicyRequest
+	(*GetPolicyResponse)(nil),            // 39: fp.v1.GetPolicyResponse
+	(*ConfigChanged)(nil),                // 40: fp.v1.ConfigChanged
+	(*AccessKeyChanged)(nil),             // 41: fp.v1.AccessKeyChanged
+	(*GetAccessKeyRequest)(nil),          // 42: fp.v1.GetAccessKeyRequest
+	(*GetAccessKeyResponse)(nil),         // 43: fp.v1.GetAccessKeyResponse
+	(*ReportAccessKeyUsageRequest)(nil),  // 44: fp.v1.ReportAccessKeyUsageRequest
+	(*AccessKeyUsage)(nil),               // 45: fp.v1.AccessKeyUsage
+	(*ReportAccessKeyUsageResponse)(nil), // 46: fp.v1.ReportAccessKeyUsageResponse
+	nil,                                  // 47: fp.v1.LoginRequest.CredentialsEntry
+	(*RevokeEvent)(nil),                  // 48: fp.v1.RevokeEvent
+	(*AppPolicy)(nil),                    // 49: fp.v1.AppPolicy
 }
 var file_fp_v1_auth_proto_depIdxs = []int32{
-	40, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
+	47, // 0: fp.v1.LoginRequest.credentials:type_name -> fp.v1.LoginRequest.CredentialsEntry
 	15, // 1: fp.v1.LoginResponse.user:type_name -> fp.v1.UserInfo
 	3,  // 2: fp.v1.OAuthLoginResult.login:type_name -> fp.v1.LoginResponse
 	6,  // 3: fp.v1.ExchangeOAuthTicketResponse.result:type_name -> fp.v1.OAuthLoginResult
 	6,  // 4: fp.v1.PollOAuthLoginResponse.result:type_name -> fp.v1.OAuthLoginResult
 	6,  // 5: fp.v1.ExchangeAppCodeResponse.result:type_name -> fp.v1.OAuthLoginResult
 	3,  // 6: fp.v1.BindPhoneLoginResponse.login:type_name -> fp.v1.LoginResponse
-	41, // 7: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
-	26, // 8: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
-	27, // 9: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
-	24, // 10: fp.v1.WatchResponse.policy_changed:type_name -> fp.v1.PolicyChanged
-	25, // 11: fp.v1.WatchResponse.user_role_changed:type_name -> fp.v1.UserRoleChanged
-	33, // 12: fp.v1.WatchResponse.config_changed:type_name -> fp.v1.ConfigChanged
-	23, // 13: fp.v1.WatchResponse.app_im_config_changed:type_name -> fp.v1.AppIMConfigChanged
-	34, // 14: fp.v1.WatchResponse.access_key_changed:type_name -> fp.v1.AccessKeyChanged
-	22, // 15: fp.v1.WatchResponse.wechat_subscription_changed:type_name -> fp.v1.WechatSubscriptionChanged
-	29, // 16: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
-	42, // 17: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
-	38, // 18: fp.v1.ReportAccessKeyUsageRequest.usages:type_name -> fp.v1.AccessKeyUsage
-	0,  // 19: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
-	2,  // 20: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
-	4,  // 21: fp.v1.AuthService.StartOAuthLogin:input_type -> fp.v1.StartOAuthLoginRequest
-	7,  // 22: fp.v1.AuthService.ExchangeOAuthTicket:input_type -> fp.v1.ExchangeOAuthTicketRequest
-	9,  // 23: fp.v1.AuthService.PollOAuthLogin:input_type -> fp.v1.PollOAuthLoginRequest
-	11, // 24: fp.v1.AuthService.ExchangeAppCode:input_type -> fp.v1.ExchangeAppCodeRequest
-	13, // 25: fp.v1.AuthService.BindPhoneLogin:input_type -> fp.v1.BindPhoneLoginRequest
-	16, // 26: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
-	18, // 27: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
-	20, // 28: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
-	28, // 29: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
-	31, // 30: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
-	35, // 31: fp.v1.AuthService.GetAccessKey:input_type -> fp.v1.GetAccessKeyRequest
-	37, // 32: fp.v1.AuthService.ReportAccessKeyUsage:input_type -> fp.v1.ReportAccessKeyUsageRequest
-	1,  // 33: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
-	3,  // 34: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
-	5,  // 35: fp.v1.AuthService.StartOAuthLogin:output_type -> fp.v1.StartOAuthLoginResponse
-	8,  // 36: fp.v1.AuthService.ExchangeOAuthTicket:output_type -> fp.v1.ExchangeOAuthTicketResponse
-	10, // 37: fp.v1.AuthService.PollOAuthLogin:output_type -> fp.v1.PollOAuthLoginResponse
-	12, // 38: fp.v1.AuthService.ExchangeAppCode:output_type -> fp.v1.ExchangeAppCodeResponse
-	14, // 39: fp.v1.AuthService.BindPhoneLogin:output_type -> fp.v1.BindPhoneLoginResponse
-	17, // 40: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
-	19, // 41: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
-	21, // 42: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
-	30, // 43: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
-	32, // 44: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
-	36, // 45: fp.v1.AuthService.GetAccessKey:output_type -> fp.v1.GetAccessKeyResponse
-	39, // 46: fp.v1.AuthService.ReportAccessKeyUsage:output_type -> fp.v1.ReportAccessKeyUsageResponse
-	33, // [33:47] is the sub-list for method output_type
-	19, // [19:33] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	23, // 7: fp.v1.WatchRequest.hello:type_name -> fp.v1.WatchHello
+	24, // 8: fp.v1.WatchRequest.ack:type_name -> fp.v1.EventAck
+	26, // 9: fp.v1.WatchRequest.reply:type_name -> fp.v1.LoginCheckReply
+	48, // 10: fp.v1.WatchResponse.revoke:type_name -> fp.v1.RevokeEvent
+	33, // 11: fp.v1.WatchResponse.ready:type_name -> fp.v1.WatchReady
+	34, // 12: fp.v1.WatchResponse.purge:type_name -> fp.v1.WatchPurge
+	31, // 13: fp.v1.WatchResponse.policy_changed:type_name -> fp.v1.PolicyChanged
+	32, // 14: fp.v1.WatchResponse.user_role_changed:type_name -> fp.v1.UserRoleChanged
+	40, // 15: fp.v1.WatchResponse.config_changed:type_name -> fp.v1.ConfigChanged
+	30, // 16: fp.v1.WatchResponse.app_im_config_changed:type_name -> fp.v1.AppIMConfigChanged
+	41, // 17: fp.v1.WatchResponse.access_key_changed:type_name -> fp.v1.AccessKeyChanged
+	29, // 18: fp.v1.WatchResponse.wechat_subscription_changed:type_name -> fp.v1.WechatSubscriptionChanged
+	27, // 19: fp.v1.WatchResponse.app_event:type_name -> fp.v1.AppEvent
+	25, // 20: fp.v1.WatchResponse.login_check:type_name -> fp.v1.LoginCheck
+	36, // 21: fp.v1.ReportPermissionsRequest.points:type_name -> fp.v1.PermissionPoint
+	49, // 22: fp.v1.GetPolicyResponse.policy:type_name -> fp.v1.AppPolicy
+	45, // 23: fp.v1.ReportAccessKeyUsageRequest.usages:type_name -> fp.v1.AccessKeyUsage
+	0,  // 24: fp.v1.AuthService.SendLoginCode:input_type -> fp.v1.SendLoginCodeRequest
+	2,  // 25: fp.v1.AuthService.Login:input_type -> fp.v1.LoginRequest
+	4,  // 26: fp.v1.AuthService.StartOAuthLogin:input_type -> fp.v1.StartOAuthLoginRequest
+	7,  // 27: fp.v1.AuthService.ExchangeOAuthTicket:input_type -> fp.v1.ExchangeOAuthTicketRequest
+	9,  // 28: fp.v1.AuthService.PollOAuthLogin:input_type -> fp.v1.PollOAuthLoginRequest
+	11, // 29: fp.v1.AuthService.ExchangeAppCode:input_type -> fp.v1.ExchangeAppCodeRequest
+	13, // 30: fp.v1.AuthService.BindPhoneLogin:input_type -> fp.v1.BindPhoneLoginRequest
+	16, // 31: fp.v1.AuthService.Logout:input_type -> fp.v1.LogoutRequest
+	18, // 32: fp.v1.AuthService.RevokeSession:input_type -> fp.v1.RevokeSessionRequest
+	20, // 33: fp.v1.AuthService.ValidateToken:input_type -> fp.v1.ValidateTokenRequest
+	22, // 34: fp.v1.AuthService.Watch:input_type -> fp.v1.WatchRequest
+	35, // 35: fp.v1.AuthService.ReportPermissions:input_type -> fp.v1.ReportPermissionsRequest
+	38, // 36: fp.v1.AuthService.GetPolicy:input_type -> fp.v1.GetPolicyRequest
+	42, // 37: fp.v1.AuthService.GetAccessKey:input_type -> fp.v1.GetAccessKeyRequest
+	44, // 38: fp.v1.AuthService.ReportAccessKeyUsage:input_type -> fp.v1.ReportAccessKeyUsageRequest
+	1,  // 39: fp.v1.AuthService.SendLoginCode:output_type -> fp.v1.SendLoginCodeResponse
+	3,  // 40: fp.v1.AuthService.Login:output_type -> fp.v1.LoginResponse
+	5,  // 41: fp.v1.AuthService.StartOAuthLogin:output_type -> fp.v1.StartOAuthLoginResponse
+	8,  // 42: fp.v1.AuthService.ExchangeOAuthTicket:output_type -> fp.v1.ExchangeOAuthTicketResponse
+	10, // 43: fp.v1.AuthService.PollOAuthLogin:output_type -> fp.v1.PollOAuthLoginResponse
+	12, // 44: fp.v1.AuthService.ExchangeAppCode:output_type -> fp.v1.ExchangeAppCodeResponse
+	14, // 45: fp.v1.AuthService.BindPhoneLogin:output_type -> fp.v1.BindPhoneLoginResponse
+	17, // 46: fp.v1.AuthService.Logout:output_type -> fp.v1.LogoutResponse
+	19, // 47: fp.v1.AuthService.RevokeSession:output_type -> fp.v1.RevokeSessionResponse
+	21, // 48: fp.v1.AuthService.ValidateToken:output_type -> fp.v1.ValidateTokenResponse
+	28, // 49: fp.v1.AuthService.Watch:output_type -> fp.v1.WatchResponse
+	37, // 50: fp.v1.AuthService.ReportPermissions:output_type -> fp.v1.ReportPermissionsResponse
+	39, // 51: fp.v1.AuthService.GetPolicy:output_type -> fp.v1.GetPolicyResponse
+	43, // 52: fp.v1.AuthService.GetAccessKey:output_type -> fp.v1.GetAccessKeyResponse
+	46, // 53: fp.v1.AuthService.ReportAccessKeyUsage:output_type -> fp.v1.ReportAccessKeyUsageResponse
+	39, // [39:54] is the sub-list for method output_type
+	24, // [24:39] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_fp_v1_auth_proto_init() }
@@ -2732,7 +3448,12 @@ func file_fp_v1_auth_proto_init() {
 		return
 	}
 	file_fp_v1_common_proto_init()
-	file_fp_v1_auth_proto_msgTypes[21].OneofWrappers = []any{
+	file_fp_v1_auth_proto_msgTypes[22].OneofWrappers = []any{
+		(*WatchRequest_Hello)(nil),
+		(*WatchRequest_Ack)(nil),
+		(*WatchRequest_Reply)(nil),
+	}
+	file_fp_v1_auth_proto_msgTypes[28].OneofWrappers = []any{
 		(*WatchResponse_Revoke)(nil),
 		(*WatchResponse_Ready)(nil),
 		(*WatchResponse_Purge)(nil),
@@ -2742,6 +3463,8 @@ func file_fp_v1_auth_proto_init() {
 		(*WatchResponse_AppImConfigChanged)(nil),
 		(*WatchResponse_AccessKeyChanged)(nil),
 		(*WatchResponse_WechatSubscriptionChanged)(nil),
+		(*WatchResponse_AppEvent)(nil),
+		(*WatchResponse_LoginCheck)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2749,7 +3472,7 @@ func file_fp_v1_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fp_v1_auth_proto_rawDesc), len(file_fp_v1_auth_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   41,
+			NumMessages:   48,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

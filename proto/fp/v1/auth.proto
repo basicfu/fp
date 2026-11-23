@@ -37,6 +37,10 @@ service AuthService {
   // Logout 撤销一个 token。
   rpc Logout(LogoutRequest) returns (LogoutResponse);
 
+  // RevokeSession 按会话 id 撤销一个会话（如业务方「移除这台设备」）。被撤销的 token 再校验得到 KICKED，
+  // 而不是 TOKEN_INVALID，客户端据此提示「已被移出账号」。
+  rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
+
   // ValidateToken 是 SDK 回源校验的入口。
   rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
 
@@ -82,6 +86,11 @@ message LoginRequest {
   string user_agent = 4;
   // mobile 决定适用哪一档空闲超时。
   bool mobile = 5;
+  // device_pub（32 字节公钥的 hex，64 个字符，别的写法回 INVALID_ARGUMENT）与 client_ref 刻进会话：
+  // 应用开了会话绑定设备时，之后每次请求按 device_pub 验签，
+  // client_ref 是应用侧的设备 id，随 ValidateToken 带回。不绑设备的应用不填。
+  string device_pub = 6;
+  string client_ref = 7;
 }
 
 // LoginResponse 是登录成功的结果。
@@ -133,6 +142,9 @@ message ExchangeOAuthTicketRequest {
   string ip = 2;
   string user_agent = 3;
   bool mobile = 4;
+  // device_pub / client_ref 同 LoginRequest。
+  string device_pub = 5;
+  string client_ref = 6;
 }
 
 // ExchangeOAuthTicketResponse 是换票据结果。
@@ -146,6 +158,9 @@ message PollOAuthLoginRequest {
   string ip = 2;
   string user_agent = 3;
   bool mobile = 4;
+  // device_pub / client_ref 同 LoginRequest。
+  string device_pub = 5;
+  string client_ref = 6;
 }
 
 // PollOAuthLoginResponse 是轮询结果。
@@ -161,6 +176,9 @@ message ExchangeAppCodeRequest {
   string ip = 3;
   string user_agent = 4;
   bool mobile = 5;
+  // device_pub / client_ref 同 LoginRequest。
+  string device_pub = 6;
+  string client_ref = 7;
 }
 
 // ExchangeAppCodeResponse 是换 code 的结果。
@@ -176,6 +194,9 @@ message BindPhoneLoginRequest {
   string ip = 4;
   string user_agent = 5;
   bool mobile = 6;
+  // device_pub / client_ref 同 LoginRequest。
+  string device_pub = 7;
+  string client_ref = 8;
 }
 
 // BindPhoneLoginResponse 是绑手机登录成功的结果。
@@ -206,6 +227,21 @@ message LogoutRequest {
 
 // LogoutResponse 是登出结果。重复登出也返回成功。
 message LogoutResponse {}
+
+// RevokeSessionRequest 是一次按会话撤销。
+message RevokeSessionRequest {
+  string user_id = 1;
+  // session_id 不属于该用户、或会话已不存在时什么都不做，revoked 为 0。
+  string session_id = 2;
+  // reason 目前只接受 "kick"。
+  string reason = 3;
+}
+
+// RevokeSessionResponse 是撤销结果。
+message RevokeSessionResponse {
+  // revoked 是作废的 token 数：轮换过渡期内一个会话可能有新旧两个。
+  int32 revoked = 1;
+}
 
 // ValidateTokenRequest 是一次回源校验。
 message ValidateTokenRequest {
@@ -248,13 +284,75 @@ message ValidateTokenResponse {
   // 权限点），用户的角色跟着身份一起来。把 casbin 的 g 规则（用户 → 角色）
   // 全量下发给每个 SDK 实例是不现实的——它随用户数增长。
   repeated string roles = 6;
+
+  // client_ref / device_pub 是登录时刻进会话的设备信息，没绑设备的会话为空。
+  // 业务方用 client_ref 核对「这个 token 是不是这台设备的」。
+  string client_ref = 7;
+  string device_pub = 8;
 }
 
-// WatchRequest 是建流请求。
+// WatchRequest 是客户端在 Watch 流上发的消息。应用身份来自 metadata，不在消息体里重复。
 //
-// 目前无字段：应用身份来自 metadata，不在消息体里重复。
-// 保留消息本身是为了将来能在同一条流上订阅更多事件类型。
-message WatchRequest {}
+// 什么都不发的老 SDK 照旧只收广播类事件（撤销、配置变更等）。
+message WatchRequest {
+  oneof msg {
+    // hello 声明本流能处理的能力，建流后发一次。
+    WatchHello hello = 1;
+    // ack 确认已处理完的业务事件。
+    EventAck ack = 2;
+    // reply 回答一次登录校验（WatchResponse.login_check）。
+    LoginCheckReply reply = 3;
+  }
+}
+
+// WatchHello 是能力声明。
+message WatchHello {
+  // caps 取 "app_events"（收业务事件并确认）、"login_check"（回答登录校验）。不认识的能力服务端忽略。
+  repeated string caps = 1;
+}
+
+// EventAck 确认一批业务事件，ids 是 AppEvent.id。
+message EventAck {
+  repeated string ids = 1;
+}
+
+// LoginCheck 是登录前 fp 同步问应用「这台设备能不能登录」，只发给 hello 里声明了 "login_check" 的流。
+//
+// 应用须在 3 秒内经同一条流回 LoginCheckReply，超时按登录失败处理。
+message LoginCheck {
+  string call_id = 1;
+  // device_header 是客户端设备头原文（应用配置的请求头），由应用自己解析。
+  string device_header = 2;
+  string ip = 3;
+}
+
+// LoginCheckReply 是应用对 LoginCheck 的回答。
+message LoginCheckReply {
+  string call_id = 1;
+  bool allow = 2;
+  // client_ref 是应用给这台设备的标识，放行时必填，刻进会话、随 ValidateToken 带回。
+  string client_ref = 3;
+  // code / msg 仅拒绝时：原样作为登录错误返回给客户端（如 version_too_low）。
+  string code = 4;
+  string msg = 5;
+}
+
+// AppEvent 是一条业务事件（登录成功、退出登录、账号删除、微信订阅变化）。
+//
+// 与其它推送不同，它持久化在 fp、要确认：一条事件只投给本应用的一条流，确认前会重投
+// （10 秒没确认就换流重投），断线重连后补发。业务方按 id 幂等处理。
+message AppEvent {
+  string id = 1;
+  // seq 是本应用内递增的序号。同一用户的事件按 seq 先后到达（换流重投时可能少量乱序）。
+  int64 seq = 2;
+  // kind 取 login_succeeded / logged_out / account_deleted / wechat_subscription，
+  // 用字符串而不是 enum：新增种类时老 SDK 能原样透传。
+  string kind = 3;
+  string user_id = 4;
+  // payload 是该种类的 JSON 内容。
+  bytes payload = 5;
+  int64 created_at_ms = 6;
+}
 
 // WatchResponse 是一条推送事件。
 //
@@ -285,6 +383,10 @@ message WatchResponse {
     AccessKeyChanged access_key_changed = 8;
     // wechat_subscription_changed 表示某个用户的微信通知状态可能变了。fp-im 的流不会收到。
     WechatSubscriptionChanged wechat_subscription_changed = 9;
+    // app_event 是一条要确认的业务事件，只发给 hello 里声明了 "app_events" 的流。
+    AppEvent app_event = 10;
+    // login_check 是一次登录校验，只发给 hello 里声明了 "login_check" 的流。
+    LoginCheck login_check = 11;
   }
 }
 

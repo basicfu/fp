@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -35,6 +36,8 @@ type applicationDTO struct {
 	DefaultRoleKey string           `json:"defaultRoleKey"`
 	Session        sessionPolicyDTO `json:"session"`
 	IM             imConfigDTO      `json:"im"`
+	Domains        []string         `json:"domains"`
+	Account        accountConfigDTO `json:"account"`
 	CreatedAt      int64            `json:"createdAt"`
 	UpdatedAt      int64            `json:"updatedAt"`
 }
@@ -56,6 +59,32 @@ type imBizAuthDTO struct {
 	VerifyURL string `json:"verifyUrl"`
 	TimeoutMs int32  `json:"timeoutMs"`
 	CacheSize int32  `json:"cacheSize"`
+}
+
+type accountConfigDTO struct {
+	Enabled         bool     `json:"enabled"`
+	LoginTypes      []string `json:"loginTypes"`
+	EditableFields  []string `json:"editableFields"`
+	DeviceBinding   bool     `json:"deviceBinding"`
+	DeviceHeader    string   `json:"deviceHeader"`
+	Events          bool     `json:"events"`
+	WechatReturnURL string   `json:"wechatReturnUrl"`
+}
+
+func toAccountConfigDTO(c domain.AccountConfig) accountConfigDTO {
+	return accountConfigDTO{
+		Enabled: c.Enabled, LoginTypes: nonNil(c.LoginTypes), EditableFields: nonNil(c.EditableFields),
+		DeviceBinding: c.DeviceBinding, DeviceHeader: c.DeviceHeader, Events: c.Events,
+		WechatReturnURL: c.WechatReturnURL,
+	}
+}
+
+// nonNil 让空列表序列化成 [] 而不是 null，前端不用到处判空。
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func toIMConfigDTO(c domain.IMConfig) imConfigDTO {
@@ -82,6 +111,8 @@ func toApplicationDTO(a domain.Application) applicationDTO {
 			TokenCacheTTLSeconds:     a.Session.TokenCacheTTLSeconds,
 		},
 		IM:        toIMConfigDTO(a.IM),
+		Domains:   nonNil(a.Domains),
+		Account:   toAccountConfigDTO(a.Account),
 		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 }
@@ -110,6 +141,36 @@ func (h *applicationHandler) updateIM(w http.ResponseWriter, r *http.Request) {
 		cfg.BizAuth = &domain.IMBizAuth{VerifyURL: b.VerifyURL, TimeoutMs: b.TimeoutMs, CacheSize: b.CacheSize}
 	}
 	app, err := h.svc.SetIMConfig(r.Context(), id, cfg)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toApplicationDTO(*app))
+}
+
+type updateAccountRequest struct {
+	Domains []string         `json:"domains"`
+	Account accountConfigDTO `json:"account"`
+}
+
+// updateAccount 全量替换应用的域名与账号接口配置，语义同 /im 与 /session。
+func (h *applicationHandler) updateAccount(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req updateAccountRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	app, err := h.svc.SetAccount(r.Context(), id, req.Domains, domain.AccountConfig{
+		Enabled: req.Account.Enabled, LoginTypes: req.Account.LoginTypes,
+		EditableFields: req.Account.EditableFields, DeviceBinding: req.Account.DeviceBinding,
+		DeviceHeader: req.Account.DeviceHeader, Events: req.Account.Events,
+		WechatReturnURL: strings.TrimSpace(req.Account.WechatReturnURL),
+	})
 	if err != nil {
 		writeError(w, err)
 		return

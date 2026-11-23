@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -35,6 +38,7 @@ const applicationColumns = `
 	rotate_interval_seconds, extend_interval_seconds, token_cache_ttl_seconds,
 	cookie_domain, redirect_uris, grant_types, default_role_key,
 	im_enabled, im_conn_policy, im_conn_limit, im_allow_guest, im_guest_ip_rate, im_biz_auth,
+	domains, account,
 	(extract(epoch from created_at) * 1000)::bigint,
 	(extract(epoch from updated_at) * 1000)::bigint`
 
@@ -52,6 +56,28 @@ type ApplicationService struct {
 	schemas ConnectorSchemas
 	// configPub 为 nil 时 SetIMConfig 只写库不推送，见 WithIMConfigPublisher。
 	configPub IMConfigPublisher
+
+	// 本实例的应用缓存：Host → 应用（账号接口每个请求认应用）与 id → 应用（写业务事件前看开关）。
+	// cacheGen 每次清缓存加一：查库前记下、写缓存时核对，查库期间被清过就不写，免得把改之前的旧值写回去。
+	cacheMu   sync.Mutex
+	cacheGen  uint64
+	cacheMax  int
+	hostCache map[string]appEntry
+	idCache   map[uuid.UUID]appEntry
+	// afterLoad 只给测试在查库与写缓存之间插动作。
+	afterLoad func()
+}
+
+// appCacheTTL 是应用缓存的存活上限。多实例间没有失效广播，别的实例上改了配置最长这么久后才生效。
+// appCacheMax 是每张缓存的条目上限：满了先清过期的，仍满就不再收负缓存（存在的应用条目数本来有限）。
+const (
+	appCacheTTL = 10 * time.Second
+	appCacheMax = 4096
+)
+
+type appEntry struct {
+	app *domain.Application // nil 表示没有这个应用（负缓存，挡住乱填 Host 的穿透）
+	exp time.Time
 }
 
 // NewApplicationService 构造 ApplicationService。
@@ -81,7 +107,7 @@ type IMConfigPublisher interface {
 }
 
 func NewApplicationService(pool *pgxpool.Pool, schemas ConnectorSchemas, opts ...ApplicationOption) *ApplicationService {
-	s := &ApplicationService{pool: pool, schemas: schemas}
+	s := &ApplicationService{pool: pool, schemas: schemas, cacheMax: appCacheMax}
 	for _, o := range opts {
 		o(s)
 	}
@@ -317,6 +343,7 @@ func (s *ApplicationService) UpdateSessionPolicy(ctx context.Context, id uuid.UU
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新会话策略: %w", err)
 	}
+	s.invalidateCache()
 	return app, nil
 }
 
@@ -357,6 +384,7 @@ func (s *ApplicationService) Update(ctx context.Context, id uuid.UUID, name, coo
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新应用: %w", err)
 	}
+	s.invalidateCache()
 	return app, nil
 }
 
@@ -387,6 +415,7 @@ func (s *ApplicationService) SetStatus(ctx context.Context, id uuid.UUID, status
 	if err != nil {
 		return nil, fmt.Errorf("service: 更新应用状态: %w", err)
 	}
+	s.invalidateCache()
 	return app, nil
 }
 
@@ -417,6 +446,7 @@ func (s *ApplicationService) Delete(ctx context.Context, id uuid.UUID) error {
 	if _, err := s.pool.Exec(ctx, `DELETE FROM application WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("service: 删除应用: %w", err)
 	}
+	s.invalidateCache()
 	return nil
 }
 
@@ -600,13 +630,14 @@ func (s *ApplicationService) ListConnectors(ctx context.Context, appID uuid.UUID
 
 func scanApplication(r rowScanner) (*domain.Application, error) {
 	var app domain.Application
-	var bizAuth []byte
+	var bizAuth, account []byte
 	err := r.Scan(
 		&app.ID, &app.Name, &app.Code, &app.AppID, &app.Status,
 		&app.Session.IdleTimeoutSeconds, &app.Session.IdleTimeoutMobileSeconds, &app.Session.MaxLifetimeSeconds,
 		&app.Session.RotateIntervalSeconds, &app.Session.ExtendIntervalSeconds, &app.Session.TokenCacheTTLSeconds,
 		&app.CookieDomain, &app.RedirectURIs, &app.GrantTypes, &app.DefaultRoleKey,
 		&app.IM.Enabled, &app.IM.ConnPolicy, &app.IM.ConnLimit, &app.IM.AllowGuest, &app.IM.GuestIPRate, &bizAuth,
+		&app.Domains, &account,
 		&app.CreatedAt, &app.UpdatedAt,
 	)
 	if err != nil {
@@ -619,6 +650,14 @@ func scanApplication(r rowScanner) (*domain.Application, error) {
 			return nil, fmt.Errorf("service: 解析 im_biz_auth: %w", err)
 		}
 		app.IM.BizAuth = &b
+	}
+	if len(account) > 0 {
+		if err := json.Unmarshal(account, &app.Account); err != nil {
+			return nil, fmt.Errorf("service: 解析 account: %w", err)
+		}
+	}
+	if app.Domains == nil {
+		app.Domains = []string{}
 	}
 	return &app, nil
 }
@@ -647,6 +686,7 @@ func (s *ApplicationService) SetDefaultRole(ctx context.Context, id uuid.UUID, r
 	if err != nil {
 		return nil, fmt.Errorf("service: 设置默认角色: %w", err)
 	}
+	s.invalidateCache()
 	return app, nil
 }
 
@@ -693,6 +733,7 @@ func (s *ApplicationService) SetIMConfig(ctx context.Context, id uuid.UUID, cfg 
 			slog.Error("service: 广播 IM 配置变更失败", "appId", app.AppID, "err", err)
 		}
 	}
+	s.invalidateCache()
 	return app, nil
 }
 
@@ -705,4 +746,184 @@ func (s *ApplicationService) maskConnectorConfig(connectorType string, config ma
 		return map[string]any{}
 	}
 	return domain.MaskSecrets(fields, config)
+}
+
+// SetAccount 整体替换应用的域名与账号接口配置。
+//
+// 域名先在事务里腾空再写入：application_domain 的主键保证全局唯一，撞车时
+// 整个事务回滚，application 上的数组列不会留下半截结果。
+func (s *ApplicationService) SetAccount(ctx context.Context, id uuid.UUID, domains []string, cfg domain.AccountConfig) (*domain.Application, error) {
+	domains, err := domain.NormalizeDomains(domains)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if cfg.LoginTypes == nil {
+		cfg.LoginTypes = []string{}
+	}
+	if cfg.EditableFields == nil {
+		cfg.EditableFields = []string{}
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("service: 序列化 account: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("service: 开启事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		UPDATE application SET domains = $2, account = $3, updated_at = now()
+		WHERE id = $1
+		RETURNING `+applicationColumns, id, domains, raw)
+	app, err := scanApplication(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: 更新账号配置: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM application_domain WHERE app_id = $1`, id); err != nil {
+		return nil, fmt.Errorf("service: 清理旧域名: %w", err)
+	}
+	for _, d := range domains {
+		if _, err := tx.Exec(ctx, `INSERT INTO application_domain (domain, app_id) VALUES ($1, $2)`, d, id); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+				return nil, domain.Failf(domain.ErrConflict, domain.CodeDomainTaken, "域名 %q 已被其他应用使用", d)
+			}
+			return nil, fmt.Errorf("service: 写入域名: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("service: 提交账号配置: %w", err)
+	}
+	s.invalidateCache()
+	return app, nil
+}
+
+// GetActiveByHost 按请求 Host 取应用：去端口、转小写后精确匹配，且应用须启用。
+// 找不到与已停用对调用方都是 CodeAppNotFound，不让外部据此探测域名归属。
+func (s *ApplicationService) GetActiveByHost(ctx context.Context, host string) (*domain.Application, error) {
+	notFound := domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
+	host = normalizeHost(host)
+	// 不像域名的 Host 不可能登记过，不查库也不进缓存。
+	if !domain.ValidDomain(host) {
+		return nil, notFound
+	}
+	now := time.Now()
+	s.cacheMu.Lock()
+	e, ok := s.hostCache[host]
+	gen := s.cacheGen
+	s.cacheMu.Unlock()
+	if !ok || now.After(e.exp) {
+		app, err := s.loadByHost(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		e = appEntry{app: app, exp: now.Add(appCacheTTL)}
+		s.cacheMu.Lock()
+		s.hostCache = storeEntry(s, s.hostCache, host, e, gen, now)
+		s.cacheMu.Unlock()
+	}
+	if e.app == nil || e.app.Status != domain.ApplicationStatusActive {
+		return nil, notFound
+	}
+	cp := *e.app
+	return &cp, nil
+}
+
+// GetByIDCached 同 GetByID，但走本实例缓存（最长 appCacheTTL 看不到别的实例上的改动）。
+// 给高频且容忍短暂延迟的读用，如每写一条业务事件前看应用开没开事件。
+func (s *ApplicationService) GetByIDCached(ctx context.Context, id uuid.UUID) (*domain.Application, error) {
+	now := time.Now()
+	s.cacheMu.Lock()
+	e, ok := s.idCache[id]
+	gen := s.cacheGen
+	s.cacheMu.Unlock()
+	if !ok || now.After(e.exp) {
+		app, err := s.GetByID(ctx, id)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return nil, err
+		}
+		e = appEntry{app: app, exp: now.Add(appCacheTTL)}
+		s.cacheMu.Lock()
+		s.idCache = storeEntry(s, s.idCache, id, e, gen, now)
+		s.cacheMu.Unlock()
+	}
+	if e.app == nil {
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeAppNotFound, "应用不存在")
+	}
+	cp := *e.app
+	return &cp, nil
+}
+
+func (s *ApplicationService) loadByHost(ctx context.Context, host string) (*domain.Application, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT `+applicationColumns+` FROM application
+		WHERE id = (SELECT app_id FROM application_domain WHERE domain = $1)`, host)
+	app, err := scanApplication(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: 按域名查询应用: %w", err)
+	}
+	return app, nil
+}
+
+// storeEntry 把查库结果写进缓存 m 并返回它，调用方持有 cacheMu。gen 是查库前记下的代数，查库期间缓存被清过就不写。
+func storeEntry[K comparable](s *ApplicationService, m map[K]appEntry, k K, e appEntry, gen uint64, now time.Time) map[K]appEntry {
+	if s.afterLoad != nil {
+		hook := s.afterLoad
+		s.cacheMu.Unlock()
+		hook()
+		s.cacheMu.Lock()
+	}
+	if gen != s.cacheGen {
+		return m
+	}
+	if m == nil {
+		m = map[K]appEntry{}
+	}
+	if len(m) >= s.cacheMax {
+		for key, v := range m {
+			if now.After(v.exp) {
+				delete(m, key)
+			}
+		}
+		if len(m) >= s.cacheMax && e.app == nil {
+			return m
+		}
+	}
+	m[k] = e
+	return m
+}
+
+// invalidateCache 清空本实例的应用缓存。应用的任何字段变更都可能影响
+// 缓存里的副本（状态、账号配置），整张清掉比逐项判断可靠。
+func (s *ApplicationService) invalidateCache() {
+	s.cacheMu.Lock()
+	s.cacheGen++
+	s.hostCache = nil
+	s.idCache = nil
+	s.cacheMu.Unlock()
+}
+
+// normalizeHost 去掉端口并转小写。IPv6 字面量带方括号，不会出现在域名里，
+// 原样返回即可（必然匹配不到）。
+func normalizeHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if strings.HasPrefix(host, "[") {
+		return host
+	}
+	if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	return host
 }

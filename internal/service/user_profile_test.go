@@ -14,6 +14,7 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/testsupport"
 )
@@ -32,7 +33,7 @@ type profileEnv struct {
 func newProfileEnv(t *testing.T) *profileEnv {
 	t.Helper()
 	pool := testsupport.NewTestDB(t)
-	return &profileEnv{users: service.NewUserService(pool), pool: pool}
+	return &profileEnv{users: service.NewUserService(pool, service.WithObjectStore(objstore.NewMemory())), pool: pool}
 }
 
 func (e *profileEnv) newUser(t *testing.T, phone, nickname string) *domain.User {
@@ -81,26 +82,25 @@ func TestUpdateAvatarStoresReplacesAndClears(t *testing.T) {
 	ctx := context.Background()
 	u := e.newUser(t, "13800138000", "小明")
 
-	// 存
+	// 存：图片在对象存储里，PG 只留哈希
 	p, err := e.users.UpdateAvatar(ctx, u.ID, testPNG)
 	if err != nil {
 		t.Fatalf("UpdateAvatar: %v", err)
 	}
 	pngHash := domain.AvatarHash(testPNG)
-	if p.User.AvatarHash != pngHash {
-		t.Fatalf("返回的 AvatarHash = %q, want %q", p.User.AvatarHash, pngHash)
+	if p.User.AvatarHash != pngHash || p.AvatarURL == "" {
+		t.Fatalf("返回的 AvatarHash = %q AvatarURL = %q", p.User.AvatarHash, p.AvatarURL)
 	}
 	userHash, rows, rowHash, ct, data := e.storedAvatar(t, u.ID)
-	if userHash != pngHash || rows != 1 || rowHash != pngHash || ct != "image/png" || !bytes.Equal(data, testPNG) {
-		t.Fatalf("落库不一致: app_user=%q rows=%d user_avatar=%q type=%q 字节相同=%v",
-			userHash, rows, rowHash, ct, bytes.Equal(data, testPNG))
+	if userHash != pngHash || rows != 1 || rowHash != pngHash || ct != "image/png" || len(data) != 0 {
+		t.Fatalf("落库不一致: app_user=%q rows=%d user_avatar=%q type=%q data=%d 字节",
+			userHash, rows, rowHash, ct, len(data))
 	}
-	gotType, gotImage, err := e.users.GetAvatar(ctx, pngHash)
-	if err != nil || gotType != "image/png" || !bytes.Equal(gotImage, testPNG) {
-		t.Fatalf("GetAvatar = %q, %d 字节, %v——取回的应与存入的逐字节相同", gotType, len(gotImage), err)
-	}
+	// 字节不再从 PG 取。
+	_, _, err = e.users.GetAvatar(ctx, pngHash)
+	wantCode(t, err, domain.CodeAvatarNotFound, domain.ErrNotFound)
 
-	// 替换：仍然只有一行，旧哈希取不到了
+	// 替换：仍然只有一行，旧哈希对不上了
 	p, err = e.users.UpdateAvatar(ctx, u.ID, testJPEG)
 	if err != nil {
 		t.Fatalf("替换头像: %v", err)
@@ -111,7 +111,7 @@ func TestUpdateAvatarStoresReplacesAndClears(t *testing.T) {
 		t.Fatalf("替换后不一致: 返回=%q app_user=%q rows=%d user_avatar=%q type=%q",
 			p.User.AvatarHash, userHash, rows, rowHash, ct)
 	}
-	_, _, err = e.users.GetAvatar(ctx, pngHash)
+	_, err = e.users.AvatarURLByHash(ctx, pngHash)
 	wantCode(t, err, domain.CodeAvatarNotFound, domain.ErrNotFound)
 
 	// 清除：nil 与空切片等价
@@ -124,11 +124,22 @@ func TestUpdateAvatarStoresReplacesAndClears(t *testing.T) {
 			t.Fatalf("清除头像: %v", err)
 		}
 		userHash, rows, _, _, _ = e.storedAvatar(t, u.ID)
-		if p.User.AvatarHash != "" || userHash != "" || rows != 0 {
-			t.Fatalf("清除后: 返回=%q app_user=%q rows=%d，都应为空", p.User.AvatarHash, userHash, rows)
+		if p.User.AvatarHash != "" || userHash != "" || rows != 0 || p.AvatarURL != "" {
+			t.Fatalf("清除后: 返回=%q app_user=%q rows=%d url=%q，都应为空", p.User.AvatarHash, userHash, rows, p.AvatarURL)
 		}
-		_, _, err = e.users.GetAvatar(ctx, jpegHash)
+		_, err = e.users.AvatarURLByHash(ctx, jpegHash)
 		wantCode(t, err, domain.CodeAvatarNotFound, domain.ErrNotFound)
+	}
+}
+
+// 老数据（还没迁到对象存储）仍可按哈希取字节。
+func TestGetAvatarServesLegacyRows(t *testing.T) {
+	e := newProfileEnv(t)
+	u := e.newUser(t, "13800138000", "小明")
+	seedLegacyAvatar(t, e.pool, u.ID, testPNG)
+	ct, img, err := e.users.GetAvatar(context.Background(), domain.AvatarHash(testPNG))
+	if err != nil || ct != "image/png" || !bytes.Equal(img, testPNG) {
+		t.Fatalf("GetAvatar = %q, %d 字节, %v", ct, len(img), err)
 	}
 }
 
@@ -161,7 +172,7 @@ func TestUpdateAvatarSameImageSameHash(t *testing.T) {
 	if _, err := e.users.UpdateAvatar(ctx, a.ID, nil); err != nil {
 		t.Fatalf("清除: %v", err)
 	}
-	if _, _, err := e.users.GetAvatar(ctx, other.User.AvatarHash); err != nil {
+	if _, err := e.users.AvatarURLByHash(ctx, other.User.AvatarHash); err != nil {
 		t.Fatalf("甲清除头像后，乙的同一张图应仍取得到: %v", err)
 	}
 }
@@ -213,7 +224,7 @@ func TestDeletingUserCascadesAvatar(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("删用户后 user_avatar 还剩 %d 行", n)
 	}
-	_, _, err = e.users.GetAvatar(ctx, p.User.AvatarHash)
+	_, err = e.users.AvatarURLByHash(ctx, p.User.AvatarHash)
 	wantCode(t, err, domain.CodeAvatarNotFound, domain.ErrNotFound)
 }
 

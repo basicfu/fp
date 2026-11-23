@@ -1,3 +1,4 @@
+import { isUuidLike } from './format'
 /** 用户列表每页条数。 */
 export const PAGE_SIZE = 20
 
@@ -38,7 +39,10 @@ export function buildUserQuery({ page, keyword, status }: UserQuery): string {
   const q = new URLSearchParams()
   q.set('limit', String(PAGE_SIZE))
   q.set('offset', String((p - 1) * PAGE_SIZE))
-  if (keyword) q.set('keyword', keyword)
+  const kw = keyword?.trim()
+  // 用户 ID 走精确查询：模糊匹配昵称/手机号搜不到它。
+  if (kw && isUuidLike(kw)) q.set('userId', kw)
+  else if (keyword) q.set('keyword', keyword)
   if (status) q.set('status', status)
   return q.toString()
 }

@@ -431,7 +431,9 @@ type GetAvatarResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Image []byte                 `protobuf:"bytes,1,opt,name=image,proto3" json:"image,omitempty"`
 	// content_type 是存入时按文件头识别出的类型：image/jpeg、image/png 或 image/webp。
-	ContentType   string `protobuf:"bytes,2,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	ContentType string `protobuf:"bytes,2,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	// url 非空表示头像在对象存储上，此时 image 为空，按它取图（如 302 过去）。
+	Url           string `protobuf:"bytes,3,opt,name=url,proto3" json:"url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -476,6 +478,13 @@ func (x *GetAvatarResponse) GetImage() []byte {
 func (x *GetAvatarResponse) GetContentType() string {
 	if x != nil {
 		return x.ContentType
+	}
+	return ""
+}
+
+func (x *GetAvatarResponse) GetUrl() string {
+	if x != nil {
+		return x.Url
 	}
 	return ""
 }
@@ -1442,10 +1451,11 @@ const file_fp_v1_user_proto_rawDesc = "" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05image\x18\x02 \x01(\fR\x05image\"&\n" +
 	"\x10GetAvatarRequest\x12\x12\n" +
-	"\x04hash\x18\x01 \x01(\tR\x04hash\"L\n" +
+	"\x04hash\x18\x01 \x01(\tR\x04hash\"^\n" +
 	"\x11GetAvatarResponse\x12\x14\n" +
 	"\x05image\x18\x01 \x01(\fR\x05image\x12!\n" +
-	"\fcontent_type\x18\x02 \x01(\tR\vcontentType\"1\n" +
+	"\fcontent_type\x18\x02 \x01(\tR\vcontentType\x12\x10\n" +
+	"\x03url\x18\x03 \x01(\tR\x03url\"1\n" +
 	"\x16RequestDeletionRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\"4\n" +
 	"\x17RequestDeletionResponse\x12\x19\n" +

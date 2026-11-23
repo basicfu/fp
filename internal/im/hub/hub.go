@@ -355,13 +355,14 @@ func (h *Hub) GroupLocalCount(app, group, uid string) int {
 func (h *Hub) AddStream(ctx context.Context, app string, s Stream) (remove func()) {
 	h.mu.Lock()
 	h.streams[app] = append(h.streams[app], s)
-	first := len(h.streams[app]) == 1
-	h.mu.Unlock()
-	if first {
+	// SetServing 只改内存，放在锁内：锁外调用时并发的注册与注销可能后发先至，
+	// 把登记反转成与流的实际有无相反，且心跳只重写当前值，不会自愈。
+	if len(h.streams[app]) == 1 {
 		if err := h.live.SetServing(ctx, app, true); err != nil {
 			slog.Error("hub: 声明 server 流失败", "app", app, "err", err)
 		}
 	}
+	h.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -380,18 +381,15 @@ func (h *Hub) AddStream(ctx context.Context, app string, s Stream) (remove func(
 					list = append(list, x)
 				}
 			}
-			last := len(list) == 0
-			if last {
+			if len(list) == 0 {
 				delete(h.streams, app)
+				if err := h.live.SetServing(context.Background(), app, false); err != nil {
+					slog.Error("hub: 撤销 server 流声明失败", "app", app, "err", err)
+				}
 			} else {
 				h.streams[app] = list
 			}
 			h.mu.Unlock()
-			if last {
-				if err := h.live.SetServing(context.Background(), app, false); err != nil {
-					slog.Error("hub: 撤销 server 流声明失败", "app", app, "err", err)
-				}
-			}
 		})
 	}
 }

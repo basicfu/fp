@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/service"
 )
 
 // takeWechatEvents 取走迄今发布的微信通知事件，返回 应用 → 该应用收到的最后一条状态。
@@ -98,4 +99,32 @@ func TestWechatAutoBindIsPushed(t *testing.T) {
 	// 没有 unionid 能对上的关注者：谁都不推。
 	e.push(t, "o-stranger", "subscribe", "", 100)
 	wantPushed(t, "陌生人关注", e.takeWechatEvents(t, user), map[uuid.UUID]bool{})
+}
+
+// 即时推送之外，每个要通知的应用各写一条 wechat_subscription 事件（开了事件的应用经 Watch 可靠收到）。
+func TestWechatSubscriptionChangeWritesAppEvents(t *testing.T) {
+	e := newMPEnv(t)
+	ctx := context.Background()
+	user := e.newUser(t, "13800000001", "")
+	loggedIn, creator := e.newApp(t, "logged-in"), e.newApp(t, "creator")
+	if err := e.users.EnsureRegistration(ctx, user, loggedIn.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.wechat.CreateSubscribeQR(ctx, creator.AppID, user); err != nil {
+		t.Fatal(err)
+	}
+	e.appended.take()
+	e.push(t, "o-1", "subscribe", "qrscene_"+e.mp.lastScene(t), 100)
+
+	got := map[uuid.UUID]bool{}
+	for _, ev := range e.appended.take() {
+		p, ok := ev.Payload.(service.WechatSubscriptionPayload)
+		if ev.Kind != domain.EventWechatSubscription || ev.UserID != user || !ok {
+			t.Fatalf("事件形状不对: %+v", ev)
+		}
+		got[ev.AppID] = p.Subscribed
+	}
+	wantPushed(t, "扫码开启", got, map[uuid.UUID]bool{loggedIn.ID: true, creator.ID: true})
+	// 原来的即时推送照旧，老 SDK 不受影响。
+	wantPushed(t, "即时推送", e.takeWechatEvents(t, user), map[uuid.UUID]bool{loggedIn.ID: true, creator.ID: true})
 }

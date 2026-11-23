@@ -138,6 +138,8 @@ message GetAvatarResponse {
   bytes image = 1;
   // content_type 是存入时按文件头识别出的类型：image/jpeg、image/png 或 image/webp。
   string content_type = 2;
+  // url 非空表示头像在对象存储上，此时 image 为空，按它取图（如 302 过去）。
+  string url = 3;
 }
 
 message RequestDeletionRequest {

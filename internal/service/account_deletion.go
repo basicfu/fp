@@ -28,6 +28,11 @@ func WithDeletionCoolingOff(d time.Duration) AccountOption {
 	}
 }
 
+// WithAccountEvents 让注销生效时给开了事件的应用写 account_deleted。
+func WithAccountEvents(ev *AppEvents) AccountOption {
+	return func(s *AccountService) { s.events = ev }
+}
+
 // RequestDeletion 替用户提交注销，返回预计永久删除的时间（unix 毫秒）。
 //
 // ACTIVE 进入冷静期；已在冷静期内时幂等，按原提交时间算，不重新计时。
@@ -82,12 +87,24 @@ func (s *AccountService) revokeForDeletion(ctx context.Context, userID uuid.UUID
 // 中途出错就停下返回，已处理的不回滚；剩下的留给下一轮。
 func (s *AccountService) SweepDeletions(ctx context.Context) (purged, expired int, err error) {
 	for {
-		id, ok, err := s.users.purgeOneDue(ctx, s.coolingOff)
+		var woken []uuid.UUID
+		id, ok, err := s.users.purgeOneDue(ctx, s.coolingOff, func(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+			if s.events == nil {
+				return nil
+			}
+			// 与删数据同一个事务：要么都生效，要么都不生效，不会出现删了却没通知业务方。
+			var err error
+			woken, err = s.events.AppendForUserAppsTx(ctx, tx, id, domain.EventAccountDeleted, struct{}{})
+			return err
+		})
 		if err != nil {
 			return purged, expired, err
 		}
 		if !ok {
 			break
+		}
+		if s.events != nil {
+			s.events.Wake(ctx, woken)
 		}
 		purged++
 		// 正常情况下这时已没有会话：提交时撤过，冷静期里登录又会复活成 ACTIVE、轮不到这里。
@@ -138,7 +155,10 @@ func (s *AccountService) RunDeletionSweep(ctx context.Context, every time.Durati
 // app_user 行留作墓碑：业务方（kkdesk）按 user_id 问状态时要能看到"已注销"，
 // 而不是一个分不清"注销了"还是"id 写错了"的 USER_NOT_FOUND；归档期满时随归档一起删。
 // 登录标识删掉之后手机号、微信就释放了，再登录会注册成一个全新的用户。
-func (s *UserService) purgeOneDue(ctx context.Context, coolingOff time.Duration) (uuid.UUID, bool, error) {
+//
+// beforeCommit 在提交前跑在同一个事务里，失败则整个回滚。
+func (s *UserService) purgeOneDue(ctx context.Context, coolingOff time.Duration,
+	beforeCommit func(ctx context.Context, tx pgx.Tx, id uuid.UUID) error) (uuid.UUID, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return uuid.Nil, false, fmt.Errorf("service: 开启事务: %w", err)
@@ -175,6 +195,9 @@ func (s *UserService) purgeOneDue(ctx context.Context, coolingOff time.Duration)
 		return uuid.Nil, false, fmt.Errorf("service: 写入注销归档: %w", err)
 	}
 	for _, stmt := range []string{
+		// 头像对象先登记待删：随后那条 DELETE FROM user_avatar 会把 key 一起带走。
+		`INSERT INTO object_gc (key) SELECT object_key FROM user_avatar
+		 WHERE user_id = $1 AND object_key <> '' ON CONFLICT DO NOTHING`,
 		`DELETE FROM identity WHERE user_id = $1`,
 		`DELETE FROM user_extra WHERE user_id = $1`,
 		`DELETE FROM user_role WHERE user_id = $1`,
@@ -193,6 +216,11 @@ func (s *UserService) purgeOneDue(ctx context.Context, coolingOff time.Duration)
 		    delete_submitted_at = NULL, updated_at = now()
 		WHERE id = $1`, id, domain.UserStatusDeleted); err != nil {
 		return uuid.Nil, false, fmt.Errorf("service: 注销置墓碑: %w", err)
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx, tx, id); err != nil {
+			return uuid.Nil, false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, false, fmt.Errorf("service: 提交事务: %w", err)

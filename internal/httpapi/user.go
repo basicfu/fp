@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
@@ -80,8 +82,19 @@ func (h *userHandler) list(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
+	// uuid.Parse 同时认带横杠与 32 位两种写法：控制台显示 32 位，接口与存储是带横杠的。
+	var userID *uuid.UUID
+	if raw := q.Get("userId"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			writeError(w, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "userId 不是合法的用户 ID"))
+			return
+		}
+		userID = &id
+	}
+
 	items, total, err := h.users.List(r.Context(), service.UserListQuery{
-		Keyword: q.Get("keyword"), Status: q.Get("status"),
+		Keyword: q.Get("keyword"), Status: q.Get("status"), ID: userID,
 		Limit: limit, Offset: offset,
 	})
 	if err != nil {
@@ -180,7 +193,15 @@ func (h *userHandler) clearAvatar(w http.ResponseWriter, r *http.Request) {
 
 // avatar 按内容哈希回图片，供控制台的用户详情页显示。
 func (h *userHandler) avatar(w http.ResponseWriter, r *http.Request) {
-	contentType, image, err := h.users.GetAvatar(r.Context(), chi.URLParam(r, "hash"))
+	hash := chi.URLParam(r, "hash")
+	contentType, image, err := h.users.GetAvatar(r.Context(), hash)
+	if errors.Is(err, domain.ErrNotFound) {
+		// 头像已存进对象存储（PG 里没有字节）：跳到它的公开地址。
+		if url, uerr := h.users.AvatarURLByHash(r.Context(), hash); uerr == nil {
+			http.Redirect(w, r, url, http.StatusFound)
+			return
+		}
+	}
 	if err != nil {
 		writeError(w, err)
 		return

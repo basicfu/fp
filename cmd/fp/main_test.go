@@ -5,15 +5,22 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/basicfu/fp/internal/config"
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
+	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
 )
 
@@ -310,5 +317,119 @@ func TestResetPasswordSaysNothingAboutLegacyAccountsWhenNoneRetired(t *testing.T
 	}
 	if strings.Contains(out.String(), "已停用") {
 		t.Fatalf("没有旧账号被停用时不该有这条提示: %q", out.String())
+	}
+}
+
+func TestRunSubcommandAvatarMigrateRejectsBadFlags(t *testing.T) {
+	clearConnectionEnv(t)
+	for _, args := range [][]string{
+		{"avatar-migrate", "--bogus"},
+		{"avatar-migrate", "extra"},
+		{"avatar-migrate", "-batch", "0"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := runSubcommand(args, &stdout, &stderr); code != 2 {
+			t.Fatalf("%v: 退出码 = %d, want 2（stderr = %q）", args, code, stderr.String())
+		}
+	}
+}
+
+func TestAvatarMigrateReportsCountAndIsRepeatable(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	users := service.NewUserService(pool, service.WithObjectStore(objstore.NewMemory()))
+	ctx := context.Background()
+	u, _, _, err := users.EnsureUserWithIdentity(ctx, service.EnsureIdentityInput{Type: domain.IdentityTypePhone, Subject: "13800138000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	png := append([]byte("\x89PNG\r\n\x1a\n"), "x"...)
+	if _, err := pool.Exec(ctx, `INSERT INTO user_avatar (user_id, hash, content_type, data) VALUES ($1, $2, 'image/png', $3)`,
+		u.ID, domain.AvatarHash(png), png); err != nil {
+		t.Fatal(err)
+	}
+	for want := range []string{"已迁移 1 张", "已迁移 0 张"} {
+		var out bytes.Buffer
+		if err := avatarMigrate(ctx, users, 100, &out); err != nil {
+			t.Fatalf("avatarMigrate: %v", err)
+		}
+		if !strings.Contains(out.String(), []string{"已迁移 1 张", "已迁移 0 张"}[want]) {
+			t.Fatalf("第 %d 次输出 = %q", want+1, out.String())
+		}
+	}
+}
+
+func TestRunSubcommandImportRejectsBadFlags(t *testing.T) {
+	clearConnectionEnv(t)
+	for _, args := range [][]string{
+		{"session-bind-import"}, {"session-bind-import", "-file", "x", "extra"},
+		{"wechat-nickname-import", "--bogus"}, {"wechat-nickname-import", "-file", ""},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := runSubcommand(args, &stdout, &stderr); code != 2 {
+			t.Fatalf("%v: 退出码 = %d, want 2（stderr = %q）", args, code, stderr.String())
+		}
+	}
+}
+
+func TestImportReportsBadLines(t *testing.T) {
+	var out bytes.Buffer
+	printImportStats(&out, service.ImportStats{Updated: 2, Skipped: 1, Bad: []service.ImportLineError{{Line: 3, Err: "不是合法 JSON"}}})
+	if got := out.String(); got != "更新 2，不变 0，跳过 1，坏行 1\n  第 3 行：不是合法 JSON\n" {
+		t.Fatalf("输出 = %q", got)
+	}
+}
+
+// 导入命令要带上应用的会话策略：到期集合的分值按应用自己的空闲超时算，不是默认策略。
+func TestSessionBindImportTracksExpiryByAppPolicy(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	rdb := testsupport.NewTestRedis(t)
+	ctx := context.Background()
+	apps := service.NewApplicationService(pool, connector.NewRegistry())
+	app, _, err := apps.Create(ctx, "导入", "import-"+uuid.NewString()[:6])
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := domain.DefaultSessionPolicy()
+	p.IdleTimeoutSeconds, p.IdleTimeoutMobileSeconds = 3600, 3600
+	if app, err = apps.UpdateSessionPolicy(ctx, app.ID, p); err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewSessionStore(rdb)
+	sess, err := service.NewSessionService(st, store.NewRevokePublisher(rdb), store.NewEpochStore(rdb)).
+		Issue(ctx, service.IssueInput{UserID: uuid.New(), App: app})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bind.jsonl")
+	line := `{"session_id":"` + sess.ID + `","device_pub":"` + strings.Repeat("ab", 32) + `","client_ref":"7"}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FP_POSTGRES_URL", testsupport.PostgresURL(t))
+	t.Setenv("FP_REDIS_URL", testsupport.RedisURL(t))
+	var out bytes.Buffer
+	if err := runImport(ctx, "session-bind-import", path, &out); err != nil {
+		t.Fatalf("runImport: %v (%s)", err, out.String())
+	}
+	sess.ClientRef = "7"
+	score, ok, err := st.ExpiryScore(ctx, store.ExpiryMember(sess))
+	if err != nil || !ok || score != service.SessionExpiresAt(sess, app.Session) {
+		t.Fatalf("分值 = %d (%v, %v)，want %d", score, ok, err, service.SessionExpiresAt(sess, app.Session))
+	}
+}
+
+// oss 配错（缺密钥、endpoint 不是阿里云）不能让整个 fp 起不来：记错误日志，按没配处理，只有头像上传不可用。
+func TestOpenObjectStoreDegradesOnBadConfig(t *testing.T) {
+	if s := openObjectStore(config.OSS{Bucket: "b"}); s != nil {
+		t.Fatalf("缺密钥的 oss 应按没配处理，得到 %v", s)
+	}
+	if s := openObjectStore(config.OSS{AccessKeyID: "a", AccessKeySecret: "s", Bucket: "b", Endpoint: "example.com"}); s != nil {
+		t.Fatalf("endpoint 不对的 oss 应按没配处理，得到 %v", s)
+	}
+	if s := openObjectStore(config.OSS{}); s != nil {
+		t.Fatalf("没配 oss: %v", s)
+	}
+	if s := openObjectStore(config.OSS{AccessKeyID: "a", AccessKeySecret: "s", Bucket: "b", Endpoint: "oss-cn-hangzhou.aliyuncs.com"}); s == nil {
+		t.Fatal("配对的 oss 没建出来")
 	}
 }

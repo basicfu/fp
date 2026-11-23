@@ -23,6 +23,28 @@ type SessionService struct {
 	epochs EpochStore
 	// now 返回当前毫秒时间戳。可注入，便于测试过期与轮换边界。
 	now func() int64
+	// events 为 nil 时撤销不写 logged_out 事件。
+	events AppEventAppender
+	// apps 只用来取会话所属应用的策略（踢出墓碑的期限）。为 nil 时按默认策略。
+	apps SessionApps
+}
+
+// SessionApps 是 SessionService 对应用的依赖，*ApplicationService 满足它。
+type SessionApps interface {
+	GetByID(ctx context.Context, id uuid.UUID) (*domain.Application, error)
+}
+
+// SessionOption 调整 SessionService。
+type SessionOption func(*SessionService)
+
+// WithSessionEvents 让撤销会话前先写 logged_out 事件。
+func WithSessionEvents(ev AppEventAppender) SessionOption {
+	return func(s *SessionService) { s.events = ev }
+}
+
+// WithSessionApps 让 SessionService 能取会话所属应用的策略。
+func WithSessionApps(apps SessionApps) SessionOption {
+	return func(s *SessionService) { s.apps = apps }
 }
 
 // EpochStore 是 SessionService 需要的最小纪元能力。
@@ -33,13 +55,17 @@ type EpochStore interface {
 }
 
 // NewSessionService 构造使用真实时钟的 SessionService。
-func NewSessionService(st *store.SessionStore, pub *store.RevokePublisher, ep EpochStore) *SessionService {
-	return NewSessionServiceWithClock(st, pub, ep, func() int64 { return time.Now().UnixMilli() })
+func NewSessionService(st *store.SessionStore, pub *store.RevokePublisher, ep EpochStore, opts ...SessionOption) *SessionService {
+	return NewSessionServiceWithClock(st, pub, ep, func() int64 { return time.Now().UnixMilli() }, opts...)
 }
 
 // NewSessionServiceWithClock 构造使用自定义时钟的 SessionService。
-func NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublisher, ep EpochStore, now func() int64) *SessionService {
-	return &SessionService{store: st, pub: pub, epochs: ep, now: now}
+func NewSessionServiceWithClock(st *store.SessionStore, pub *store.RevokePublisher, ep EpochStore, now func() int64, opts ...SessionOption) *SessionService {
+	s := &SessionService{store: st, pub: pub, epochs: ep, now: now}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // IssueInput 描述一次签发请求。
@@ -54,6 +80,11 @@ type IssueInput struct {
 	// 调用方负责传入——SessionService 不依赖 AuthzService，避免两个 service
 	// 互相引用。
 	Roles []string
+	// DevicePub、ClientRef 原样刻进会话，见 domain.Session 的同名字段。
+	DevicePub string
+	ClientRef string
+	// SessionID 非空时用作会话 id：登录要在签发之前先写 login_succeeded，id 得提前定下。
+	SessionID string
 }
 
 // Issue 为一次成功的认证签发新会话。
@@ -76,8 +107,12 @@ func (s *SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Sess
 	now := s.now()
 	idle := in.App.Session.IdleTimeoutFor(in.Mobile)
 
+	id := in.SessionID
+	if id == "" {
+		id = uuid.NewString()
+	}
 	sess := &domain.Session{
-		ID:             uuid.NewString(),
+		ID:             id,
 		Token:          token,
 		UserID:         in.UserID,
 		AppID:          in.App.ID,
@@ -90,11 +125,67 @@ func (s *SessionService) Issue(ctx context.Context, in IssueInput) (*domain.Sess
 		Mobile:         in.Mobile,
 		Roles:          in.Roles,
 		Epoch:          epoch,
+		DevicePub:      in.DevicePub,
+		ClientRef:      in.ClientRef,
 	}
-	if err := s.store.Put(ctx, sess, idle); err != nil {
+	if err := s.put(ctx, sess, idle, in.App.Session); err != nil {
 		return nil, err
 	}
 	return sess, nil
+}
+
+// pendingLoginGrace 是登录预占的到期登记的期限：远长于一次登录请求，到点还没被签发覆盖说明这次登录已半途作废。
+const pendingLoginGrace = 5 * time.Minute
+
+// ReservePending 在写 login_succeeded 之前先把会话登记进到期集合。之后签发失败、补写 logged_out 也失败、
+// 甚至进程在中间崩掉，过期扫描到点找不到会话都会补一条 logged_out，业务方不会永远以为它在线。
+// 签发成功时 PutTracked 用真实到期时刻覆盖这条登记。sess 只需 AppID、UserID、ID、ClientRef。
+func (s *SessionService) ReservePending(ctx context.Context, sess *domain.Session) error {
+	if s.events == nil {
+		return nil
+	}
+	return s.store.ReserveExpiry(ctx, store.ExpiryMember(sess), s.now()+pendingLoginGrace.Milliseconds())
+}
+
+// AbandonPending 是登录写过（或可能写过）login_succeeded 之后没能签发成功：补一条 logged_out(revoked)。
+// 补写成功才摘登记；失败就留给过期扫描。业务方收到一条它没见过的会话的退出是无害的。
+func (s *SessionService) AbandonPending(ctx context.Context, sess *domain.Session) {
+	if s.events == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	if err := s.events.Append(ctx, sess.AppID, sess.UserID, domain.EventLoggedOut, LoggedOutPayload{
+		SessionID: sess.ID, ClientRef: sess.ClientRef, Reason: domain.LoggedOutRevoked,
+	}); err != nil {
+		slog.Error("service: 补写作废登录的退出事件失败，留给过期扫描", "err", err, "sessionId", sess.ID)
+		return
+	}
+	if err := s.store.UntrackExpiry(ctx, store.ExpiryMember(sess)); err != nil {
+		slog.Warn("service: 摘除作废登录的到期登记失败，扫描会再补一条退出", "err", err, "sessionId", sess.ID)
+	}
+}
+
+// EpochStale 报告会话刻的纪元是否已不是当前纪元（签发途中撞上了一次递增纪元的撤销）。
+func (s *SessionService) EpochStale(ctx context.Context, sess *domain.Session) (bool, error) {
+	epoch, err := s.epochs.Current(ctx, sess.UserID)
+	if err != nil {
+		return false, err
+	}
+	return epoch != sess.Epoch, nil
+}
+
+// put 写会话；开了事件时顺带把到期时刻记进到期集合（与会话同一事务），过期扫描据此发 logged_out(expired)。
+// 延期必须走这里：分值不跟着延，延期过的会话会在旧时刻被误报过期。
+func (s *SessionService) put(ctx context.Context, sess *domain.Session, ttl time.Duration, p domain.SessionPolicy) error {
+	if s.events == nil {
+		return s.store.Put(ctx, sess, ttl)
+	}
+	return s.store.PutTracked(ctx, sess, ttl, SessionExpiresAt(sess, p))
+}
+
+// SessionExpiresAt 是会话的到期时刻（毫秒）：空闲超时与绝对上限中较早的一个。
+func SessionExpiresAt(sess *domain.Session, p domain.SessionPolicy) int64 {
+	return min(sess.IdleExpiresAt, sess.MaxExpiresAt(p))
 }
 
 // ValidateResult 是一次校验的结果。
@@ -147,6 +238,10 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 
 	sess, err := s.store.Get(ctx, token)
 	if errors.Is(err, domain.ErrNotFound) {
+		// 只有会话不在了才查墓碑：活着的会话不多付一次 Redis。墓碑认应用，别的应用拿到这个 token 照旧是 TOKEN_INVALID。
+		if kickedApp, ok, kerr := s.store.KickedApp(ctx, token); kerr == nil && ok && kickedApp == app.ID {
+			return nil, domain.Fail(domain.ErrUnauthorized, domain.CodeKicked, "已被移出账号，请重新登录")
+		}
 		return nil, domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 	if err != nil {
@@ -164,11 +259,7 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 		return nil, err
 	}
 	if epoch != sess.Epoch {
-		// 主动删掉：留着它只会让后续每次校验都白跑两趟 Redis，
-		// 而它永远不可能再通过。
-		if err := s.store.Delete(ctx, sess.Token); err != nil {
-			slog.Error("service: 删除纪元失配的会话失败", "err", err, "sessionId", sess.ID)
-		}
+		s.dropStaleEpoch(ctx, sess)
 		return nil, domain.Failf(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录")
 	}
 
@@ -223,6 +314,32 @@ func (s *SessionService) Validate(ctx context.Context, token string, app *domain
 	return res, nil
 }
 
+// dropStaleEpoch 删掉纪元失配的会话：留着它只会让后续每次校验都白跑两趟 Redis，而它永远不可能再通过。
+//
+// 纪元变了会话却还在，多半是撤销递增纪元后、写 logged_out 时失败中断了，业务方还不知道它没了，所以先补一条
+// revoked 再删。只在会话仍在到期集合里时补：正常撤销与过期扫描写完事件都会摘掉成员，轮换出的新旧 token
+// 共用一个成员，这样同一会话不会补两条。补写失败就不删，下次校验再补。
+func (s *SessionService) dropStaleEpoch(ctx context.Context, sess *domain.Session) {
+	if s.events != nil {
+		_, tracked, err := s.store.ExpiryScore(ctx, store.ExpiryMember(sess))
+		if err != nil {
+			slog.Error("service: 读取纪元失配会话的到期登记失败", "err", err, "sessionId", sess.ID)
+			return
+		}
+		if tracked {
+			if err := s.events.Append(ctx, sess.AppID, sess.UserID, domain.EventLoggedOut, LoggedOutPayload{
+				SessionID: sess.ID, ClientRef: sess.ClientRef, Reason: domain.LoggedOutRevoked,
+			}); err != nil {
+				slog.Error("service: 补写纪元失配会话的退出事件失败", "err", err, "sessionId", sess.ID)
+				return
+			}
+		}
+	}
+	if err := s.store.Delete(ctx, sess.Token); err != nil {
+		slog.Error("service: 删除纪元失配的会话失败", "err", err, "sessionId", sess.ID)
+	}
+}
+
 // tryExtend 在拿到去重锁时刷新空闲超时，否则原样返回 nil。
 //
 // 两层降频（设计文档 4.5.2）：调用方已按 extend_interval 做了时间窗判断，
@@ -243,7 +360,7 @@ func (s *SessionService) tryExtend(ctx context.Context, sess *domain.Session, ap
 
 	// Redis TTL 取剩余有效期而非空闲超时：绝对上限更近时，
 	// 让 Redis 在上限时刻自动清理，避免留下必然会被拒绝的僵尸会话。
-	if err := s.store.Put(ctx, &updated, updated.RemainingAt(now, app.Session)); err != nil {
+	if err := s.put(ctx, &updated, updated.RemainingAt(now, app.Session), app.Session); err != nil {
 		return nil, err
 	}
 	return &updated, nil
@@ -291,7 +408,7 @@ func (s *SessionService) tryRotate(ctx context.Context, sess *domain.Session, ap
 	newSess.IssuedAt = now
 	newSess.LastExtendedAt = now
 	newSess.IdleExpiresAt = now + idle.Milliseconds()
-	if err := s.store.Put(ctx, &newSess, newSess.RemainingAt(now, app.Session)); err != nil {
+	if err := s.put(ctx, &newSess, newSess.RemainingAt(now, app.Session), app.Session); err != nil {
 		return "", nil, err
 	}
 
@@ -389,6 +506,13 @@ func (s *SessionService) RevokeSession(ctx context.Context, userID uuid.UUID, se
 	})
 }
 
+// RevokeSessionInApp 同 RevokeSession，但只认该应用的会话：业务方按会话 id 撤销时，不能撤到别的应用头上。
+func (s *SessionService) RevokeSessionInApp(ctx context.Context, userID, appID uuid.UUID, sessionID, reason string) (int, error) {
+	return s.revokeMatching(ctx, []uuid.UUID{userID}, reason, func(sess *domain.Session) bool {
+		return sess.ID == sessionID && sess.AppID == appID
+	})
+}
+
 // RevokeUsers 撤销一批用户的全部会话。
 //
 // 这是**唯一实现**：revokeMatching 本身就是按 userIDs 切片写的，Revoke /
@@ -448,6 +572,11 @@ func (s *SessionService) revokeMatching(
 	match func(*domain.Session) bool,
 ) (int, error) {
 	groups := make(map[uuid.UUID]*appGroup)
+	// emitted 按会话去重：轮换过渡期内一个会话有新旧两个 token，事件只写一条。
+	var emitted map[string]bool
+	if s.events != nil {
+		emitted = map[string]bool{}
+	}
 
 	// 中途出错时，已经删掉的 token 必须照样广播出去。
 	//
@@ -481,7 +610,7 @@ func (s *SessionService) revokeMatching(
 	}()
 
 	for _, uid := range userIDs {
-		if err := s.revokeUserTokens(ctx, uid, match, groups); err != nil {
+		if err := s.revokeUserTokens(ctx, uid, reason, emitted, match, groups); err != nil {
 			return revokedCount(groups), err
 		}
 	}
@@ -509,7 +638,12 @@ func revokedCount(groups map[uuid.UUID]*appGroup) int {
 // 它分批删除，中途某一批失败时会**同时**返回已经真实删除的条数和一个非
 // nil 错误——那些删除已经在 Redis 里真实发生了，"出错就当 0 个"会让管理员
 // 误以为撤销完全没生效。
-func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID, match func(*domain.Session) bool, groups map[uuid.UUID]*appGroup) error {
+//
+// 每个会话先写 logged_out 事件、（被踢时）立墓碑，最后才删：写事件失败就不删、直接返回错误，
+// 中途崩溃只会留下「事件已写、会话还在」——业务方先解绑，结果偏向拒绝；反过来会话没了业务方却还认它。
+// emitted 为 nil 表示这次撤销不写事件。
+func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID, reason string, emitted map[string]bool,
+	match func(*domain.Session) bool, groups map[uuid.UUID]*appGroup) error {
 	toks, err := s.store.ListUserTokens(ctx, userID)
 	if err != nil {
 		return err
@@ -525,6 +659,24 @@ func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID,
 		if !match(sess) {
 			continue
 		}
+		if emitted != nil && !emitted[sess.ID] {
+			if err := s.events.Append(ctx, sess.AppID, sess.UserID, domain.EventLoggedOut, LoggedOutPayload{
+				SessionID: sess.ID, ClientRef: sess.ClientRef, Reason: reason,
+			}); err != nil {
+				// 纪元类撤销此时纪元已递增、会话却留着；客户端不再校验的话要等到空闲超时才有人发现。
+				// 把它的到期登记提到现在，过期扫描下一轮比对纪元补出 revoked。纪元没变的（单设备踢出）扫描会原样放回。
+				if terr := s.store.TrackExpiry(context.WithoutCancel(ctx), store.ExpiryMember(sess), s.now()); terr != nil {
+					slog.Error("service: 提前到期登记失败", "err", terr, "sessionId", sess.ID)
+				}
+				return err
+			}
+			emitted[sess.ID] = true
+		}
+		if reason == domain.RevokeReasonKick {
+			if err := s.store.PutKicked(ctx, tok, sess.AppID, s.kickedTTL(ctx, sess)); err != nil {
+				return err
+			}
+		}
 		if err := s.store.Delete(ctx, tok); err != nil {
 			return err
 		}
@@ -537,6 +689,17 @@ func (s *SessionService) revokeUserTokens(ctx context.Context, userID uuid.UUID,
 		g.users[userID] = true
 	}
 	return nil
+}
+
+// kickedTTL 是踢出墓碑的期限：留到会话本来的绝对上限，过了那个时刻这个 token 无论如何都不能用了。
+func (s *SessionService) kickedTTL(ctx context.Context, sess *domain.Session) time.Duration {
+	p := domain.DefaultSessionPolicy()
+	if s.apps != nil {
+		if app, err := s.apps.GetByID(ctx, sess.AppID); err == nil {
+			p = app.Session
+		}
+	}
+	return time.Duration(sess.MaxExpiresAt(p)-s.now()) * time.Millisecond
 }
 
 // announce 广播撤销事件。发布失败只记日志不返回错误——

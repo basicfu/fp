@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/basicfu/fp/internal/config"
+	"github.com/basicfu/fp/internal/connector"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 )
@@ -14,6 +19,12 @@ import (
 const usage = `用法：
   fp                  启动服务
   fp reset-password   重置管理员账号：用户名恢复为 admin，密码随机生成并打印，作废全部管理端会话
+  fp avatar-migrate [-batch 100]
+                      把存在数据库里的头像上传到对象存储（系统配置里的 oss 段）并回填地址，可重复执行
+  fp session-bind-import -file <path>
+                      给已有会话补设备公钥与 client_ref（每行 {session_id, device_pub, client_ref[, user_id]}），可重复执行
+  fp wechat-nickname-import -file <path>
+                      把微信昵称补到用户的微信身份上（每行 {user_id, nickname}），只补空的、不覆盖已有，可重复执行
 `
 
 // runSubcommand 返回进程退出码。多余参数一律报错而不是静默忽略：
@@ -28,6 +39,32 @@ func runSubcommand(args []string, stdout, stderr io.Writer) int {
 		}
 		if err := runResetPassword(context.Background(), stdout); err != nil {
 			fmt.Fprintf(stderr, "重置失败：%v\n本命令可安全重跑；若失败发生在写库之后，旧密码已失效，只有重跑才能拿到新密码。\n", err)
+			return 1
+		}
+		return 0
+	case "avatar-migrate":
+		fs := flag.NewFlagSet("avatar-migrate", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		batch := fs.Int("batch", 100, "每批处理的头像数")
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() > 0 || *batch < 1 {
+			fmt.Fprintf(stderr, "avatar-migrate 参数不合法\n\n%s", usage)
+			return 2
+		}
+		if err := runAvatarMigrate(context.Background(), *batch, stdout); err != nil {
+			fmt.Fprintf(stderr, "迁移失败：%v\n本命令可安全重跑，已迁移的不会重复上传。\n", err)
+			return 1
+		}
+		return 0
+	case "session-bind-import", "wechat-nickname-import":
+		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		file := fs.String("file", "", "导入文件，每行一个 JSON")
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() > 0 || *file == "" {
+			fmt.Fprintf(stderr, "%s 参数不合法\n\n%s", args[0], usage)
+			return 2
+		}
+		if err := runImport(context.Background(), args[0], *file, stdout); err != nil {
+			fmt.Fprintf(stderr, "导入失败：%v\n本命令可安全重跑，已导入的不会重复修改。\n", err)
 			return 1
 		}
 		return 0
@@ -99,4 +136,96 @@ func resetPassword(ctx context.Context, svc passwordResetter, out io.Writer) err
 		_, err = fmt.Fprintf(out, "另有 %d 个旧版本遗留的管理员账号已停用。\n", disabled)
 	}
 	return err
+}
+
+// runAvatarMigrate 只依赖 Postgres 与系统配置里的 oss 段，不连 Redis。
+func runAvatarMigrate(ctx context.Context, batch int, out io.Writer) error {
+	pgURL, err := config.RequireEnv("FP_POSTGRES_URL")
+	if err != nil {
+		return err
+	}
+	connCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	pool, err := store.OpenPostgres(connCtx, pgURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := store.Migrate(ctx, pool); err != nil {
+		return err
+	}
+	sys, err := service.NewSystemConfigService(pool).Current(ctx)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Parse(sys.Value, config.EnvOr("FP_ENV", "DEV"))
+	if err != nil {
+		return err
+	}
+	st, err := objstore.New(cfg.OSS)
+	if err != nil {
+		return err
+	}
+	if st == nil {
+		return errors.New("系统配置里没有配置 oss（bucket 为空）")
+	}
+	return avatarMigrate(ctx, service.NewUserService(pool, service.WithObjectStore(st)), batch, out)
+}
+
+func avatarMigrate(ctx context.Context, users *service.UserService, batch int, out io.Writer) error {
+	n, err := users.MigrateAvatars(ctx, batch)
+	// 失败时也先报已完成的数量：重跑只会处理剩下的。
+	fmt.Fprintf(out, "已迁移 %d 张头像\n", n)
+	return err
+}
+
+// runImport 只依赖 Postgres 与 Redis，不读系统配置。会话导入必须在应用开启设备绑定之前跑完：
+// 开启之后没记设备的会话一律按登录过期拒绝（见 DeviceGuard.Check），没补上的用户要重新登录。
+func runImport(ctx context.Context, kind, path string, out io.Writer) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	pgURL, err := config.RequireEnv("FP_POSTGRES_URL")
+	if err != nil {
+		return err
+	}
+	connCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	pool, err := store.OpenPostgres(connCtx, pgURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := store.Migrate(ctx, pool); err != nil {
+		return err
+	}
+	var st service.ImportStats
+	if kind == "wechat-nickname-import" {
+		st, err = service.NewUserService(pool).ImportWechatNicknames(ctx, f)
+	} else {
+		redisURL, rerr := config.RequireEnv("FP_REDIS_URL")
+		if rerr != nil {
+			return rerr
+		}
+		rdb, rerr := store.OpenRedis(connCtx, redisURL)
+		if rerr != nil {
+			return rerr
+		}
+		defer rdb.Close()
+		// 要应用的会话策略:导入顺带把会话按真实到期登记进到期集合。
+		sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), store.NewEpochStore(rdb),
+			service.WithSessionApps(service.NewApplicationService(pool, connector.NewRegistry())))
+		st, err = sessions.ImportDeviceBindings(ctx, f)
+	}
+	printImportStats(out, st)
+	return err
+}
+
+func printImportStats(out io.Writer, st service.ImportStats) {
+	fmt.Fprintf(out, "更新 %d，不变 %d，跳过 %d，坏行 %d\n", st.Updated, st.Unchanged, st.Skipped, len(st.Bad))
+	for _, b := range st.Bad {
+		fmt.Fprintf(out, "  第 %d 行：%s\n", b.Line, b.Err)
+	}
 }

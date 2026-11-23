@@ -1,4 +1,4 @@
-package redisx
+package cluster
 
 import (
 	"context"
@@ -28,13 +28,13 @@ type job struct {
 	done chan error
 }
 
-var ErrClosed = errors.New("redisx: runner 已关闭")
+var ErrClosed = errors.New("cluster: runner 已关闭")
 
 // NewRunner 的参数对应配置 pipeline.flush_interval / pipeline.flush_size。
 // size>1 而 interval=0 是配置错误：单条命令会永远凑不满，这里拒绝而不是运行期挂死。
 func NewRunner(c redis.UniversalClient, flushInterval time.Duration, flushSize int) (*Runner, error) {
 	if flushSize > 1 && flushInterval <= 0 {
-		return nil, errors.New("redisx: pipeline.flush_size > 1 时必须设置 pipeline.flush_interval")
+		return nil, errors.New("cluster: pipeline.flush_size > 1 时必须设置 pipeline.flush_interval")
 	}
 	return &Runner{c: c, interval: flushInterval, size: flushSize}, nil
 }

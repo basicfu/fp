@@ -23,6 +23,9 @@ export interface Application {
   defaultRoleKey: string
   session: SessionPolicy
   im: IMConfig
+  /** 对外域名，终端用户账号接口按请求 Host 识别应用。 */
+  domains: string[]
+  account: AccountConfig
   createdAt: number
   updatedAt: number
 }
@@ -45,6 +48,18 @@ export interface IMConfig {
   allowGuest: boolean
   guestIpRate: number
   bizAuth: IMBizAuth | null
+}
+
+/** 应用对终端用户开放的账号接口配置；enabled 关着时不对外暴露任何账号接口。 */
+export interface AccountConfig {
+  enabled: boolean
+  loginTypes: string[]
+  editableFields: string[]
+  deviceBinding: boolean
+  deviceHeader: string
+  events: boolean
+  /** /wechat/start 发起扫码时的回跳地址，须同时在微信登录方式的回跳白名单里；空 = 不开放扫码。 */
+  wechatReturnUrl: string
 }
 
 export interface IMCredentialStatus {

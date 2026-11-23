@@ -10,6 +10,7 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -29,6 +30,8 @@ type authEnv struct {
 	// pool 用于少数需要绕过 service 层直接改库的用例（例如制造"应用已停用"这种
 	// 第一阶段还没有管理接口可以到达的状态）。
 	pool *pgxpool.Pool
+	// objects 是头像用的内存对象存储。
+	objects *objstore.Memory
 }
 
 // newAuthEnv 默认不限制发码频率：好几个用例要对同一个手机号连发验证码。
@@ -48,7 +51,8 @@ func newAuthEnvWithClock(t *testing.T, now func() int64, codeOpts ...service.Log
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
-	users := service.NewUserService(pool)
+	objects := objstore.NewMemory()
+	users := service.NewUserService(pool, service.WithObjectStore(objects))
 	epochs := store.NewEpochStore(rdb)
 	sessions := service.NewSessionServiceWithClock(
 		store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), epochs, now)
@@ -83,7 +87,7 @@ func newAuthEnvWithClock(t *testing.T, now func() int64, codeOpts ...service.Log
 		}),
 		apps: apps, users: users, sess: sessions, logs: logs,
 		accounts: service.NewAccountService(users, sessions, epochs, logs),
-		sms:      sms, codes: codes, app: app, pool: pool,
+		sms:      sms, codes: codes, app: app, pool: pool, objects: objects,
 	}
 }
 

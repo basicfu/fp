@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -37,11 +38,55 @@ type Config struct {
 	AccountDeletion AccountDeletion `yaml:"account_deletion"`
 	// VerifyCode 是业务方给已登录用户发验证码（换绑、设密码前的身份校验）的参数。
 	VerifyCode VerifyCode `yaml:"verify_code"`
+	// OSS 是对象存储（头像等用户上传的文件）。Bucket 留空表示没配，依赖它的接口返回不可用。
+	OSS OSS `yaml:"oss"`
+	// AccountAPI 是终端用户账号接口（/api/account）的参数。
+	AccountAPI AccountAPI `yaml:"account_api"`
 	// LegacySMS 只为兼容：Parse 开着 KnownFields(true)，而存量系统配置的第一版是
 	// seedDefaultsYAML 把默认值整份写进去的，里面带着 sms: 段。直接删字段会让这些
 	// 库启动时解析失败；版本快照又不允许改写。读进来、丢掉；omitempty 保证 ToYAML
 	// 不再输出它。
 	LegacySMS any `yaml:"sms,omitempty"`
+}
+
+// OSS 是阿里云对象存储的接入参数。
+type OSS struct {
+	AccessKeyID     string `yaml:"access_key_id"`
+	AccessKeySecret string `yaml:"access_key_secret"`
+	Bucket          string `yaml:"bucket"`
+	Endpoint        string `yaml:"endpoint"`
+	// FileURL 是文件对外地址前缀（通常是 CDN 域名）；留空用 https://{bucket}.{endpoint}。
+	FileURL string `yaml:"file_url"`
+}
+
+// AccountAPI 是终端用户账号接口的参数。
+type AccountAPI struct {
+	// TrustedProxies 是网关的地址（单个 IP 或 CIDR）。只有从这些地址直连来的请求才认 X-Forwarded-For，
+	// 否则客户端自己写一个头就能冒充任意 IP。填了之后不是从这些地址来的账号接口请求一律 404，
+	// 免得绕过网关直连 fp、随意填 Host 冒充应用的域名。留空表示一律用直连地址、不拦来源——fp 在网关后面时要填。
+	TrustedProxies []string `yaml:"trusted_proxies"`
+
+	proxies []netip.Prefix
+}
+
+// Proxies 返回解析好的 TrustedProxies（Parse 已校验过）。
+func (a AccountAPI) Proxies() []netip.Prefix { return a.proxies }
+
+func parseProxies(in []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(in))
+	for _, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if p, err := netip.ParsePrefix(raw); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("config: account_api.trusted_proxies 里的 %q 不是 IP 或 CIDR", raw)
+		}
+		out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+	}
+	return out, nil
 }
 
 type Log struct {
@@ -125,6 +170,9 @@ func Parse(yamlText string, env string) (*Config, error) {
 	// 0 天意味着提交即删、登录撤销的口子形同虚设，按写错处理而不是照办。
 	if c.AccountDeletion.CoolingOffDays < 1 {
 		return nil, fmt.Errorf("config: account_deletion.cooling_off_days 至少为 1，收到 %d", c.AccountDeletion.CoolingOffDays)
+	}
+	if c.AccountAPI.proxies, err = parseProxies(c.AccountAPI.TrustedProxies); err != nil {
+		return nil, err
 	}
 	// 显式写成空串等同没配：模板 code 为空时 Send 只会回"模板不存在"，不如落回默认值。
 	if c.VerifyCode.EmailTemplate = strings.TrimSpace(c.VerifyCode.EmailTemplate); c.VerifyCode.EmailTemplate == "" {

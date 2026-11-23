@@ -129,15 +129,23 @@ func (u *Users) UpdateAvatar(ctx context.Context, userID string, image []byte) (
 	return userProfileFrom(p), nil
 }
 
-// Avatar 按内容哈希取回头像的原始字节与 Content-Type（image/jpeg、image/png 或 image/webp）。
+// AvatarImage 是 Avatar 的结果。URL 非空时头像在对象存储上，可按它取图（例如 302 过去）；Image 非空时是原始字节，
+// ContentType 是 image/jpeg、image/png 或 image/webp。迁移期老头像两者都有，任用其一；新上传的只有 URL。
+type AvatarImage struct {
+	Image       []byte
+	ContentType string
+	URL         string
+}
+
+// Avatar 按内容哈希取回头像。
 //
 // 没有这个哈希时返回 ErrNotFound（Code 为 CodeAvatarNotFound）——头像被替换或清除后，旧哈希就取不到了。
-func (u *Users) Avatar(ctx context.Context, hash string) (image []byte, contentType string, err error) {
+func (u *Users) Avatar(ctx context.Context, hash string) (*AvatarImage, error) {
 	res, err := u.c.userRPC.GetAvatar(ctx, &fpv1.GetAvatarRequest{Hash: hash})
 	if err != nil {
-		return nil, "", translateUser(err)
+		return nil, translateUser(err)
 	}
-	return res.GetImage(), res.GetContentType(), nil
+	return &AvatarImage{Image: res.GetImage(), ContentType: res.GetContentType(), URL: res.GetUrl()}, nil
 }
 
 // RequestDeletion 替用户提交注销，返回预计永久删除的时间。

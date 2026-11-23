@@ -1,4 +1,4 @@
-import { disabledIMConfig } from '@/lib/testFixtures'
+import { disabledAccountConfig, disabledIMConfig } from '@/lib/testFixtures'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useParams } from 'react-router'
@@ -30,6 +30,8 @@ const sampleApp: Application = {
     tokenCacheTtlSeconds: 30,
   },
   im: disabledIMConfig,
+  domains: [],
+  account: disabledAccountConfig,
   createdAt: 1700000000000,
   updatedAt: 1700000000000,
 }

@@ -37,6 +37,9 @@ type Deps struct {
 	Auth *service.AuthService
 	// WechatMP 处理服务号的事件推送（/wechat/mp/callback，对公网）。为 nil 时不挂载。
 	WechatMP *service.WechatMPService
+	// Account 是终端用户的账号接口（accountapi.NewRouter），挂在 /api/account 下。为 nil 时不挂载。
+	// 由调用方构造而不是这里 import：它有自己的一套依赖（滑块题库、登录校验），与管理 API 无关。
+	Account http.Handler
 
 	// SecureCookies 决定管理端会话 cookie 是否带 Secure 属性。
 	//
@@ -51,11 +54,14 @@ type Deps struct {
 	Console fs.FS
 }
 
+// AccountPrefix 是终端用户账号接口的前缀，见 Deps.Account。
+const AccountPrefix = "/api/account"
+
 // NewRouter 装配管理 UI 的 HTTP 路由。
 //
-// 这套 API 只服务管理控制台。SDK 走 gRPC（计划二），终端用户的登录接口
-// 由 SDK 代理。对公网的只有两个回调：三方扫码登录的 /oauth/callback（终端用户浏览器）
-// 与服务号事件推送的 /wechat/mp/callback（微信服务器）。
+// 这套 API 只服务管理控制台。SDK 走 gRPC（计划二）。对公网的有两个回调：三方扫码登录的
+// /oauth/callback（终端用户浏览器）与服务号事件推送的 /wechat/mp/callback（微信服务器）；
+// 终端用户账号接口 /api/account 经业务方网关转来，见 Deps.Account。
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -94,6 +100,10 @@ func NewRouter(d Deps) http.Handler {
 	}
 	if d.WechatMP != nil {
 		r.HandleFunc(notify.WechatMPCallbackPath, wechatMPCallback(d.WechatMP))
+	}
+
+	if d.Account != nil {
+		r.Mount(AccountPrefix, d.Account)
 	}
 
 	r.Route("/admin/api", func(r chi.Router) {
@@ -137,6 +147,8 @@ func NewRouter(d Deps) http.Handler {
 			// PUT 而不是 PATCH：这是 IM 接入配置的**全量替换**（关掉 bizAuth
 			// 就是把它设成 null），与上面 /session 同一语义。
 			r.Put("/applications/{id}/im", appH.updateIM)
+			// 同为全量替换：域名列表与终端用户账号接口配置。
+			r.Put("/applications/{id}/account", appH.updateAccount)
 			r.Get("/applications/{id}/connectors", appH.listConnectors)
 			r.Put("/applications/{id}/connectors/{type}", appH.putConnector)
 

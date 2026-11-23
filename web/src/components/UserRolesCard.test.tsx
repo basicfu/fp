@@ -1,4 +1,4 @@
-import { disabledIMConfig } from '@/lib/testFixtures'
+import { disabledAccountConfig, disabledIMConfig } from '@/lib/testFixtures'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
@@ -34,6 +34,8 @@ function appWith(defaultRoleKey: string, over: Partial<Application> = {}): Appli
       tokenCacheTtlSeconds: 1,
     },
     im: disabledIMConfig,
+    domains: [],
+    account: disabledAccountConfig,
     createdAt: 1,
     updatedAt: 1,
     ...over,

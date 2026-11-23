@@ -9,6 +9,8 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/web"
@@ -195,5 +197,32 @@ func TestRouterServesRealEmbeddedConsoleAtRoot(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
 		t.Fatalf("index.html 的 Cache-Control = %q，必须含 no-cache", cc)
+	}
+}
+
+// 账号接口挂在 /api/account 下:前缀之后的路径原样交给它,GET 也不能被 SPA 回退吃掉。
+func TestAccountAPIMountedUnderPrefix(t *testing.T) {
+	var seen string
+	acct := chi.NewRouter()
+	acct.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
+		seen = chi.RouteContext(r.Context()).RoutePath
+		w.WriteHeader(http.StatusTeapot)
+	})
+	h := httpapi.NewRouter(httpapi.Deps{Console: builtConsole(), Account: acct})
+	for _, c := range []struct{ method, path, want string }{
+		{"GET", "/api/account/me", "/me"},
+		{"POST", "/api/account/identity/bind", "/identity/bind"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		if rec.Code != http.StatusTeapot || seen != c.want {
+			t.Fatalf("%s %s: %d, 收到路径 %q", c.method, c.path, rec.Code, seen)
+		}
+	}
+	// 没装配时不挂:落回控制台静态页。
+	rec := httptest.NewRecorder()
+	httpapi.NewRouter(httpapi.Deps{Console: builtConsole()}).ServeHTTP(rec, httptest.NewRequest("GET", "/api/account/me", nil))
+	if rec.Code == http.StatusTeapot {
+		t.Fatal("Account 为 nil 时不该挂载")
 	}
 }

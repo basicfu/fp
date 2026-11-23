@@ -1,4 +1,4 @@
-package rendezvous
+package cluster
 
 import "testing"
 

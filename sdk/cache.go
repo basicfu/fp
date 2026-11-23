@@ -30,6 +30,8 @@ type entry struct {
 	// roles 是该用户在本应用的有效角色，鉴权判定用它。
 	// 跟着身份一起缓存：判定因此完全不碰网络。
 	roles []string
+	// clientRef 是会话绑定的设备标识，见 Identity.ClientRef。
+	clientRef string
 	// accessKey 非 nil 表示这是访问密钥的缓存条目（键见 accessKeyCacheKey），roles 同样有效。
 	accessKey *accessKeyEntry
 

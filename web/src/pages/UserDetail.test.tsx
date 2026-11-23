@@ -105,6 +105,23 @@ async function openResetDialogAndSubmit(pwd = 'new-secret-pwd') {
 
 // Step 4 人工验证第 1 条的自动化替代：身份、在线设备、登录日志三块
 // 确实都渲染出了各自接口返回的数据。
+test('用户 ID 显示为 32 位写法，复制的也是它', async () => {
+  const dashed = '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b'
+  const compact = '0190a1b2c3d47e5f8a9b0c1d2e3f4a5b'
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  stubFetchSequence(
+    new Response(JSON.stringify({ ...sampleUser, id: dashed }), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+    new Response(JSON.stringify([]), { status: 200 }),
+  )
+  renderDetail()
+  await waitFor(() => expect(screen.getByText(compact)).toBeTruthy())
+  expect(screen.queryByText(dashed)).toBeFalsy()
+  fireEvent.click(screen.getByRole('button', { name: '复制用户 ID' }))
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(compact))
+})
+
 test('初次加载渲染身份、在线设备、登录日志三块数据', async () => {
   stubFetchSequence(
     new Response(JSON.stringify(sampleUser), { status: 200 }),

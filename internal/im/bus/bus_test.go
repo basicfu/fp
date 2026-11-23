@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/basicfu/fp/internal/im/redisx"
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/testsupport"
 )
 
 func TestPublishReachesOnlyTargetNode(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
-	run, _ := redisx.NewRunner(rdb, 0, 1)
+	run, _ := cluster.NewRunner(rdb, 0, 1)
 	defer run.Close()
 	b := New(rdb, run)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -56,7 +56,7 @@ func TestPublishReachesOnlyTargetNode(t *testing.T) {
 // 有订阅者的频道返回实际订阅者数。
 func TestPublishReturnsSubscriberCount(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
-	run, _ := redisx.NewRunner(rdb, 0, 1)
+	run, _ := cluster.NewRunner(rdb, 0, 1)
 	defer run.Close()
 	b := New(rdb, run)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,7 +98,7 @@ func TestPublishReturnsSubscriberCount(t *testing.T) {
 // 这里不设 first 特判，直接断言重连后能收到 SignalGap。
 func TestSubscribeSignalsGapOnReconnect(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
-	run, _ := redisx.NewRunner(rdb, 0, 1)
+	run, _ := cluster.NewRunner(rdb, 0, 1)
 	defer run.Close()
 	b := New(rdb, run)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -135,5 +135,33 @@ func TestSubscribeSignalsGapOnReconnect(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("重连后 5 秒内没收到消息")
+	}
+}
+
+// fp-im 已在生产上跑，节点频道名必须与搬进 cluster 之前一致：新旧节点滚动发布时互相要能收到。
+func TestPublishUsesLegacyChannelName(t *testing.T) {
+	rdb := testsupport.NewTestRedis(t)
+	run, _ := cluster.NewRunner(rdb, 0, 1)
+	defer run.Close()
+	b := New(rdb, run)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sub := rdb.SSubscribe(ctx, "fp:im:node:im-legacy")
+	defer sub.Close()
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{Type: TypeMsg, App: "a1", Subject: "u:1", Payload: []byte(`1`)}
+	if n, err := b.Publish(ctx, "im-legacy", env); err != nil || n != 1 {
+		t.Fatalf("发布到旧频道名应有 1 个订阅者：n=%d err=%v", n, err)
+	}
+	select {
+	case m := <-sub.Channel():
+		if _, err := Decode([]byte(m.Payload)); err != nil {
+			t.Fatalf("收到的不是信封：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("旧频道名上 5 秒内没收到消息")
 	}
 }

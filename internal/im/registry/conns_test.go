@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/model"
-	"github.com/basicfu/fp/internal/im/redisx"
 	"github.com/basicfu/fp/internal/testsupport"
 	"github.com/redis/go-redis/v9"
 )
 
 func newConns(t *testing.T, fieldTTL time.Duration) (*Conns, *redis.Client) {
 	rdb := testsupport.NewTestRedis(t)
-	run, err := redisx.NewRunner(rdb, 0, 1)
+	run, err := cluster.NewRunner(rdb, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestFieldTTLAndRenew(t *testing.T) {
 	if err != nil || len(ttl) != 1 || ttl[0] < 1 || ttl[0] > 2 {
 		t.Fatalf("握手后 field 应带 2 秒 TTL，实际 %v (%v)", ttl, err)
 	}
-	run, _ := redisx.NewRunner(rdb, 0, 1)
+	run, _ := cluster.NewRunner(rdb, 0, 1)
 	defer run.Close()
 	c2 := NewConns(rdb, run, 60*time.Second)
 	if err := c2.Renew(ctx, "a1", "u:1", []string{"c1"}); err != nil {

@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -44,6 +45,15 @@ func (s *userServer) authorize(ctx context.Context) error {
 		return StatusFrom(err)
 	}
 	return nil
+}
+
+// domainCode 取领域错误的码，不是领域错误时为空。
+func domainCode(err error) string {
+	var de *domain.Error
+	if errors.As(err, &de) {
+		return de.Code
+	}
+	return ""
 }
 
 // parseUserID 把请求里的 user_id 解析成 UUID。写错的 id 就是一个不存在的用户，
@@ -106,11 +116,22 @@ func (s *userServer) GetAvatar(ctx context.Context, req *fpv1.GetAvatarRequest) 
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
 	}
+	// PG 里还有字节就字节、地址一起给：只认 image 的老 SDK 照常能用；新上传的头像只在对象存储里，只有地址。
 	contentType, image, err := s.svc.GetAvatar(ctx, req.GetHash())
-	if err != nil {
+	if err != nil && domainCode(err) != domain.CodeAvatarNotFound {
 		return nil, StatusFrom(err)
 	}
-	return &fpv1.GetAvatarResponse{Image: image, ContentType: contentType}, nil
+	notFound := err
+	url, err := s.svc.AvatarURLByHash(ctx, req.GetHash())
+	if err != nil {
+		if c := domainCode(err); c != domain.CodeAvatarNotFound && c != domain.CodeObjectStoreUnavailable {
+			return nil, StatusFrom(err)
+		}
+		if image == nil {
+			return nil, StatusFrom(notFound)
+		}
+	}
+	return &fpv1.GetAvatarResponse{Image: image, ContentType: contentType, Url: url}, nil
 }
 
 // RequestDeletion 走 AccountService 而不是 UserService：改状态必须连带撤销会话、写审计，

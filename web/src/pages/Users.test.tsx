@@ -98,7 +98,7 @@ test('浏览器后退到没有关键词的历史记录时，搜索框回填为�
   renderUsers(['/users'])
 
   const input = (await waitFor(() =>
-    screen.getByPlaceholderText('手机号 / 用户名 / 昵称'),
+    screen.getByPlaceholderText('手机号 / 用户名 / 昵称 / 用户 ID'),
   )) as HTMLInputElement
   const form = input.closest('form')
   if (!form) throw new Error('未找到搜索表单')
@@ -107,14 +107,14 @@ test('浏览器后退到没有关键词的历史记录时，搜索框回填为�
   fireEvent.submit(form)
 
   await waitFor(() => {
-    const box = screen.getByPlaceholderText('手机号 / 用户名 / 昵称') as HTMLInputElement
+    const box = screen.getByPlaceholderText('手机号 / 用户名 / 昵称 / 用户 ID') as HTMLInputElement
     expect(box.value).toBe('138')
   })
 
   fireEvent.click(screen.getByRole('button', { name: '__back__' }))
 
   await waitFor(() => {
-    const box = screen.getByPlaceholderText('手机号 / 用户名 / 昵称') as HTMLInputElement
+    const box = screen.getByPlaceholderText('手机号 / 用户名 / 昵称 / 用户 ID') as HTMLInputElement
     expect(box.value).toBe('')
   })
 })
@@ -135,7 +135,7 @@ test('提交搜索后输入框仍然持有焦点，不会因为组件重挂而�
   renderUsers(['/users'])
 
   const input = (await waitFor(() =>
-    screen.getByPlaceholderText('手机号 / 用户名 / 昵称'),
+    screen.getByPlaceholderText('手机号 / 用户名 / 昵称 / 用户 ID'),
   )) as HTMLInputElement
   const form = input.closest('form')
   if (!form) throw new Error('未找到搜索表单')
@@ -147,7 +147,7 @@ test('提交搜索后输入框仍然持有焦点，不会因为组件重挂而�
   fireEvent.submit(form)
 
   await waitFor(() => {
-    expect((screen.getByPlaceholderText('手机号 / 用户名 / 昵称') as HTMLInputElement).value).toBe('138')
+    expect((screen.getByPlaceholderText('手机号 / 用户名 / 昵称 / 用户 ID') as HTMLInputElement).value).toBe('138')
   })
   // 同一个 DOM 节点应该还在文档里持有焦点——不是"又找到一个值对的输入框"，
   // 而是这个输入框自己没有被换掉。

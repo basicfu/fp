@@ -247,3 +247,16 @@ func takenOnConflict(err error) error {
 	}
 	return err
 }
+
+// SetIdentityNickname 记下三方身份自带的昵称（微信昵称），每次扫码登录、绑定时刷新。
+// 昵称规整同 thirdPartyNickname，规整后为空就不改：微信偶尔不给昵称，不该把记着的冲掉。
+func (s *UserService) SetIdentityNickname(ctx context.Context, identityID uuid.UUID, raw string) error {
+	nickname := thirdPartyNickname(raw)
+	if nickname == "" {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE identity SET nickname = $2 WHERE id = $1 AND nickname <> $2`, identityID, nickname); err != nil {
+		return fmt.Errorf("service: 写入身份昵称: %w", err)
+	}
+	return nil
+}

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"log/slog"
 
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/model"
-	"github.com/basicfu/fp/internal/im/rendezvous"
 	fpimv1 "github.com/basicfu/fp/sdk/gen/fpim/v1"
 )
 
@@ -58,9 +58,9 @@ func (h *Hub) Deliver(ctx context.Context, env bus.Envelope) bool {
 				candidates = append(candidates, n)
 			}
 		}
-		// rendezvous.Rank 对空 candidates 返回空切片（非 nil），下面的循环
+		// cluster.Rank 对空 candidates 返回空切片（非 nil），下面的循环
 		// 长度为 0，天然实现"候选为空则静默丢弃"，不需要额外的分支。
-		env.Route = rendezvous.Rank(candidates, env.Subject)
+		env.Route = cluster.Rank(candidates, env.Subject)
 		env.Hop = 0
 	}
 

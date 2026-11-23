@@ -27,6 +27,7 @@ const (
 	AuthService_ExchangeAppCode_FullMethodName      = "/fp.v1.AuthService/ExchangeAppCode"
 	AuthService_BindPhoneLogin_FullMethodName       = "/fp.v1.AuthService/BindPhoneLogin"
 	AuthService_Logout_FullMethodName               = "/fp.v1.AuthService/Logout"
+	AuthService_RevokeSession_FullMethodName        = "/fp.v1.AuthService/RevokeSession"
 	AuthService_ValidateToken_FullMethodName        = "/fp.v1.AuthService/ValidateToken"
 	AuthService_Watch_FullMethodName                = "/fp.v1.AuthService/Watch"
 	AuthService_ReportPermissions_FullMethodName    = "/fp.v1.AuthService/ReportPermissions"
@@ -62,6 +63,9 @@ type AuthServiceClient interface {
 	BindPhoneLogin(ctx context.Context, in *BindPhoneLoginRequest, opts ...grpc.CallOption) (*BindPhoneLoginResponse, error)
 	// Logout 撤销一个 token。
 	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
+	// RevokeSession 按会话 id 撤销一个会话（如业务方「移除这台设备」）。被撤销的 token 再校验得到 KICKED，
+	// 而不是 TOKEN_INVALID，客户端据此提示「已被移出账号」。
+	RevokeSession(ctx context.Context, in *RevokeSessionRequest, opts ...grpc.CallOption) (*RevokeSessionResponse, error)
 	// ValidateToken 是 SDK 回源校验的入口。
 	ValidateToken(ctx context.Context, in *ValidateTokenRequest, opts ...grpc.CallOption) (*ValidateTokenResponse, error)
 	// Watch 是撤销事件的推送流。
@@ -170,6 +174,16 @@ func (c *authServiceClient) Logout(ctx context.Context, in *LogoutRequest, opts 
 	return out, nil
 }
 
+func (c *authServiceClient) RevokeSession(ctx context.Context, in *RevokeSessionRequest, opts ...grpc.CallOption) (*RevokeSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeSessionResponse)
+	err := c.cc.Invoke(ctx, AuthService_RevokeSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *authServiceClient) ValidateToken(ctx context.Context, in *ValidateTokenRequest, opts ...grpc.CallOption) (*ValidateTokenResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ValidateTokenResponse)
@@ -260,6 +274,9 @@ type AuthServiceServer interface {
 	BindPhoneLogin(context.Context, *BindPhoneLoginRequest) (*BindPhoneLoginResponse, error)
 	// Logout 撤销一个 token。
 	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
+	// RevokeSession 按会话 id 撤销一个会话（如业务方「移除这台设备」）。被撤销的 token 再校验得到 KICKED，
+	// 而不是 TOKEN_INVALID，客户端据此提示「已被移出账号」。
+	RevokeSession(context.Context, *RevokeSessionRequest) (*RevokeSessionResponse, error)
 	// ValidateToken 是 SDK 回源校验的入口。
 	ValidateToken(context.Context, *ValidateTokenRequest) (*ValidateTokenResponse, error)
 	// Watch 是撤销事件的推送流。
@@ -311,6 +328,9 @@ func (UnimplementedAuthServiceServer) BindPhoneLogin(context.Context, *BindPhone
 }
 func (UnimplementedAuthServiceServer) Logout(context.Context, *LogoutRequest) (*LogoutResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Logout not implemented")
+}
+func (UnimplementedAuthServiceServer) RevokeSession(context.Context, *RevokeSessionRequest) (*RevokeSessionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeSession not implemented")
 }
 func (UnimplementedAuthServiceServer) ValidateToken(context.Context, *ValidateTokenRequest) (*ValidateTokenResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ValidateToken not implemented")
@@ -495,6 +515,24 @@ func _AuthService_Logout_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AuthService_RevokeSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).RevokeSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_RevokeSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).RevokeSession(ctx, req.(*RevokeSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AuthService_ValidateToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ValidateTokenRequest)
 	if err := dec(in); err != nil {
@@ -630,6 +668,10 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Logout",
 			Handler:    _AuthService_Logout_Handler,
+		},
+		{
+			MethodName: "RevokeSession",
+			Handler:    _AuthService_RevokeSession_Handler,
 		},
 		{
 			MethodName: "ValidateToken",

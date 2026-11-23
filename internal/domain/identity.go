@@ -27,4 +27,7 @@ type Identity struct {
 	Credential  string
 	LastLoginAt int64
 	CreatedAt   int64
+	// Nickname 是三方身份自带的昵称（微信昵称），登录、绑定时刷新；本地标识为空串。
+	// 与 User.Nickname 不同：那是用户自己的昵称，这里只用来告诉用户"绑的是哪个微信"。
+	Nickname string
 }

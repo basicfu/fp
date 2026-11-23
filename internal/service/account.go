@@ -40,6 +40,8 @@ type AccountService struct {
 	logs     *LoginLogService
 	// coolingOff 是提交注销到永久删除的冷静期，见 RequestDeletion。
 	coolingOff time.Duration
+	// events 为 nil 时注销生效不写 account_deleted。
+	events *AppEvents
 }
 
 // NewAccountService 构造 AccountService。
