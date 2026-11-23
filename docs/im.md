@@ -14,6 +14,10 @@ export FP_IM_FPSDK_SECRET=<在 fp 控制台生成，见下面>
 ./scripts/run-im.sh
 ```
 
+另有一个可选的 `FP_IM_ENV`（缺省 `dev`），含义同 fp 的 `FP_ENV`：不是 `dev`
+时日志除了打 stdout，还按天写进 `/logs/<日期>.log`（保留 30 天），部署时把宿主机
+日志目录挂到容器的 `/logs`。生产传 `FP_IM_ENV=prod`。
+
 `fp-im` 没有配置文件——只要求这三个环境变量，缺一不启动；其余启动参数
 （监听地址、心跳/超时这些）全部是写死在 `internal/im/config` 里的默认值，
 想改就改代码、发新版本，不支持运行时配置。与 fp 自己的启动配置

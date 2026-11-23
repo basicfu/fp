@@ -55,6 +55,30 @@ func TestFromEnvReadsRequiredFieldsAndFillsDefaults(t *testing.T) {
 	}
 }
 
+// FP_IM_ENV 决定日志要不要落盘(logging.Setup 只在非 dev 时写 /logs);
+// 部署脚本一直传着 FP_IM_ENV=prod,以前没人读,生产上 fp-im 一行日志文件都没有。
+func TestFromEnvReadsEnv(t *testing.T) {
+	setRequiredEnv(t)
+
+	t.Setenv("FP_IM_ENV", "")
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.Env != "dev" {
+		t.Errorf("未设置 FP_IM_ENV 时 Env = %q, want dev", cfg.Env)
+	}
+
+	t.Setenv("FP_IM_ENV", "prod")
+	cfg, err = FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.Env != "prod" {
+		t.Errorf("FP_IM_ENV=prod 时 Env = %q, want prod", cfg.Env)
+	}
+}
+
 func TestFromEnvRequiresRedisURL(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("FP_IM_REDIS_URL", "")

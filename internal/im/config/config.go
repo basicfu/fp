@@ -144,6 +144,10 @@ func FromEnv() (*Config, error) {
 	}
 
 	c := defaultConfig()
+	// 可选,缺省 dev。非 dev 时 logging.Setup 才把日志同时写进 /logs,与 fp 的 FP_ENV 同一套行为。
+	if env := os.Getenv("FP_IM_ENV"); env != "" {
+		c.Env = env
+	}
 	c.Redis.URL = redisURL
 	c.FPSDK.Addr = fpsdkAddr
 	c.FPSDK.Secret = fpsdkSecret
