@@ -97,7 +97,7 @@ func TestStaticIndexReturnsFullBodyWhenETagDoesNotMatch(t *testing.T) {
 	}
 }
 
-// 静态资源现在挂在 /static/ 前缀下——CDN 按 static.xxzj.com/fp/ 回源到源站
+// 静态资源现在挂在 /static/ 前缀下——CDN 按 static.kkdesk.com/fp/ 回源到源站
 // 的 /static/，Vite 构建时 base 写死的就是这个前缀，两边对得上。
 func TestStaticServesFileUnderPrefix(t *testing.T) {
 	h := newStaticHandler(builtConsole())

@@ -12,7 +12,7 @@ export default defineConfig(({ command }) => ({
   },
   // 生产构建时，index.html 里引用的资源地址（<script src>/<link href>）
   // 都会带上这个前缀。scripts/build-web.sh 已经把 VITE_ASSET_BASE 写死成
-  // CDN 地址（static.xxzj.com/fp/，回源映射到源站的 /static/），这里的
+  // CDN 地址（static.kkdesk.com/fp/，回源映射到源站的 /static/），这里的
   // /static/ 只是没经过那个脚本、直接跑 npm run build 时的兜底——
   // fp 自己的 internal/httpapi/static.go 也认这个前缀，不接 CDN 照样能跑。
   //

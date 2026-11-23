@@ -64,7 +64,7 @@ SELECT username, status, created_at FROM admin ORDER BY created_at;
 自己的 `/admin/api/*`）直接连源站，不上 CDN——内容要么每次都会变（HTML
 靠 ETag 做条件请求，见下面），要么是带会话的动态数据，缓存了要么没意义
 要么有风险。JS/CSS/字体这些静态产物走 CDN：`scripts/build-web.sh` 把
-`VITE_ASSET_BASE` 写死成 `https://static.xxzj.com/fp/`，构建出来的
+`VITE_ASSET_BASE` 写死成 `https://static.kkdesk.com/fp/`，构建出来的
 `index.html` 里 `<script>`/`<link>` 地址直接指向这个 CDN 域名；CDN 那边
 把这个路径回源映射到源站的 `/static/` 就行（`internal/httpapi/static.go`
 认这个前缀）。
