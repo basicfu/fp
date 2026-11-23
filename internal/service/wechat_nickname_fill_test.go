@@ -53,8 +53,8 @@ func TestWechatNewUserGetsWechatNickname(t *testing.T) {
 	if res.User.Nickname != "小明" || e.nicknameOf(t, res.User.ID) != "小明" {
 		t.Fatalf("nickname = %q", res.User.Nickname)
 	}
-	// 头像本次不处理：外链照旧记在 avatar_url，不生成 avatar_hash。
-	if res.User.AvatarHash != "" || !strings.HasPrefix(res.User.AvatarURL, "https://img/") {
+	// 外链照旧记在 avatar_url；这个环境没配对象存储，不补 avatar_hash。
+	if res.User.AvatarHash != "" || !strings.HasSuffix(res.User.AvatarURL, "/headimg/o1") {
 		t.Fatalf("avatar = %q / %q", res.User.AvatarURL, res.User.AvatarHash)
 	}
 }

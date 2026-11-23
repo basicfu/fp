@@ -145,7 +145,7 @@ func (s *UserService) UpdateAvatar(ctx context.Context, id uuid.UUID, image []by
 		}
 	}
 
-	if err := s.storeAvatar(ctx, id, hash, contentType, newKey); err != nil {
+	if err := s.storeAvatar(ctx, id, hash, contentType, newKey, false); err != nil {
 		if newKey != "" {
 			// ctx 可能正是因取消才失败的，清理要用不随它取消的 ctx。
 			if derr := s.objects.Delete(context.WithoutCancel(ctx), newKey); derr != nil {
@@ -157,7 +157,11 @@ func (s *UserService) UpdateAvatar(ctx context.Context, id uuid.UUID, image []by
 	return s.GetProfile(ctx, id)
 }
 
-func (s *UserService) storeAvatar(ctx context.Context, id uuid.UUID, hash, contentType, newKey string) error {
+// errAvatarNotEmpty 是 storeAvatar 只补空时用户已有头像（或用户已不在）的结果，不是故障。
+var errAvatarNotEmpty = errors.New("service: 用户已有头像")
+
+// storeAvatar 在一个事务里写头像两张表。onlyIfEmpty 时只在 avatar_hash 仍为空时写，否则返回 errAvatarNotEmpty。
+func (s *UserService) storeAvatar(ctx context.Context, id uuid.UUID, hash, contentType, newKey string, onlyIfEmpty bool) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("service: 开启事务: %w", err)
@@ -165,12 +169,18 @@ func (s *UserService) storeAvatar(ctx context.Context, id uuid.UUID, hash, conte
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	// 先改 app_user：这一行的行锁让同一用户的并发换头像排队，两张表不会各留一方的结果。
+	// 只补空的条件也放这条 UPDATE 里：等到行锁后 PG 会按提交后的新值重判 WHERE，
+	// 和用户同时手动上传时，先提交的手动头像不会被补空覆盖。
 	tag, err := tx.Exec(ctx,
-		`UPDATE app_user SET avatar_hash = $2, updated_at = now() WHERE id = $1`, id, hash)
+		`UPDATE app_user SET avatar_hash = $2, updated_at = now() WHERE id = $1 AND (NOT $3 OR avatar_hash = '')`,
+		id, hash, onlyIfEmpty)
 	if err != nil {
 		return fmt.Errorf("service: 更新头像哈希: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		if onlyIfEmpty {
+			return errAvatarNotEmpty
+		}
 		return domain.Failf(domain.ErrNotFound, domain.CodeUserNotFound, "用户不存在")
 	}
 	if _, err := tx.Exec(ctx, `
@@ -201,6 +211,47 @@ func (s *UserService) storeAvatar(ctx context.Context, id uuid.UUID, hash, conte
 		return fmt.Errorf("service: 提交事务: %w", err)
 	}
 	return nil
+}
+
+// HasObjectStore 报告是否配了头像所在的对象存储。
+func (s *UserService) HasObjectStore() bool { return s.objects != nil }
+
+// FillEmptyAvatar 用户还没有头像时把 image 存为头像，返回是否写入。已有头像、没配对象存储都不写，也不算错。
+//
+// 存储路径与 UpdateAvatar 相同（预登记 → 上传 → 事务入库）。没写进去时对象已经上传，
+// 把预登记改成立即到期交给 object_gc 删，不在这里直接删：删除失败还有它重试。
+func (s *UserService) FillEmptyAvatar(ctx context.Context, id uuid.UUID, image []byte) (bool, error) {
+	if s.objects == nil {
+		return false, nil
+	}
+	contentType, err := domain.CheckAvatar(image)
+	if err != nil {
+		return false, err
+	}
+	key, err := newAvatarKey(contentType)
+	if err != nil {
+		return false, err
+	}
+	if err := s.reserveObjectKey(ctx, key); err != nil {
+		return false, err
+	}
+	err = s.objects.Put(ctx, key, contentType, image, avatarCacheControl)
+	if err != nil {
+		err = fmt.Errorf("service: 上传头像: %w", err)
+	} else {
+		err = s.storeAvatar(ctx, id, domain.AvatarHash(image), contentType, key, true)
+	}
+	if err == nil {
+		return true, nil
+	}
+	if _, derr := s.pool.Exec(context.WithoutCancel(ctx), `UPDATE object_gc SET due_at = now() WHERE key = $1`, key); derr != nil {
+		// 预登记还在，到期照样会删，只是晚一些。
+		slog.Warn("service: 丢弃补空头像对象失败，等预登记到期再删", "key", key, "err", derr)
+	}
+	if errors.Is(err, errAvatarNotEmpty) {
+		return false, nil
+	}
+	return false, err
 }
 
 // pendingObjectGrace 是上传前预登记的待删期限：远长于一次上传加入库，到点还没被摘掉说明入库没成。

@@ -9,6 +9,7 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -22,8 +23,10 @@ type oauthEnv struct {
 	apps  *service.ApplicationService
 	users *service.UserService
 	sms   *testsupport.FakeLoginSMS
-	app   string // 对外 appId
-	appID string // 内部 UUID 字符串
+	// objects 只在 newOAuthEnvWithObjects 建的环境里非 nil。
+	objects *objstore.Memory
+	app     string // 对外 appId
+	appID   string // 内部 UUID 字符串
 }
 
 // newOAuthEnv 只启用 wechat_web，不启用 sms_code：绑手机发码靠的是放宽后的 SendLoginCode。
@@ -35,11 +38,26 @@ func newOAuthEnv(t *testing.T, extra map[string]any) *oauthEnv {
 // newOAuthEnvWith 同 newOAuthEnv，发码频率规则由调用方定：不传 codeOpts 即默认限流。
 func newOAuthEnvWith(t *testing.T, extra map[string]any, codeOpts ...service.LoginCodeOption) *oauthEnv {
 	t.Helper()
+	return newOAuthEnvStore(t, nil, extra, codeOpts...)
+}
+
+// newOAuthEnvWithObjects 同 newOAuthEnv，另配内存对象存储：微信头像会在后台补到空头像的用户上。
+func newOAuthEnvWithObjects(t *testing.T) *oauthEnv {
+	t.Helper()
+	return newOAuthEnvStore(t, objstore.NewMemory(), nil, service.WithLoginCodeRateRules())
+}
+
+func newOAuthEnvStore(t *testing.T, objects *objstore.Memory, extra map[string]any, codeOpts ...service.LoginCodeOption) *oauthEnv {
+	t.Helper()
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 	wx := testsupport.NewFakeWechat(t)
 
-	users := service.NewUserService(pool)
+	var userOpts []service.UserOption
+	if objects != nil {
+		userOpts = append(userOpts, service.WithObjectStore(objects))
+	}
+	users := service.NewUserService(pool, userOpts...)
 	codes := service.NewLoginCodeService(rdb, codeOpts...)
 	reg := connector.NewRegistry()
 	for _, c := range []connector.Connector{
@@ -70,12 +88,17 @@ func newOAuthEnvWith(t *testing.T, extra map[string]any, codeOpts ...service.Log
 	}
 	sms := &testsupport.FakeLoginSMS{}
 	sessions := service.NewSessionService(store.NewSessionStore(rdb), store.NewRevokePublisher(rdb), store.NewEpochStore(rdb))
+	auth := service.NewAuthService(service.AuthDeps{
+		Apps: apps, Users: users, Sessions: sessions, Logs: service.NewLoginLogService(pool), Registry: reg,
+		Codes: codes, Notifier: sms, OAuth: service.NewOAuthStore(rdb), PublicURL: "https://fp.example.com",
+		// 假微信的头像地址在 httptest 上。
+		Avatars: connector.NewAvatarFetcher("127.0.0.1"),
+	})
+	// 后注册先执行：后台补头像跑完再清库，免得它写进下一个测试的数据。
+	t.Cleanup(func() { service.WaitBackgroundForTest(auth) })
 	return &oauthEnv{
-		auth: service.NewAuthService(service.AuthDeps{
-			Apps: apps, Users: users, Sessions: sessions, Logs: service.NewLoginLogService(pool), Registry: reg,
-			Codes: codes, Notifier: sms, OAuth: service.NewOAuthStore(rdb), PublicURL: "https://fp.example.com",
-		}),
-		codes: codes, apps: apps, users: users, sms: sms, app: app.AppID, appID: app.ID.String(),
+		auth:  auth,
+		codes: codes, apps: apps, users: users, sms: sms, objects: objects, app: app.AppID, appID: app.ID.String(),
 	}
 }
 
@@ -148,7 +171,7 @@ func TestOAuthFirstLoginBindsPhoneThenLogsInDirectly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Status != service.OAuthStatusBindPhone || out.BindTicket == "" || out.Nickname != "小明" || out.AvatarURL != "https://img/o1" {
+	if out.Status != service.OAuthStatusBindPhone || out.BindTicket == "" || out.Nickname != "小明" || !strings.HasSuffix(out.AvatarURL, "/headimg/o1") {
 		t.Fatalf("out = %+v", out)
 	}
 

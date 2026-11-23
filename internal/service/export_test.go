@@ -23,3 +23,6 @@ func SetAppCacheForTest(s *ApplicationService, max int, afterLoad func()) {
 	}
 	s.afterLoad = afterLoad
 }
+
+// WaitBackgroundForTest 等 AuthService 起的后台补头像全部跑完。
+func WaitBackgroundForTest(s *AuthService) { s.avatarFills.Wait() }

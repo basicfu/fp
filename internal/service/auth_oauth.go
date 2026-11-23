@@ -311,7 +311,7 @@ func (s *AuthService) settle(ctx context.Context, app *domain.Application, in OA
 				}); err != nil {
 					return nil, err
 				}
-				user = s.fillNicknameFrom(ctx, user, p)
+				user = s.fillProfileFrom(ctx, user, p)
 			}
 			s.noteIdentityNickname(ctx, identity, p)
 			res, err := s.completeLogin(ctx, app, loginInputFrom(in, connType), profileResult(p), user, identity, false, "")
@@ -366,7 +366,7 @@ func (s *AuthService) BindPhone(ctx context.Context, in BindPhoneInput) (*LoginR
 	}
 
 	p := t.Outcome.Profile
-	// 昵称不在建号时写：新号与挂到老号都交给 fillNicknameFrom，规整规则只有一处。
+	// 昵称不在建号时写：新号与挂到老号都交给 fillProfileFrom，规整规则只有一处。
 	res, err := s.deps.Users.LinkPhone(ctx, LinkPhoneInput{Phone: phone, Identity: EnsureIdentityInput{
 		Type: p.IdentityType, Subject: p.Subject, UnionKey: p.UnionKey, AvatarURL: p.AvatarURL,
 	}})
@@ -374,7 +374,7 @@ func (s *AuthService) BindPhone(ctx context.Context, in BindPhoneInput) (*LoginR
 		s.logFailure(ctx, app, login, p.IdentityType, p.Subject, err)
 		return nil, err
 	}
-	res.User = s.fillNicknameFrom(ctx, res.User, p)
+	res.User = s.fillProfileFrom(ctx, res.User, p)
 	s.noteIdentityNickname(ctx, res.Identity, p)
 	var note string
 	if len(res.Replaced) > 0 {

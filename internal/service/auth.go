@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 
 	"github.com/google/uuid"
 
@@ -45,17 +46,25 @@ type AuthDeps struct {
 	// Events 写 login_succeeded。为 nil 时不写（不开事件的部署与大部分测试）。
 	// 它与 Sessions 的事件（WithSessionEvents）要一起给或一起不给：预占与补写退出靠后者。
 	Events AppEventAppender
+	// Avatars 下载三方头像补到空头像的账号上；nil 时只放行微信头像域名。
+	Avatars *connector.AvatarFetcher
 }
 
 // AuthService 编排登录流程。它是唯一知道"登录该按什么顺序发生"的地方：
 // Connector 只管校验凭据，UserService 只管归并，SessionService 只管令牌。
 type AuthService struct {
 	deps AuthDeps
+	// avatarSlots 限住同时在跑的后台补头像个数，avatarFills 供测试等它们跑完。见 fillAvatarLater。
+	avatarSlots chan struct{}
+	avatarFills sync.WaitGroup
 }
 
 // NewAuthService 构造 AuthService。
 func NewAuthService(d AuthDeps) *AuthService {
-	return &AuthService{deps: d}
+	if d.Avatars == nil {
+		d.Avatars = connector.NewAvatarFetcher(connector.WechatAvatarHosts...)
+	}
+	return &AuthService{deps: d, avatarSlots: make(chan struct{}, maxAvatarFills)}
 }
 
 // LoginInput 是一次登录请求。
