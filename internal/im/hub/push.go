@@ -46,6 +46,12 @@ func (h *Hub) Push(ctx context.Context, app string, sub model.Subject, payload [
 // 不要退化成循环调 Push——那样每个 subject 各自一次注册表往返，PushMany
 // 存在的唯一意义（把多次查询合并成一次）就没了。
 func (h *Hub) PushMany(ctx context.Context, app string, subs []model.Subject, payload []byte) []PushResult {
+	results := h.pushMany(ctx, app, subs, payload)
+	h.countPush(results)
+	return results
+}
+
+func (h *Hub) pushMany(ctx context.Context, app string, subs []model.Subject, payload []byte) []PushResult {
 	results := make([]PushResult, len(subs))
 	localHits := make([]int, len(subs))
 	var pending []int // 还需要查注册表的下标

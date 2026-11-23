@@ -122,6 +122,8 @@ type Hub struct {
 	// 支点（谁抢到 delete 谁负责发事件），推迟它就得另造一套去重；而且
 	// 那样做期间连接仍留在路由表里，Push 会继续投给一条正在拆的连接。
 	teardowns int
+
+	stats stats
 }
 
 func New(nodeID string, reg Registry, live Liveness, pub Publisher, apps auth.AppConfigSource) *Hub {
@@ -177,6 +179,7 @@ func (h *Hub) AddConn(ctx context.Context, app string, sub model.Subject, c Conn
 	var dirty GroupIndex
 	if !dup {
 		dirty = h.groupAddLocked(app, sub, 1)
+		h.stats.opened.Add(1)
 	}
 	h.mu.Unlock()
 	if dirty != nil {
@@ -228,6 +231,7 @@ func (h *Hub) RemoveConn(ctx context.Context, app string, sub model.Subject, con
 		// 与摘表在同一个临界区里自增，见 teardowns 字段的注释：这条连接从
 		// 现在起到断开事件发完之前，都还没"了结"。
 		h.teardowns++
+		h.stats.closed.Add(1)
 	}
 	var dirty GroupIndex
 	if ok {

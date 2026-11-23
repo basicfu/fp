@@ -100,6 +100,9 @@ type Reg struct {
 	// （不管是循环调 Lookup 还是循环调只传一个主体的 LookupMany），这个
 	// 计数器会随主体数一起涨上去，而不是恒为 1。
 	LookupManyCalls int
+
+	// LookupErr 非 nil 时 LookupMany 直接返回它,模拟 Redis 查表失败。
+	LookupErr error
 }
 
 func (r *Reg) Lookup(_ context.Context, _, subject string, _ []string) (map[string]model.ConnMeta, error) {
@@ -108,6 +111,9 @@ func (r *Reg) Lookup(_ context.Context, _, subject string, _ []string) (map[stri
 
 func (r *Reg) LookupMany(ctx context.Context, app string, subjects []string, live []string) ([]map[string]model.ConnMeta, error) {
 	r.LookupManyCalls++
+	if r.LookupErr != nil {
+		return nil, r.LookupErr
+	}
 	out := make([]map[string]model.ConnMeta, len(subjects))
 	for i, s := range subjects {
 		out[i], _ = r.Lookup(ctx, app, s, live)

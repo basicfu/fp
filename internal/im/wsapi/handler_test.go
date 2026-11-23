@@ -293,6 +293,16 @@ func TestNoAuthFrameRejectsBadRequest(t *testing.T) {
 	expectReject(t, c, model.CodeBadRequest, model.CloseAuthFailed)
 }
 
+// 握手被拒要计进 hub 的统计,定时日志靠它看出鉴权有没有异常。
+func TestRejectCountedInHubStats(t *testing.T) {
+	e := newEnv(t, Config{})
+	c := e.dial(t)
+	defer c.CloseNow()
+	send(t, c, map[string]any{"t": model.FrameAuth, "app": "a1", "token": "bad"})
+	expectReject(t, c, model.CodeAuthFailed, model.CloseAuthFailed)
+	waitUntil(t, func() bool { return e.h.StatsSnapshot().Rejected == 1 }, "握手被拒应计 1 次")
+}
+
 func TestBadTokenCloses4001AndGuestRules(t *testing.T) {
 	e := newEnv(t, Config{})
 	c := e.dial(t)

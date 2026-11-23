@@ -235,6 +235,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 	go renewLoop(ctx, h, conns, gidx, cfg.Conn.FieldRenew.Std())
 	guests := wsapi.NewGuestLimiter()
 	go sweepLoop(ctx, guests)
+	go statsLoop(ctx, h, log, statsInterval)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsapi.New(wsapi.Deps{

@@ -247,6 +247,7 @@ func unavailable() *rejection {
 // reject 先发鉴权结果帧再关闭：client 发出首帧后收到的第一帧必须是 t=2，
 // 拒绝也不例外，client 才能拿到可展示的原因，而不是只看到一个关闭码。
 func (s *server) reject(ctx context.Context, ws *websocket.Conn, rej *rejection) {
+	s.Hub.NoteRejected()
 	// 写给个上限：写不出去说明连接已坏。coder/websocket 在 ctx 到期时直接
 	// 断开底层连接，随后的 Close 成为空操作——正好是"没法写就直接关闭"。
 	wctx, cancel := context.WithTimeout(ctx, rejectWriteTimeout)
