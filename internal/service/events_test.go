@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/basicfu/fp/internal/domain"
 )
 
@@ -38,4 +40,31 @@ func wantDomainCode(t *testing.T, err error, code string) {
 	if !errors.As(err, &de) || de.Code != code {
 		t.Fatalf("err = %v, want code %s", err, code)
 	}
+}
+
+// recordingAppender 记下写进事件表的业务事件。
+type recordingAppender struct {
+	mu     sync.Mutex
+	events []recordedAppEvent
+}
+
+type recordedAppEvent struct {
+	AppID, UserID uuid.UUID
+	Kind          string
+	Payload       any
+}
+
+func (r *recordingAppender) Append(_ context.Context, appID, userID uuid.UUID, kind string, payload any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, recordedAppEvent{AppID: appID, UserID: userID, Kind: kind, Payload: payload})
+	return nil
+}
+
+func (r *recordingAppender) take() []recordedAppEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.events
+	r.events = nil
+	return out
 }

@@ -225,7 +225,7 @@ func TestServeDeliversFirstConnectEventAfterStartup(t *testing.T) {
 	// 同步 Refresh 的时刻，Redis 里就已经有 B 可读——"启动后第一条事件不
 	// 丢"这条性质才是被真正验证的东西，而不是在测"A 起得比 B 晚多久"。
 	waitUntil(t, func() bool {
-		return rdb.HLen(ctx, model.SrvKey("a1")).Val() == 1
+		return rdb.HLen(ctx, model.ClusterKeys().Srv("a1")).Val() == 1
 	}, "节点 B 应在 a1 的服务表里登记自己")
 
 	// 节点 A：client 接在这里。A 上没有任何 server 流，连接事件必须跨节点
@@ -373,7 +373,7 @@ func (f *fakeHandshaker) Handshake(_ context.Context, _, _, _ string, _ model.Co
 	return registry.HandshakeResult{}, f.err
 }
 
-// fakeLiveness 是 reregistrar 需要的 registry.Liveness 子集的假实现。
+// fakeLiveness 是 reregistrar 需要的 cluster.Liveness 子集的假实现。
 type fakeLiveness struct {
 	present    bool
 	presentErr error

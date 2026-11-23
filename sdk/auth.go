@@ -44,6 +44,9 @@ type Identity struct {
 	// Roles 是该用户在本应用的有效角色（全局角色 ∪ 应用默认角色），
 	// 由 fp 在签发会话时解析好，随每次校验一起回来。鉴权判定用它。
 	Roles []string
+	// ClientRef 是登录时刻进会话的设备标识（应用开了会话绑定设备才有，如 kkdesk 的设备 id）。
+	// 业务方用它核对「这个 token 是不是这台设备的」。
+	ClientRef string
 	// Stale 为 true 表示这是 fp 不可达期间返回的陈旧结果。
 	// 业务方可据此拒绝高危操作。
 	Stale bool
@@ -152,6 +155,7 @@ func (a *Auth) Validate(ctx context.Context, token string) (*Identity, error) {
 			sessionID: res.GetSessionId(),
 			rotatedTo: res.GetNewToken(),
 			roles:     res.GetRoles(),
+			clientRef: res.GetClientRef(),
 		}
 		// cache_ttl_ms == 0 表示"不要缓存"。put 内部会原样忽略，
 		// 这里不做任何"没给就用默认值"的兜底——那正是契约禁止的事。
@@ -218,6 +222,7 @@ func identityFrom(e entry, stale bool) *Identity {
 		SessionID: e.sessionID,
 		RotatedTo: e.rotatedTo,
 		Roles:     e.roles,
+		ClientRef: e.clientRef,
 		Stale:     stale,
 	}
 }
@@ -269,6 +274,10 @@ type LoginInput struct {
 	IP            string
 	UserAgent     string
 	Mobile        bool
+	// DevicePub（32 字节设备公钥的 hex，64 个字符，否则 ErrInvalidArgument）与 ClientRef 刻进会话，
+	// 之后经 Identity.ClientRef 取回。代终端登录、要绑设备时才填。
+	DevicePub string
+	ClientRef string
 }
 
 // LoginResult 是登录成功的结果。
@@ -295,6 +304,8 @@ func (a *Auth) Login(ctx context.Context, in LoginInput) (*LoginResult, error) {
 		Ip:            in.IP,
 		UserAgent:     in.UserAgent,
 		Mobile:        in.Mobile,
+		DevicePub:     in.DevicePub,
+		ClientRef:     in.ClientRef,
 	})
 	if err != nil {
 		return nil, translate(err)
@@ -310,6 +321,27 @@ func (a *Auth) Logout(ctx context.Context, token string) error {
 	_, err := a.c.rpc.Logout(ctx, &fpv1.LogoutRequest{Token: token})
 	a.cache.drop(token)
 	return translate(err)
+}
+
+// CodeKicked 是 Validate 遇到被 RevokeSession（或管理员踢下线）作废的 token 时 *Error 的 Code，
+// 哨兵仍是 ErrUnauthorized。客户端据此提示「已被移出账号」，而不是「登录已过期」。
+const CodeKicked = "KICKED"
+
+// RevokeReasonKick 是 RevokeSession 目前唯一接受的原因。
+const RevokeReasonKick = "kick"
+
+// RevokeSession 按会话 id 撤销本应用的一个会话（如「移除这台设备并退出」），返回作废的 token 数：
+// 轮换过渡期内一个会话可能有新旧两个 token；会话不属于该用户、不属于本应用或已不存在时返回 0。
+//
+// reason 目前只接受 RevokeReasonKick。被撤的 token 之后 Validate 得到 Code 为 CodeKicked 的 ErrUnauthorized；
+// 应用开了事件时会收到 reason 为 kick 的 logged_out。各实例的本地缓存靠撤销推送即时失效。
+func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID, reason string) (int, error) {
+	res, err := a.c.rpc.RevokeSession(ctx, &fpv1.RevokeSessionRequest{UserId: userID, SessionId: sessionID, Reason: reason})
+	if err != nil {
+		// 走用户接口那套映射：用户不存在是 ErrNotFound 而不是 ErrUnauthorized，后者会让业务方误清自己的登录态。
+		return 0, translateUser(err)
+	}
+	return int(res.GetRevoked()), nil
 }
 
 // translate 把 gRPC status 转成 SDK 的哨兵错误，

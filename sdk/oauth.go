@@ -69,6 +69,9 @@ type OAuthClient struct {
 	IP        string
 	UserAgent string
 	Mobile    bool
+	// DevicePub、ClientRef 同 LoginInput。
+	DevicePub string
+	ClientRef string
 }
 
 // OAuthResult 是换票据 / 轮询的结论。
@@ -112,6 +115,7 @@ func (a *Auth) StartOAuth(ctx context.Context, in OAuthStartInput) (*OAuthStart,
 func (a *Auth) ExchangeOAuth(ctx context.Context, ticket string, c OAuthClient) (*OAuthResult, error) {
 	res, err := a.c.rpc.ExchangeOAuthTicket(ctx, &fpv1.ExchangeOAuthTicketRequest{
 		Ticket: ticket, Ip: c.IP, UserAgent: c.UserAgent, Mobile: c.Mobile,
+		DevicePub: c.DevicePub, ClientRef: c.ClientRef,
 	})
 	if err != nil {
 		return nil, translate(err)
@@ -123,6 +127,7 @@ func (a *Auth) ExchangeOAuth(ctx context.Context, ticket string, c OAuthClient) 
 func (a *Auth) PollOAuth(ctx context.Context, state string, c OAuthClient) (*OAuthResult, error) {
 	res, err := a.c.rpc.PollOAuthLogin(ctx, &fpv1.PollOAuthLoginRequest{
 		State: state, Ip: c.IP, UserAgent: c.UserAgent, Mobile: c.Mobile,
+		DevicePub: c.DevicePub, ClientRef: c.ClientRef,
 	})
 	if err != nil {
 		return nil, translate(err)
@@ -147,6 +152,7 @@ func (a *Auth) ExchangeAppCode(ctx context.Context, in AppCodeInput) (*OAuthResu
 	}
 	res, err := a.c.rpc.ExchangeAppCode(ctx, &fpv1.ExchangeAppCodeRequest{
 		ConnectorType: in.Connector, Code: in.Code, Ip: in.IP, UserAgent: in.UserAgent, Mobile: in.Mobile,
+		DevicePub: in.DevicePub, ClientRef: in.ClientRef,
 	})
 	if err != nil {
 		return nil, translate(err)
@@ -160,6 +166,7 @@ func (a *Auth) BindPhone(ctx context.Context, in BindPhoneInput) (*LoginResult, 
 	res, err := a.c.rpc.BindPhoneLogin(ctx, &fpv1.BindPhoneLoginRequest{
 		BindTicket: in.BindTicket, Phone: in.Phone, Code: in.Code,
 		Ip: in.IP, UserAgent: in.UserAgent, Mobile: in.Mobile,
+		DevicePub: in.DevicePub, ClientRef: in.ClientRef,
 	})
 	if err != nil {
 		return nil, translate(err)

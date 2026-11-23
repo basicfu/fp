@@ -16,6 +16,14 @@ import { afterEach } from 'vitest'
 import { cleanup } from '@testing-library/react'
 import { takeUnmatched } from '@/lib/testApi'
 
+// Node 26 自带实验性全局 localStorage/sessionStorage，没配 --localstorage-file 时是不可用对象，
+// 会遮住 jsdom 的实现（getItem/clear 不是函数）；检测到不可用时改指向 jsdom 的 window，旧版 Node 不受影响。
+for (const name of ['localStorage', 'sessionStorage'] as const) {
+  if (typeof (globalThis as Record<string, any>)[name]?.getItem === 'function') continue
+  const real = (globalThis as any).jsdom?.window?.[name]
+  if (real) Object.defineProperty(globalThis, name, { value: real, configurable: true, writable: true })
+}
+
 afterEach(() => {
   let missed: string[]
   try {

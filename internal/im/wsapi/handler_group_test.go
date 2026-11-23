@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/auth"
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/hub/hubtest"
 	"github.com/basicfu/fp/internal/im/model"
-	"github.com/basicfu/fp/internal/im/redisx"
 	"github.com/basicfu/fp/internal/im/registry"
 	"github.com/basicfu/fp/internal/testsupport"
 	"github.com/coder/websocket"
@@ -28,7 +28,7 @@ func (l liveList) LiveNodes() []string { return l }
 func newRedisEnv(t *testing.T, policy model.Policy, ids map[string]auth.Identity) (*env, *registry.Conns) {
 	t.Helper()
 	rdb := testsupport.NewTestRedis(t)
-	run, err := redisx.NewRunner(rdb, 0, 1)
+	run, err := cluster.NewRunner(rdb, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

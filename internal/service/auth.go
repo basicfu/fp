@@ -42,6 +42,9 @@ type AuthDeps struct {
 	// 不用扫码登录的部署（含大部分测试）可以不给。
 	OAuth     *OAuthStore
 	PublicURL string
+	// Events 写 login_succeeded。为 nil 时不写（不开事件的部署与大部分测试）。
+	// 它与 Sessions 的事件（WithSessionEvents）要一起给或一起不给：预占与补写退出靠后者。
+	Events AppEventAppender
 }
 
 // AuthService 编排登录流程。它是唯一知道"登录该按什么顺序发生"的地方：
@@ -64,6 +67,9 @@ type LoginInput struct {
 	IP            string
 	UA            string
 	Mobile        bool
+	// DevicePub、ClientRef 刻进会话，见 domain.Session 的同名字段。不绑设备的应用留空。
+	DevicePub string
+	ClientRef string
 }
 
 // LoginResult 是登录成功的结果。
@@ -222,15 +228,35 @@ func (s *AuthService) completeLogin(ctx context.Context, app *domain.Application
 		}
 	}
 
+	// login_succeeded 先于签发写：会话一旦写进 Redis 就可能被并发的撤销扫到并写 logged_out，
+	// 晚写的 login_succeeded 会让业务方以为一个已经没了的会话在线。为此会话 id 提前定下，
+	// 并先占一条到期登记——之后哪一步失败（包括事件已提交却报错、进程崩掉），都会有 logged_out 收尾。
+	pending := &domain.Session{ID: uuid.NewString(), AppID: app.ID, UserID: user.ID, ClientRef: in.ClientRef}
+	if s.deps.Events != nil {
+		if err := s.deps.Sessions.ReservePending(ctx, pending); err != nil {
+			s.logFailureWithUser(ctx, app, in, result, user.ID, err)
+			return nil, err
+		}
+		if err := s.deps.Events.Append(ctx, app.ID, user.ID, domain.EventLoginSucceeded, LoginSucceededPayload{
+			SessionID: pending.ID, ClientRef: pending.ClientRef,
+		}); err != nil {
+			s.deps.Sessions.AbandonPending(ctx, pending)
+			s.logFailureWithUser(ctx, app, in, result, user.ID, err)
+			return nil, err
+		}
+	}
+
 	sess, err := s.deps.Sessions.Issue(ctx, IssueInput{
 		UserID: user.ID, App: app, IP: in.IP, UA: in.UA, Mobile: in.Mobile, Roles: roles,
+		DevicePub: in.DevicePub, ClientRef: in.ClientRef, SessionID: pending.ID,
 	})
 	if err != nil {
+		s.deps.Sessions.AbandonPending(ctx, pending)
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
 	}
 
-	// 签发之后再读一次用户：冻结或改密都要把刚发的会话撤掉。
+	// 签发之后再读一次用户与纪元：冻结、改密、踢下线都要把刚发的会话撤掉。
 	if err := s.recheckLoginable(ctx, user, sess); err != nil {
 		s.logFailureWithUser(ctx, app, in, result, user.ID, err)
 		return nil, err
@@ -266,11 +292,12 @@ func (s *AuthService) completeLogin(ctx context.Context, app *domain.Application
 // 管理动作返回 200、管理员以为生效了，login_log 里还记着一次成功登录，而攻击者
 // 手上那个 token 在整个空闲窗口内（默认 7 天，移动端 30 天）一直有效。
 //
-// 复查两件事：
+// 复查三件事：
 //
 //  1. CanLogin()——盖住冻结/注销。
 //  2. password_hash 是否变过——盖住改密。改密**不改变用户状态**，
 //     CanLogin() 照样为真，光看状态是看不见它的。
+//  3. 纪元是否变过——盖住踢下线（它只递增纪元）。
 //
 // 第 2 条为什么用哈希比对而不是时间戳：bcrypt 每次都用新的随机盐，
 // 所以哪怕把密码改成和原来一模一样的字符串，产出的哈希串也必然不同。
@@ -307,15 +334,26 @@ func (s *AuthService) recheckLoginable(ctx context.Context, user *domain.User, s
 	if fresh.PasswordHash != user.PasswordHash {
 		s.revokeIssued(ctx, sess, domain.RevokeReasonPasswordChanged)
 		return domain.Fail(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录").
-			WithDesc("账号凭据已变更（改密或纪元失配），已强制下线")
+			WithDesc("账号凭据已变更（改密），已强制下线")
+	}
+	// 踢下线不改状态也不改密码，只递增纪元：它若落在签发读纪元与写会话之间，清扫扫不到这个会话，
+	// 而它刻的是旧纪元、注定校验不过，不能当登录成功交出去。
+	stale, err := s.deps.Sessions.EpochStale(ctx, sess)
+	if err != nil || stale {
+		s.revokeIssued(ctx, sess, domain.LoggedOutRevoked)
+		if err != nil {
+			return err
+		}
+		return domain.Fail(domain.ErrUnauthorized, domain.CodeTokenInvalid, "登录已过期，请重新登录").
+			WithDesc("签发途中纪元已变（撤销并发），已强制下线")
 	}
 	return nil
 }
 
-// revokeIssued 撤销刚刚签发、随后发现不该签发的会话。
-// 撤销失败只记日志：这里已经在返回错误的路上，会话最终也会随空闲超时消失。
+// revokeIssued 撤销刚刚签发、随后发现不该签发的会话。login_succeeded 已经写过，所以照常写 logged_out。
+// 撤销失败只记日志：这里已经在返回错误的路上；写事件失败时撤销会把到期登记提前，过期扫描会收尾。
 func (s *AuthService) revokeIssued(ctx context.Context, sess *domain.Session, reason string) {
-	if err := s.deps.Sessions.Revoke(ctx, sess.Token, reason); err != nil {
+	if _, err := s.deps.Sessions.RevokeSession(context.WithoutCancel(ctx), sess.UserID, sess.ID, reason); err != nil {
 		slog.Error("service: 撤销刚签发的会话失败", "err", err, "sessionId", sess.ID)
 	}
 }
@@ -366,6 +404,29 @@ func (s *AuthService) Logout(ctx context.Context, appID, token string) error {
 		SessionID:     sess.ID,
 	})
 	return nil
+}
+
+// RevokeSession 是业务方按会话 id 撤销（如「移除这台设备并退出」），只认调用方应用的会话。
+// reason 只接受 kick：被撤的 token 再校验得到 KICKED，客户端据此提示「已被移出账号」。
+func (s *AuthService) RevokeSession(ctx context.Context, appID string, userID uuid.UUID, sessionID, reason string) (int, error) {
+	app, err := s.activeApp(ctx, appID)
+	if err != nil {
+		return 0, err
+	}
+	if reason != domain.RevokeReasonKick {
+		return 0, domain.Failf(domain.ErrInvalidArgument, domain.CodeInvalidArgument, "不支持的撤销原因 %q", reason)
+	}
+	n, err := s.deps.Sessions.RevokeSessionInApp(ctx, userID, app.ID, sessionID, reason)
+	if err != nil {
+		return n, err
+	}
+	if n > 0 {
+		s.writeLog(ctx, domain.LoginLog{
+			UserID: &userID, ApplicationID: &app.ID, Event: domain.LoginEventRevoke, Success: true,
+			Reason: reason, SessionID: sessionID,
+		})
+	}
+	return n, nil
 }
 
 // ValidateToken 是 SDK 回源的入口：校验 token 并给出缓存时长。

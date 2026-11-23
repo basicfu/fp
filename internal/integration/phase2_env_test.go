@@ -22,6 +22,7 @@ import (
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/grpcapi"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -60,7 +61,7 @@ type phase2Services struct {
 func wireServices(t *testing.T, pool *pgxpool.Pool, rdb *redis.Client) phase2Services {
 	t.Helper()
 
-	users := service.NewUserService(pool)
+	users := service.NewUserService(pool, service.WithObjectStore(objstore.NewMemory()))
 	logs := service.NewLoginLogService(pool)
 
 	epochs := store.NewEpochStore(rdb)

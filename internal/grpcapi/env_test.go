@@ -17,6 +17,7 @@ import (
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -95,7 +96,7 @@ func newGRPCEnv(t *testing.T) *grpcEnv {
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
-	users := service.NewUserService(pool)
+	users := service.NewUserService(pool, service.WithObjectStore(objstore.NewMemory()))
 	epochs := store.NewEpochStore(rdb)
 	clk := newFakeClock(time.Now().UnixMilli())
 	// revokePub 同时喂给 sessions（发布撤销）和 hub（订阅撤销）——两个方向

@@ -1,7 +1,7 @@
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import ApplicationIMSettings from './ApplicationIMSettings'
-import { disabledIMConfig } from '@/lib/testFixtures'
+import { disabledAccountConfig, disabledIMConfig } from '@/lib/testFixtures'
 import type { Application } from '@/lib/types'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -23,6 +23,8 @@ const baseApp: Application = {
     tokenCacheTtlSeconds: 30,
   },
   im: disabledIMConfig,
+  domains: [],
+  account: disabledAccountConfig,
   createdAt: 1700000000000,
   updatedAt: 1700000000000,
 }

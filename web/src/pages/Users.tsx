@@ -90,7 +90,7 @@ export default function Users() {
             name="keyword"
             value={keywordInput}
             onChange={(e) => setKeywordInput(e.target.value)}
-            placeholder="手机号 / 用户名 / 昵称"
+            placeholder="手机号 / 用户名 / 昵称 / 用户 ID"
             className="w-64 pl-8"
           />
         </div>

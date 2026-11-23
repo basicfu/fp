@@ -67,3 +67,13 @@ test('normalizePage 缺省（null/undefined）按第 1 页处理，合法页码�
   expect(normalizePage(3)).toBe(3)
   expect(normalizePage('5')).toBe(5)
 })
+
+// 关键词是 UUID（任一写法）时按用户 ID 精确查，而不是当昵称/手机号去模糊匹配——
+// 控制台显示的是 32 位写法，管理员粘贴回来的就是它。
+test('关键词是用户 ID 时改发 userId 参数', () => {
+  for (const kw of ['0190a1b2c3d47e5f8a9b0c1d2e3f4a5b', ' 0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b ']) {
+    const q = new URLSearchParams(buildUserQuery({ page: 1, keyword: kw }))
+    expect(q.get('userId')).toBe(kw.trim())
+    expect(q.has('keyword')).toBe(false)
+  }
+})

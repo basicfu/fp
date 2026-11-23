@@ -35,6 +35,16 @@ const (
 	// CodeTokenInvalid 覆盖 token 不存在、已过期、以及被强制下线
 	//（改密码/纪元失配）。对使用者而言都是"要重新登录"，不再细分。
 	CodeTokenInvalid = "TOKEN_INVALID"
+	// CodeDeviceUnverified 是会话绑定设备的应用上，请求没带设备头、设备头与会话的设备不符、签名或时间窗不过，
+	// 或 nonce 重放。刻意不细分：客户端的动作都是「按服务端时间校正后重签一次，还不行就重新登录」。
+	CodeDeviceUnverified = "DEVICE_UNVERIFIED"
+	// CodeKicked 是会话被业务方或管理员按设备移除（撤销原因 kick）后再用它的 token。与 TOKEN_INVALID 分开，
+	// 客户端据此提示「已被移出账号」而不是「登录已过期」。
+	CodeKicked = "KICKED"
+	// CodeLoginCheckUnavailable：登录前问应用认不认设备，没问到（应用没有在线的流、超时、应答不完整）。
+	CodeLoginCheckUnavailable = "LOGIN_CHECK_UNAVAILABLE"
+	// CodeLoginCheckRejected：应用拒绝了这台设备登录却没给错误码。给了码时原样用应用的码。
+	CodeLoginCheckRejected = "LOGIN_CHECK_REJECTED"
 
 	CodeAppDisabled          = "APP_DISABLED"
 	CodeAppNotFound          = "APP_NOT_FOUND"
@@ -71,11 +81,13 @@ const (
 	// 映射）。Detail 里带解析错误。
 	CodeConfigValueInvalid = "CONFIG_VALUE_INVALID"
 	// CodeConfigTypeInvalid 是配置分区取值不合法（不是 DEFAULT/WEB）。
-	CodeConfigTypeInvalid          = "CONFIG_TYPE_INVALID"
-	CodePhoneInvalid               = "PHONE_INVALID"
-	CodePasswordTooShort           = "PASSWORD_TOO_SHORT"
-	CodePasswordTooLong            = "PASSWORD_TOO_LONG"
-	CodeCodeTaken                  = "CODE_TAKEN"
+	CodeConfigTypeInvalid = "CONFIG_TYPE_INVALID"
+	CodePhoneInvalid      = "PHONE_INVALID"
+	CodePasswordTooShort  = "PASSWORD_TOO_SHORT"
+	CodePasswordTooLong   = "PASSWORD_TOO_LONG"
+	CodeCodeTaken         = "CODE_TAKEN"
+	// CodeDomainTaken：域名已被另一个应用占用。
+	CodeDomainTaken                = "DOMAIN_TAKEN"
 	CodeUnionKeyConflict           = "UNION_KEY_CONFLICT"
 	CodeConnectorAlreadyRegistered = "CONNECTOR_ALREADY_REGISTERED"
 	CodeConfigVersionConflict      = "CONFIG_VERSION_CONFLICT"
@@ -143,6 +155,8 @@ const (
 	CodeNotifyRecipientUnreachable = "NOTIFY_RECIPIENT_UNREACHABLE"
 	// CodeWechatMPUnavailable：通知中心里没有启用的服务号（wechat_mp 供应商实例），微信通知整体不可用。
 	CodeWechatMPUnavailable = "WECHAT_MP_UNAVAILABLE"
+	// CodeObjectStoreUnavailable：系统配置里没配对象存储（oss），头像无法上传。
+	CodeObjectStoreUnavailable = "OBJECT_STORE_UNAVAILABLE"
 	// CodeVerifyTemplateUnavailable：应用开放了短信登录，但通知中心里的验证码模板还用不了
 	// （没建、已停用、变量不是 code、没关联供应商）。与 CONNECTOR_DISABLED（应用没开放这种登录）、
 	// NOTIFY_SEND_FAILED（模板配好了但供应商没发出去）是三件要去三个地方处理的事，所以各占一个码。
@@ -187,6 +201,11 @@ var codeSentinels = map[string]error{
 	CodeAccountFrozen:      ErrForbidden,
 	CodeAccountUnavailable: ErrForbidden,
 	CodeTokenInvalid:       ErrUnauthorized,
+	CodeDeviceUnverified:   ErrUnauthorized,
+	CodeKicked:             ErrUnauthorized,
+	// 应用侧不可用不是调用方的错，归 Internal，同 CodeVerifyTemplateUnavailable。
+	CodeLoginCheckUnavailable: ErrInternal,
+	CodeLoginCheckRejected:    ErrForbidden,
 
 	CodeAppDisabled:          ErrForbidden,
 	CodeAppNotFound:          ErrNotFound,
@@ -209,6 +228,7 @@ var codeSentinels = map[string]error{
 	CodePasswordTooShort:           ErrInvalidArgument,
 	CodePasswordTooLong:            ErrInvalidArgument,
 	CodeCodeTaken:                  ErrConflict,
+	CodeDomainTaken:                ErrConflict,
 	CodeUnionKeyConflict:           ErrConflict,
 	CodeConnectorAlreadyRegistered: ErrConflict,
 	CodeConfigVersionConflict:      ErrConflict,
@@ -256,6 +276,8 @@ var codeSentinels = map[string]error{
 	CodeNotifyRecipientUnreachable: ErrNotFound,
 	// 平台侧没配好，同 CodeVerifyTemplateUnavailable 归 Internal。
 	CodeWechatMPUnavailable: ErrInternal,
+	// 平台侧没配好，同 CodeWechatMPUnavailable 归 Internal。
+	CodeObjectStoreUnavailable: ErrInternal,
 	// 平台侧没配好，不是调用方的错：归 Internal，SDK 才会把它当"暂不可用"而不是"未授权"。
 	CodeVerifyTemplateUnavailable: ErrInternal,
 

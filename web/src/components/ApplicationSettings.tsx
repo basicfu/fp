@@ -10,6 +10,7 @@ import { LabelHint } from '@/components/ui/label-hint'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import ConnectorsPanel from '@/components/ConnectorsPanel'
 import ApplicationIMSettings from '@/components/ApplicationIMSettings'
+import ApplicationAccountSettings from '@/components/ApplicationAccountSettings'
 import IMCredentialCard from '@/components/IMCredentialCard'
 import { api } from '@/lib/api'
 import { errorMessage } from '@/lib/useResource'
@@ -30,6 +31,7 @@ export default function ApplicationSettings({ app, onSaved }: { app: Application
         <TabsList>
           <TabsTrigger value="session">会话策略</TabsTrigger>
           <TabsTrigger value="connectors">登录方式</TabsTrigger>
+          <TabsTrigger value="account">账号接口</TabsTrigger>
           <TabsTrigger value="im">IM 接入</TabsTrigger>
         </TabsList>
 
@@ -39,6 +41,10 @@ export default function ApplicationSettings({ app, onSaved }: { app: Application
 
         <TabsContent value="connectors" className="pt-4">
           <ConnectorsPanel appId={app.id} />
+        </TabsContent>
+
+        <TabsContent value="account" className="pt-4">
+          <ApplicationAccountSettings app={app} onSaved={onSaved} />
         </TabsContent>
 
         <TabsContent value="im" className="space-y-4 pt-4">

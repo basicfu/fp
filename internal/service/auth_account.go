@@ -276,11 +276,13 @@ func (s *AuthService) settleBind(ctx context.Context, app *domain.Application, u
 		return nil, err
 	}
 	p := out.Profile
-	if _, err := s.deps.Users.BindThirdParty(ctx, userID, EnsureIdentityInput{
+	ident, err := s.deps.Users.BindThirdParty(ctx, userID, EnsureIdentityInput{
 		Type: p.IdentityType, Subject: p.Subject, UnionKey: p.UnionKey,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
+	s.noteIdentityNickname(ctx, ident, p)
 	u, err := s.deps.Users.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err

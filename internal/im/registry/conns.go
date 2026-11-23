@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/model"
-	"github.com/basicfu/fp/internal/im/redisx"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -25,11 +25,11 @@ type HandshakeResult struct {
 // Conns 读写每个 subject 的连接表 fp:im:{app:subject}:conn。
 type Conns struct {
 	c        redis.UniversalClient
-	run      *redisx.Runner
+	run      *cluster.Runner
 	fieldTTL time.Duration
 }
 
-func NewConns(c redis.UniversalClient, run *redisx.Runner, fieldTTL time.Duration) *Conns {
+func NewConns(c redis.UniversalClient, run *cluster.Runner, fieldTTL time.Duration) *Conns {
 	return &Conns{c: c, run: run, fieldTTL: fieldTTL}
 }
 

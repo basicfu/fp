@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/objstore"
 )
 
 // minPasswordLength 是密码最小长度（按 rune 计）。第一阶段只做长度校验，
@@ -41,16 +42,31 @@ const userColumnsPrefixed = `
 const identityColumns = `
 	id, user_id, type, subject, union_key, credential,
 	coalesce((extract(epoch from last_login_at) * 1000)::bigint, 0),
-	(extract(epoch from created_at) * 1000)::bigint`
+	(extract(epoch from created_at) * 1000)::bigint, nickname`
 
 // UserService 管理用户、登录标识与应用注册关系。
 type UserService struct {
 	pool *pgxpool.Pool
+	// objects 为 nil 表示没配对象存储：头像上传返回 OBJECT_STORE_UNAVAILABLE。
+	objects objstore.Store
+}
+
+// UserOption 是 NewUserService 的可选依赖。用变参选项而不是加形参：
+// 构造点有二十多处，绝大多数（测试）不碰头像。
+type UserOption func(*UserService)
+
+// WithObjectStore 注入头像所在的对象存储。
+func WithObjectStore(st objstore.Store) UserOption {
+	return func(s *UserService) { s.objects = st }
 }
 
 // NewUserService 构造 UserService。
-func NewUserService(pool *pgxpool.Pool) *UserService {
-	return &UserService{pool: pool}
+func NewUserService(pool *pgxpool.Pool, opts ...UserOption) *UserService {
+	s := &UserService{pool: pool}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // EnsureIdentityInput 描述一次"确保某个登录标识存在"的请求。
@@ -437,8 +453,10 @@ type UserListQuery struct {
 	// Keyword 同时匹配昵称与任意登录标识（手机号 / 用户名 / 邮箱 / openid），前缀与子串均可。
 	Keyword string
 	Status  string
-	Limit   int
-	Offset  int
+	// ID 非空时只查这个用户（与其他条件取交集）。
+	ID     *uuid.UUID
+	Limit  int
+	Offset int
 }
 
 // UserListItem 是列表中的一行：用户本体加上他的全部登录标识。
@@ -462,11 +480,12 @@ func (s *UserService) List(ctx context.Context, q UserListQuery) ([]UserListItem
 		WHERE ($1 = '' OR u.nickname ILIKE '%' || $1 || '%'
 		       OR EXISTS (SELECT 1 FROM identity i
 		                  WHERE i.user_id = u.id AND i.subject ILIKE '%' || $1 || '%'))
-		  AND ($2 = '' OR u.status = $2)`
+		  AND ($2 = '' OR u.status = $2)
+		  AND ($3::uuid IS NULL OR u.id = $3)`
 
 	var total int
 	if err := s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM app_user u`+where, q.Keyword, q.Status).Scan(&total); err != nil {
+		`SELECT count(*) FROM app_user u`+where, q.Keyword, q.Status, q.ID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("service: 统计用户数: %w", err)
 	}
 	if total == 0 {
@@ -479,8 +498,8 @@ func (s *UserService) List(ctx context.Context, q UserListQuery) ([]UserListItem
 			// 只按 created_at 排序不安全：它默认 now()，而 now() 取的是**事务**时间戳，
 			// 批量导入/播种时同一事务里的多行取值完全相同，LIMIT/OFFSET 翻页会
 			// 让并列的行重复出现在两页、或者一页都不出现。
-			` ORDER BY u.created_at DESC, u.id DESC LIMIT $3 OFFSET $4`,
-		q.Keyword, q.Status, q.Limit, q.Offset)
+			` ORDER BY u.created_at DESC, u.id DESC LIMIT $4 OFFSET $5`,
+		q.Keyword, q.Status, q.ID, q.Limit, q.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("service: 查询用户列表: %w", err)
 	}
@@ -622,7 +641,7 @@ func scanUser(r rowScanner) (*domain.User, error) {
 func scanIdentity(r rowScanner) (*domain.Identity, error) {
 	var i domain.Identity
 	err := r.Scan(&i.ID, &i.UserID, &i.Type, &i.Subject, &i.UnionKey, &i.Credential,
-		&i.LastLoginAt, &i.CreatedAt)
+		&i.LastLoginAt, &i.CreatedAt, &i.Nickname)
 	if err != nil {
 		return nil, err
 	}

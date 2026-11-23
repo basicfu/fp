@@ -1,5 +1,4 @@
-// Package rendezvous 实现最高随机权重哈希（HRW）。
-package rendezvous
+package cluster
 
 import (
 	"hash/fnv"

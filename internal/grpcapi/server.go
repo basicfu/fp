@@ -50,6 +50,11 @@ type Deps struct {
 	Users *service.UserService
 	// Accounts 承载提交注销（撤销会话、写审计）。为 nil 时 RequestDeletion 返回 Unimplemented。
 	Accounts *service.AccountService
+
+	// Events 经 Watch 流投递业务事件。为 nil 时不投递（业务事件留在事件表里，等有投递的实例）。
+	Events *EventDispatcher
+	// LoginCheck 经 Watch 流承接登录校验与跨实例转发。为 nil 时本实例的流不接登录校验。
+	LoginCheck *LoginCheckRelay
 }
 
 // deniedIMCreds 在没有配置 IM 凭据校验器时拒绝一切 im 调用。
@@ -70,6 +75,10 @@ type Server struct {
 	// 会让它保持零值 nil——Run/Ready/Shutdown 都据此把"没有配置中继"当成
 	// 合法状态，不参与编排，行为与本任务之前完全一致。
 	configHub *ConfigHub
+	// events 为 nil 表示本实例不投递业务事件。
+	events *EventDispatcher
+	// loginCheck 为 nil 表示本实例不承接登录校验。
+	loginCheck *LoginCheckRelay
 }
 
 // KeepaliveMinTime 是服务端能容忍的最短客户端 ping 间隔。
@@ -142,6 +151,8 @@ func New(d Deps) *Server {
 		Apps: d.Apps, Authz: d.Authz,
 		Hub: hub, ConfigHub: configHub,
 		AccessKeys: d.AccessKeys,
+		Events:     d.Events,
+		LoginCheck: d.LoginCheck,
 	}))
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))
 	fpv1.RegisterIMGatewayServiceServer(srv, newIMServer(d.Apps))
@@ -152,7 +163,7 @@ func New(d Deps) *Server {
 		fpv1.RegisterUserServiceServer(srv, newUserServer(d.Users, d.Accounts, d.Auth, d.Apps))
 	}
 
-	return &Server{grpc: srv, hub: hub, configHub: configHub}
+	return &Server{grpc: srv, hub: hub, configHub: configHub, events: d.Events, loginCheck: d.LoginCheck}
 }
 
 // Run 并行启动撤销事件与配置事件两条中继，阻塞到 ctx 取消，或其中一条
@@ -174,6 +185,14 @@ func New(d Deps) *Server {
 // 只关心撤销这一条中继的时序）视为"没有配置中继"，只跑撤销这一条，
 // 行为与本任务之前完全一致。
 func (s *Server) Run(ctx context.Context) error {
+	// 业务事件的唤醒订阅不参与就绪判定：它挂了投递还有轮询兜底，不该拖住整个服务启动。
+	if s.events != nil {
+		go s.events.Run(ctx)
+	}
+	// 登录校验的节点频道同理：订阅不上只是转发不过来，本实例自己的流照常能问。
+	if s.loginCheck != nil {
+		go s.loginCheck.Run(ctx)
+	}
 	if s.configHub == nil {
 		return s.hub.Run(ctx)
 	}
@@ -290,6 +309,10 @@ func (s *Server) Shutdown(ctx context.Context) {
 	s.hub.Close()
 	if s.configHub != nil {
 		s.configHub.Close()
+	}
+	// 交出投递租约：别的实例不必等租约过期就能接手。
+	if s.events != nil {
+		s.events.Close()
 	}
 
 	done := make(chan struct{})

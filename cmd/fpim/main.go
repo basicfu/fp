@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/auth"
 	"github.com/basicfu/fp/internal/im/bizauth"
 	"github.com/basicfu/fp/internal/im/bus"
@@ -115,13 +116,13 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, opt serveO
 		return err
 	}
 	defer rdb.Close()
-	runner, err := redisx.NewRunner(rdb, cfg.Pipeline.FlushInterval.Std(), cfg.Pipeline.FlushSize)
+	runner, err := cluster.NewRunner(rdb, cfg.Pipeline.FlushInterval.Std(), cfg.Pipeline.FlushSize)
 	if err != nil {
 		return err
 	}
 	defer runner.Close()
 
-	live := registry.NewLiveness(rdb, nodeID, cfg.Node.Heartbeat.Std(), cfg.Node.DeadAfter.Std())
+	live := cluster.NewLiveness(rdb, model.ClusterKeys(), nodeID, cfg.Node.Heartbeat.Std(), cfg.Node.DeadAfter.Std())
 	conns := registry.NewConns(rdb, runner, cfg.Conn.FieldTTL.Std())
 	b := bus.New(rdb, runner)
 
@@ -343,7 +344,7 @@ drain:
 // 的二次断开"——那条顾虑在这里已经不成立：①已经把本节点的 HTTP 监听关掉
 // 了，重连的 client 根本落不回来，它们会被负载均衡送到别的节点。而"先停
 // gRPC"会直接让②发不出断开事件，代价比那条顾虑大得多。
-func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *registry.Liveness, gidx *registry.GroupIndex, log *slog.Logger) {
+func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *cluster.Liveness, gidx *registry.GroupIndex, log *slog.Logger) {
 	hctx, hcancel := context.WithTimeout(context.Background(), shutdownBudget)
 	if err := httpSrv.Shutdown(hctx); err != nil {
 		log.Error("HTTP 优雅关闭超时", "err", err)
@@ -374,7 +375,7 @@ func shutdown(h *hub.Hub, httpSrv *http.Server, grpcSrv *imgrpc.Server, live *re
 	// 不删的话每一次发版都往这两张表里永久加一个字段（节点标识每次启动都
 	// 是新值），而每个节点每 3 秒还要把整张表读一遍——正确性靠时间戳过滤
 	// 保住了，但这是一条会随时间恶化的热路径。心跳写入时挂的字段级过期
-	// （registry.Liveness）是崩溃场景的兜底，这里的主动删除是优雅关闭场景
+	// （cluster.Liveness）是崩溃场景的兜底，这里的主动删除是优雅关闭场景
 	// 的即时清理，两者互补：前者慢但覆盖所有退出方式，后者快但只在正常
 	// 退出时生效。
 	dctx, dcancel := context.WithTimeout(context.Background(), shutdownBudget)
@@ -450,7 +451,7 @@ func runBusLoop(ctx context.Context, b *bus.Bus, nodeID string, h *hub.Hub, rr *
 const reregisterInterval = time.Second / 2000
 
 // handshaker 是 reregistrar 需要的 registry.Conns 子集。
-// livenessPort 是它需要的 registry.Liveness 子集。抽成接口只为让"失败要
+// livenessPort 是它需要的 cluster.Liveness 子集。抽成接口只为让"失败要
 // 计数并留下日志"和"不占住消费协程"这两条性质能在不连 Redis 的情况下被
 // 测到——本包此前零测试，甲二的两个缺陷正是因此长期没被发现。
 type handshaker interface {

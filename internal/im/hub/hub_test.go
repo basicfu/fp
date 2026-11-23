@@ -77,6 +77,36 @@ func TestRemoveLastStreamClearsServing(t *testing.T) {
 	}
 }
 
+// 最后一条流的注销与新首条流的注册交错时，登记必须与流的实际有无一致。
+func TestServingNotInvertedByLateUnregister(t *testing.T) {
+	h, _, live, _, _ := hubtest.NewHub()
+	rm := h.AddStream(context.Background(), "a1", &hubtest.Stream{})
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	live.OnSetServing = func(_ string, on bool) {
+		if !on {
+			close(entered)
+			<-release
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); rm() }()
+	<-entered
+	go func() {
+		defer wg.Done()
+		h.AddStream(context.Background(), "a1", &hubtest.Stream{})
+	}()
+	// 留出时间让新流的注册在旧代码里抢先完成 SetServing(true)。
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if !live.IsServing("a1") {
+		t.Fatal("本节点持有流却未登记为 serving：注销的 false 后发先至")
+	}
+}
+
 func TestHandleEnvelopeMsgFansOutToLocalConns(t *testing.T) {
 	h, _, _, _, _ := hubtest.NewHub()
 	c1 := &hubtest.Conn{ConnID: "c1"}

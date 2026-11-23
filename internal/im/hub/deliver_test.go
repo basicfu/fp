@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/hub/hubtest"
-	"github.com/basicfu/fp/internal/im/rendezvous"
 )
 
 func up(subject string) bus.Envelope {
@@ -37,7 +37,7 @@ func TestDeliverLocalStreamWins(t *testing.T) {
 func TestDeliverAdvancesToNextCandidateWhenFirstHasNoSubscriber(t *testing.T) {
 	h, _, live, pub, _ := hubtest.NewHub()
 	live.Servers["a1"] = []string{"im-b", "im-c"}
-	ranked := rendezvous.Rank([]string{"im-b", "im-c"}, "u:1")
+	ranked := cluster.Rank([]string{"im-b", "im-c"}, "u:1")
 	first, second := ranked[0], ranked[1]
 	pub.Subs = map[string]int64{first: 0, second: 1}
 
@@ -58,7 +58,7 @@ func TestDeliverAdvancesToNextCandidateWhenFirstHasNoSubscriber(t *testing.T) {
 func TestDeliverDropsLocalOnZeroSubscribers(t *testing.T) {
 	h, _, live, pub, _ := hubtest.NewHub()
 	live.Servers["a1"] = []string{"im-b", "im-c"}
-	ranked := rendezvous.Rank([]string{"im-b", "im-c"}, "u:1")
+	ranked := cluster.Rank([]string{"im-b", "im-c"}, "u:1")
 	first := ranked[0]
 	pub.Subs = map[string]int64{first: 0}
 
@@ -75,7 +75,7 @@ func TestDeliverDropsLocalOnZeroSubscribers(t *testing.T) {
 func TestDeliverExhaustsRouteAndFails(t *testing.T) {
 	h, _, live, pub, _ := hubtest.NewHub()
 	live.Servers["a1"] = []string{"im-b", "im-c"}
-	ranked := rendezvous.Rank([]string{"im-b", "im-c"}, "u:1")
+	ranked := cluster.Rank([]string{"im-b", "im-c"}, "u:1")
 	pub.Subs = map[string]int64{ranked[0]: 0, ranked[1]: 0}
 
 	ok := h.Deliver(context.Background(), up("u:1"))
@@ -208,7 +208,7 @@ func TestDeliverRouteLargerThan255DoesNotWrapAround(t *testing.T) {
 	}
 	live.Servers["a1"] = nodes
 
-	ranked := rendezvous.Rank(nodes, "u:1")
+	ranked := cluster.Rank(nodes, "u:1")
 	last := ranked[len(ranked)-1]
 	subs := make(map[string]int64, len(ranked))
 	for _, node := range ranked {

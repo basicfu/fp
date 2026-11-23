@@ -30,6 +30,47 @@ func (a *testApplication) authed(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, mdAppID, a.appID, mdAppSecret, a.secret)
 }
 
+// keepAvatarBytes 模拟还没迁到对象存储的老头像：字节在 PG、没有 key，GetAvatar 给字节。
+// 新上传的头像只在对象存储里，GetAvatar 只给地址（见 TestGetAvatarOnObjectStoreReturnsURL）。
+func (e *grpcEnv) keepAvatarBytes(t *testing.T, userID uuid.UUID, image []byte) {
+	t.Helper()
+	if _, err := e.pool.Exec(context.Background(),
+		`UPDATE user_avatar SET data = $2, object_key = '' WHERE user_id = $1`, userID, image); err != nil {
+		t.Fatalf("保留头像字节: %v", err)
+	}
+}
+
+// 灰度期老路径 /avatar/{hash} 经 GetAvatar 取图：纯对象存储上的头像只给地址，调用方 302 过去。
+// 迁移后字节还留在 PG 时字节、类型、地址一起给：只认字节的老 SDK 照常能取到图。
+func TestGetAvatarOnObjectStoreReturnsURL(t *testing.T) {
+	e := newGRPCEnv(t)
+	ctx := e.authed(context.Background())
+	u := e.newBareUser(t, "头像")
+	p, err := e.userClient.UpdateAvatar(ctx, &fpv1.UpdateAvatarRequest{UserId: u.ID.String(), Image: grpcTestPNG})
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := e.userClient.GetAvatar(ctx, &fpv1.GetAvatarRequest{Hash: p.GetAvatarHash()})
+	if err != nil {
+		t.Fatalf("GetAvatar: %v", err)
+	}
+	if !strings.HasPrefix(img.GetUrl(), "https://memory.test/avatar/") || len(img.GetImage()) != 0 {
+		t.Fatalf("纯对象存储: url=%q image=%d 字节", img.GetUrl(), len(img.GetImage()))
+	}
+
+	if _, err := e.pool.Exec(context.Background(), `UPDATE user_avatar SET data = $2 WHERE user_id = $1`, u.ID, grpcTestPNG); err != nil {
+		t.Fatal(err)
+	}
+	img, err = e.userClient.GetAvatar(ctx, &fpv1.GetAvatarRequest{Hash: p.GetAvatarHash()})
+	if err != nil {
+		t.Fatalf("GetAvatar: %v", err)
+	}
+	if !strings.HasPrefix(img.GetUrl(), "https://memory.test/avatar/") || !bytes.Equal(img.GetImage(), grpcTestPNG) ||
+		img.GetContentType() != "image/png" {
+		t.Fatalf("PG 还有字节: url=%q image=%d 字节 type=%q", img.GetUrl(), len(img.GetImage()), img.GetContentType())
+	}
+}
+
 // newBareUser 直接在库里建一个用户：他没有在任何应用登录过。
 func (e *grpcEnv) newBareUser(t *testing.T, nickname string) *domain.User {
 	t.Helper()
@@ -147,6 +188,7 @@ func TestUsersAreSharedAcrossApplications(t *testing.T) {
 	if err != nil {
 		t.Fatalf("应用 B 传头像: %v", err)
 	}
+	e.keepAvatarBytes(t, u.ID, grpcTestPNG)
 	img, err := e.userClient.GetAvatar(ctxA, &fpv1.GetAvatarRequest{Hash: withAvatar.GetAvatarHash()})
 	if err != nil || !bytes.Equal(img.GetImage(), grpcTestPNG) {
 		t.Fatalf("应用 A 取应用 B 传的头像: %v", err)
@@ -240,6 +282,8 @@ func TestAvatarRoundTripOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateAvatar(1 MB): %v", err)
 	}
+	uid := uuid.MustParse(id)
+	e.keepAvatarBytes(t, uid, big)
 	bigHash := p.GetAvatarHash()
 	if bigHash != domain.AvatarHash(big) {
 		t.Fatalf("avatar_hash = %q, want %q", bigHash, domain.AvatarHash(big))
@@ -257,6 +301,7 @@ func TestAvatarRoundTripOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("换头像: %v", err)
 	}
+	e.keepAvatarBytes(t, uid, grpcTestWebP)
 	if p.GetAvatarHash() == bigHash || p.GetAvatarHash() == "" {
 		t.Fatalf("换头像后 avatar_hash = %q", p.GetAvatarHash())
 	}
@@ -356,6 +401,7 @@ func TestUserServiceAuthBoundaries(t *testing.T) {
 	if _, err := e.users.UpdateAvatar(context.Background(), u.ID, grpcTestPNG); err != nil {
 		t.Fatalf("准备头像: %v", err)
 	}
+	e.keepAvatarBytes(t, u.ID, grpcTestPNG)
 
 	for name, call := range e.userServiceCalls(u.ID.String()) {
 		// 先确认带应用凭据时这次调用本身是通的，否则下面的"被拒"说明不了任何事。
@@ -382,6 +428,7 @@ func TestUserServiceRejectsDisabledApplication(t *testing.T) {
 	if _, err := e.users.UpdateAvatar(context.Background(), u.ID, grpcTestPNG); err != nil {
 		t.Fatalf("准备头像: %v", err)
 	}
+	e.keepAvatarBytes(t, u.ID, grpcTestPNG)
 	e.disableApplication(t)
 
 	for name, call := range e.userServiceCalls(u.ID.String()) {

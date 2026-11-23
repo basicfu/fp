@@ -14,6 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/basicfu/fp/internal/accountapi"
+	"github.com/basicfu/fp/internal/accountapi/captcha"
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/config"
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
@@ -21,6 +26,7 @@ import (
 	"github.com/basicfu/fp/internal/httpapi"
 	"github.com/basicfu/fp/internal/logging"
 	"github.com/basicfu/fp/internal/notify"
+	"github.com/basicfu/fp/internal/objstore"
 	"github.com/basicfu/fp/internal/service"
 	"github.com/basicfu/fp/internal/store"
 	"github.com/basicfu/fp/web"
@@ -29,6 +35,12 @@ import (
 // deletionSweepInterval 是注销清理任务的周期。冷静期按天计，一小时的延迟对"7 天后删除"无关紧要，
 // 而更密的周期只是在多数时候空跑一条查询。
 const deletionSweepInterval = time.Hour
+
+// appEventPruneInterval 是清理已确认业务事件的周期。保留期按天计，每小时一次足够。
+const appEventPruneInterval = time.Hour
+
+// objectGCInterval 是待删对象的清理周期。
+const objectGCInterval = time.Minute
 
 func main() {
 	if len(os.Args) > 1 {
@@ -143,7 +155,11 @@ func run() error {
 	// （见 service.WithIMConfigPublisher）。
 	configPub := store.NewConfigPublisher(rdb)
 
-	userSvc := service.NewUserService(pool)
+	objects := openObjectStore(cfg.OSS)
+	userSvc := service.NewUserService(pool, service.WithObjectStore(objects))
+	if objects != nil {
+		go service.NewObjectGC(pool, objects).Run(ctx, objectGCInterval)
+	}
 	loginCodes := service.NewLoginCodeService(rdb)
 
 	registry := connector.NewRegistry()
@@ -162,7 +178,13 @@ func run() error {
 
 	appSvc := service.NewApplicationService(pool, registry, service.WithIMConfigPublisher(configPub))
 
-	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore)
+	// 业务事件表要在会话、登录、注销、微信订阅之前建好：它们都要先写事件再改状态。
+	appEventSignal := store.NewAppEventSignal(rdb)
+	appEvents := service.NewAppEvents(pool, appSvc, appEventSignal)
+	go appEvents.RunPrune(ctx, appEventPruneInterval)
+
+	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore,
+		service.WithSessionEvents(appEvents), service.WithSessionApps(appSvc))
 
 	adminSvc := service.NewAdminService(pool, rdb)
 	if err := adminSvc.EnsureBootstrap(ctx, cfg.BootstrapAdmin.User, cfg.BootstrapAdmin.Password); err != nil {
@@ -185,7 +207,8 @@ func run() error {
 		}
 		log.Info("通知模块走开发代理", "proxy", notify.DevProxy)
 	}
-	wechatMPSvc := service.NewWechatMPService(pool, rdb, service.WithWechatMPPublisher(revokePub))
+	wechatMPSvc := service.NewWechatMPService(pool, rdb, service.WithWechatMPPublisher(revokePub),
+		service.WithWechatMPEvents(appEvents))
 	notifySvc := service.NewNotifyService(pool, rdb, notify.DefaultRegistry(), service.WithNotifyProd(cfg.IsProd()),
 		service.WithNotifyRecipients(domain.NotifyChannelWechatMP, wechatMPSvc.ResolveRecipient))
 
@@ -202,12 +225,37 @@ func run() error {
 		Authz:             authzSvc,
 		OAuth:             service.NewOAuthStore(rdb),
 		PublicURL:         cfg.PublicURL,
+		Events:            appEvents,
 	})
 
 	accountSvc := service.NewAccountService(userSvc, sessionSvc, epochStore, logSvc,
-		service.WithDeletionCoolingOff(time.Duration(cfg.AccountDeletion.CoolingOffDays)*24*time.Hour))
+		service.WithDeletionCoolingOff(time.Duration(cfg.AccountDeletion.CoolingOffDays)*24*time.Hour),
+		service.WithAccountEvents(appEvents))
 	// 每个实例都跑：领取用行锁跳过，多实例并发不会重复处理，也不需要选主。
 	go accountSvc.RunDeletionSweep(ctx, deletionSweepInterval)
+
+	// 登录校验的跨实例转发：fp 核心自己一套节点心跳与节点频道（fp:core:*），与 fp-im 的键不重叠。
+	// 不攒批：转发是请求-应答，攒批只会把 3 秒预算吃掉一截。
+	coreNodes := cluster.NewLiveness(rdb, cluster.Keys{Prefix: "fp:core"}, uuid.Must(uuid.NewV7()).String(),
+		3*time.Second, 10*time.Second)
+	coreRunner, err := cluster.NewRunner(rdb, 0, 0)
+	if err != nil {
+		return err
+	}
+	loginCheckRelay := grpcapi.NewLoginCheckRelay(coreNodes, cluster.NewBus(rdb, coreRunner, cluster.Keys{Prefix: "fp:core"}))
+
+	// 滑块题库每个实例一份,只有 Pool.Run 一个协程出图,CPU 占用封顶一个核。
+	captchaSvc, err := captcha.NewService(ctx, rdb)
+	if err != nil {
+		return err
+	}
+	go captchaSvc.Pool.Run(ctx)
+	accountAPI := accountapi.NewRouter(accountapi.Deps{
+		Apps: appSvc, Auth: authSvc, Users: userSvc, Accounts: accountSvc, WechatMP: wechatMPSvc,
+		Sessions: sessionSvc, Guard: service.NewDeviceGuard(store.NewNonceStore(rdb)),
+		Check:   service.NewLoginCheck(loginCheckRelay, service.LoginCheckOptions{}),
+		Captcha: captchaSvc, Redis: rdb, TrustedProxies: cfg.AccountAPI.Proxies(),
+	})
 
 	httpSrv := &http.Server{
 		Addr: cfg.HTTP.Addr,
@@ -227,6 +275,7 @@ func run() error {
 			Notify:        notifySvc,
 			Auth:          authSvc,
 			WechatMP:      wechatMPSvc,
+			Account:       accountAPI,
 			// 生产环境的管理端 cookie 必须带 Secure。
 			SecureCookies: cfg.IsProd(),
 			Console:       web.Dist(),
@@ -252,6 +301,16 @@ func run() error {
 		}
 	}()
 
+	go coreNodes.Run(ctx)
+	defer func() {
+		// 正常退出立刻摘掉登记，别的实例不必等判死阈值才不选本实例。
+		dctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := coreNodes.Deregister(dctx); err != nil {
+			log.Warn("摘除节点登记失败，等它过期", "err", err)
+		}
+	}()
+
 	grpcSrv := grpcapi.New(grpcapi.Deps{
 		Auth:       authSvc,
 		Apps:       appSvc,
@@ -265,6 +324,8 @@ func run() error {
 		WechatMP:   wechatMPSvc,
 		Users:      userSvc,
 		Accounts:   accountSvc,
+		Events:     grpcapi.NewEventDispatcher(appEvents, store.NewLease(rdb), appEventSignal, grpcapi.DispatchConfig{}),
+		LoginCheck: loginCheckRelay,
 	})
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPC.Addr)
@@ -279,6 +340,15 @@ func run() error {
 		if err := grpcSrv.ServeWhenReady(ctx, grpcLis, 10*time.Second); err != nil {
 			fatalErr <- fmt.Errorf("gRPC 服务异常退出: %w", err)
 			stop()
+		}
+	}()
+	// 会话过期扫描等服务就绪再起：刚启动、还没对外服务的实例不必抢着领取。多实例都跑，领取是原子的。
+	sessionExpiry := service.NewSessionExpiry(sessionStore, epochStore, appEvents, appSvc, service.SessionExpiryOptions{})
+	go func() {
+		select {
+		case <-grpcSrv.Ready():
+			_ = sessionExpiry.Run(ctx)
+		case <-ctx.Done():
 		}
 	}()
 	log.Info("fp 启动", "env", cfg.Env, "http", cfg.HTTP.Addr, "grpc", cfg.GRPC.Addr)
@@ -338,4 +408,15 @@ drain:
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// openObjectStore 按配置建对象存储。没配（bucket 为空）或配错时返回 nil：头像上传返回不可用，其余功能不受影响。
+// 配错不让 fp 起不来——登录、会话这些核心功能不该被一个头像配置拖下线。
+func openObjectStore(cfg config.OSS) objstore.Store {
+	objects, err := objstore.New(cfg)
+	if err != nil {
+		slog.Error("对象存储配置有误，按未配置处理：头像上传不可用", "err", err)
+		return nil
+	}
+	return objects
 }

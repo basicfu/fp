@@ -1,22 +1,24 @@
-package registry
+package cluster
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/basicfu/fp/internal/im/model"
 	"github.com/basicfu/fp/internal/testsupport"
 	"github.com/redis/go-redis/v9"
 )
+
+// 沿用 fp-im 的前缀：测试里 Redis 里的键与生产一致。
+var testKeys = Keys{Prefix: "fp:im"}
 
 func TestLivenessSeesPeersAndDropsDead(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
 	now := time.UnixMilli(1_000_000)
 	clock := func() time.Time { return now }
-	a := NewLiveness(rdb, "im-a", 3*time.Second, 10*time.Second)
-	b := NewLiveness(rdb, "im-b", 3*time.Second, 10*time.Second)
+	a := NewLiveness(rdb, testKeys, "im-a", 3*time.Second, 10*time.Second)
+	b := NewLiveness(rdb, testKeys, "im-b", 3*time.Second, 10*time.Second)
 	a.now, b.now = clock, clock
 
 	if err := a.Beat(ctx); err != nil {
@@ -44,7 +46,7 @@ func waitSrvField(t *testing.T, rdb *redis.Client, app, node string, want bool) 
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		v, err := rdb.HGet(context.Background(), model.SrvKey(app), node).Result()
+		v, err := rdb.HGet(context.Background(), testKeys.Srv(app), node).Result()
 		exists := err == nil && v != ""
 		if exists == want {
 			return
@@ -72,12 +74,12 @@ func waitRunPrimed(t *testing.T, rdb *redis.Client, node string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		v, err := rdb.HGet(context.Background(), model.KeyNodes, node).Result()
+		v, err := rdb.HGet(context.Background(), testKeys.Nodes(), node).Result()
 		if err == nil && v != "" {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("等待 Run 的启动预热轮完成超时：%s 一直没有出现在 %s 里，err=%v", node, model.KeyNodes, err)
+			t.Fatalf("等待 Run 的启动预热轮完成超时：%s 一直没有出现在 %s 里，err=%v", node, testKeys.Nodes(), err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -88,8 +90,8 @@ func waitRunPrimed(t *testing.T, rdb *redis.Client, node string) {
 func TestLivenessServerNodes(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
-	a := NewLiveness(rdb, "im-a", 50*time.Millisecond, 10*time.Second)
-	b := NewLiveness(rdb, "im-b", 50*time.Millisecond, 10*time.Second)
+	a := NewLiveness(rdb, testKeys, "im-a", 50*time.Millisecond, 10*time.Second)
+	b := NewLiveness(rdb, testKeys, "im-b", 50*time.Millisecond, 10*time.Second)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go a.Run(runCtx)
@@ -121,7 +123,7 @@ func TestLivenessServerNodes(t *testing.T) {
 // "立即返回 nil"，验证这一点顺带验证了它确实没有走网络。
 func TestSetServingReturnsImmediately(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
-	l := NewLiveness(rdb, "im-a", time.Hour, 10*time.Second) // 心跳周期设得很长：这条测试不需要 Run 消费信号
+	l := NewLiveness(rdb, testKeys, "im-a", time.Hour, 10*time.Second) // 心跳周期设得很长：这条测试不需要 Run 消费信号
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan error, 1)
@@ -141,7 +143,7 @@ func TestSetServingReturnsImmediately(t *testing.T) {
 // 信号 channel 容量为 1 会把这些通知合并成一次，这里验证合并不会把状态写错。
 func TestSetServingRapidSuccessionEndsAtRealState(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
-	l := NewLiveness(rdb, "im-a", 20*time.Millisecond, 10*time.Second)
+	l := NewLiveness(rdb, testKeys, "im-a", 20*time.Millisecond, 10*time.Second)
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go l.Run(runCtx)
@@ -183,7 +185,7 @@ func TestSetServingOutOfOrderRegression(t *testing.T) {
 
 	// 心跳周期设得很长，避免 Run 的周期性无条件写在测试窗口内先一步把状态
 	// 写对，从而掩盖掉这里真正要测的"由 SetServing 信号触发的写"这条路径。
-	l := NewLiveness(rdb, "im-a", time.Hour, 10*time.Second)
+	l := NewLiveness(rdb, testKeys, "im-a", time.Hour, 10*time.Second)
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go l.Run(runCtx)
@@ -269,7 +271,7 @@ func (delayHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Proce
 // 方向。
 //
 // 复审实测过一个假阳性：如果把心跳分支里的 writeServingTable(ctx) 换成
-// 空语句，整个 registry 包的测试仍然全绿——因为 Beat() 本身就会对
+// 空语句，整个 cluster 包的测试仍然全绿——因为 Beat() 本身就会对
 // l.serving 集合里的每个 app 做 HSET，只要断言的是"条目被 HSET 回来"，
 // Beat() 单独就能让测试通过，根本测不到 writeServingTable 是否被调用。
 // writeServingTable 唯一无可替代的地方是 HDEL 方向：Beat() 从来不会
@@ -280,7 +282,7 @@ func (delayHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Proce
 // app 什么也不做。
 func TestHeartbeatBackstopHDelsStaleEntry(t *testing.T) {
 	rdb := testsupport.NewTestRedis(t)
-	l := NewLiveness(rdb, "im-a", 30*time.Millisecond, 10*time.Second)
+	l := NewLiveness(rdb, testKeys, "im-a", 30*time.Millisecond, 10*time.Second)
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go l.Run(runCtx)
@@ -299,7 +301,7 @@ func TestHeartbeatBackstopHDelsStaleEntry(t *testing.T) {
 	// 从外部把字段重新写回去，模拟一条不该存在的残留条目。l.serving["a1"]
 	// 仍然是 false，没有任何本地事件会再次触发 SetServing 的信号——能纠正
 	// 这条残留的，只有心跳分支的无条件重写。
-	if err := rdb.HSet(context.Background(), model.SrvKey("a1"), "im-a", time.Now().UnixMilli()).Err(); err != nil {
+	if err := rdb.HSet(context.Background(), testKeys.Srv("a1"), "im-a", time.Now().UnixMilli()).Err(); err != nil {
 		t.Fatal(err)
 	}
 	waitSrvField(t, rdb, "a1", "im-a", false)
@@ -310,8 +312,8 @@ func TestHeartbeatBackstopHDelsStaleEntry(t *testing.T) {
 func TestDropLocalHidesNodeUntilRefresh(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
-	a := NewLiveness(rdb, "im-a", time.Hour, 10*time.Second)
-	b := NewLiveness(rdb, "im-b", time.Hour, 10*time.Second)
+	a := NewLiveness(rdb, testKeys, "im-a", time.Hour, 10*time.Second)
+	b := NewLiveness(rdb, testKeys, "im-b", time.Hour, 10*time.Second)
 
 	if err := a.SetServing(ctx, "a1", true); err != nil {
 		t.Fatal(err)
@@ -362,7 +364,7 @@ func TestDropLocalHidesNodeUntilRefresh(t *testing.T) {
 func TestHeartbeatFieldsCarryTTL(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
-	l := NewLiveness(rdb, "im-a", 3*time.Second, 10*time.Second)
+	l := NewLiveness(rdb, testKeys, "im-a", 3*time.Second, 10*time.Second)
 	// 心跳表的过期时长按判死阈值的倍数算，这里核对的是"确实设了、且量级
 	// 对得上"，不是一个写死的秒数——倍数改了这条断言仍然成立。
 	wantTTL := int64((10 * time.Second * nodeFieldTTLFactor).Seconds())
@@ -373,7 +375,7 @@ func TestHeartbeatFieldsCarryTTL(t *testing.T) {
 	if err := l.Beat(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{model.KeyNodes, model.SrvKey("a1")} {
+	for _, key := range []string{testKeys.Nodes(), testKeys.Srv("a1")} {
 		ttl, err := rdb.HTTL(ctx, key, "im-a").Result()
 		if err != nil || len(ttl) != 1 {
 			t.Fatalf("读 %s 的字段 TTL 失败：%v %v", key, ttl, err)
@@ -388,11 +390,11 @@ func TestHeartbeatFieldsCarryTTL(t *testing.T) {
 	// 服务表还有第二条写入路径：serving 信号触发的 writeServingTable。
 	// 它同样要挂 TTL，否则一个"HSET 出去、下一次心跳之前就崩掉"的进程会
 	// 在服务表里留下永不过期的条目。
-	if err := rdb.HPersist(ctx, model.SrvKey("a1"), "im-a").Err(); err != nil {
+	if err := rdb.HPersist(ctx, testKeys.Srv("a1"), "im-a").Err(); err != nil {
 		t.Fatal(err)
 	}
 	l.writeServingTable(ctx)
-	ttl, err := rdb.HTTL(ctx, model.SrvKey("a1"), "im-a").Result()
+	ttl, err := rdb.HTTL(ctx, testKeys.Srv("a1"), "im-a").Result()
 	if err != nil || len(ttl) != 1 || ttl[0] <= 0 {
 		t.Fatalf("writeServingTable 写的服务表字段也必须带过期，实际 %v (%v)", ttl, err)
 	}
@@ -404,7 +406,7 @@ func TestHeartbeatFieldsCarryTTL(t *testing.T) {
 func TestDeregisterRemovesOwnEntries(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
-	l := NewLiveness(rdb, "im-a", 3*time.Second, 10*time.Second)
+	l := NewLiveness(rdb, testKeys, "im-a", 3*time.Second, 10*time.Second)
 	if err := l.SetServing(ctx, "a1", true); err != nil {
 		t.Fatal(err)
 	}
@@ -419,10 +421,10 @@ func TestDeregisterRemovesOwnEntries(t *testing.T) {
 	if err := l.Deregister(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := rdb.HExists(ctx, model.KeyNodes, "im-a").Result(); n {
+	if n, _ := rdb.HExists(ctx, testKeys.Nodes(), "im-a").Result(); n {
 		t.Fatal("优雅关闭后节点表里不应再有自己的条目")
 	}
-	if n, _ := rdb.HExists(ctx, model.SrvKey("a1"), "im-a").Result(); n {
+	if n, _ := rdb.HExists(ctx, testKeys.Srv("a1"), "im-a").Result(); n {
 		t.Fatal("优雅关闭后服务表里不应再有自己的条目（曾经服务过的 app 也要删）")
 	}
 }
@@ -433,7 +435,7 @@ func TestDeregisterRemovesOwnEntries(t *testing.T) {
 func TestSelfPresentReportsNodeEntry(t *testing.T) {
 	ctx := context.Background()
 	rdb := testsupport.NewTestRedis(t)
-	l := NewLiveness(rdb, "im-a", 3*time.Second, 10*time.Second)
+	l := NewLiveness(rdb, testKeys, "im-a", 3*time.Second, 10*time.Second)
 	if ok, err := l.SelfPresent(ctx); err != nil || ok {
 		t.Fatalf("还没写过心跳时不应报告条目存在：%v %v", ok, err)
 	}
@@ -443,10 +445,28 @@ func TestSelfPresentReportsNodeEntry(t *testing.T) {
 	if ok, err := l.SelfPresent(ctx); err != nil || !ok {
 		t.Fatalf("写过心跳之后应报告条目存在：%v %v", ok, err)
 	}
-	if err := rdb.HDel(ctx, model.KeyNodes, "im-a").Err(); err != nil {
+	if err := rdb.HDel(ctx, testKeys.Nodes(), "im-a").Err(); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := l.SelfPresent(ctx); err != nil || ok {
 		t.Fatalf("条目被删（模拟 Redis 数据丢失）后应报告不存在：%v %v", ok, err)
+	}
+}
+
+// fp-im 的存活表与服务表键名是生产数据，Beat 写出去的键必须与搬家前逐字相同。
+func TestBeatWritesLegacyKeys(t *testing.T) {
+	ctx := context.Background()
+	rdb := testsupport.NewTestRedis(t)
+	l := NewLiveness(rdb, Keys{Prefix: "fp:im"}, "im-legacy", 3*time.Second, 10*time.Second)
+	if err := l.SetServing(ctx, "a1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Beat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"fp:im:node", "fp:im:srv:a1"} {
+		if ok, _ := rdb.HExists(ctx, key, "im-legacy").Result(); !ok {
+			t.Fatalf("%s 里应有 im-legacy", key)
+		}
 	}
 }

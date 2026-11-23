@@ -1,4 +1,4 @@
-package redisx
+package cluster
 
 import (
 	"context"

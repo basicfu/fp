@@ -97,6 +97,8 @@ func TestAuthServiceSurface(t *testing.T) {
 		"BindPhoneLogin":      {false, false},
 		// App 经三方 SDK 拿到的 code 直接换结论。
 		"ExchangeAppCode": {false, false},
+		// 业务方按会话 id 撤销（移除设备）。
+		"RevokeSession": {false, false},
 	}
 
 	methods := svc.Methods()

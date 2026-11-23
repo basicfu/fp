@@ -218,12 +218,18 @@ func TestUsersAvatar(t *testing.T) {
 	stub := &userStub{avatar: &fpv1.GetAvatarResponse{Image: image, ContentType: "image/jpeg"}}
 	u := newUsersForTest(t, stub)
 
-	got, contentType, err := u.Avatar(context.Background(), "0123456789abcdef0123456789abcdef")
+	got, err := u.Avatar(context.Background(), "0123456789abcdef0123456789abcdef")
 	if err != nil {
 		t.Fatalf("Avatar: %v", err)
 	}
-	if stub.lastHash != "0123456789abcdef0123456789abcdef" || contentType != "image/jpeg" || !bytes.Equal(got, image) {
-		t.Fatalf("hash=%q contentType=%q image=%v", stub.lastHash, contentType, got)
+	if stub.lastHash != "0123456789abcdef0123456789abcdef" || got.ContentType != "image/jpeg" || !bytes.Equal(got.Image, image) || got.URL != "" {
+		t.Fatalf("hash=%q got=%+v", stub.lastHash, got)
+	}
+
+	stub.avatar = &fpv1.GetAvatarResponse{Url: "https://cdn.example/avatar/1.png"}
+	got, err = u.Avatar(context.Background(), "0123456789abcdef0123456789abcdef")
+	if err != nil || got.URL != "https://cdn.example/avatar/1.png" || len(got.Image) != 0 {
+		t.Fatalf("对象存储上的头像: got=%+v err=%v", got, err)
 	}
 }
 
@@ -261,7 +267,7 @@ func TestUsersErrorMapping(t *testing.T) {
 		_, getErr := u.Get(ctx, "u-1")
 		_, updateErr := u.Update(ctx, "u-1", UserUpdate{Nickname: &name})
 		_, avatarErr := u.UpdateAvatar(ctx, "u-1", []byte("img"))
-		_, _, downloadErr := u.Avatar(ctx, "h")
+		_, downloadErr := u.Avatar(ctx, "h")
 		_, deletionErr := u.RequestDeletion(ctx, "u-1")
 
 		for method, err := range map[string]error{"Get": getErr, "Update": updateErr, "UpdateAvatar": avatarErr, "Avatar": downloadErr, "RequestDeletion": deletionErr} {

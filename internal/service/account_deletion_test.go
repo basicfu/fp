@@ -251,6 +251,10 @@ func TestSweepPurgesDueDeletionAndArchives(t *testing.T) {
 	if _, err := e.users.UpdateAvatar(ctx, uid, png); err != nil {
 		t.Fatalf("传头像: %v", err)
 	}
+	var avatarKey string
+	if err := e.pool.QueryRow(ctx, `SELECT object_key FROM user_avatar WHERE user_id = $1`, uid).Scan(&avatarKey); err != nil {
+		t.Fatalf("读头像 key: %v", err)
+	}
 	if _, err := e.pool.Exec(ctx, `UPDATE app_user SET avatar_url = 'https://wx.example/a.png' WHERE id = $1`, uid); err != nil {
 		t.Fatalf("写外部头像: %v", err)
 	}
@@ -287,6 +291,16 @@ func TestSweepPurgesDueDeletionAndArchives(t *testing.T) {
 	}
 	if u.Nickname != "" || u.PasswordHash != "" || u.Gender != "" || u.AvatarURL != "" || u.AvatarHash != "" || u.DeleteSubmittedAt != 0 {
 		t.Fatalf("墓碑上还留着资料: %+v", u)
+	}
+	// 头像对象登记进待删队列，GC 跑过后对象存储里也没了。
+	if n := e.count(t, `SELECT count(*) FROM object_gc WHERE key = $1`, avatarKey); n != 1 {
+		t.Errorf("object_gc 里该头像 key 有 %d 行, want 1", n)
+	}
+	if n, err := service.NewObjectGC(e.pool, e.objects).RunOnce(ctx); err != nil || n != 1 {
+		t.Errorf("GC = %d, %v", n, err)
+	}
+	if _, ok := e.objects.Get(avatarKey); ok {
+		t.Error("注销后头像对象还在对象存储里")
 	}
 	for table, sql := range map[string]string{
 		"identity":    `SELECT count(*) FROM identity WHERE user_id = $1`,

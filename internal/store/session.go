@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,7 +27,42 @@ const (
 	sessionLockPrefix  = "fp:lock:"
 	// rotationPrefix 是「旧 token → 新 token」映射的键前缀。
 	rotationPrefix = "fp:rot:"
+	// kickedPrefix 是被踢会话的墓碑：fp:sess:kicked:{sha256(token)} → 应用内部 ID。
+	// 键里放哈希而不是 token 原文：墓碑要留到会话本来的绝对上限，没必要让一份可用凭据的原文在 Redis 里多躺几十天。
+	kickedPrefix = "fp:sess:kicked:"
 )
+
+func kickedKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return kickedPrefix + hex.EncodeToString(sum[:])
+}
+
+// PutKicked 给被踢会话的 token 立墓碑，之后校验它得到「已被移出」而不是「登录过期」。ttl 不为正时不写。
+func (s *SessionStore) PutKicked(ctx context.Context, token string, appID uuid.UUID, ttl time.Duration) error {
+	if ttl <= 0 {
+		return nil
+	}
+	if err := s.rdb.Set(ctx, kickedKey(token), appID.String(), ttl).Err(); err != nil {
+		return fmt.Errorf("store: 写入踢出墓碑: %w", err)
+	}
+	return nil
+}
+
+// KickedApp 读 token 的踢出墓碑，返回当时会话所属的应用。没有墓碑时 ok 为假。
+func (s *SessionStore) KickedApp(ctx context.Context, token string) (appID uuid.UUID, ok bool, err error) {
+	v, err := s.rdb.Get(ctx, kickedKey(token)).Result()
+	if errors.Is(err, redis.Nil) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("store: 读取踢出墓碑: %w", err)
+	}
+	id, err := uuid.Parse(v)
+	if err != nil {
+		return uuid.Nil, false, nil
+	}
+	return id, true, nil
+}
 
 // SessionStore 用 Redis 存放会话。
 //
@@ -50,6 +88,16 @@ func NewSessionStore(rdb *redis.Client) *SessionStore {
 // SET 出来的是一个永不过期的键。这类键没有任何东西会回收它——
 // ListUserTokens 只清理"已消失"的键，反而会把它当成活跃会话一直列出去。
 func (s *SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.Duration) error {
+	return s.put(ctx, sess, ttl, 0)
+}
+
+// PutTracked 同 Put，并在同一个事务里把会话的到期时刻（毫秒）记进到期集合，供过期扫描发 logged_out(expired)。
+// 签发、延期、轮换出的新 token 走它；轮换后缩短到过渡期的旧 token 走 Put——那不是会话的到期时刻。
+func (s *SessionStore) PutTracked(ctx context.Context, sess *domain.Session, ttl time.Duration, expiresAt int64) error {
+	return s.put(ctx, sess, ttl, expiresAt)
+}
+
+func (s *SessionStore) put(ctx context.Context, sess *domain.Session, ttl time.Duration, expiresAt int64) error {
 	if ttl <= 0 {
 		return domain.Fail(domain.ErrInternal, domain.CodeInternal, "服务器内部错误").
 			WithDesc("会话 TTL 必须为正，收到 %v（写入会得到一个永不过期的键）", ttl)
@@ -68,6 +116,9 @@ func (s *SessionStore) Put(ctx context.Context, sess *domain.Session, ttl time.D
 	pipe.Set(ctx, sessionKeyPrefix+sess.Token, raw, ttl)
 	pipe.SAdd(ctx, userSessionsPrefix+sess.UserID.String(), sess.Token)
 	pipe.Expire(ctx, userSessionsPrefix+sess.UserID.String(), indexTTL)
+	if expiresAt > 0 {
+		pipe.ZAdd(ctx, SessionExpiryKey, redis.Z{Score: float64(expiresAt), Member: ExpiryMember(sess)})
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("store: 写入会话: %w", err)
 	}
@@ -102,6 +153,8 @@ func (s *SessionStore) Delete(ctx context.Context, token string) error {
 	pipe.Del(ctx, sessionKeyPrefix+token)
 	if sess != nil {
 		pipe.SRem(ctx, userSessionsPrefix+sess.UserID.String(), token)
+		// 撤销了就不该再报过期。成员按会话不按 token，轮换的新旧 token 删哪个都摘同一个成员。
+		pipe.ZRem(ctx, SessionExpiryKey, ExpiryMember(sess))
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("store: 删除会话: %w", err)
@@ -256,4 +309,119 @@ func (s *SessionStore) RotatedTo(ctx context.Context, oldToken string) (string, 
 		return "", fmt.Errorf("store: 读取轮换映射: %w", err)
 	}
 	return v, nil
+}
+
+// SessionExpiryKey 是会话到期集合：分值是会话到期时刻（毫秒），成员见 ExpiryMember。
+const SessionExpiryKey = "fp:sess:exp"
+
+// ExpiryMember 是会话在到期集合里的成员 {app_id}:{user_id}:{session_id}:{client_ref}。
+// 带全事件要用的字段：会话 key 被 TTL 清掉之后，扫描仍能只凭成员串发出 logged_out。
+func ExpiryMember(sess *domain.Session) string {
+	return sess.AppID.String() + ":" + sess.UserID.String() + ":" + sess.ID + ":" + sess.ClientRef
+}
+
+// ParseExpiryMember 拆开成员串。client_ref 在最后，本身含冒号也不影响。
+func ParseExpiryMember(m string) (appID, userID uuid.UUID, sessionID, clientRef string, ok bool) {
+	parts := strings.SplitN(m, ":", 4)
+	if len(parts) != 4 {
+		return uuid.Nil, uuid.Nil, "", "", false
+	}
+	a, err1 := uuid.Parse(parts[0])
+	u, err2 := uuid.Parse(parts[1])
+	if err1 != nil || err2 != nil || parts[2] == "" {
+		return uuid.Nil, uuid.Nil, "", "", false
+	}
+	return a, u, parts[2], parts[3], true
+}
+
+// claimExpiredScript 原子领取分值 ≤ now 的至多 limit 个成员，并把它们的分值推到 lease：
+// 并发的扫描器领不到同一批；领走的那个崩了，lease 到点后会被别人重新领到，事件不会丢。
+var claimExpiredScript = redis.NewScript(`
+local ms = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+for _, m in ipairs(ms) do
+  redis.call('ZADD', KEYS[1], ARGV[3], m)
+end
+return ms`)
+
+// ClaimExpired 领取到期时刻 ≤ now 的至多 limit 个成员，领走的分值改成 leaseUntil。
+func (s *SessionStore) ClaimExpired(ctx context.Context, now int64, limit int, leaseUntil int64) ([]string, error) {
+	ms, err := claimExpiredScript.Run(ctx, s.rdb, []string{SessionExpiryKey}, now, limit, leaseUntil).StringSlice()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("store: 领取到期会话: %w", err)
+	}
+	return ms, nil
+}
+
+// TrackExpiry 改已登记成员的到期时刻（会话其实延期了，或要提前复核）。只改不加：扫描复核期间会话被撤销、
+// 成员已随会话摘掉的话，放回去就会在下一轮再报一次 expired。
+func (s *SessionStore) TrackExpiry(ctx context.Context, member string, expiresAt int64) error {
+	if err := s.rdb.ZAddXX(ctx, SessionExpiryKey, redis.Z{Score: float64(expiresAt), Member: member}).Err(); err != nil {
+		return fmt.Errorf("store: 更新会话到期: %w", err)
+	}
+	return nil
+}
+
+// ReserveExpiry 新登记一个成员，用于登录在签发之前的预占（见 service.SessionService.ReservePending）。
+func (s *SessionStore) ReserveExpiry(ctx context.Context, member string, expiresAt int64) error {
+	if err := s.rdb.ZAdd(ctx, SessionExpiryKey, redis.Z{Score: float64(expiresAt), Member: member}).Err(); err != nil {
+		return fmt.Errorf("store: 登记会话到期: %w", err)
+	}
+	return nil
+}
+
+// UntrackExpiry 从到期集合摘掉成员。
+func (s *SessionStore) UntrackExpiry(ctx context.Context, member string) error {
+	if err := s.rdb.ZRem(ctx, SessionExpiryKey, member).Err(); err != nil {
+		return fmt.Errorf("store: 摘除会话到期: %w", err)
+	}
+	return nil
+}
+
+// ExpiryScore 是成员当前的分值，不在集合里时 ok 为假。
+func (s *SessionStore) ExpiryScore(ctx context.Context, member string) (score int64, ok bool, err error) {
+	v, err := s.rdb.ZScore(ctx, SessionExpiryKey, member).Result()
+	if errors.Is(err, redis.Nil) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store: 读取会话到期: %w", err)
+	}
+	return int64(v), true, nil
+}
+
+// FindSession 按会话 id 找该用户的会话，轮换过渡期内新旧 token 并存时取到期最晚的那个（新 token）。
+// 找不到返回 domain.ErrNotFound。
+func (s *SessionStore) FindSession(ctx context.Context, userID uuid.UUID, sessionID string) (*domain.Session, error) {
+	tokens, err := s.rdb.SMembers(ctx, userSessionsPrefix+userID.String()).Result()
+	if err != nil {
+		return nil, fmt.Errorf("store: 读取用户会话索引: %w", err)
+	}
+	var best *domain.Session
+	for _, batch := range chunkStrings(tokens, redisBatchSize) {
+		keys := make([]string, len(batch))
+		for i, tok := range batch {
+			keys[i] = sessionKeyPrefix + tok
+		}
+		values, err := s.rdb.MGet(ctx, keys...).Result()
+		if err != nil {
+			return nil, fmt.Errorf("store: 批量读取会话: %w", err)
+		}
+		for _, v := range values {
+			raw, ok := v.(string)
+			if !ok {
+				continue
+			}
+			var sess domain.Session
+			if json.Unmarshal([]byte(raw), &sess) != nil || sess.ID != sessionID {
+				continue
+			}
+			if best == nil || sess.IdleExpiresAt > best.IdleExpiresAt {
+				best = &sess
+			}
+		}
+	}
+	if best == nil {
+		return nil, domain.Failf(domain.ErrNotFound, domain.CodeSessionNotFound, "会话不存在或已过期")
+	}
+	return best, nil
 }

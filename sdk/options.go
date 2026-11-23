@@ -108,6 +108,23 @@ type Options struct {
 	// 要准确状态的在客户端重连时重取即可。与 OnRevoke 一样在读循环里同步执行，必须快。为 nil 表示不关心。
 	OnWechatSubscriptionChanged func(WechatSubscriptionEvent)
 
+	// OnAppEvent 处理 fp 可靠投递的业务事件（登录成功、退出登录、账号删除、微信订阅变化），
+	// 需要应用在 fp 控制台开启「事件」。设置了它，SDK 才会在推送流上声明接收业务事件。
+	//
+	// 返回 nil 才向 fp 确认；返回错误时 fp 会在 10 秒后重投回同一条流，流断开了才换到本应用的另一条。
+	// 同一用户的事件按顺序投递：前一条没确认，后一条不会发出。
+	// 同一事件可能收到多次，按 AppEvent.ID 幂等处理。回调在单独的 goroutine 里串行执行，不阻塞撤销推送，
+	// 但慢回调会让后续业务事件排队。
+	OnAppEvent func(ctx context.Context, ev AppEvent) error
+
+	// OnLoginCheck 在应用开了「会话绑定设备」时，fp 签发会话之前同步问「这台设备能不能登录」。
+	// 设置了它，SDK 才会在推送流上声明回答登录校验；fp 只把校验发给声明了的流。
+	//
+	// 必须在 3 秒内返回（ctx 带这个期限），否则这次登录失败。放行时 ClientRef 必填，它刻进会话、
+	// 随 Validate 的 Identity.ClientRef 带回。返回 error 等同拒绝，客户端收到 unavailable。
+	// 每次校验在单独的 goroutine 里执行，互不阻塞。
+	OnLoginCheck func(ctx context.Context, req LoginCheckRequest) (LoginCheckResult, error)
+
 	// MaxSignedBodyBytes 是访问密钥签名请求的 body 上限，超出回 413。默认 10MB。
 	MaxSignedBodyBytes int64
 	// NonceCapacity 是本进程记住的 nonce 条数上限。满了拒绝新的签名请求（503），

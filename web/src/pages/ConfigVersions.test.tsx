@@ -1,6 +1,6 @@
 // 仓库**没有**装 @testing-library/user-event（不在 package.json 里），
 // 用既有的 fireEvent，写法照 ApplicationSettings.test.tsx。
-import { disabledIMConfig } from '@/lib/testFixtures'
+import { disabledAccountConfig, disabledIMConfig } from '@/lib/testFixtures'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -126,6 +126,8 @@ const fixedApp: Application = {
     tokenCacheTtlSeconds: 1,
   },
   im: disabledIMConfig,
+  domains: [],
+  account: disabledAccountConfig,
   createdAt: 1,
   updatedAt: 1,
 }

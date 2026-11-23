@@ -12,7 +12,8 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import UserRolesCard from '@/components/UserRolesCard'
 import { api } from '@/lib/api'
 import { useResource, errorMessage } from '@/lib/useResource'
-import { formatTime } from '@/lib/format'
+import { compactId, formatTime } from '@/lib/format'
+import { copyToClipboard } from '@/lib/clipboard'
 import { statusLabels } from '@/lib/labels'
 import { userStatusBadgeClassName, GRAY } from '@/lib/status-badge'
 import type { LoginLog, User, UserSession } from '@/lib/types'
@@ -109,7 +110,7 @@ export default function UserDetail() {
         open={confirmingFreeze}
         onOpenChange={setConfirmingFreeze}
         title="冻结账号"
-        description={`冻结后「${u.nickname || u.id}」将无法登录，且会立即下线该用户当前全部在线设备${sessions.data ? `（现有 ${sessions.data.length} 台）` : ''}，需要解除冻结后用新会话重新登录。`}
+        description={`冻结后「${u.nickname || compactId(u.id)}」将无法登录，且会立即下线该用户当前全部在线设备${sessions.data ? `（现有 ${sessions.data.length} 台）` : ''}，需要解除冻结后用新会话重新登录。`}
         confirmLabel="确认冻结"
         onConfirm={() => {
           setConfirmingFreeze(false)
@@ -131,7 +132,21 @@ export default function UserDetail() {
               <Button variant="outline" size="sm" onClick={() => setConfirmingClearAvatar(true)}>清除头像</Button>
             </div>
           )}
-          <div className="text-muted-foreground">用户 ID：<span className="font-mono">{u.id}</span></div>
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <span>用户 ID：<span className="font-mono">{compactId(u.id)}</span></span>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="复制用户 ID"
+              onClick={async () => {
+                const ok = await copyToClipboard(compactId(u.id))
+                if (ok) toast.success('已复制')
+                else toast.error('复制失败，请手动选中复制')
+              }}
+            >
+              复制
+            </Button>
+          </div>
           <div className="text-muted-foreground">注册时间：{formatTime(u.createdAt)}</div>
           <div className="text-muted-foreground">
             注册来源：
@@ -262,7 +277,7 @@ export default function UserDetail() {
         open={confirmingClearAvatar}
         onOpenChange={setConfirmingClearAvatar}
         title="清除头像"
-        description={`将删除「${u.nickname || u.id}」当前的头像，所有应用里都会变回默认头像。图片不会保留，无法恢复。`}
+        description={`将删除「${u.nickname || compactId(u.id)}」当前的头像，所有应用里都会变回默认头像。图片不会保留，无法恢复。`}
         confirmLabel="确认清除"
         onConfirm={() => {
           setConfirmingClearAvatar(false)
@@ -274,7 +289,7 @@ export default function UserDetail() {
         open={confirmingRevokeAll}
         onOpenChange={setConfirmingRevokeAll}
         title="全部下线设备"
-        description={`将立即下线「${u.nickname || u.id}」当前全部在线设备${sessions.data ? `（${sessions.data.length} 台）` : ''}，这些设备需要重新登录才能继续使用。`}
+        description={`将立即下线「${u.nickname || compactId(u.id)}」当前全部在线设备${sessions.data ? `（${sessions.data.length} 台）` : ''}，这些设备需要重新登录才能继续使用。`}
         confirmLabel="确认全部下线"
         onConfirm={() => {
           setConfirmingRevokeAll(false)

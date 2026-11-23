@@ -142,6 +142,9 @@ type Live struct {
 	// Dropped 记录 DropLocal 的调用参数，供测试断言 Deliver/PushMany 在
 	// 目标节点返回 0 订阅者时确实剔除了本地快照。
 	Dropped []string
+	// OnSetServing 在 SetServing 生效前调用（不持 l.mu），测试借此人为制造
+	// 注册与注销的交错顺序。
+	OnSetServing func(app string, on bool)
 }
 
 func (l *Live) LiveNodes() []string             { return l.Nodes }
@@ -149,6 +152,9 @@ func (l *Live) ServerNodes(app string) []string { return l.Servers[app] }
 func (l *Live) TrackApp(string)                 {}
 
 func (l *Live) SetServing(_ context.Context, app string, on bool) error {
+	if l.OnSetServing != nil {
+		l.OnSetServing(app, on)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.Serving == nil {

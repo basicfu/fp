@@ -248,3 +248,62 @@ func TestParseVerifyCodeEmailTemplate(t *testing.T) {
 		}
 	}
 }
+
+func TestParseOSS(t *testing.T) {
+	cfg, err := Parse(`
+oss:
+  access_key_id: ak
+  access_key_secret: sk
+  bucket: b
+  endpoint: oss-cn-hangzhou.aliyuncs.com
+  file_url: https://cdn.example.com/
+`, "dev")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := OSS{AccessKeyID: "ak", AccessKeySecret: "sk", Bucket: "b",
+		Endpoint: "oss-cn-hangzhou.aliyuncs.com", FileURL: "https://cdn.example.com/"}
+	if cfg.OSS != want {
+		t.Fatalf("OSS = %+v, want %+v", cfg.OSS, want)
+	}
+}
+
+// 老库的系统配置没有 oss 段，KnownFields(true) 下必须照常解析、OSS 为零值。
+func TestParseWithoutOSSStaysZero(t *testing.T) {
+	cfg, err := Parse("log:\n  level: debug\n", "dev")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.OSS != (OSS{}) {
+		t.Fatalf("OSS = %+v, want zero", cfg.OSS)
+	}
+}
+
+func TestToYAMLRoundTripsOSS(t *testing.T) {
+	cfg, _ := Parse("oss:\n  bucket: b\n  endpoint: e\n  file_url: https://cdn/\n", "dev")
+	text, err := ToYAML(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(text, "dev")
+	if err != nil || got.OSS != cfg.OSS {
+		t.Fatalf("round trip: %+v, %v", got.OSS, err)
+	}
+}
+
+func TestParseAccountAPITrustedProxies(t *testing.T) {
+	cfg, err := Parse("account_api:\n  trusted_proxies: [\"10.0.0.0/8\", \"192.168.1.5\"]\n", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.AccountAPI.Proxies()
+	if len(got) != 2 || got[0].String() != "10.0.0.0/8" || got[1].String() != "192.168.1.5/32" {
+		t.Fatalf("proxies = %v", got)
+	}
+	if _, err := Parse("account_api:\n  trusted_proxies: [\"nope\"]\n", "dev"); err == nil {
+		t.Fatal("非法地址应报错")
+	}
+	if cfg, err := Parse("", "dev"); err != nil || len(cfg.AccountAPI.Proxies()) != 0 {
+		t.Fatalf("没配时应为空: %v %v", cfg, err)
+	}
+}

@@ -44,6 +44,12 @@ type Session struct {
 	// 只能扫到已存在的会话，扫不到正在签发路上的那一个。轮换时原样继承——
 	// 轮换只换 token 的值，不是新的一次认证。
 	Epoch int64
+
+	// DevicePub 是登录时设备头里的设备公钥（hex），应用开了会话绑定设备才有。之后每次请求的设备头公钥
+	// 必须与它一致，换设备拿走的 token 用不了。轮换、延期原样继承。
+	DevicePub string
+	// ClientRef 是应用给这台设备的标识（如 kkdesk 的设备 id），随校验结果带回，业务方据此核对 token 属于哪台设备。
+	ClientRef string
 }
 
 // MaxExpiresAt 返回绝对上限到期时刻（毫秒）。到达后必须重新认证，轮换无法延长它。

@@ -39,6 +39,9 @@ type OAuthStartInput struct {
 	Mode string
 	// ReturnURL 仅 web 模式：登录完成后浏览器回到的业务页面，必须命中白名单。
 	ReturnURL string
+	// CallbackBase 非空时三方回调拼在它后面（如 https://产品域名），否则用 PublicURL。
+	// 账号接口经产品域名对外：三方只认登记过的授权回调域，也不该把 fp 自己的域名暴露给终端。
+	CallbackBase string
 }
 
 // OAuthStart 是发起结果。业务方要么跳转 AuthURL，要么拿后三项嵌入官方登录组件。
@@ -56,6 +59,9 @@ type OAuthClient struct {
 	IP     string
 	UA     string
 	Mobile bool
+	// DevicePub、ClientRef 同 LoginInput。
+	DevicePub string
+	ClientRef string
 }
 
 // OAuthOutcome 是 Exchange / Poll 的结论。
@@ -104,7 +110,11 @@ func (s *AuthService) startOAuth(ctx context.Context, in OAuthStartInput, bindUs
 	if err != nil {
 		return nil, err
 	}
-	if s.deps.PublicURL == "" || s.deps.OAuth == nil {
+	base := in.CallbackBase
+	if base == "" {
+		base = s.deps.PublicURL
+	}
+	if base == "" || s.deps.OAuth == nil {
 		return nil, domain.Fail(domain.ErrInternal, domain.CodePublicURLMissing, "扫码登录暂不可用").
 			WithDesc("系统配置没填 public_url，拼不出三方回调地址")
 	}
@@ -137,7 +147,7 @@ func (s *AuthService) startOAuth(ctx context.Context, in OAuthStartInput, bindUs
 	if err := s.deps.OAuth.putState(ctx, state, st); err != nil {
 		return nil, err
 	}
-	redirectURI := s.deps.PublicURL + OAuthCallbackPath
+	redirectURI := base + OAuthCallbackPath
 	return &OAuthStart{
 		State:         state,
 		AuthURL:       conn.AuthorizeURL(cfg, redirectURI, state),
@@ -307,6 +317,7 @@ func (s *AuthService) settle(ctx context.Context, app *domain.Application, in OA
 				}
 				user = s.fillNicknameFrom(ctx, user, p)
 			}
+			s.noteIdentityNickname(ctx, identity, p)
 			res, err := s.completeLogin(ctx, app, loginInputFrom(in, connType), profileResult(p), user, identity, false, "")
 			if err != nil {
 				return nil, err
@@ -368,6 +379,7 @@ func (s *AuthService) BindPhone(ctx context.Context, in BindPhoneInput) (*LoginR
 		return nil, err
 	}
 	res.User = s.fillNicknameFrom(ctx, res.User, p)
+	s.noteIdentityNickname(ctx, res.Identity, p)
 	var note string
 	if len(res.Replaced) > 0 {
 		olds := make([]string, 0, len(res.Replaced))
@@ -467,7 +479,8 @@ func (s *AuthService) hasPhone(ctx context.Context, userID uuid.UUID) (bool, err
 }
 
 func loginInputFrom(in OAuthClient, connType string) LoginInput {
-	return LoginInput{AppID: in.AppID, ConnectorType: connType, IP: in.IP, UA: in.UA, Mobile: in.Mobile}
+	return LoginInput{AppID: in.AppID, ConnectorType: connType, IP: in.IP, UA: in.UA, Mobile: in.Mobile,
+		DevicePub: in.DevicePub, ClientRef: in.ClientRef}
 }
 
 func profileResult(p *connector.OAuthProfile) *connector.Result {
@@ -498,6 +511,16 @@ func detailOf(err error) string {
 		return de.DetailJSON()
 	}
 	return ""
+}
+
+// noteIdentityNickname 把三方昵称记到这条身份上（账号面板显示"绑的是哪个微信"）。尽力而为，理由同 fillNicknameFrom。
+func (s *AuthService) noteIdentityNickname(ctx context.Context, identity *domain.Identity, p *connector.OAuthProfile) {
+	if identity == nil || p == nil {
+		return
+	}
+	if err := s.deps.Users.SetIdentityNickname(ctx, identity.ID, p.Nickname); err != nil {
+		slog.Warn("service: 记三方身份昵称失败", "err", err, "identityId", identity.ID)
+	}
 }
 
 // fillNicknameFrom 用户昵称为空时补上三方昵称（已有的不覆盖），返回补完的用户。

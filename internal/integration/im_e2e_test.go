@@ -13,12 +13,12 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/basicfu/fp/internal/cluster"
 	"github.com/basicfu/fp/internal/im/auth"
 	"github.com/basicfu/fp/internal/im/bus"
 	"github.com/basicfu/fp/internal/im/hub"
 	"github.com/basicfu/fp/internal/im/imgrpc"
 	"github.com/basicfu/fp/internal/im/model"
-	"github.com/basicfu/fp/internal/im/redisx"
 	"github.com/basicfu/fp/internal/im/registry"
 	"github.com/basicfu/fp/internal/im/wsapi"
 	"github.com/basicfu/fp/internal/testsupport"
@@ -42,7 +42,7 @@ func (a staticAuth) Verify(_ context.Context, req auth.VerifyRequest) (auth.Iden
 // 连 grpcAddr，live 暴露给测试轮询"这个节点的存活视图有没有看到另一个节点"。
 type imNode struct {
 	id   string
-	live *registry.Liveness
+	live *cluster.Liveness
 	// hub 暴露出来供 im_provisioning_test 把 fpauth 的撤销回调接上——
 	// 生产装配里那个回调也是这么接的（cmd/fp-im 的 h.OnRevoked）。
 	hub      *hub.Hub
@@ -77,13 +77,13 @@ func startNode(t *testing.T, rdb *redis.Client, id string, apps auth.AppConfigSo
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	run, err := redisx.NewRunner(rdb, 0, 1)
+	run, err := cluster.NewRunner(rdb, 0, 1)
 	if err != nil {
-		t.Fatalf("redisx.NewRunner: %v", err)
+		t.Fatalf("cluster.NewRunner: %v", err)
 	}
 	t.Cleanup(run.Close)
 
-	live := registry.NewLiveness(rdb, id, 200*time.Millisecond, time.Second)
+	live := cluster.NewLiveness(rdb, model.ClusterKeys(), id, 200*time.Millisecond, time.Second)
 	conns := registry.NewConns(rdb, run, 30*time.Minute)
 	b := bus.New(rdb, run)
 	h := hub.New(id, conns, live, b, apps)

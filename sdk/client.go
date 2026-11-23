@@ -388,9 +388,37 @@ func (c *Client) runWatch(ctx context.Context) {
 // 把退避重置回最小值：连 ready 都没等到就断开，说明这次重连尝试本身就
 // 失败了，退避必须继续按原节奏增长，不能被"看似建了流"误导。
 func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
+	// 流级 ctx：本次流结束时一并停掉业务事件 worker。
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	stream, err := c.rpc.Watch(ctx)
 	if err != nil {
 		return false, err
+	}
+	// gRPC 不允许同一条流并发 Send，流上的所有发送方（确认、登录校验应答）共用这把锁。
+	var sendMu sync.Mutex
+	var caps []string
+	if c.opts.OnAppEvent != nil {
+		caps = append(caps, capAppEvents)
+	}
+	if c.opts.OnLoginCheck != nil {
+		caps = append(caps, capLoginCheck)
+	}
+	if len(caps) > 0 {
+		// 老服务端不读客户端消息，hello 只是停在缓冲里，不影响收流。
+		if err := stream.Send(&fpv1.WatchRequest{Msg: &fpv1.WatchRequest_Hello{
+			Hello: &fpv1.WatchHello{Caps: caps},
+		}}); err != nil {
+			return false, err
+		}
+	}
+	var worker *appEventWorker
+	if c.opts.OnAppEvent != nil {
+		worker = c.startAppEventWorker(ctx, stream, &sendMu)
+		defer func() {
+			cancel()
+			<-worker.done
+		}()
 	}
 	for {
 		msg, err := stream.Recv()
@@ -398,6 +426,14 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 			return gotReady, err
 		}
 		switch {
+		case msg.GetAppEvent() != nil:
+			if worker != nil {
+				worker.offer(msg.GetAppEvent())
+			}
+		case msg.GetLoginCheck() != nil:
+			if c.opts.OnLoginCheck != nil {
+				go c.answerLoginCheck(ctx, stream, &sendMu, msg.GetLoginCheck())
+			}
 		case msg.GetReady() != nil:
 			// 重连后必须清空缓存：断开期间发生的撤销一条都没收到，缓存里
 			// 的任何条目都可能是已被撤销的会话。首次连接也走这条路径，

@@ -451,3 +451,46 @@ func createAppID(t *testing.T, h http.Handler, token string) string {
 	}
 	return created.Application.ID
 }
+
+func TestPutAccountConfigRoundTripAndConflict(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	a := createAppID(t, h, token)
+	b := createAppID(t, h, token)
+
+	body := `{"domains":["API.Example.com"],"account":{"enabled":true,"loginTypes":["sms","password"],` +
+		`"editableFields":["nickname"],"deviceBinding":true,"deviceHeader":"X-Device","events":true}}`
+	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account", body)
+	if rec.Code != 200 {
+		t.Fatalf("保存失败：%d %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"domains":["api.example.com"]`, `"loginTypes":["sms","password"]`,
+		`"deviceHeader":"X-Device"`, `"events":true`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("响应里缺 %s：%s", want, rec.Body.String())
+		}
+	}
+	rec = do(t, h, token, http.MethodGet, "/admin/api/applications/"+a, "")
+	if !strings.Contains(rec.Body.String(), `"domains":["api.example.com"]`) {
+		t.Fatalf("GET 读不回域名：%s", rec.Body.String())
+	}
+
+	rec = do(t, h, token, http.MethodPut, "/admin/api/applications/"+b+"/account",
+		`{"domains":["api.example.com"],"account":{"enabled":false}}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("域名冲突必须 409，got %d：%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPutAccountConfigValidates(t *testing.T) {
+	h, token, _ := newAdminEnv(t)
+	a := createAppID(t, h, token)
+	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account",
+		`{"domains":[],"account":{"enabled":true,"deviceBinding":true,"deviceHeader":""}}`)
+	if rec.Code != 400 {
+		t.Fatalf("缺设备头必须 400，got %d：%s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account", `{"domains":[],"acount":{}}`)
+	if rec.Code != 400 {
+		t.Fatalf("未知字段必须 400，got %d", rec.Code)
+	}
+}
