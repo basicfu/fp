@@ -748,7 +748,7 @@ func (s *ApplicationService) maskConnectorConfig(connectorType string, config ma
 	return domain.MaskSecrets(fields, config)
 }
 
-// SetAccount 整体替换应用的域名与账号接口配置。
+// SetAccount 整体替换应用的域名与账号接口配置。cfg.Events 不由调用方决定，沿用库里的值（见 EnableAccountEvents）。
 //
 // 域名先在事务里腾空再写入：application_domain 的主键保证全局唯一，撞车时
 // 整个事务回滚，application 上的数组列不会留下半截结果。
@@ -757,15 +757,7 @@ func (s *ApplicationService) SetAccount(ctx context.Context, id uuid.UUID, domai
 	if err != nil {
 		return nil, err
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	if cfg.LoginTypes == nil {
-		cfg.LoginTypes = []string{}
-	}
-	if cfg.EditableFields == nil {
-		cfg.EditableFields = []string{}
-	}
+	cfg.Events = false
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("service: 序列化 account: %w", err)
@@ -778,7 +770,8 @@ func (s *ApplicationService) SetAccount(ctx context.Context, id uuid.UUID, domai
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	row := tx.QueryRow(ctx, `
-		UPDATE application SET domains = $2, account = $3, updated_at = now()
+		UPDATE application SET domains = $2, updated_at = now(),
+			account = jsonb_set($3::jsonb, '{events}', to_jsonb(COALESCE((account->>'events')::boolean, false)))
 		WHERE id = $1
 		RETURNING `+applicationColumns, id, domains, raw)
 	app, err := scanApplication(row)
@@ -805,6 +798,21 @@ func (s *ApplicationService) SetAccount(ctx context.Context, id uuid.UUID, domai
 	}
 	s.invalidateCache()
 	return app, nil
+}
+
+// EnableAccountEvents 让应用开始收业务事件，幂等；应用不存在时什么都不做。
+// 只改 events 一个键，不动 updated_at：这不是谁在控制台的改动。
+func (s *ApplicationService) EnableAccountEvents(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE application SET account = jsonb_set(account, '{events}', 'true'::jsonb)
+		WHERE id = $1 AND COALESCE((account->>'events')::boolean, false) = false`, id)
+	if err != nil {
+		return fmt.Errorf("service: 打开业务事件: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		s.invalidateCache()
+	}
+	return nil
 }
 
 // GetActiveByHost 按请求 Host 取应用：去端口、转小写后精确匹配，且应用须启用。

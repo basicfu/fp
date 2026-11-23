@@ -34,8 +34,9 @@ import (
 )
 
 const (
-	testHost      = "api.test.local"
-	deviceHeader  = "X-Test-Device"
+	testHost = "api.test.local"
+	// deviceHeader 是固定的设备签名头,写死在测试里守住对外约定。
+	deviceHeader  = "X-Sign"
 	returnURL     = "myapp://wechat-login"
 	fakeClientRef = "dev-1"
 )
@@ -202,21 +203,27 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-// setAccount 在全开的账号配置上改几项。
+// setAccount 在开了验签的账号配置上改几项。
 func (e *env) setAccount(t *testing.T, mod func(*domain.AccountConfig)) {
 	t.Helper()
-	cfg := domain.AccountConfig{
-		Enabled:        true,
-		LoginTypes:     []string{domain.AccountLoginSMS, domain.AccountLoginPassword, domain.AccountLoginWechat, domain.AccountLoginWechatPhone},
-		EditableFields: []string{domain.AccountFieldNickname, domain.AccountFieldAvatar},
-		DeviceBinding:  true, DeviceHeader: deviceHeader, WechatReturnURL: returnURL,
-	}
+	cfg := domain.AccountConfig{DeviceBinding: true}
 	mod(&cfg)
 	app, err := e.apps.SetAccount(context.Background(), e.app.ID, []string{testHost}, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.app = app
+}
+
+// setConnector 改应用某种登录方式的启停与配置。微信的 config 传 nil 时沿用测试默认的那份。
+func (e *env) setConnector(t *testing.T, typ string, on bool, cfg map[string]any) {
+	t.Helper()
+	if cfg == nil && typ == connector.TypeWechatWeb {
+		cfg = map[string]any{"appId": "wxapp", "appSecret": "s3cret", "returnUrls": returnURL}
+	}
+	if err := e.apps.SetConnector(context.Background(), e.app.ID, typ, on, cfg); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type reqOpt func(*http.Request)

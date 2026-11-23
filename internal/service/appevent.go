@@ -67,7 +67,8 @@ type (
 // LoggedOutExpired 是会话空闲超时或到达绝对上限时 logged_out 的 reason。
 const LoggedOutExpired = domain.LoggedOutExpired
 
-// Append 给一个应用写一条事件。应用没开事件、或应用已删除时什么都不做。
+// Append 给一个应用写一条事件。应用还没有流声明过 app_events（见 ApplicationService.EnableAccountEvents）、
+// 或应用已删除时什么都不做。
 //
 // 调用方要「先写事件再改状态」（如先 Append 再撤销会话）：两者不在一个事务里，
 // 中途失败时宁可业务方多收一条事件，也不能让状态已变、业务方却永远不知道。
@@ -90,7 +91,7 @@ func (s *AppEvents) Append(ctx context.Context, appID, userID uuid.UUID, kind st
 	return nil
 }
 
-// AppendForUserApps 给所有开了事件的启用应用各写一条，用于账号删除这类不属于某个应用的事件。
+// AppendForUserApps 给所有收事件的启用应用各写一条，用于账号删除这类不属于某个应用的事件。
 func (s *AppEvents) AppendForUserApps(ctx context.Context, userID uuid.UUID, kind string, payload any) error {
 	written, err := s.AppendForUserAppsTx(ctx, s.pool, userID, kind, payload)
 	s.Wake(ctx, written)

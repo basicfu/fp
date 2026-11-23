@@ -42,6 +42,7 @@ func (a eventsOnApps) List(ctx context.Context) ([]domain.Application, error) {
 
 // eventCluster 是共用一套 PG/Redis 的多个 fp 实例，各有自己的投递器，模拟多实例部署。
 type eventCluster struct {
+	apps   *service.ApplicationService
 	events *service.AppEvents
 	appID  uuid.UUID
 	extID  string
@@ -63,6 +64,12 @@ var testDispatch = DispatchConfig{
 
 func newEventCluster(t *testing.T, n int) *eventCluster {
 	t.Helper()
+	return newEventClusterWith(t, n, true)
+}
+
+// newEventClusterWith 的 forceOn 为 false 时事件开关走真实的应用配置(只有流声明了 app_events 才打开)。
+func newEventClusterWith(t *testing.T, n int, forceOn bool) *eventCluster {
+	t.Helper()
 	pool := testsupport.NewTestDB(t)
 	rdb := testsupport.NewTestRedis(t)
 
@@ -80,13 +87,17 @@ func newEventCluster(t *testing.T, n int) *eventCluster {
 		Apps: apps, Users: users, Sessions: sessions, Logs: service.NewLoginLogService(pool), Registry: reg,
 	})
 	signal := store.NewAppEventSignal(rdb)
-	events := service.NewAppEvents(pool, eventsOnApps{apps}, signal)
+	var src service.AppEventApps = apps
+	if forceOn {
+		src = eventsOnApps{apps}
+	}
+	events := service.NewAppEvents(pool, src, signal)
 
 	app, secret, err := apps.Create(context.Background(), "事件投递", "evt-"+uuid.NewString()[:8])
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &eventCluster{events: events, appID: app.ID, extID: app.AppID, secret: secret}
+	c := &eventCluster{apps: apps, events: events, appID: app.ID, extID: app.AppID, secret: secret}
 	for i := 0; i < n; i++ {
 		d := NewEventDispatcher(events, store.NewLease(rdb), signal, testDispatch)
 		srv := New(Deps{Auth: authSvc, Apps: apps, Pub: revokePub, Configs: configs, ConfigPub: configPub, Events: d})
@@ -204,6 +215,61 @@ func (c *eventCluster) append(t *testing.T, user uuid.UUID, kind string) {
 	t.Helper()
 	if err := c.events.Append(context.Background(), c.appID, user, kind, map[string]string{"k": kind}); err != nil {
 		t.Fatalf("Append: %v", err)
+	}
+}
+
+// 应用第一次有流声明 app_events 时自动开始收事件;从没声明过的应用不写事件表,免得堆积。
+func TestAppEventsAutoEnabledByHello(t *testing.T) {
+	c := newEventClusterWith(t, 1, false)
+	ctx := context.Background()
+	pending := func() int {
+		evs, err := c.events.Pending(ctx, c.appID, 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(evs)
+	}
+	c.append(t, uuid.New(), domain.EventLoginSucceeded)
+	if n := pending(); n != 0 {
+		t.Fatalf("没有流声明过 app_events 却写了 %d 条", n)
+	}
+
+	// 只声明登录校验的流不算。
+	sctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(ctx, mdAppID, c.extID, mdAppSecret, c.secret))
+	defer cancel()
+	other, err := c.nodes[0].client.Watch(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Send(&fpv1.WatchRequest{Msg: &fpv1.WatchRequest_Hello{Hello: &fpv1.WatchHello{Caps: []string{CapLoginCheck}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if app, _ := c.apps.GetByID(ctx, c.appID); app.Account.Events {
+		t.Fatal("没声明 app_events 的流打开了事件")
+	}
+
+	w := c.watch(t, 0, "A", true)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		app, err := c.apps.GetByID(ctx, c.appID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if app.Account.Events {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("声明 app_events 后没有自动打开事件")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	c.append(t, uuid.New(), domain.EventLoggedOut)
+	if ev := w.next(3 * time.Second); ev.GetKind() != domain.EventLoggedOut {
+		t.Fatalf("收到的不是打开后写的事件: %+v", ev)
 	}
 }
 

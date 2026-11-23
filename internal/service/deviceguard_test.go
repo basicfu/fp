@@ -48,7 +48,7 @@ func (d testDevice) header(t *testing.T, now time.Time, nonce string) string {
 }
 
 func bindingApp(on bool) *domain.Application {
-	return &domain.Application{ID: uuid.New(), Account: domain.AccountConfig{DeviceBinding: on, DeviceHeader: "X-KKdesk-Device"}}
+	return &domain.Application{ID: uuid.New(), Account: domain.AccountConfig{DeviceBinding: on}}
 }
 
 func wantUnverified(t *testing.T, err error, what string) {

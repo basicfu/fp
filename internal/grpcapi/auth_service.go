@@ -34,6 +34,11 @@ type AppLookup interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.Application, error)
 }
 
+// AccountEvents 在应用第一次有流声明 app_events 时打开它的业务事件，*service.ApplicationService 满足它。
+type AccountEvents interface {
+	EnableAccountEvents(ctx context.Context, id uuid.UUID) error
+}
+
 // AuthServerDeps 是 gRPC 认证服务的依赖。
 type AuthServerDeps struct {
 	Auth *service.AuthService
@@ -49,6 +54,8 @@ type AuthServerDeps struct {
 	AccessKeys *service.AccessKeyService
 	// Events 投递业务事件。为 nil 时声明了 app_events 的流也收不到业务事件。
 	Events *EventDispatcher
+	// EventsOn 与 Events 成对：没有它，从没收过事件的应用声明了 app_events 也不会开始写事件表。
+	EventsOn AccountEvents
 	// LoginCheck 承接登录校验。为 nil 时声明了 login_check 的流不进登记。
 	LoginCheck *LoginCheckRelay
 }
@@ -57,7 +64,7 @@ type AuthServerDeps struct {
 func NewAuthServer(d AuthServerDeps) fpv1.AuthServiceServer {
 	return &authServer{
 		auth: d.Auth, hub: d.Hub, configHub: d.ConfigHub, apps: d.Apps, authz: d.Authz,
-		accessKeys: d.AccessKeys, events: d.Events, loginCheck: d.LoginCheck,
+		accessKeys: d.AccessKeys, events: d.Events, eventsOn: d.EventsOn, loginCheck: d.LoginCheck,
 	}
 }
 
@@ -70,6 +77,7 @@ type authServer struct {
 	authz      *service.AuthzService
 	accessKeys *service.AccessKeyService
 	events     *EventDispatcher
+	eventsOn   AccountEvents
 	loginCheck *LoginCheckRelay
 }
 
@@ -338,6 +346,13 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 			return nil
 		case h := <-hellos:
 			if appEvents == nil && s.events != nil && slices.Contains(h.GetCaps(), CapAppEvents) {
+				// 开关由「有没有流真的来收」决定，不让业务方去控制台再开一次。失败不断流：下次重连再试，
+				// 在此之前只是事件不入表，与没开时一样。
+				if !app.Account.Events && s.eventsOn != nil {
+					if err := s.eventsOn.EnableAccountEvents(ctx, app.ID); err != nil {
+						slog.Warn("grpcapi: 自动打开业务事件失败", "appId", app.AppID, "err", err)
+					}
+				}
 				es, unregister := s.events.Register(app.ID)
 				defer unregister()
 				appEvents = es.out

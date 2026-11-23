@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 )
 
@@ -14,7 +13,9 @@ import (
 // 客户端上传前会压缩, 放这么大进来只会让每台设备多下一份没用的数据。
 const maxAvatarBytes = 256 << 10
 
-// handleProfile 只接受应用开放修改的字段:出现别的字段整个请求拒掉,而不是静默忽略——
+const fieldNickname = "nickname"
+
+// handleProfile 只接受能改的字段(昵称;头像走 /avatar):出现别的字段整个请求拒掉,而不是静默忽略——
 // 客户端以为改成了,下次 /me 又变回去,比明确报错更难排查。
 func (h *handler) handleProfile(w http.ResponseWriter, r *http.Request) {
 	c, authed := h.requireUser(w, r)
@@ -26,16 +27,15 @@ func (h *handler) handleProfile(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	acct := appOf(r).Account
 	for k := range fields {
-		if k != domain.AccountFieldNickname || !acct.CanEdit(k) {
+		if k != fieldNickname {
 			h.writeErr(w, "forbidden", "不允许修改该项资料")
 			return
 		}
 	}
 	// 用指针认出 null:解进 string 时 null 是空操作,会被当成改成空昵称。
 	var nickname *string
-	if json.Unmarshal(fields[domain.AccountFieldNickname], &nickname) != nil || nickname == nil {
+	if json.Unmarshal(fields[fieldNickname], &nickname) != nil || nickname == nil {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
@@ -65,10 +65,6 @@ func (h *handler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 
 // updateAvatar 的请求体是图片原始字节, 空体 = 清除头像。
 func (h *handler) updateAvatar(w http.ResponseWriter, r *http.Request, c *caller) (*service.UserProfile, bool) {
-	if !appOf(r).Account.CanEdit(domain.AccountFieldAvatar) {
-		h.writeErr(w, "forbidden", "不允许修改该项资料")
-		return nil, false
-	}
 	image, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAvatarBytes))
 	if err != nil {
 		var tooLarge *http.MaxBytesError

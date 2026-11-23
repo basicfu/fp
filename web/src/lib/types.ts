@@ -50,16 +50,12 @@ export interface IMConfig {
   bizAuth: IMBizAuth | null
 }
 
-/** 应用对终端用户开放的账号接口配置；enabled 关着时不对外暴露任何账号接口。 */
+/** 应用对终端用户开放的账号接口配置。登记了域名即对外开放。 */
 export interface AccountConfig {
-  enabled: boolean
-  loginTypes: string[]
-  editableFields: string[]
+  /** 验签：会话绑定设备，每个请求都校验设备签名。 */
   deviceBinding: boolean
-  deviceHeader: string
+  /** 只读：应用的 Watch 流声明接收业务事件后自动开启。 */
   events: boolean
-  /** /wechat/start 发起扫码时的回跳地址，须同时在微信登录方式的回跳白名单里；空 = 不开放扫码。 */
-  wechatReturnUrl: string
 }
 
 export interface IMCredentialStatus {

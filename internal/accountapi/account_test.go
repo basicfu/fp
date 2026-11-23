@@ -55,8 +55,6 @@ func TestProfile(t *testing.T) {
 	wantErr(t, e.do(t, "PUT", "/profile", `{}`, withToken(tok)), 400, "bad_request", "")
 	// 不在开放字段里的一律拒,不静默忽略。
 	wantErr(t, e.do(t, "PUT", "/profile", `{"nickname":"a","gender":"MALE"}`, withToken(tok)), 403, "forbidden", "")
-	e.setAccount(t, func(c *domain.AccountConfig) { c.EditableFields = []string{domain.AccountFieldAvatar} })
-	wantErr(t, e.do(t, "PUT", "/profile", `{"nickname":"阿贵"}`, withToken(tok)), 403, "forbidden", "")
 	wantErr(t, e.do(t, "PUT", "/profile", `{"nickname":"阿贵"}`), 401, "unauthorized", "")
 }
 
@@ -75,8 +73,6 @@ func TestAvatar(t *testing.T) {
 	if u := userOf(t, wantOK(t, e.doBytes(t, "PUT", "/avatar", nil, withToken(tok)))); u["avatar"] != "" {
 		t.Fatalf("清除: %v", u)
 	}
-	e.setAccount(t, func(c *domain.AccountConfig) { c.EditableFields = []string{domain.AccountFieldNickname} })
-	wantErr(t, e.doBytes(t, "PUT", "/avatar", img, withToken(tok)), 403, "forbidden", "")
 }
 
 func TestPassword(t *testing.T) {

@@ -152,6 +152,7 @@ func New(d Deps) *Server {
 		Hub: hub, ConfigHub: configHub,
 		AccessKeys: d.AccessKeys,
 		Events:     d.Events,
+		EventsOn:   d.Apps,
 		LoginCheck: d.LoginCheck,
 	}))
 	fpv1.RegisterConfigServiceServer(srv, newConfigServer(d.Configs, d.Apps))

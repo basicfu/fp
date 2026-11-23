@@ -34,7 +34,7 @@
 | 配置项 | 说明 |
 |---|---|
 | AppID / AppSecret | 必填。AppSecret 保存后只显示掩码 |
-| 允许的网页回跳地址 | `web` 模式回跳页地址的前缀，多个用逗号分隔，例如 `https://app.example.com/login/wechat` |
+| 允许的网页回跳地址 | `web` 模式回跳页地址的前缀，多个用逗号分隔，例如 `https://app.example.com/login/wechat`。终端用户账号接口发起扫码时用其中第一项 |
 | 桌面 App 自定义协议 | 例如 `myapp`。配了之后，`desktop` 模式只走协议跳回 |
 | 允许桌面端轮询 | 默认关闭。只给没有自定义协议的桌面客户端打开 |
 

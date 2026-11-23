@@ -46,7 +46,7 @@ func (h *handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	out, done := h.login(w, r, req)
+	out, done := h.login(w, r, req, "bad_request", "")
 	if !done {
 		return
 	}
@@ -72,12 +72,12 @@ func (h *handler) loginUser(r *http.Request, out *loginOutcome) accountUser {
 	return h.accountUser(r.Context(), p)
 }
 
-// login 是四种登录方式的同一段:校验参数 → 认设备 → 登录。失败时已写好响应。
+// login 是四种登录方式的同一段:登录方式开没开 → 校验参数 → 认设备 → 登录。失败时已写好响应。
+// 没开的方式回 offCode/offMsg。开没开先于认设备:关着的方式不该去问应用认不认这台设备。
 // 格式不对的请求不往下走:短信那边按手机号计次,畸形号码也会白白消耗一次额度。
-func (h *handler) login(w http.ResponseWriter, r *http.Request, req loginReq) (*loginOutcome, bool) {
+func (h *handler) login(w http.ResponseWriter, r *http.Request, req loginReq, offCode, offMsg string) (*loginOutcome, bool) {
 	app := appOf(r)
-	if !app.Account.HasLoginType(req.Type) {
-		h.writeErr(w, "bad_request", "")
+	if !h.loginOn(w, r, req.Type, offCode, offMsg) {
 		return nil, false
 	}
 	switch req.Type {
@@ -186,7 +186,7 @@ func (h *handler) logoutAllowed(r *http.Request, token string) bool {
 		// 查不到就交给 Logout 自己判(重复登出、已过期都是无事可做)。没绑设备的会话本就用不了,登出照常撤掉。
 		return true
 	}
-	if err := h.d.Guard.Check(r.Context(), app, sess, r.Header.Get(app.Account.DeviceHeader), h.now()); err != nil {
+	if err := h.d.Guard.Check(r.Context(), app, sess, signature(r), h.now()); err != nil {
 		slog.Info("accountapi: 登出的设备头与会话不符, 不撤销", "sessionId", sess.ID, "err", err)
 		return false
 	}

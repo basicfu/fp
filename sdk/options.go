@@ -109,7 +109,8 @@ type Options struct {
 	OnWechatSubscriptionChanged func(WechatSubscriptionEvent)
 
 	// OnAppEvent 处理 fp 可靠投递的业务事件（登录成功、退出登录、账号删除、微信订阅变化），
-	// 需要应用在 fp 控制台开启「事件」。设置了它，SDK 才会在推送流上声明接收业务事件。
+	// 设置了它，SDK 才会在推送流上声明接收业务事件；应用第一次有流这样声明时 fp 自动开始为它记录事件，
+	// 不用去控制台开（在那之前发生的事件不会补发）。
 	//
 	// 返回 nil 才向 fp 确认；返回错误时 fp 会在 10 秒后重投回同一条流，流断开了才换到本应用的另一条。
 	// 同一用户的事件按顺序投递：前一条没确认，后一条不会发出。
@@ -117,7 +118,7 @@ type Options struct {
 	// 但慢回调会让后续业务事件排队。
 	OnAppEvent func(ctx context.Context, ev AppEvent) error
 
-	// OnLoginCheck 在应用开了「会话绑定设备」时，fp 签发会话之前同步问「这台设备能不能登录」。
+	// OnLoginCheck 在应用开了「验签」（会话绑定设备）时，fp 签发会话之前同步问「这台设备能不能登录」。
 	// 设置了它，SDK 才会在推送流上声明回答登录校验；fp 只把校验发给声明了的流。
 	//
 	// 必须在 3 秒内返回（ctx 带这个期限），否则这次登录失败。放行时 ClientRef 必填，它刻进会话、

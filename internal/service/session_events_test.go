@@ -143,8 +143,13 @@ func newEventApp(t *testing.T, apps *service.ApplicationService, code string, ev
 	if err := apps.SetConnector(ctx, app.ID, connector.TypePassword, true, nil); err != nil {
 		t.Fatal(err)
 	}
-	if app, err = apps.SetAccount(ctx, app.ID, nil, domain.AccountConfig{Events: events}); err != nil {
-		t.Fatalf("SetAccount: %v", err)
+	if events {
+		if err := apps.EnableAccountEvents(ctx, app.ID); err != nil {
+			t.Fatalf("EnableAccountEvents: %v", err)
+		}
+	}
+	if app, err = apps.GetByID(ctx, app.ID); err != nil {
+		t.Fatal(err)
 	}
 	return app
 }

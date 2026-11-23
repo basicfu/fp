@@ -21,7 +21,7 @@ const CodeLoginCheckUnavailable = "unavailable"
 
 // LoginCheckRequest 是 fp 在签发会话前问的一次登录校验，见 Options.OnLoginCheck。
 type LoginCheckRequest struct {
-	// DeviceHeader 是客户端设备头原文（应用配置的请求头，如 kkdesk 的 X-KKdesk-Device），fp 已验过签名与时间窗。
+	// DeviceHeader 是客户端设备签名头（X-Sign）原文，fp 已验过签名与时间窗。
 	DeviceHeader string
 	// IP 是客户端 IP。
 	IP string

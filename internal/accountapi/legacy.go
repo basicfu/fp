@@ -16,6 +16,10 @@ import (
 //
 // 与老格式的唯一差别:账号 ID(display_id)整个功能删了,老格式里它本来就是"发号失败时省略",老客户端按省略处理。
 
+// legacySignHeader 是已发版老客户端发设备签名用的头名。只有老路径(不带 X-Account-Api)在没有 X-Sign 时才认它,
+// 随本文件一起删。
+const legacySignHeader = "X-KKdesk-Device"
+
 func (h *handler) legacyRoutes(r chi.Router) {
 	r.Post("/sms-code", h.legacySMSCode)
 	r.Post("/wechat/login", h.legacyWechatLogin)
@@ -129,8 +133,7 @@ func (h *handler) legacySMSCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 原实现在应用没开短信登录时回 unavailable,老客户端据此提示"暂不可用"而不是"参数错误"。
-	if !codeAllowed(appOf(r).Account, purposeLogin, channelSMS) {
-		h.writeErr(w, "unavailable", "")
+	if !h.codeOn(w, r, purposeLogin, "unavailable") {
 		return
 	}
 	if h.sendLoginCode(w, r, codeReq{Purpose: purposeLogin, Channel: channelSMS, Target: req.Phone,
@@ -145,11 +148,7 @@ func (h *handler) legacyLogin(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	if !appOf(r).Account.HasLoginType(req.Type) {
-		h.writeErr(w, "unavailable", "")
-		return
-	}
-	if out, done := h.login(w, r, req); done {
+	if out, done := h.login(w, r, req, "unavailable", ""); done {
 		ok(w, legacyLoginResp{Token: out.res.Session.Token, User: h.legacyLoginUser(r, out)})
 	}
 }
@@ -162,11 +161,7 @@ func (h *handler) legacyWechatLogin(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	if !appOf(r).Account.HasLoginType(domain.AccountLoginWechat) {
-		h.writeErr(w, "unavailable", "微信登录暂未开放")
-		return
-	}
-	out, done := h.login(w, r, loginReq{Type: domain.AccountLoginWechat, Ticket: req.Ticket})
+	out, done := h.login(w, r, loginReq{Type: domain.AccountLoginWechat, Ticket: req.Ticket}, "unavailable", msgWechatOff)
 	if !done {
 		return
 	}
@@ -183,19 +178,15 @@ func (h *handler) legacyWechatPhone(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	if !appOf(r).Account.HasLoginType(domain.AccountLoginWechatPhone) {
-		h.writeErr(w, "unavailable", "微信登录暂未开放")
-		return
-	}
-	out, done := h.login(w, r, loginReq{Type: domain.AccountLoginWechatPhone, BindTicket: req.BindTicket, Phone: req.Phone, Code: req.Code})
+	out, done := h.login(w, r, loginReq{Type: domain.AccountLoginWechatPhone, BindTicket: req.BindTicket, Phone: req.Phone, Code: req.Code},
+		"unavailable", msgWechatOff)
 	if done {
 		ok(w, legacyLoginResp{Token: out.res.Session.Token, User: h.legacyLoginUser(r, out)})
 	}
 }
 
 func (h *handler) legacyWechatStart(w http.ResponseWriter, r *http.Request) {
-	if !appOf(r).Account.HasLoginType(domain.AccountLoginWechat) {
-		h.writeErr(w, "unavailable", "微信登录暂未开放")
+	if !h.loginOn(w, r, domain.AccountLoginWechat, "unavailable", msgWechatOff) {
 		return
 	}
 	if st, done := h.startWechatLogin(w, r); done {
@@ -231,10 +222,6 @@ func (h *handler) legacyProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if !decodeBody(w, r, &req, maxBody) || req.Nickname == nil {
 		h.writeErr(w, "bad_request", "")
-		return
-	}
-	if !appOf(r).Account.CanEdit(domain.AccountFieldNickname) {
-		h.writeErr(w, "forbidden", "不允许修改该项资料")
 		return
 	}
 	if p, done := h.updateNickname(w, r, c, *req.Nickname); done {
@@ -313,8 +300,11 @@ func (h *handler) legacyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m, known := legacyCodePurposes[req.Purpose]
-	if !known || !codeAllowed(appOf(r).Account, m[0], m[1]) {
+	if !known || !codeAllowed(m[0], m[1]) {
 		h.writeErr(w, "bad_request", "")
+		return
+	}
+	if !h.codeOn(w, r, m[0], "bad_request") {
 		return
 	}
 	if h.sendAccountCode(w, r, c, m[0], m[1], req.Target) {

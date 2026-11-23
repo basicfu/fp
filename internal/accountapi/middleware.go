@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 )
 
@@ -26,7 +27,7 @@ func appOf(r *http.Request) *domain.Application {
 }
 func ipOf(r *http.Request) string { return r.Context().Value(keyIP).(string) }
 
-// withApp 按 Host 认应用。认不出、或应用没开账号接口一律 404:不让外部据此探测域名归属。
+// withApp 按 Host 认应用:登记了域名、应用启用即对外开放。认不出一律 404:不让外部据此探测域名归属。
 // 这组接口只经网关对外,Host 可信的前提由 withTrustedPeer 把住(配了可信代理时)。
 func (h *handler) withApp(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,9 +39,6 @@ func (h *handler) withApp(next http.Handler) http.Handler {
 		case err != nil:
 			slog.Error("accountapi: 按域名取应用失败", "host", r.Host, "err", err)
 			h.writeErr(w, "unavailable", "")
-			return
-		case !app.Account.Enabled:
-			h.writeErr(w, "not_found", "接口不存在")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), keyApp, app)))
@@ -110,6 +108,58 @@ func (h *handler) trusted(a netip.Addr) bool {
 	return false
 }
 
+// SignHeader 是设备签名头。名字固定、不随应用配置:客户端只有一套,没有按应用换头名的需要。
+// Header.Get 按规范形式取,客户端发 x-sign 也认得。
+const SignHeader = "X-Sign"
+
+// signature 取设备签名。老路径还认 legacySignHeader,见它的注释。
+func signature(r *http.Request) string {
+	if v := r.Header.Get(SignHeader); v != "" {
+		return v
+	}
+	if r.Header.Get(APIHeader) != APIVersion {
+		return r.Header.Get(legacySignHeader)
+	}
+	return ""
+}
+
+// connectorOn 报告应用开没开这种登录方式:账号接口不另设开关,沿用应用登录方式的启停。
+// 查库出错时已写好 unavailable,ok 为 false。
+func (h *handler) connectorOn(w http.ResponseWriter, r *http.Request, typ string) (on, ok bool) {
+	ac, err := h.d.Apps.GetConnector(r.Context(), appOf(r).ID, typ)
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		return false, true
+	case err != nil:
+		slog.Warn("accountapi: 读登录方式失败", "type", typ, "err", err)
+		h.writeErr(w, "unavailable", "")
+		return false, false
+	}
+	return ac.Enabled, true
+}
+
+// loginConnector 是 /login 各 type 用到的登录方式。微信绑手机用的是扫码换来的票据,跟着微信走。
+var loginConnector = map[string]string{
+	domain.AccountLoginSMS:         connector.TypeSMSCode,
+	domain.AccountLoginPassword:    connector.TypePassword,
+	domain.AccountLoginWechat:      connector.TypeWechatWeb,
+	domain.AccountLoginWechatPhone: connector.TypeWechatWeb,
+}
+
+// loginOn 报告这种 /login type 能不能用,不能用时按 offCode/offMsg 回(新老接口的码不同)。失败时已写好响应。
+func (h *handler) loginOn(w http.ResponseWriter, r *http.Request, loginType, offCode, offMsg string) bool {
+	typ, known := loginConnector[loginType]
+	if !known {
+		h.writeErr(w, "bad_request", "")
+		return false
+	}
+	on, ok := h.connectorOn(w, r, typ)
+	if ok && !on {
+		h.writeErr(w, offCode, offMsg)
+	}
+	return ok && on
+}
+
 // caller 是一次通过校验的请求。Rotated 非空表示 token 被轮换了,响应要带回给客户端。
 type caller struct {
 	UserID  uuid.UUID
@@ -139,7 +189,7 @@ func (h *handler) requireUser(w http.ResponseWriter, r *http.Request) (*caller, 
 		return nil, false
 	}
 	if app.Account.DeviceBinding {
-		header := r.Header.Get(app.Account.DeviceHeader)
+		header := signature(r)
 		if header == "" {
 			// 老路径照业务方原实现:已登录接口缺设备头是 device_unverified,只有登录才报 version_too_low。
 			if r.Header.Get(APIHeader) != APIVersion {
@@ -208,7 +258,7 @@ func (h *handler) loginDevice(w http.ResponseWriter, r *http.Request) (devicePub
 	if !app.Account.DeviceBinding {
 		return "", "", true
 	}
-	header := r.Header.Get(app.Account.DeviceHeader)
+	header := signature(r)
 	if header == "" {
 		h.writeErr(w, "version_too_low", "")
 		return "", "", false

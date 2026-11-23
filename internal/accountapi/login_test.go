@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
 )
@@ -38,9 +39,17 @@ func TestCodeLoginNeedsCaptchaAndGoesToTarget(t *testing.T) {
 	if len(e.sms.Sent()) != n || e.captcha.verified.Load() != v {
 		t.Fatal("非法请求触达了发码或滑块")
 	}
-	// 没开短信登录也没开微信绑手机:不许发登录短信。
-	e.setAccount(t, func(c *domain.AccountConfig) { c.LoginTypes = []string{domain.AccountLoginPassword} })
-	wantErr(t, e.do(t, "POST", "/code", smsBody(phone, "ok")), 400, "bad_request", "")
+	// 登录方式沿用应用的启停:关了短信登录,还开着微信(首次扫码要绑手机)照样能发。
+	e.setConnector(t, connector.TypeSMSCode, false, nil)
+	wantOK(t, e.do(t, "POST", "/code", smsBody(newPhone(), "ok")))
+	// 两个都关了:不许发登录短信,也不去验滑块。
+	e.setConnector(t, connector.TypeWechatWeb, false, nil)
+	n, v = len(e.sms.Sent()), e.captcha.verified.Load()
+	wantErr(t, e.do(t, "POST", "/code", smsBody(newPhone(), "ok")), 400, "bad_request", "")
+	wantErr(t, e.do(t, "POST", "/sms-code", legacySMS(newPhone(), "ok"), legacy()), 503, "unavailable", "")
+	if len(e.sms.Sent()) != n || e.captcha.verified.Load() != v {
+		t.Fatal("登录方式都关了还发了码或验了滑块")
+	}
 }
 
 func TestCodeAccountPurposes(t *testing.T) {
@@ -76,7 +85,7 @@ func TestCodeAccountPurposes(t *testing.T) {
 	_, taken := e.newUser(t)
 	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"sms","target":"`+taken+`"}`, withToken(tok)), 409, "phone_taken", "")
 	// 没开密码登录:不许发设密码的码。
-	e.setAccount(t, func(c *domain.AccountConfig) { c.LoginTypes = []string{domain.AccountLoginSMS} })
+	e.setConnector(t, connector.TypePassword, false, nil)
 	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"password","channel":"sms"}`, withToken(tok)), 400, "bad_request", "")
 }
 
@@ -154,8 +163,14 @@ func TestLoginPassword(t *testing.T) {
 		t.Fatalf("密码登录: %v", m)
 	}
 	wantErr(t, e.do(t, "POST", "/login", `{"type":"password","account":"`+phone+`","password":"wrong123"}`), 401, "login_failed", "")
-	e.setAccount(t, func(c *domain.AccountConfig) { c.LoginTypes = []string{domain.AccountLoginSMS} })
+	// 关了密码登录:拒掉,且不去问应用认不认设备。
+	e.setConnector(t, connector.TypePassword, false, nil)
+	n := len(e.check.calls)
 	wantErr(t, e.do(t, "POST", "/login", `{"type":"password","account":"`+phone+`","password":"Abcdefg1"}`), 400, "bad_request", "")
+	wantErr(t, e.do(t, "POST", "/login", `{"type":"password","account":"`+phone+`","password":"Abcdefg1"}`, legacy()), 503, "unavailable", "")
+	if len(e.check.calls) != n {
+		t.Fatal("登录方式关着还问了应用")
+	}
 }
 
 func TestLoginDeviceChecks(t *testing.T) {
@@ -243,11 +258,33 @@ func TestWechatLoginFirstBindsPhoneThenDirect(t *testing.T) {
 		t.Fatalf("扫码会话没绑设备: %+v", sess)
 	}
 
-	e.setAccount(t, func(c *domain.AccountConfig) { c.WechatReturnURL = "" })
-	wantErr(t, e.do(t, "POST", "/wechat/start", `{"purpose":"login"}`), 503, "unavailable", "微信登录暂未开放")
-	e.setAccount(t, func(c *domain.AccountConfig) { c.WechatReturnURL = "myapp://elsewhere" })
-	wantErr(t, e.do(t, "POST", "/wechat/start", `{"purpose":"login"}`), 503, "unavailable", "微信登录暂未开放")
 	wantErr(t, e.do(t, "POST", "/wechat/start", `{"purpose":"x"}`), 400, "bad_request", "")
+}
+
+// 回跳地址取微信登录方式「允许的网页回跳地址」的第一项;白名单为空时不开放扫码。
+func TestWechatReturnURLFromConnector(t *testing.T) {
+	e := newEnv(t)
+	wechatCfg := func(urls string) map[string]any {
+		return map[string]any{"appId": "wxapp", "appSecret": "s3cret", "returnUrls": urls}
+	}
+	e.setConnector(t, connector.TypeWechatWeb, true, wechatCfg(" myapp://first , myapp://second"))
+	st := wantOK(t, e.do(t, "POST", "/wechat/start", `{"purpose":"login"}`))
+	cb := e.auth.HandleOAuthCallback(context.Background(), st["state"].(string), "oxR:unR:回跳")
+	if !strings.HasPrefix(cb.Redirect, "myapp://first?") {
+		t.Fatalf("回跳 = %q, 应是白名单第一项", cb.Redirect)
+	}
+
+	e.setConnector(t, connector.TypeWechatWeb, true, wechatCfg(""))
+	wantErr(t, e.do(t, "POST", "/wechat/start", `{"purpose":"login"}`), 503, "unavailable", "微信登录暂未开放")
+	_, _, tok := e.loggedIn(t)
+	wantErr(t, e.do(t, "POST", "/wechat/start", `{"purpose":"bind"}`, withToken(tok)), 503, "unavailable", "微信登录暂未开放")
+
+	// 关了微信登录:新接口照旧回 bad_request,老路径回暂未开放。
+	e.setConnector(t, connector.TypeWechatWeb, false, wechatCfg(returnURL))
+	wantErr(t, e.do(t, "POST", "/wechat/start", `{"purpose":"login"}`), 400, "bad_request", "")
+	wantErr(t, e.do(t, "POST", "/wechat/start", `{}`, legacy()), 503, "unavailable", "微信登录暂未开放")
+	wantErr(t, e.do(t, "POST", "/wechat/login", `{"ticket":"t"}`, legacy()), 503, "unavailable", "微信登录暂未开放")
+	wantErr(t, e.do(t, "POST", "/login", `{"type":"wechat","ticket":"t"}`), 400, "bad_request", "")
 }
 
 // bind 票据只认发起人:换给别的用户、或拿登录票据来绑都不行。

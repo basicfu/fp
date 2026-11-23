@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/connector"
 )
 
 // 老路径的期望形状逐个抄自业务方原实现的 handler 与其测试(account_test / manage_test / wechat_test /
@@ -366,7 +366,7 @@ func anyMap(m map[string]json.RawMessage) map[string]any {
 }
 
 // 老路径与业务方原实现同形:已登录接口缺设备头回 device_unverified(登录接口才是 version_too_low);
-// 应用没开短信 / 密码登录时老 /login、/sms-code 回 unavailable 而不是 bad_request。新接口不变。
+// 应用关了短信 / 密码 / 微信登录时老 /login、/sms-code 回 unavailable 而不是 bad_request。新接口不变。
 func TestLegacyMatchesOriginalErrorShapes(t *testing.T) {
 	e := newEnv(t)
 	L := legacy()
@@ -374,7 +374,9 @@ func TestLegacyMatchesOriginalErrorShapes(t *testing.T) {
 	wantErr(t, e.do(t, "GET", "/me", "", L, withToken(tok), noDevice()), 403, "device_unverified", "")
 	wantErr(t, e.do(t, "GET", "/me", "", withToken(tok), noDevice()), 400, "version_too_low", "")
 
-	e.setAccount(t, func(c *domain.AccountConfig) { c.LoginTypes = []string{domain.AccountLoginWechat} })
+	for _, typ := range []string{connector.TypeSMSCode, connector.TypePassword, connector.TypeWechatWeb} {
+		e.setConnector(t, typ, false, nil)
+	}
 	wantErr(t, e.do(t, "POST", "/login", `{"type":"password","account":"root","password":"x"}`, L), 503, "unavailable", "")
 	wantErr(t, e.do(t, "POST", "/login", `{"type":"sms","phone":"13800138000","code":"123456"}`, L), 503, "unavailable", "")
 	wantErr(t, e.do(t, "POST", "/sms-code", legacySMS("13800138000", "ok"), L), 503, "unavailable", "")

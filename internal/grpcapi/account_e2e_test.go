@@ -31,7 +31,7 @@ import (
 
 const (
 	e2eHost         = "acct.e2e.local"
-	e2eDeviceHeader = "X-E2E-Device"
+	e2eDeviceHeader = accountapi.SignHeader
 	e2ePassword     = "hunter2hunter2"
 )
 
@@ -49,10 +49,7 @@ func (c *lcCluster) accountAPI(t *testing.T, node int, opts service.LoginCheckOp
 	if err := c.apps.SetConnector(ctx, c.app.ID, connector.TypePassword, true, nil); err != nil {
 		t.Fatal(err)
 	}
-	app, err := c.apps.SetAccount(ctx, c.app.ID, []string{e2eHost}, domain.AccountConfig{
-		Enabled: true, LoginTypes: []string{domain.AccountLoginPassword},
-		DeviceBinding: true, DeviceHeader: e2eDeviceHeader,
-	})
+	app, err := c.apps.SetAccount(ctx, c.app.ID, []string{e2eHost}, domain.AccountConfig{DeviceBinding: true})
 	if err != nil {
 		t.Fatal(err)
 	}

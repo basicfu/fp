@@ -16,13 +16,8 @@ export const disabledIMConfig: IMConfig = {
   bizAuth: null,
 }
 
-/** disabledAccountConfig 是新建应用的账号接口默认值：全关。 */
+/** disabledAccountConfig 是新建应用的账号接口默认值：不验签、未收事件。 */
 export const disabledAccountConfig: AccountConfig = {
-  enabled: false,
-  loginTypes: [],
-  editableFields: [],
   deviceBinding: false,
-  deviceHeader: '',
   events: false,
-  wechatReturnUrl: '',
 }

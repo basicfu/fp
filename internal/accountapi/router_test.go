@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/basicfu/fp/internal/accountapi"
 	"github.com/basicfu/fp/internal/accountapi/captcha"
 	"github.com/basicfu/fp/internal/domain"
 )
@@ -19,8 +20,82 @@ func TestUnknownHostAndDisabledAppAre404(t *testing.T) {
 	if w := e.do(t, "GET", "/captcha", "", func(r *http.Request) { r.Host = "API.Test.Local:443" }); w.Code != http.StatusOK {
 		t.Fatalf("带端口的 Host: %d %s", w.Code, w.Body.String())
 	}
-	e.setAccount(t, func(c *domain.AccountConfig) { c.Enabled = false })
+	// 不再有单独的开关:去掉域名就不对外,应用停用同样认不出。
+	if _, err := e.apps.SetAccount(context.Background(), e.app.ID, nil, e.app.Account); err != nil {
+		t.Fatal(err)
+	}
 	wantErr(t, e.do(t, "GET", "/captcha", ""), http.StatusNotFound, "not_found", "")
+	e.setAccount(t, func(*domain.AccountConfig) {})
+	if _, err := e.apps.SetStatus(context.Background(), e.app.ID, domain.ApplicationStatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, e.do(t, "GET", "/captcha", ""), http.StatusNotFound, "not_found", "")
+}
+
+// 生产库里的 account 还带着旧版的开关字段:照常解析,旧 enabled/login_types/editable_fields 不再起作用,
+// device_binding 保留生效。
+func TestOldAccountJSONStillReads(t *testing.T) {
+	e := newEnv(t)
+	old := `{"enabled":false,"login_types":[],"editable_fields":[],"device_binding":true,` +
+		`"device_header":"X-Old","events":false,"wechat_return_url":"myapp://old"}`
+	if err := e.db(context.Background(), `UPDATE application SET account = $2::jsonb WHERE id = $1`, e.app.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	id, phone := e.newUser(t)
+	if err := e.users.SetPassword(context.Background(), id, "Abcdefg1"); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"password","account":"` + phone + `","password":"Abcdefg1"}`
+	wantErr(t, e.do(t, "POST", "/login", body, noDevice()), 400, "version_too_low", "")
+	tok, _ := wantOK(t, e.do(t, "POST", "/login", body))["token"].(string)
+	wantOK(t, e.do(t, "PUT", "/profile", `{"nickname":"阿福"}`, withToken(tok)))
+}
+
+// 设备签名头固定为 X-Sign。新接口只认它;老路径(不带 X-Account-Api)还认已发版客户端用的 X-KKdesk-Device。
+func TestSignHeader(t *testing.T) {
+	e := newEnv(t)
+	id, phone, tok := e.loggedIn(t)
+	if err := e.users.SetPassword(context.Background(), id, "Abcdefg1"); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"password","account":"` + phone + `","password":"Abcdefg1"}`
+	oldName := func(r *http.Request) {
+		r.Header.Del(deviceHeader)
+		r.Header.Set("X-KKdesk-Device", e.dev.header(t, time.Now()))
+	}
+	wantErr(t, e.do(t, "GET", "/me", "", withToken(tok), oldName), 400, "version_too_low", "")
+	wantErr(t, e.do(t, "POST", "/login", body, oldName), 400, "version_too_low", "")
+
+	L := legacy()
+	wantOK(t, e.do(t, "GET", "/me", "", L, withToken(tok), oldName))
+	wantOK(t, e.do(t, "GET", "/me", "", L, withToken(tok)))
+	wantOK(t, e.do(t, "POST", "/login", body, L, oldName))
+	wantOK(t, e.do(t, "POST", "/login", body, L))
+	// 两个都带时以 X-Sign 为准。
+	both := func(r *http.Request) { r.Header.Set("X-KKdesk-Device", "garbage") }
+	wantOK(t, e.do(t, "GET", "/me", "", L, withToken(tok), both))
+}
+
+// 头名不分大小写:经真实连接发小写的 x-sign 也认。
+func TestSignHeaderCaseInsensitive(t *testing.T) {
+	e := newEnv(t)
+	_, _, tok := e.loggedIn(t)
+	srv := httptest.NewServer(e.h)
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/me", nil)
+	req.Host = testHost
+	req.Header.Set(accountapi.APIHeader, accountapi.APIVersion)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	// 直接写 map 绕过 Set 的规范化,线上就是小写原样发出。
+	req.Header["x-sign"] = []string{e.dev.header(t, time.Now())}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("小写 x-sign: %d", resp.StatusCode)
+	}
 }
 
 func TestCaptchaBinaryNoStore(t *testing.T) {

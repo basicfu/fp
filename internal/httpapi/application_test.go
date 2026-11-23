@@ -457,14 +457,13 @@ func TestPutAccountConfigRoundTripAndConflict(t *testing.T) {
 	a := createAppID(t, h, token)
 	b := createAppID(t, h, token)
 
-	body := `{"domains":["API.Example.com"],"account":{"enabled":true,"loginTypes":["sms","password"],` +
-		`"editableFields":["nickname"],"deviceBinding":true,"deviceHeader":"X-Device","events":true}}`
+	body := `{"domains":["API.Example.com"],"account":{"deviceBinding":true}}`
 	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account", body)
 	if rec.Code != 200 {
 		t.Fatalf("保存失败：%d %s", rec.Code, rec.Body.String())
 	}
-	for _, want := range []string{`"domains":["api.example.com"]`, `"loginTypes":["sms","password"]`,
-		`"deviceHeader":"X-Device"`, `"events":true`} {
+	// 事件开关只读：业务方的流声明了 app_events 才自动打开。
+	for _, want := range []string{`"domains":["api.example.com"]`, `"account":{"deviceBinding":true,"events":false}`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("响应里缺 %s：%s", want, rec.Body.String())
 		}
@@ -475,7 +474,7 @@ func TestPutAccountConfigRoundTripAndConflict(t *testing.T) {
 	}
 
 	rec = do(t, h, token, http.MethodPut, "/admin/api/applications/"+b+"/account",
-		`{"domains":["api.example.com"],"account":{"enabled":false}}`)
+		`{"domains":["api.example.com"],"account":{"deviceBinding":false}}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("域名冲突必须 409，got %d：%s", rec.Code, rec.Body.String())
 	}
@@ -484,12 +483,14 @@ func TestPutAccountConfigRoundTripAndConflict(t *testing.T) {
 func TestPutAccountConfigValidates(t *testing.T) {
 	h, token, _ := newAdminEnv(t)
 	a := createAppID(t, h, token)
-	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account",
-		`{"domains":[],"account":{"enabled":true,"deviceBinding":true,"deviceHeader":""}}`)
-	if rec.Code != 400 {
-		t.Fatalf("缺设备头必须 400，got %d：%s", rec.Code, rec.Body.String())
+	// 去掉的旧字段与只读的 events 都不收：静默忽略会让人以为设上了。
+	for _, acct := range []string{`{"enabled":true}`, `{"deviceHeader":"X-Device"}`, `{"events":true}`, `{"loginTypes":["sms"]}`} {
+		rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account", `{"domains":[],"account":`+acct+`}`)
+		if rec.Code != 400 {
+			t.Fatalf("%s 必须 400，got %d：%s", acct, rec.Code, rec.Body.String())
+		}
 	}
-	rec = do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account", `{"domains":[],"acount":{}}`)
+	rec := do(t, h, token, http.MethodPut, "/admin/api/applications/"+a+"/account", `{"domains":[],"acount":{}}`)
 	if rec.Code != 400 {
 		t.Fatalf("未知字段必须 400，got %d", rec.Code)
 	}

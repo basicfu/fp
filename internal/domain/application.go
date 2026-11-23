@@ -2,7 +2,6 @@ package domain
 
 import (
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -216,70 +215,24 @@ func (c IMConfig) Validate() error {
 	return nil
 }
 
-// 账号接口可用的登录方式与可编辑资料字段。
+// 账号接口 /login 的 type。能不能用看应用里对应登录方式(connector)的启停,账号接口不另设开关。
 const (
 	AccountLoginSMS         = "sms"
 	AccountLoginPassword    = "password"
 	AccountLoginWechat      = "wechat"
 	AccountLoginWechatPhone = "wechat_phone"
-
-	AccountFieldNickname = "nickname"
-	AccountFieldAvatar   = "avatar"
 )
 
-// AccountConfig 是应用对终端用户开放的账号接口配置。零值即全关，
-// 新应用在有人明确打开之前不对外暴露任何账号接口。
+// AccountConfig 是应用对终端用户开放的账号接口配置。登记了域名即对外开放,这里只剩不能自动推断的项。
+//
+// 落库在 application.account(jsonb)。旧版本还写过 enabled、login_types、editable_fields、device_header、
+// wechat_return_url 等键:解析时忽略,下次保存时自然消失,不做迁移。
 type AccountConfig struct {
-	Enabled bool `json:"enabled"`
-	// LoginTypes 是允许的 /login type，空表示一种都不允许。
-	LoginTypes []string `json:"login_types"`
-	// EditableFields 是 PUT /profile 允许改的字段。
-	EditableFields []string `json:"editable_fields"`
-	// DeviceBinding 开启后会话绑定设备公钥，每个请求都验设备签名。
+	// DeviceBinding(控制台叫「验签」)开启后会话绑定设备公钥,每个请求都验设备签名。
 	DeviceBinding bool `json:"device_binding"`
-	// DeviceHeader 是设备头的名字，DeviceBinding 开着时必填。
-	DeviceHeader string `json:"device_header"`
-	// Events 开启后该应用经 Watch 流收到业务事件。
+	// Events 不由控制台设置:应用的 Watch 流第一次声明 app_events 时自动打开,此后才写事件表——
+	// 从没接收过的应用写了也没人确认,只会堆积。不自动关。
 	Events bool `json:"events"`
-	// WechatReturnURL 是 /wechat/start 发起网页扫码时的回跳地址（如桌面端的自定义协议），
-	// 必须同时在微信登录方式的回跳白名单里；空表示账号接口不开放扫码。
-	WechatReturnURL string `json:"wechat_return_url,omitempty"`
-}
-
-// HasLoginType 报告 /login 的这种 type 是否被允许。
-func (c AccountConfig) HasLoginType(t string) bool {
-	return slices.Contains(c.LoginTypes, t)
-}
-
-// CanEdit 报告 PUT /profile 是否允许改这个字段。
-func (c AccountConfig) CanEdit(field string) bool {
-	return slices.Contains(c.EditableFields, field)
-}
-
-// Validate 校验账号配置。关着时放行，理由同 IMConfig.Validate：
-// 不逼人一次填全才能存草稿。
-func (c AccountConfig) Validate() error {
-	if !c.Enabled {
-		return nil
-	}
-	for _, t := range c.LoginTypes {
-		switch t {
-		case AccountLoginSMS, AccountLoginPassword, AccountLoginWechat, AccountLoginWechatPhone:
-		default:
-			return Failf(ErrInvalidArgument, CodeInvalidArgument, "未知的登录方式 %q", t)
-		}
-	}
-	for _, f := range c.EditableFields {
-		switch f {
-		case AccountFieldNickname, AccountFieldAvatar:
-		default:
-			return Failf(ErrInvalidArgument, CodeInvalidArgument, "未知的可编辑字段 %q", f)
-		}
-	}
-	if c.DeviceBinding && strings.TrimSpace(c.DeviceHeader) == "" {
-		return Failf(ErrInvalidArgument, CodeInvalidArgument, "开启设备绑定时必须填写设备头名称")
-	}
-	return nil
 }
 
 var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)

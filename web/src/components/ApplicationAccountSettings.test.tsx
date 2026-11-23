@@ -30,61 +30,40 @@ const baseApp: Application = {
   updatedAt: 1700000000000,
 }
 
-test('账号接口未启用时只显示总开关和域名', () => {
+test('只有域名和验签可改，没有总开关和逐项权限', () => {
   render(<ApplicationAccountSettings app={baseApp} onSaved={() => {}} />)
-  expect(screen.getByRole('switch', { name: '启用账号接口' })).toBeTruthy()
   expect(screen.getByLabelText('域名')).toBeTruthy()
+  expect(screen.getByRole('switch', { name: '验签' })).toBeTruthy()
+  expect(screen.queryByRole('switch', { name: '启用账号接口' })).toBeFalsy()
   expect(screen.queryByLabelText('设备头名称')).toBeFalsy()
+  expect(screen.queryByLabelText('扫码回跳地址')).toBeFalsy()
+  expect(screen.queryByLabelText('密码登录')).toBeFalsy()
+  expect(screen.queryByLabelText('昵称')).toBeFalsy()
 })
 
-test('设备头名称只在开启设备绑定后出现', () => {
-  const app = { ...baseApp, account: { ...disabledAccountConfig, enabled: true } }
-  const first = render(<ApplicationAccountSettings app={app} onSaved={() => {}} />)
-  expect(screen.queryByLabelText('设备头名称')).toBeFalsy()
+test('业务事件只读，按应用是否已开始接收显示', () => {
+  const first = render(<ApplicationAccountSettings app={baseApp} onSaved={() => {}} />)
+  expect(screen.getByText('未开启')).toBeTruthy()
+  expect(screen.queryByRole('switch', { name: '业务事件' })).toBeFalsy()
   first.unmount()
   render(
-    <ApplicationAccountSettings
-      app={{ ...app, account: { ...app.account, deviceBinding: true, deviceHeader: 'X-Device' } }}
-      onSaved={() => {}}
-    />,
+    <ApplicationAccountSettings app={{ ...baseApp, account: { ...disabledAccountConfig, events: true } }} onSaved={() => {}} />,
   )
-  expect((screen.getByLabelText('设备头名称') as HTMLInputElement).value).toBe('X-Device')
+  expect(screen.getByText('已开启')).toBeTruthy()
 })
 
-test('保存时按行拆域名并带上勾选项', async () => {
+test('保存时按行拆域名并带上验签开关', async () => {
   const calls = stubApi({ 'PUT /applications/app-1/account': baseApp })
   const onSaved = vi.fn()
-  const app = {
-    ...baseApp,
-    domains: ['a.example.com'],
-    account: { ...disabledAccountConfig, enabled: true, loginTypes: ['sms'] },
-  }
+  const app = { ...baseApp, domains: ['a.example.com'], account: { ...disabledAccountConfig, events: true } }
   const { container } = render(<ApplicationAccountSettings app={app} onSaved={onSaved} />)
   fireEvent.change(screen.getByLabelText('域名'), { target: { value: 'a.example.com\n\n b.example.com \n' } })
-  fireEvent.click(screen.getByLabelText('密码登录'))
-  fireEvent.click(screen.getByLabelText('昵称'))
+  fireEvent.click(screen.getByRole('switch', { name: '验签' }))
   fireEvent.submit(container.querySelector('form')!)
 
   await waitFor(() => expect(onSaved).toHaveBeenCalled())
   expect(calls[0].body).toEqual({
     domains: ['a.example.com', 'b.example.com'],
-    account: {
-      enabled: true,
-      loginTypes: ['sms', 'password'],
-      editableFields: ['nickname'],
-      deviceBinding: false,
-      deviceHeader: '',
-      events: false,
-      wechatReturnUrl: '',
-    },
+    account: { deviceBinding: true },
   })
-})
-
-test('开启设备绑定却没填设备头时不提交', async () => {
-  const calls = stubApi({})
-  const app = { ...baseApp, account: { ...disabledAccountConfig, enabled: true, deviceBinding: true } }
-  const { container } = render(<ApplicationAccountSettings app={app} onSaved={() => {}} />)
-  fireEvent.submit(container.querySelector('form')!)
-  await new Promise((r) => setTimeout(r, 20))
-  expect(calls.length).toBe(0)
 })

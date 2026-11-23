@@ -215,7 +215,7 @@ err = auth.Logout(ctx, token)
 
 ### 退出登录事件
 
-应用在控制台开了业务事件时，`Options.OnAppEvent` 会收到 `fpsdk.EventLoggedOut`，Payload 为
+设置了 `Options.OnAppEvent` 的 SDK 连上后，fp 自动开始为该应用记录业务事件（不用去控制台开；之前发生的不补发），`OnAppEvent` 会收到 `fpsdk.EventLoggedOut`，Payload 为
 `{"session_id","client_ref","reason"}`。reason 取值（`fpsdk.LoggedOut*`）：
 
 | reason | 含义 |

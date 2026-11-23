@@ -1,6 +1,7 @@
 package accountapi
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -38,8 +39,7 @@ func (h *handler) handleWechatStart(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Purpose {
 	case purposeLogin:
-		if !appOf(r).Account.HasLoginType(domain.AccountLoginWechat) {
-			h.writeErr(w, "bad_request", "")
+		if !h.loginOn(w, r, domain.AccountLoginWechat, "bad_request", "") {
 			return
 		}
 		if st, done := h.startWechatLogin(w, r); done {
@@ -60,16 +60,33 @@ func (h *handler) handleWechatStart(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// oauthStart 的回跳地址取应用配置:它要进三方的回跳白名单,客户端给的不能信。
+// msgWechatOff 是微信扫码没开或没配好时给终端用户的话;要配什么只进日志。
+const msgWechatOff = "微信登录暂未开放"
+
+// oauthStart 的回跳地址取微信登录方式回跳白名单的第一项:它本就得在白名单里,客户端给的不能信。
+// 客户端从不打开它(见文件头),取哪一项都一样,第一项最好预期。
 func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) (service.OAuthStartInput, bool) {
 	app := appOf(r)
-	if app.Account.WechatReturnURL == "" {
-		slog.Warn("accountapi: 应用没配扫码回跳地址", "app", app.AppID)
-		h.writeErr(w, "unavailable", "微信登录暂未开放")
+	returnURL := ""
+	ac, err := h.d.Apps.GetConnector(r.Context(), app.ID, connector.TypeWechatWeb)
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+	case err != nil:
+		slog.Warn("accountapi: 读微信登录方式失败", "app", app.AppID, "err", err)
+		h.writeErr(w, "unavailable", "")
 		return service.OAuthStartInput{}, false
+	case ac.Enabled:
+		urls := connector.OAuthReturnURLs(ac.Config)
+		if len(urls) == 0 {
+			slog.Warn("accountapi: 微信登录方式没配允许的网页回跳地址, 扫码不可用", "app", app.AppID)
+			h.writeErr(w, "unavailable", msgWechatOff)
+			return service.OAuthStartInput{}, false
+		}
+		returnURL = urls[0]
 	}
+	// 没开微信登录时照常往下走,由 StartOAuth 报 CONNECTOR_DISABLED,登录与绑定各按自己的映射回。
 	return service.OAuthStartInput{AppID: app.AppID, ConnectorType: connector.TypeWechatWeb, Mode: service.OAuthModeWeb,
-		ReturnURL: app.Account.WechatReturnURL, CallbackBase: callbackBase(r)}, true
+		ReturnURL: returnURL, CallbackBase: callbackBase(r)}, true
 }
 
 // callbackBase 是三方回调的前缀：用已认定应用的请求 Host（走到这里 withApp 已按它认出了应用），固定 https——

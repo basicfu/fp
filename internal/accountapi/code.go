@@ -8,7 +8,7 @@ import (
 	"net/http"
 
 	"github.com/basicfu/fp/internal/accountapi/captcha"
-	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/service"
 )
 
@@ -86,19 +86,39 @@ type codeResp struct {
 	Token       string `json:"token,omitempty"`
 }
 
-// codeAllowed:组合必须是现在实现了的、且在应用开关内的。
-func codeAllowed(acct domain.AccountConfig, purpose, channel string) bool {
+// codeAllowed:用途与渠道的组合必须是现在实现了的。
+func codeAllowed(purpose, channel string) bool {
 	switch purpose {
-	case purposeLogin:
-		// 微信首次登录要绑手机号,同样要发登录短信。
-		return channel == channelSMS && (acct.HasLoginType(domain.AccountLoginSMS) || acct.HasLoginType(domain.AccountLoginWechatPhone))
-	case purposeVerify:
+	case purposeLogin, purposeVerify, purposePassword:
 		return channel == channelSMS
-	case purposePassword:
-		return channel == channelSMS && acct.HasLoginType(domain.AccountLoginPassword)
 	case purposeBind:
 		return channel == channelSMS || channel == channelEmail
 	}
+	return false
+}
+
+// codeOn:登录短信要应用开着短信登录或微信登录(首次扫码要绑手机号,同样发登录短信);设密码的码要开着密码登录。
+// 不满足时回 offCode。先于滑块与发码判断:关着的方式不该消耗用户的滑块。失败时已写好响应。
+func (h *handler) codeOn(w http.ResponseWriter, r *http.Request, purpose, offCode string) bool {
+	var types []string
+	switch purpose {
+	case purposeLogin:
+		types = []string{connector.TypeSMSCode, connector.TypeWechatWeb}
+	case purposePassword:
+		types = []string{connector.TypePassword}
+	default:
+		return true
+	}
+	for _, typ := range types {
+		on, ok := h.connectorOn(w, r, typ)
+		if !ok {
+			return false
+		}
+		if on {
+			return true
+		}
+	}
+	h.writeErr(w, offCode, "")
 	return false
 }
 
@@ -108,8 +128,11 @@ func (h *handler) handleCode(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	if !codeAllowed(appOf(r).Account, req.Purpose, req.Channel) {
+	if !codeAllowed(req.Purpose, req.Channel) {
 		h.writeErr(w, "bad_request", "")
+		return
+	}
+	if !h.codeOn(w, r, req.Purpose, "bad_request") {
 		return
 	}
 	if req.Purpose == purposeLogin {

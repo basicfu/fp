@@ -846,10 +846,7 @@ func newAppWithAccount(t *testing.T, svc *service.ApplicationService, code strin
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	out, err := svc.SetAccount(context.Background(), app.ID, domains, domain.AccountConfig{
-		Enabled: true, LoginTypes: []string{"sms"}, EditableFields: []string{"nickname"},
-		DeviceBinding: true, DeviceHeader: "X-Device", Events: true,
-	})
+	out, err := svc.SetAccount(context.Background(), app.ID, domains, domain.AccountConfig{DeviceBinding: true})
 	if err != nil {
 		t.Fatalf("SetAccount: %v", err)
 	}
@@ -860,7 +857,7 @@ func TestSetAccountRoundTripAndDefaults(t *testing.T) {
 	svc := newAppService(t)
 	ctx := context.Background()
 	app, _, _ := svc.Create(ctx, "A", "a")
-	if app.Account.Enabled || len(app.Domains) != 0 {
+	if app.Account != (domain.AccountConfig{}) || len(app.Domains) != 0 {
 		t.Fatalf("新应用的账号配置应全关: %+v %v", app.Account, app.Domains)
 	}
 	got := newAppWithAccount(t, svc, "b", []string{" API.Example.com ", "api.example.com", "m.example.com"})
@@ -871,9 +868,7 @@ func TestSetAccountRoundTripAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := domain.AccountConfig{Enabled: true, LoginTypes: []string{"sms"}, EditableFields: []string{"nickname"},
-		DeviceBinding: true, DeviceHeader: "X-Device", Events: true}
-	if !reflect.DeepEqual(re.Account, want) || !reflect.DeepEqual(re.Domains, got.Domains) {
+	if want := (domain.AccountConfig{DeviceBinding: true}); re.Account != want || !reflect.DeepEqual(re.Domains, got.Domains) {
 		t.Fatalf("round trip: %+v %v", re.Account, re.Domains)
 	}
 }
@@ -912,11 +907,8 @@ func TestSetAccountRejectsInvalid(t *testing.T) {
 		domains []string
 		cfg     domain.AccountConfig
 	}{
-		"带端口":    {[]string{"a.com:443"}, domain.AccountConfig{}},
-		"带协议":    {[]string{"https://a.com"}, domain.AccountConfig{}},
-		"未知登录方式": {nil, domain.AccountConfig{Enabled: true, LoginTypes: []string{"qq"}}},
-		"未知字段":   {nil, domain.AccountConfig{Enabled: true, EditableFields: []string{"age"}}},
-		"设备绑定缺头": {nil, domain.AccountConfig{Enabled: true, DeviceBinding: true}},
+		"带端口": {[]string{"a.com:443"}, domain.AccountConfig{}},
+		"带协议": {[]string{"https://a.com"}, domain.AccountConfig{}},
 	} {
 		if _, err := svc.SetAccount(context.Background(), app.ID, tc.domains, tc.cfg); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
@@ -1033,15 +1025,63 @@ func TestGetByIDCachedInvalidatedOnChange(t *testing.T) {
 	if got, _ := svc.GetByIDCached(ctx, a.ID); got.Name == "bypass" {
 		t.Fatal("每次都查库，没走缓存")
 	}
-	cfg := a.Account
-	cfg.Events = !cfg.Events
-	if _, err := svc.SetAccount(ctx, a.ID, a.Domains, cfg); err != nil {
+	if err := svc.EnableAccountEvents(ctx, a.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := svc.GetByIDCached(ctx, a.ID); err != nil || got.Account.Events != cfg.Events || got.Name != "bypass" {
+	if got, err := svc.GetByIDCached(ctx, a.ID); err != nil || !got.Account.Events || got.Name != "bypass" {
 		t.Fatalf("改动后仍是旧值: %+v, %v", got, err)
 	}
 	if _, err := svc.GetByIDCached(ctx, uuid.New()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("不存在的应用 err = %v", err)
+	}
+}
+
+// 事件开关不归控制台:EnableAccountEvents 打开后,再保存账号配置也不会把它关掉;重复打开无副作用。
+func TestEnableAccountEventsSurvivesSetAccount(t *testing.T) {
+	svc := newAppService(t)
+	ctx := context.Background()
+	a := newAppWithAccount(t, svc, "a", []string{"api.example.com"})
+	if a.Account.Events {
+		t.Fatal("新配置的应用不该默认收事件")
+	}
+	// 控制台传上来的 Events 不算数。
+	if out, err := svc.SetAccount(ctx, a.ID, a.Domains, domain.AccountConfig{DeviceBinding: true, Events: true}); err != nil || out.Account.Events {
+		t.Fatalf("SetAccount 不该能打开事件: %+v %v", out, err)
+	}
+	for range 2 {
+		if err := svc.EnableAccountEvents(ctx, a.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	re, _ := svc.GetByID(ctx, a.ID)
+	if want := (domain.AccountConfig{DeviceBinding: true, Events: true}); re.Account != want {
+		t.Fatalf("打开事件动了别的配置: %+v", re.Account)
+	}
+	out, err := svc.SetAccount(ctx, a.ID, a.Domains, domain.AccountConfig{DeviceBinding: false})
+	if err != nil || !out.Account.Events || out.Account.DeviceBinding {
+		t.Fatalf("保存后事件被关了: %+v %v", out, err)
+	}
+	if err := svc.EnableAccountEvents(ctx, uuid.New()); err != nil {
+		t.Fatalf("不存在的应用什么都不做: %v", err)
+	}
+}
+
+// 生产库里的 account 还带着旧版字段:能读,device_binding 与 events 照旧生效。
+func TestOldAccountJSONStillReads(t *testing.T) {
+	pool := testsupport.NewTestDB(t)
+	svc := newAppServiceWith(t, pool)
+	ctx := context.Background()
+	a := newAppWithAccount(t, svc, "a", []string{"api.example.com"})
+	old := `{"enabled":true,"login_types":["sms"],"editable_fields":["nickname"],"device_binding":true,` +
+		`"device_header":"X-KKdesk-Device","events":true,"wechat_return_url":"kkdesk://wechat"}`
+	if _, err := pool.Exec(ctx, `UPDATE application SET account = $2::jsonb WHERE id = $1`, a.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	re, err := svc.GetByID(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (domain.AccountConfig{DeviceBinding: true, Events: true}); re.Account != want {
+		t.Fatalf("旧字段解析: %+v", re.Account)
 	}
 }

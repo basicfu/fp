@@ -101,7 +101,7 @@ func (h *handler) wechatErr(w http.ResponseWriter, op string, err error) {
 	case domain.CodeConnectorDisabled, domain.CodeReturnURLNotAllowed, domain.CodePublicURLMissing, domain.CodeDesktopModeDisabled:
 		// 都是控制台没配好:用户看到的只是"暂未开放",要配什么只在日志里。
 		slog.Warn("accountapi: 微信登录未就绪", "op", op, "code", code, "err", err)
-		h.writeErr(w, "unavailable", "微信登录暂未开放")
+		h.writeErr(w, "unavailable", msgWechatOff)
 	default:
 		h.loginErr(w, op, err)
 	}

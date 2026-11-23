@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -61,22 +60,19 @@ type imBizAuthDTO struct {
 	CacheSize int32  `json:"cacheSize"`
 }
 
+// accountConfigDTO 是给控制台看的账号配置。Events 只读：业务方的流声明了 app_events 才自动打开。
 type accountConfigDTO struct {
-	Enabled         bool     `json:"enabled"`
-	LoginTypes      []string `json:"loginTypes"`
-	EditableFields  []string `json:"editableFields"`
-	DeviceBinding   bool     `json:"deviceBinding"`
-	DeviceHeader    string   `json:"deviceHeader"`
-	Events          bool     `json:"events"`
-	WechatReturnURL string   `json:"wechatReturnUrl"`
+	DeviceBinding bool `json:"deviceBinding"`
+	Events        bool `json:"events"`
 }
 
 func toAccountConfigDTO(c domain.AccountConfig) accountConfigDTO {
-	return accountConfigDTO{
-		Enabled: c.Enabled, LoginTypes: nonNil(c.LoginTypes), EditableFields: nonNil(c.EditableFields),
-		DeviceBinding: c.DeviceBinding, DeviceHeader: c.DeviceHeader, Events: c.Events,
-		WechatReturnURL: c.WechatReturnURL,
-	}
+	return accountConfigDTO{DeviceBinding: c.DeviceBinding, Events: c.Events}
+}
+
+// accountConfigInput 是控制台能改的那部分。与 accountConfigDTO 分开，免得只读的 events 被静默收下。
+type accountConfigInput struct {
+	DeviceBinding bool `json:"deviceBinding"`
 }
 
 // nonNil 让空列表序列化成 [] 而不是 null，前端不用到处判空。
@@ -149,11 +145,11 @@ func (h *applicationHandler) updateIM(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateAccountRequest struct {
-	Domains []string         `json:"domains"`
-	Account accountConfigDTO `json:"account"`
+	Domains []string           `json:"domains"`
+	Account accountConfigInput `json:"account"`
 }
 
-// updateAccount 全量替换应用的域名与账号接口配置，语义同 /im 与 /session。
+// updateAccount 全量替换应用的域名与账号接口配置，语义同 /im 与 /session。登记了域名即对外开放。
 func (h *applicationHandler) updateAccount(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -165,12 +161,7 @@ func (h *applicationHandler) updateAccount(w http.ResponseWriter, r *http.Reques
 		writeError(w, err)
 		return
 	}
-	app, err := h.svc.SetAccount(r.Context(), id, req.Domains, domain.AccountConfig{
-		Enabled: req.Account.Enabled, LoginTypes: req.Account.LoginTypes,
-		EditableFields: req.Account.EditableFields, DeviceBinding: req.Account.DeviceBinding,
-		DeviceHeader: req.Account.DeviceHeader, Events: req.Account.Events,
-		WechatReturnURL: strings.TrimSpace(req.Account.WechatReturnURL),
-	})
+	app, err := h.svc.SetAccount(r.Context(), id, req.Domains, domain.AccountConfig{DeviceBinding: req.Account.DeviceBinding})
 	if err != nil {
 		writeError(w, err)
 		return
