@@ -97,29 +97,16 @@ func codeAllowed(purpose, channel string) bool {
 	return false
 }
 
-// codeOn:登录短信要应用开着短信登录或微信登录(首次扫码要绑手机号,同样发登录短信);设密码的码要开着密码登录。
+// codeOn:登录短信要应用开着短信登录或任一种微信登录(首次微信登录要绑手机号,同样发登录短信);设密码的码要开着密码登录。
 // 不满足时回 offCode。先于滑块与发码判断:关着的方式不该消耗用户的滑块。失败时已写好响应。
 func (h *handler) codeOn(w http.ResponseWriter, r *http.Request, purpose, offCode string) bool {
-	var types []string
 	switch purpose {
 	case purposeLogin:
-		types = []string{connector.TypeSMSCode, connector.TypeWechatWeb}
+		return h.anyConnectorOn(w, r, []string{connector.TypeSMSCode, connector.TypeWechatWeb, connector.TypeWechatApp}, offCode, "")
 	case purposePassword:
-		types = []string{connector.TypePassword}
-	default:
-		return true
+		return h.anyConnectorOn(w, r, []string{connector.TypePassword}, offCode, "")
 	}
-	for _, typ := range types {
-		on, ok := h.connectorOn(w, r, typ)
-		if !ok {
-			return false
-		}
-		if on {
-			return true
-		}
-	}
-	h.writeErr(w, offCode, "")
-	return false
+	return true
 }
 
 func (h *handler) handleCode(w http.ResponseWriter, r *http.Request) {

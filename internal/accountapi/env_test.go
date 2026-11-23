@@ -146,6 +146,7 @@ func newEnv(t *testing.T) *env {
 	reg := connector.NewRegistry()
 	for _, c := range []connector.Connector{
 		connector.NewPassword(users), connector.NewSMSCode(codes), connector.NewWechatWeb(connector.WithWechatAPIBase(wx.URL)),
+		connector.NewWechatApp(connector.WithWechatAPIBase(wx.URL)),
 	} {
 		if err := reg.Register(c); err != nil {
 			t.Fatal(err)
@@ -215,11 +216,14 @@ func (e *env) setAccount(t *testing.T, mod func(*domain.AccountConfig)) {
 	e.app = app
 }
 
-// setConnector 改应用某种登录方式的启停与配置。微信的 config 传 nil 时沿用测试默认的那份。
+// setConnector 改应用某种登录方式的启停与配置。微信(扫码、App)的 config 传 nil 时沿用测试默认的那份。
 func (e *env) setConnector(t *testing.T, typ string, on bool, cfg map[string]any) {
 	t.Helper()
 	if cfg == nil && typ == connector.TypeWechatWeb {
 		cfg = map[string]any{"appId": "wxapp", "appSecret": "s3cret", "returnUrls": returnURL}
+	}
+	if cfg == nil && typ == connector.TypeWechatApp {
+		cfg = map[string]any{"appId": "wxmobile", "appSecret": "s3cret"}
 	}
 	if err := e.apps.SetConnector(context.Background(), e.app.ID, typ, on, cfg); err != nil {
 		t.Fatal(err)

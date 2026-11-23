@@ -138,26 +138,39 @@ func (h *handler) connectorOn(w http.ResponseWriter, r *http.Request, typ string
 	return ac.Enabled, true
 }
 
-// loginConnector 是 /login 各 type 用到的登录方式。微信绑手机用的是扫码换来的票据,跟着微信走。
-var loginConnector = map[string]string{
-	domain.AccountLoginSMS:         connector.TypeSMSCode,
-	domain.AccountLoginPassword:    connector.TypePassword,
-	domain.AccountLoginWechat:      connector.TypeWechatWeb,
-	domain.AccountLoginWechatPhone: connector.TypeWechatWeb,
+// loginConnector 是 /login 各 type 用到的登录方式,开着其中任一种就能用。
+// 微信绑手机的票据来自扫码或 App 授权,两种微信登录哪种开着都要能绑;票据属于哪种由 BindPhone 自己核对。
+var loginConnector = map[string][]string{
+	domain.AccountLoginSMS:         {connector.TypeSMSCode},
+	domain.AccountLoginPassword:    {connector.TypePassword},
+	domain.AccountLoginWechat:      {connector.TypeWechatWeb},
+	domain.AccountLoginWechatApp:   {connector.TypeWechatApp},
+	domain.AccountLoginWechatPhone: {connector.TypeWechatWeb, connector.TypeWechatApp},
 }
 
 // loginOn 报告这种 /login type 能不能用,不能用时按 offCode/offMsg 回(新老接口的码不同)。失败时已写好响应。
 func (h *handler) loginOn(w http.ResponseWriter, r *http.Request, loginType, offCode, offMsg string) bool {
-	typ, known := loginConnector[loginType]
+	types, known := loginConnector[loginType]
 	if !known {
 		h.writeErr(w, "bad_request", "")
 		return false
 	}
-	on, ok := h.connectorOn(w, r, typ)
-	if ok && !on {
-		h.writeErr(w, offCode, offMsg)
+	return h.anyConnectorOn(w, r, types, offCode, offMsg)
+}
+
+// anyConnectorOn:types 里开着任一种就算开;都关着回 offCode/offMsg。失败时已写好响应。
+func (h *handler) anyConnectorOn(w http.ResponseWriter, r *http.Request, types []string, offCode, offMsg string) bool {
+	for _, typ := range types {
+		on, ok := h.connectorOn(w, r, typ)
+		if !ok {
+			return false
+		}
+		if on {
+			return true
+		}
 	}
-	return ok && on
+	h.writeErr(w, offCode, offMsg)
+	return false
 }
 
 // caller 是一次通过校验的请求。Rotated 非空表示 token 被轮换了,响应要带回给客户端。

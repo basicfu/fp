@@ -262,6 +262,52 @@ func TestWechatLoginFirstBindsPhoneThenDirect(t *testing.T) {
 	wantErr(t, e.do(t, "POST", "/wechat/start", `{"purpose":"x"}`), 400, "bad_request", "")
 }
 
+// App 授权登录:code 直接提交,首次同样要绑手机(走 wechat_phone),之后直接登录;
+// 只开 App 登录、关着扫码时绑手机与登录短信也要能用;扫码登录过的人第一次用 App 登录按 unionId 直接成功。
+func TestWechatAppLoginFirstBindsPhoneThenDirect(t *testing.T) {
+	e := newEnv(t)
+	// 没开 App 登录:当作不认识的 type。
+	wantErr(t, e.do(t, "POST", "/login", `{"type":"wechat_app","code":"oxM:unM:小青"}`), 400, "bad_request", "")
+	e.setConnector(t, connector.TypeWechatApp, true, nil)
+	e.setConnector(t, connector.TypeWechatWeb, false, nil)
+	wantErr(t, e.do(t, "POST", "/login", `{"type":"wechat_app"}`), 400, "bad_request", "")
+	// 微信接口失败(code 过期或用过)折成 login_failed,让用户重试。
+	wantErr(t, e.do(t, "POST", "/login", `{"type":"wechat_app","code":"bad"}`), 401, "login_failed", "")
+
+	m := wantOK(t, e.do(t, "POST", "/login", `{"type":"wechat_app","code":"oxM:unM:小青"}`))
+	bt, _ := m["bind_ticket"].(string)
+	if bt == "" || m["nickname"] != "小青" || m["token"] != nil {
+		t.Fatalf("首次 App 登录: %v", m)
+	}
+	phone := newPhone()
+	wantOK(t, e.do(t, "POST", "/code", smsBody(phone, "ok")))
+	m = wantOK(t, e.do(t, "POST", "/login", `{"type":"wechat_phone","bind_ticket":"`+bt+`","phone":"`+phone+`","code":"`+e.lastCode(t)+`"}`))
+	if u := userOf(t, m); m["token"] == "" || u["wechat"] != "小青" {
+		t.Fatalf("绑手机登录: %v", m)
+	}
+
+	m = wantOK(t, e.do(t, "POST", "/login", `{"type":"wechat_app","code":"oxM:unM:小青"}`))
+	tok, _ := m["token"].(string)
+	if tok == "" {
+		t.Fatalf("老用户 App 登录: %v", m)
+	}
+	if sess, _ := e.sessions.SessionByToken(context.Background(), tok); sess == nil || sess.ClientRef != fakeClientRef {
+		t.Fatalf("App 登录会话没绑设备: %+v", sess)
+	}
+
+	// 扫码绑过手机的人(同一 unionId),App 第一次登录直接成功。
+	e.setConnector(t, connector.TypeWechatWeb, true, nil)
+	st := wantOK(t, e.do(t, "POST", "/wechat/start", `{"purpose":"login"}`))
+	ticket := e.wechatTicket(t, st["state"].(string), "oxW:unW:阿木")
+	bt = wantOK(t, e.do(t, "POST", "/login", `{"type":"wechat","ticket":"`+ticket+`"}`))["bind_ticket"].(string)
+	phone = newPhone()
+	wantOK(t, e.do(t, "POST", "/code", smsBody(phone, "ok")))
+	wantOK(t, e.do(t, "POST", "/login", `{"type":"wechat_phone","bind_ticket":"`+bt+`","phone":"`+phone+`","code":"`+e.lastCode(t)+`"}`))
+	if m = wantOK(t, e.do(t, "POST", "/login", `{"type":"wechat_app","code":"oxA2:unW:阿木"}`)); m["token"] == nil || m["token"] == "" {
+		t.Fatalf("扫码用户首次 App 登录: %v", m)
+	}
+}
+
 // 回跳地址取微信登录方式「允许的网页回跳地址」的第一项;白名单为空时不开放扫码。
 func TestWechatReturnURLFromConnector(t *testing.T) {
 	e := newEnv(t)

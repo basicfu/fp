@@ -72,7 +72,7 @@ func (h *handler) loginUser(r *http.Request, out *loginOutcome) accountUser {
 	return h.accountUser(r.Context(), p)
 }
 
-// login 是四种登录方式的同一段:登录方式开没开 → 校验参数 → 认设备 → 登录。失败时已写好响应。
+// login 是各种登录方式的同一段:登录方式开没开 → 校验参数 → 认设备 → 登录。失败时已写好响应。
 // 没开的方式回 offCode/offMsg。开没开先于认设备:关着的方式不该去问应用认不认这台设备。
 // 格式不对的请求不往下走:短信那边按手机号计次,畸形号码也会白白消耗一次额度。
 func (h *handler) login(w http.ResponseWriter, r *http.Request, req loginReq, offCode, offMsg string) (*loginOutcome, bool) {
@@ -96,6 +96,11 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request, req loginReq, of
 		}
 	case domain.AccountLoginPassword:
 		if req.Account == "" || len(req.Account) > maxAccountLen || req.Password == "" || len(req.Password) > maxPasswordLen {
+			h.writeErr(w, "bad_request", "")
+			return nil, false
+		}
+	case domain.AccountLoginWechatApp:
+		if req.Code == "" || len(req.Code) > maxTicketLen {
 			h.writeErr(w, "bad_request", "")
 			return nil, false
 		}
@@ -138,30 +143,42 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request, req loginReq, of
 			return nil, false
 		}
 		return &loginOutcome{res: res, entered: maskPhone(req.Phone)}, true
+	case domain.AccountLoginWechatApp:
+		out, err := h.d.Auth.ExchangeAppCode(ctx, client, connector.TypeWechatApp, req.Code)
+		if err != nil {
+			h.wechatErr(w, "login-wechat-app", err)
+			return nil, false
+		}
+		return h.wechatOutcome(w, out)
 	default: // wechat
 		out, err := h.d.Auth.ExchangeOAuth(ctx, client, req.Ticket)
 		if err != nil {
 			h.wechatErr(w, "login-wechat", err)
 			return nil, false
 		}
-		switch out.Status {
-		case service.OAuthStatusSuccess:
-			if out.Login == nil {
-				slog.Error("accountapi: 微信登录成功却没有会话")
-				h.writeErr(w, "internal", "")
-				return nil, false
-			}
-			return &loginOutcome{res: out.Login, entered: anonymousName}, true
-		case service.OAuthStatusBindPhone:
-			return &loginOutcome{bindTicket: out.BindTicket, nickname: out.Nickname}, true
-		case service.OAuthStatusCancelled:
-			h.writeErr(w, "wechat_cancelled", "")
-		default:
-			slog.Warn("accountapi: 微信登录未成功", "status", out.Status)
-			h.writeErr(w, "login_failed", "微信登录失败，请重试")
-		}
-		return nil, false
+		return h.wechatOutcome(w, out)
 	}
+}
+
+// wechatOutcome 是扫码与 App 授权共用的结论处理:老用户签会话,首次登录给绑手机票据。失败时已写好响应。
+func (h *handler) wechatOutcome(w http.ResponseWriter, out *service.OAuthOutcome) (*loginOutcome, bool) {
+	switch out.Status {
+	case service.OAuthStatusSuccess:
+		if out.Login == nil {
+			slog.Error("accountapi: 微信登录成功却没有会话")
+			h.writeErr(w, "internal", "")
+			return nil, false
+		}
+		return &loginOutcome{res: out.Login, entered: anonymousName}, true
+	case service.OAuthStatusBindPhone:
+		return &loginOutcome{bindTicket: out.BindTicket, nickname: out.Nickname}, true
+	case service.OAuthStatusCancelled:
+		h.writeErr(w, "wechat_cancelled", "")
+	default:
+		slog.Warn("accountapi: 微信登录未成功", "status", out.Status)
+		h.writeErr(w, "login_failed", "微信登录失败，请重试")
+	}
+	return nil, false
 }
 
 // handleLogout 总是 200:客户端此时已经清掉了本地登录态,这里报错它也无事可做。

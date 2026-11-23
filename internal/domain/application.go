@@ -221,6 +221,8 @@ const (
 	AccountLoginPassword    = "password"
 	AccountLoginWechat      = "wechat"
 	AccountLoginWechatPhone = "wechat_phone"
+	// AccountLoginWechatApp 是手机 App 经微信 OpenSDK 拿到的 code,首次登录同样回绑手机票据走 wechat_phone。
+	AccountLoginWechatApp = "wechat_app"
 )
 
 // AccountConfig 是应用对终端用户开放的账号接口配置。登记了域名即对外开放,这里只剩不能自动推断的项。
