@@ -174,6 +174,7 @@ err = u.SetPassword(ctx, userID, password)
 | 码 | 哨兵 | 何时 |
 |---|---|---|
 | `IDENTITY_TAKEN` | `ErrConflict` | 新号码 / 邮箱 / 微信已属别的用户（发码时就会拦） |
+| `IDENTITY_UNCHANGED` | `ErrInvalidArgument` | 新号码 / 邮箱就是本人当前绑着的那个（发码时就会拦） |
 | `LAST_IDENTITY` | `ErrConflict` | 解绑后没有可登录的方式 |
 | `IDENTITY_NOT_FOUND` | `ErrNotFound` | 发码 target 为空但没绑这类标识；解绑的本来就没有 |
 | `CODE_INVALID` | `ErrInvalidArgument` | 验证码不对、过期或次数用完 |

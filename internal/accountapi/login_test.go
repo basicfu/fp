@@ -75,12 +75,14 @@ func TestCodeAccountPurposes(t *testing.T) {
 		}
 	}
 	for _, body := range []string{
-		`{"purpose":"verify","channel":"email"}`, `{"purpose":"password","channel":"email"}`,
+		`{"purpose":"password","channel":"email"}`,
 		`{"purpose":"bind","channel":"sms","target":"123"}`, `{"purpose":"bind","channel":"email","target":"ab.com"}`,
 		`{"purpose":"bind","channel":"fax","target":"x"}`, `{"purpose":"verify"}`,
 	} {
 		wantErr(t, e.do(t, "POST", "/code", body, withToken(tok)), 400, "bad_request", "")
 	}
+	// 验当前邮箱:这个号没绑邮箱。
+	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"verify","channel":"email"}`, withToken(tok)), 400, "no_email", "")
 	// 目标已属别人。
 	_, taken := e.newUser(t)
 	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"sms","target":"`+taken+`"}`, withToken(tok)), 409, "phone_taken", "")

@@ -142,9 +142,10 @@ func TestSendVerifyCodeToSomeoneElsesPhoneIsTaken(t *testing.T) {
 	if n := len(e.sms.Sent()); n != 0 {
 		t.Fatalf("号码被占用不该发码，发了 %d 条", n)
 	}
-	// 发到自己当前的号码不算占用。
-	if err := e.auth.SendVerifyCode(ctx, e.app, uid, service.VerifyChannelSMS, "13800138004"); err != nil {
-		t.Fatalf("发到自己的号码: %v", err)
+	// 换绑填自己当前的号码:同样不发码。
+	wantOAuthCode(t, e.auth.SendVerifyCode(ctx, e.app, uid, service.VerifyChannelSMS, "13800138004"), domain.CodeIdentityUnchanged)
+	if n := len(e.sms.Sent()); n != 0 {
+		t.Fatalf("自己当前的号码不该发码，发了 %d 条", n)
 	}
 }
 
@@ -188,7 +189,8 @@ func TestBindIdentityReplacesPhoneAndCodeIsBoundToUser(t *testing.T) {
 	if _, _, err := e.users.FindByIdentity(ctx, domain.IdentityTypePhone, oldPhone); err == nil {
 		t.Fatal("旧手机号应已释放")
 	}
-	wantOAuthCode(t, mustFail(e.auth.BindIdentity(ctx, e.app, uid, domain.IdentityTypePhone, newPhone, code)), domain.CodeCodeInvalid)
+	// 已经换成新号了:再拿它来绑是"与当前相同",先于验码就拦下。
+	wantOAuthCode(t, mustFail(e.auth.BindIdentity(ctx, e.app, uid, domain.IdentityTypePhone, newPhone, code)), domain.CodeIdentityUnchanged)
 	wantOAuthCode(t, mustFail(e.auth.BindIdentity(ctx, e.app, uid, "username", "bob", code)), domain.CodeInvalidArgument)
 }
 

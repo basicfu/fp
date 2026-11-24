@@ -97,6 +97,8 @@ const (
 	CodeAvatarInvalid = "AVATAR_INVALID"
 	// CodeIdentityTaken：要绑定的手机号、邮箱或微信已属于别的用户。
 	CodeIdentityTaken = "IDENTITY_TAKEN"
+	// CodeIdentityUnchanged：换绑填的就是本人当前绑定的那个手机号 / 邮箱。
+	CodeIdentityUnchanged = "IDENTITY_UNCHANGED"
 	// CodeLastIdentity：解绑后账号就没有能登录的方式了。
 	CodeLastIdentity = "LAST_IDENTITY"
 
@@ -235,6 +237,7 @@ var codeSentinels = map[string]error{
 	CodeNicknameInvalid:            ErrInvalidArgument,
 	CodeAvatarInvalid:              ErrInvalidArgument,
 	CodeIdentityTaken:              ErrConflict,
+	CodeIdentityUnchanged:          ErrInvalidArgument,
 	CodeLastIdentity:               ErrConflict,
 
 	CodeUserNotFound:           ErrNotFound,

@@ -3,6 +3,7 @@ package accountapi_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -152,6 +153,60 @@ func TestIdentityBindEmail(t *testing.T) {
 	_, _, tok2 := e.loggedIn(t)
 	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"email","target":"zhangwei@example.com"}`, withToken(tok2)), 409, "email_taken", "")
 	wantErr(t, e.do(t, "POST", "/identity/bind", `{"type":"email","email":"ab.com","code":"123456"}`, withToken(tok2)), 400, "bad_request", "")
+}
+
+// 换绑邮箱:先验身份(当前邮箱或当前手机号)拿票据;验邮箱换来的票据换不了手机号;新号填自己当前的直接拦。
+func TestIdentityChangeEmail(t *testing.T) {
+	e := newEnv(t)
+	_, phone, tok := e.loggedIn(t)
+	mail := func() string { return fmt.Sprintf("u%d@example.com", phoneSeq.Add(1)) }
+	sendBind := func(addr string) string {
+		wantOK(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"email","target":"`+addr+`"}`, withToken(tok)))
+		return e.lastCode(t)
+	}
+	bind := func(addr, code, ticket string) *httptest.ResponseRecorder {
+		return e.do(t, "POST", "/identity/bind", `{"type":"email","email":"`+addr+`","code":"`+code+`","ticket":"`+ticket+`"}`, withToken(tok))
+	}
+	verify := func(channel string) string {
+		wantOK(t, e.do(t, "POST", "/code", `{"purpose":"verify","channel":"`+channel+`"}`, withToken(tok)))
+		m := wantOK(t, e.do(t, "POST", "/code/verify", `{"purpose":"verify","channel":"`+channel+`","code":"`+e.lastCode(t)+`"}`, withToken(tok)))
+		tk, _ := m["ticket"].(string)
+		if tk == "" {
+			t.Fatalf("验 %s 没给票据: %v", channel, m)
+		}
+		return tk
+	}
+	// 还没绑邮箱:验不了「当前邮箱」;首次绑定不要票据。
+	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"verify","channel":"email"}`, withToken(tok)), 400, "no_email", "")
+	m1 := mail()
+	wantOK(t, bind(m1, sendBind(m1), ""))
+
+	// 已绑定:没票据、伪造票据都不让换。
+	m2 := mail()
+	wantErr(t, bind(m2, sendBind(m2), ""), 400, "ticket_invalid", "")
+	wantErr(t, bind(m2, "123456", "forged"), 400, "ticket_invalid", "")
+
+	// 验当前邮箱换来的票据:换不了手机号,放回去后照样能换邮箱;新邮箱的码输错票据也放回。
+	tk := verify("email")
+	p1 := newPhone()
+	wantOK(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"sms","target":"`+p1+`"}`, withToken(tok)))
+	wantErr(t, e.do(t, "POST", "/identity/bind", `{"type":"phone","phone":"`+p1+`","code":"`+e.lastCode(t)+`","ticket":"`+tk+`"}`, withToken(tok)), 400, "ticket_invalid", "")
+	code := sendBind(m2)
+	wantErr(t, bind(m2, "000000", tk), 400, "code_invalid", "")
+	if got := userOf(t, wantOK(t, bind(m2, code, tk)))["email"]; got != m2[:2]+"***"+m2[strings.Index(m2, "@"):] {
+		t.Fatalf("验邮箱后换绑: %v", got)
+	}
+	// 票据一次性。
+	m3 := mail()
+	wantErr(t, bind(m3, sendBind(m3), tk), 400, "ticket_invalid", "")
+
+	// 验当前手机号换来的票据也能换邮箱。
+	tk = verify("sms")
+	wantOK(t, bind(m3, sendBind(m3), tk))
+
+	// 新号填的就是自己当前的:发码就拦,不消耗验证码。
+	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"email","target":"`+m3+`"}`, withToken(tok)), 400, "email_same", "")
+	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"sms","target":"`+phone+`"}`, withToken(tok)), 400, "phone_same", "")
 }
 
 func TestIdentityWechatBindUnbind(t *testing.T) {

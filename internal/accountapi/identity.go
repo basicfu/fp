@@ -3,6 +3,7 @@ package accountapi
 import (
 	"log/slog"
 	"net/http"
+	"slices"
 
 	"github.com/basicfu/fp/internal/domain"
 	"github.com/basicfu/fp/internal/service"
@@ -34,7 +35,7 @@ func (h *handler) handleIdentityBind(w http.ResponseWriter, r *http.Request) {
 	case domain.IdentityTypePhone:
 		p, done = h.bindPhone(w, r, c, req.Phone, req.Code, req.Ticket)
 	case domain.IdentityTypeEmail:
-		p, done = h.bindEmail(w, r, c, req.Email, req.Code)
+		p, done = h.bindEmail(w, r, c, req.Email, req.Code, req.Ticket)
 	case service.UnbindKindWechat:
 		p, done = h.bindWechat(w, r, c, req.Ticket)
 	default:
@@ -59,39 +60,26 @@ func (h *handler) bindPhone(w http.ResponseWriter, r *http.Request, c *caller, p
 		h.writeErr(w, "bad_request", "请输入 6 位数字验证码")
 		return nil, false
 	}
-	ctx := r.Context()
-	cur, done := h.profileOf(w, r, c)
+	held, done := h.takeChangeTicket(w, r, c, domain.IdentityTypePhone, ticket, channelSMS)
 	if !done {
 		return nil, false
 	}
-	var held *heldTicket
-	if identity(cur, domain.IdentityTypePhone) != "" {
-		if ticket == "" {
-			h.writeErr(w, "ticket_invalid", "")
-			return nil, false
-		}
-		var err error
-		if held, err = h.tickets.Take(ctx, c.UserID.String(), ticket); err != nil {
-			slog.Error("accountapi: 取换绑票据失败", "err", err)
-			h.writeErr(w, "internal", "")
-			return nil, false
-		}
-		if held == nil {
-			h.writeErr(w, "ticket_invalid", "")
-			return nil, false
-		}
-	}
-	p, err := h.d.Auth.BindIdentity(ctx, appOf(r).AppID, c.UserID, domain.IdentityTypePhone, phone, code)
+	p, err := h.d.Auth.BindIdentity(r.Context(), appOf(r).AppID, c.UserID, domain.IdentityTypePhone, phone, code)
 	if err != nil {
 		// 新号的码输错不该逼用户回头重验旧号: 票据放回去, 剩余有效期不变。
-		h.tickets.Restore(ctx, held)
+		h.tickets.Restore(r.Context(), held)
 		h.manageErr(w, "phone-bind", "phone_taken", err)
 		return nil, false
 	}
 	return p, true
 }
 
-func (h *handler) bindEmail(w http.ResponseWriter, r *http.Request, c *caller, email, code string) (*service.UserProfile, bool) {
+// bindEmail 已有邮箱的是换绑:同换绑手机号,先验身份(当前邮箱或当前手机号都行)拿票据。
+func (h *handler) bindEmail(w http.ResponseWriter, r *http.Request, c *caller, email, code, ticket string) (*service.UserProfile, bool) {
+	if len(ticket) > maxPhoneTicketLen {
+		h.writeErr(w, "bad_request", "")
+		return nil, false
+	}
 	if !validEmail(email) {
 		h.writeErr(w, "bad_request", "请输入正确的邮箱")
 		return nil, false
@@ -100,12 +88,50 @@ func (h *handler) bindEmail(w http.ResponseWriter, r *http.Request, c *caller, e
 		h.writeErr(w, "bad_request", "请输入 6 位数字验证码")
 		return nil, false
 	}
+	held, done := h.takeChangeTicket(w, r, c, domain.IdentityTypeEmail, ticket, channelSMS, channelEmail)
+	if !done {
+		return nil, false
+	}
 	p, err := h.d.Auth.BindIdentity(r.Context(), appOf(r).AppID, c.UserID, domain.IdentityTypeEmail, email, code)
 	if err != nil {
+		h.tickets.Restore(r.Context(), held)
 		h.manageErr(w, "email-bind", "email_taken", err)
 		return nil, false
 	}
 	return p, true
+}
+
+// takeChangeTicket:typ 这类标识已经绑着就是换绑,必须带一张 scopes 之一换来的票据;首次绑定不要票据(held 为 nil)。
+// 失败时已写好响应。
+func (h *handler) takeChangeTicket(w http.ResponseWriter, r *http.Request, c *caller, typ, ticket string, scopes ...string) (*heldTicket, bool) {
+	cur, done := h.profileOf(w, r, c)
+	if !done {
+		return nil, false
+	}
+	if identity(cur, typ) == "" {
+		return nil, true
+	}
+	if ticket == "" {
+		h.writeErr(w, "ticket_invalid", "")
+		return nil, false
+	}
+	held, err := h.tickets.Take(r.Context(), c.UserID.String(), ticket)
+	if err != nil {
+		slog.Error("accountapi: 取换绑票据失败", "err", err)
+		h.writeErr(w, "internal", "")
+		return nil, false
+	}
+	if held == nil {
+		h.writeErr(w, "ticket_invalid", "")
+		return nil, false
+	}
+	if !slices.Contains(scopes, held.scope) {
+		// 验错了种类(验邮箱换来的拿去换手机号):放回去,它还能用来换邮箱。
+		h.tickets.Restore(r.Context(), held)
+		h.writeErr(w, "ticket_invalid", "")
+		return nil, false
+	}
+	return held, true
 }
 
 // bindWechat 用 /wechat/start purpose=bind 换来的票据。票据只认发起人,登录票据也不能拿来绑。

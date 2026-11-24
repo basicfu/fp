@@ -110,8 +110,9 @@ func looksLikeEmail(s string) bool {
 	return dot > 0 && dot < len(domainPart)-1
 }
 
-// ensureNotTakenByOthers 在发码、校验之前先挡住别人的标识：否则用户收了码、输完了，才被告知号码已被占用。
-func (s *AuthService) ensureNotTakenByOthers(ctx context.Context, userID uuid.UUID, typ, subject string) error {
+// ensureBindable 在发码、校验之前先挡住别人的标识：否则用户收了码、输完了，才被告知号码已被占用。
+// 本人当前绑着的那个也挡：换成同一个号什么都不会变，只白白消耗一次验证码和发送额度。
+func (s *AuthService) ensureBindable(ctx context.Context, userID uuid.UUID, typ, subject string) error {
 	owner, _, err := s.deps.Users.FindByIdentity(ctx, typ, subject)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
@@ -121,7 +122,7 @@ func (s *AuthService) ensureNotTakenByOthers(ctx context.Context, userID uuid.UU
 	case owner.ID != userID:
 		return identityTaken()
 	}
-	return nil
+	return domain.Fail(domain.ErrInvalidArgument, domain.CodeIdentityUnchanged, "与当前绑定的相同")
 }
 
 // SendVerifyCode 给已登录用户发一条验证码。target 非空时是要换绑的新标识，已属别人回 IDENTITY_TAKEN。
@@ -136,7 +137,7 @@ func (s *AuthService) SendVerifyCode(ctx context.Context, appID string, userID u
 		return err
 	}
 	if strings.TrimSpace(target) != "" {
-		if err := s.ensureNotTakenByOthers(ctx, userID, typ, to); err != nil {
+		if err := s.ensureBindable(ctx, userID, typ, to); err != nil {
 			return err
 		}
 	}
@@ -179,7 +180,7 @@ func (s *AuthService) BindIdentity(ctx context.Context, appID string, userID uui
 		return nil, err
 	}
 	// 先查占用再验码：被占用时不该白白消费掉用户手里的码。事务里还会再查一次，挡并发。
-	if err := s.ensureNotTakenByOthers(ctx, userID, typ, subject); err != nil {
+	if err := s.ensureBindable(ctx, userID, typ, subject); err != nil {
 		return nil, err
 	}
 	if err := s.deps.Codes.VerifyAccount(ctx, userID, subject, strings.TrimSpace(code)); err != nil {

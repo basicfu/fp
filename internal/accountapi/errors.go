@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/basicfu/fp/internal/domain"
 )
@@ -39,11 +40,15 @@ var errTable = map[string]struct {
 	"version_too_low": {http.StatusBadRequest, "客户端版本过低，请升级到最新版本后再登录"},
 	"forbidden":       {http.StatusForbidden, "当前账号状态不支持注销"},
 
-	"code_invalid":     {http.StatusBadRequest, "验证码不正确或已过期"},
-	"no_phone":         {http.StatusBadRequest, "请先绑定手机号"},
-	"phone_taken":      {http.StatusConflict, "该手机号已注册"},
-	"email_taken":      {http.StatusConflict, "该邮箱已绑定其他账号"},
-	"ticket_invalid":   {http.StatusBadRequest, "验证已过期，请重新验证当前手机号"},
+	"code_invalid":   {http.StatusBadRequest, "验证码不正确或已过期"},
+	"no_phone":       {http.StatusBadRequest, "请先绑定手机号"},
+	"no_email":       {http.StatusBadRequest, "请先绑定邮箱"},
+	"phone_taken":    {http.StatusConflict, "该手机号已注册"},
+	"email_taken":    {http.StatusConflict, "该邮箱已注册"},
+	"ticket_invalid": {http.StatusBadRequest, "验证已过期，请重新验证身份"},
+	// 换绑填的就是自己当前的号:白白消耗一次验证码和发送额度,发码时就拦下。
+	"phone_same":       {http.StatusBadRequest, "新手机号不能与当前手机号相同"},
+	"email_same":       {http.StatusBadRequest, "新邮箱不能与当前邮箱相同"},
 	"wechat_taken":     {http.StatusConflict, "该微信已绑定其他账号"},
 	"wechat_failed":    {http.StatusBadRequest, "微信绑定失败，请重试"},
 	"last_identity":    {http.StatusConflict, "无法解绑微信，请先绑定手机号"},
@@ -149,8 +154,19 @@ func (h *handler) manageErr(w http.ResponseWriter, op, taken string, err error) 
 		h.writeErr(w, "last_identity", "")
 		return
 	case domain.CodeIdentityNotFound:
-		// 只有发到 / 校验"当前手机号"会走到这里。
-		h.writeErr(w, "no_phone", "")
+		// 只有发到 / 校验"当前手机号 / 当前邮箱"会走到这里;op 以渠道结尾(code-verify-email 等)。
+		if strings.HasSuffix(op, "-"+channelEmail) {
+			h.writeErr(w, "no_email", "")
+		} else {
+			h.writeErr(w, "no_phone", "")
+		}
+		return
+	case domain.CodeIdentityUnchanged:
+		if taken == "" {
+			h.writeErr(w, "bad_request", "")
+		} else {
+			h.writeErr(w, strings.TrimSuffix(taken, "_taken")+"_same", "")
+		}
 		return
 	case domain.CodePasswordTooShort, domain.CodePasswordTooLong:
 		h.writeErr(w, "password_invalid", "")

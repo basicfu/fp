@@ -324,7 +324,7 @@ func (h *handler) legacyPhoneVerify(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	if t, done := h.verifyPhone(w, r, c, req.Code); done {
+	if t, done := h.verifyCurrent(w, r, c, channelSMS, req.Code); done {
 		ok(w, ticketResp{Ticket: t, Token: c.Rotated})
 	}
 }
@@ -358,7 +358,7 @@ func (h *handler) legacyEmailBind(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	if p, done := h.bindEmail(w, r, c, req.Email, req.Code); done {
+	if p, done := h.bindEmail(w, r, c, req.Email, req.Code, req.Ticket); done {
 		h.okLegacyAccount(w, r, c, p)
 	}
 }

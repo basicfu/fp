@@ -15,6 +15,8 @@ import (
 const (
 	// CodeIdentityTaken：要绑定的手机号、邮箱或微信已属于别的用户。哨兵 ErrConflict。
 	CodeIdentityTaken = "IDENTITY_TAKEN"
+	// CodeIdentityUnchanged：换绑填的就是本人当前绑着的那个手机号 / 邮箱。哨兵 ErrInvalidArgument。
+	CodeIdentityUnchanged = "IDENTITY_UNCHANGED"
 	// CodeLastIdentity：解绑后账号就没有能登录的方式了。哨兵 ErrConflict。
 	CodeLastIdentity = "LAST_IDENTITY"
 	// CodeIdentityNotFound：用户没有绑定这种标识（发码时 target 为空却没有手机号 / 邮箱，或解绑的本来就没有）。哨兵 ErrNotFound。
@@ -64,7 +66,7 @@ type BindOAuthResult struct {
 // SendVerifyCode 给用户发一条验证码，用于换绑、设密码之前的身份校验。
 //
 // target 为空发到当前绑定的手机号（VerifyChannelSMS）或邮箱（VerifyChannelEmail），没有则 CodeIdentityNotFound；
-// 非空是要换绑的新标识，已属别人则 CodeIdentityTaken。频率限制与 SendLoginCode 共用按收件人的计数。
+// 非空是要换绑的新标识，已属别人则 CodeIdentityTaken，就是本人当前绑着的那个则 CodeIdentityUnchanged。频率限制与 SendLoginCode 共用按收件人的计数。
 // 短信用通知模板 verify_code，邮件用 fp 系统配置 verify_code.email_template（默认 verify_code_email）。
 //
 // 这里的码只对这个 userID 有效，不能拿去登录。
@@ -80,7 +82,7 @@ func (u *Users) VerifyCode(ctx context.Context, userID, channel, target, code st
 }
 
 // BindIdentity 校验发到新 subject 的码后，把用户的手机号（IdentityPhone）或邮箱（IdentityEmail）换成它，
-// 返回改完的完整资料。已属别人返回 CodeIdentityTaken。
+// 返回改完的完整资料。已属别人返回 CodeIdentityTaken，就是本人当前绑着的那个返回 CodeIdentityUnchanged。
 //
 // 要求「先验旧手机号再换新的」之类的流程由业务方自己编排：先 VerifyCode 旧的，再 BindIdentity 新的。
 func (u *Users) BindIdentity(ctx context.Context, userID, typ, subject, code string) (*UserProfile, error) {

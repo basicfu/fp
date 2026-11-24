@@ -89,9 +89,9 @@ type codeResp struct {
 // codeAllowed:用途与渠道的组合必须是现在实现了的。
 func codeAllowed(purpose, channel string) bool {
 	switch purpose {
-	case purposeLogin, purposeVerify, purposePassword:
+	case purposeLogin, purposePassword:
 		return channel == channelSMS
-	case purposeBind:
+	case purposeVerify, purposeBind:
 		return channel == channelSMS || channel == channelEmail
 	}
 	return false
@@ -157,7 +157,7 @@ func (h *handler) sendLoginCode(w http.ResponseWriter, r *http.Request, req code
 	return true
 }
 
-// sendAccountCode:verify、password 只发到当前绑定的号码,不认客户端给的 target(防止拿来往任意号码发码);
+// sendAccountCode:verify、password 只发到当前绑定的手机号 / 邮箱,不认客户端给的 target(防止拿来往任意号码发码);
 // bind 发到 target,已被别的账号占用回 phone_taken / email_taken。
 func (h *handler) sendAccountCode(w http.ResponseWriter, r *http.Request, c *caller, purpose, channel, target string) bool {
 	taken := ""
@@ -180,7 +180,7 @@ func (h *handler) sendAccountCode(w http.ResponseWriter, r *http.Request, c *cal
 		}
 	}
 	if err := h.d.Auth.SendVerifyCode(r.Context(), appOf(r).AppID, c.UserID, channel, target); err != nil {
-		h.manageErr(w, "code-"+purpose, taken, err)
+		h.manageErr(w, "code-"+purpose+"-"+channel, taken, err)
 		return false
 	}
 	return true
@@ -203,27 +203,27 @@ func (h *handler) handleCodeVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req codeVerifyReq
-	if !decodeBody(w, r, &req, maxBody) || req.Purpose != purposeVerify || req.Channel != channelSMS {
+	if !decodeBody(w, r, &req, maxBody) || req.Purpose != purposeVerify || (req.Channel != channelSMS && req.Channel != channelEmail) {
 		h.writeErr(w, "bad_request", "")
 		return
 	}
-	if t, done := h.verifyPhone(w, r, c, req.Code); done {
+	if t, done := h.verifyCurrent(w, r, c, req.Channel, req.Code); done {
 		ok(w, ticketResp{Ticket: t, Token: c.Rotated})
 	}
 }
 
-// verifyPhone 验当前手机号的码,签一张换绑票据。
-func (h *handler) verifyPhone(w http.ResponseWriter, r *http.Request, c *caller, code string) (string, bool) {
+// verifyCurrent 验发到当前手机号(sms)或当前邮箱(email)的码,签一张记着渠道的换绑票据。
+func (h *handler) verifyCurrent(w http.ResponseWriter, r *http.Request, c *caller, channel, code string) (string, bool) {
 	if !digits(code, 6) {
 		h.writeErr(w, "bad_request", "请输入 6 位数字验证码")
 		return "", false
 	}
 	ctx := r.Context()
-	if err := h.d.Auth.VerifyCode(ctx, appOf(r).AppID, c.UserID, channelSMS, "", code); err != nil {
-		h.manageErr(w, "code-verify", "", err)
+	if err := h.d.Auth.VerifyCode(ctx, appOf(r).AppID, c.UserID, channel, "", code); err != nil {
+		h.manageErr(w, "code-verify-"+channel, "", err)
 		return "", false
 	}
-	t, err := h.tickets.Issue(ctx, c.UserID.String())
+	t, err := h.tickets.Issue(ctx, c.UserID.String(), channel)
 	if err != nil {
 		slog.Error("accountapi: 签发换绑票据失败", "err", err)
 		h.writeErr(w, "internal", "")

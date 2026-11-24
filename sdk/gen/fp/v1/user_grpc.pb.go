@@ -78,7 +78,7 @@ type UserServiceClient interface {
 	// VerifyCode 校验 SendVerifyCode 发出的码，成功即作废，不改任何资料。码错、过期、超过 5 次尝试一律 CODE_INVALID。
 	VerifyCode(ctx context.Context, in *VerifyCodeRequest, opts ...grpc.CallOption) (*VerifyCodeResponse, error)
 	// BindIdentity 校验发到新标识的验证码后，把用户的手机号或邮箱换成它（原来的同类标识删掉，没有则新增）。
-	// 已属别的用户回 IDENTITY_TAKEN；已经是本人的同一个标识时什么都不改，照样成功（码仍会被消费）。
+	// 已属别的用户回 IDENTITY_TAKEN；就是本人当前绑着的那个回 IDENTITY_UNCHANGED（SendVerifyCode 发到新标识时同样先拦）。
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	BindIdentity(ctx context.Context, in *BindIdentityRequest, opts ...grpc.CallOption) (*UserProfile, error)
@@ -283,7 +283,7 @@ type UserServiceServer interface {
 	// VerifyCode 校验 SendVerifyCode 发出的码，成功即作废，不改任何资料。码错、过期、超过 5 次尝试一律 CODE_INVALID。
 	VerifyCode(context.Context, *VerifyCodeRequest) (*VerifyCodeResponse, error)
 	// BindIdentity 校验发到新标识的验证码后，把用户的手机号或邮箱换成它（原来的同类标识删掉，没有则新增）。
-	// 已属别的用户回 IDENTITY_TAKEN；已经是本人的同一个标识时什么都不改，照样成功（码仍会被消费）。
+	// 已属别的用户回 IDENTITY_TAKEN；就是本人当前绑着的那个回 IDENTITY_UNCHANGED（SendVerifyCode 发到新标识时同样先拦）。
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	BindIdentity(context.Context, *BindIdentityRequest) (*UserProfile, error)
