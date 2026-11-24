@@ -107,6 +107,13 @@ type VerifyCode struct {
 }
 
 // DefaultVerifyEmailTemplate 是 verify_code.email_template 的默认值。
+//
+// 生产用阿里云邮件推送（DirectMail）的 SMTP 发信，fp 无需专门的阿里云邮件类型：DirectMail 的 SMTP
+// 不要求预审模板，正文由 fp 渲染，改文案不用找阿里云审核（短信则必须用审核过的模板）。已实测通过的配置：
+//   - 阿里云：发信域名配好 SPF / DKIM / MX（不过验证会退信或进垃圾箱），发信地址类型选「触发邮件」并设 SMTP 密码；
+//   - 供应商 smtp：host=smtpdm.aliyun.com（杭州，新加坡为 smtpdm-ap-southeast-1.aliyun.com）、port=465、tls=ssl，
+//     username 与 from 都是发信地址全称——MAIL FROM 与发信地址不符会被拒；ECS 封了 25 端口，所以用 465；
+//   - 模板：email 渠道、自定义内容模式（smtp 发不了供应商模板），变量只有 code，多了少了都发码失败。
 const DefaultVerifyEmailTemplate = "verify_code_email"
 
 // DefaultCoolingOffDays 是 account_deletion.cooling_off_days 的默认值。
