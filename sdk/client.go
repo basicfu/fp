@@ -3,7 +3,11 @@ package fpsdk
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,8 +49,10 @@ const KeepaliveTime = 30 * time.Second
 // Client 是与 fp 的连接。它是并发安全的，一个进程建一个即可。
 type Client struct {
 	opts Options
-	conn *grpc.ClientConn
-	rpc  fpv1.AuthServiceClient
+	// policyVer 是上一次拉到的授权策略版本: 周期刷新时版本没变就不刷 Info(见 logPolicyRefreshed)。
+	policyVer atomic.Int64
+	conn      *grpc.ClientConn
+	rpc       fpv1.AuthServiceClient
 	// cfgRPC 是配置中心的 RPC 客户端，供 Bind/BindType 拉取配置用。
 	cfgRPC fpv1.ConfigServiceClient
 	// imRPC 是 IM 网关接口的 RPC 客户端，只有 CallerType 为 CallerTypeIM 的
@@ -197,8 +203,17 @@ func (c *Client) refreshPolicy(ctx context.Context) {
 		return
 	}
 	c.authz.setPolicy(res.GetPolicy())
-	c.opts.Logger.Info("fpsdk: 策略已更新", "version", res.GetPolicy().GetVersion(),
-		"roles", len(res.GetPolicy().GetRoles()))
+	c.logPolicyRefreshed(int64(res.GetPolicy().GetVersion()), len(res.GetPolicy().GetRoles()))
+}
+
+// logPolicyRefreshed 策略每隔几分钟刷新一次、绝大多数时候版本没变: 版本变了才打 Info("策略已更新"才名副其实),
+// 没变只打 Debug。否则每个接入方一天几百行一模一样的日志。
+func (c *Client) logPolicyRefreshed(version int64, roles int) {
+	lvl := slog.LevelDebug
+	if c.policyVer.Swap(version) != version {
+		lvl = slog.LevelInfo
+	}
+	c.opts.Logger.Log(context.Background(), lvl, "fpsdk: 策略已更新", "version", version, "roles", roles)
 }
 
 // ReportPermissions 把本服务的权限点全量快照上报给 fp。
@@ -367,7 +382,9 @@ func (c *Client) runWatch(ctx context.Context) {
 		}
 
 		if err != nil {
-			c.opts.Logger.Warn("fpsdk: 撤销推送流断开，准备重连", "err", err, "backoff", backoff)
+			// 保持 Warn: 推送流现在有应用层心跳(见 watchHeartbeat), 正常不该再被代理按空闲超时掐掉, 断开就是值得看的事件。
+			// reason 把几种常见的断法翻成人话, 免得只看到一串 rpc 原文分不清是对端重启、被代理重置还是连不上。
+			c.opts.Logger.Warn("fpsdk: 撤销推送流断开，准备重连", "reason", watchEndReason(err), "err", err, "backoff", backoff)
 		}
 		select {
 		case <-ctx.Done():
@@ -378,6 +395,51 @@ func (c *Client) runWatch(ctx context.Context) {
 			if backoff *= 2; backoff > maxBackoff {
 				backoff = maxBackoff
 			}
+		}
+	}
+}
+
+// watchEndReason 把推送流断开的原文归成几类人话原因。
+func watchEndReason(err error) string {
+	msg := err.Error()
+	switch {
+	case errors.Is(err, context.Canceled), status.Code(err) == codes.Canceled:
+		return "本端主动重建流(心跳无应答)"
+	case errors.Is(err, io.EOF), msg == "EOF":
+		return "对端关闭了连接(多半是对端重启或发布)"
+	case strings.Contains(msg, "RST_STREAM"):
+		return "流被代理或对端重置(RST_STREAM,常见于代理空闲超时)"
+	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "Error while dialing"), status.Code(err) == codes.Unavailable:
+		return "连不上对端"
+	}
+	return "其他"
+}
+
+// watchHeartbeatMisses 是连续多少个心跳间隔没收到 pong 才判定流卡死(只在服务端回过 pong 之后才判)。
+const watchHeartbeatMisses = 2
+
+// watchHeartbeat 定时往推送流上发 ping; 流已回过 pong 却连续 watchHeartbeatMisses 个间隔没有新的 pong, 说明流在某一跳上卡死
+// (到代理的 TCP 还活着, 传输层 keepalive 看不出来), 主动 cancel 让 runWatch 重建。
+func (c *Client) watchHeartbeat(ctx context.Context, stream fpv1.AuthService_WatchClient, sendMu *sync.Mutex, lastPong *atomic.Int64, kill context.CancelFunc) {
+	interval := c.opts.watchHeartbeatInterval
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		sendMu.Lock()
+		err := stream.Send(&fpv1.WatchRequest{Msg: &fpv1.WatchRequest_Ping{Ping: &fpv1.WatchPing{}}})
+		sendMu.Unlock()
+		if err != nil {
+			return // 流已经坏了, Recv 那边会报错并重连
+		}
+		if lp := lastPong.Load(); lp != 0 && time.Since(time.Unix(0, lp)) > time.Duration(watchHeartbeatMisses+1)*interval {
+			c.opts.Logger.Warn("fpsdk: 推送流心跳无应答，重建流", "last_pong_ago", time.Since(time.Unix(0, lp)).Round(time.Second))
+			kill()
+			return
 		}
 	}
 }
@@ -404,6 +466,7 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 	if c.opts.OnLoginCheck != nil {
 		caps = append(caps, capLoginCheck)
 	}
+	var lastPong atomic.Int64
 	if len(caps) > 0 {
 		// 老服务端不读客户端消息，hello 只是停在缓冲里，不影响收流。
 		if err := stream.Send(&fpv1.WatchRequest{Msg: &fpv1.WatchRequest_Hello{
@@ -412,6 +475,11 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 			return false, err
 		}
 	}
+	// 应用层心跳: 流上定时有一来一回的数据，中间代理(nginx / APISIX)的空闲超时才会被两个方向都重置。
+	// 只有服务端回过 pong(说明它认识 ping)才会据此判定流卡死; 老服务端不认识 ping、永远不回，那就只管发、不判死，
+	// 否则老服务端会被每分钟重建一次流。
+	go c.watchHeartbeat(ctx, stream, &sendMu, &lastPong, cancel)
+	// 放在 hello 发完之后启动: hello 不加锁发送, 心跳与它并发会违反"同一条流不能并发 Send"。
 	var worker *appEventWorker
 	if c.opts.OnAppEvent != nil {
 		worker = c.startAppEventWorker(ctx, stream, &sendMu)
@@ -426,6 +494,8 @@ func (c *Client) watchOnce(ctx context.Context) (gotReady bool, err error) {
 			return gotReady, err
 		}
 		switch {
+		case msg.GetPong() != nil:
+			lastPong.Store(time.Now().UnixNano())
 		case msg.GetAppEvent() != nil:
 			if worker != nil {
 				worker.offer(msg.GetAppEvent())

@@ -328,8 +328,15 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 	var lc atomic.Pointer[lcStream]
 	if !isIM && (s.events != nil || s.loginCheck != nil) {
 		hellos = make(chan *fpv1.WatchHello, 1)
-		go s.recvWatch(stream, app.ID, hellos, &lc)
 	}
+	// 心跳(ping → pong)要求每条流都有人读客户端消息: 回 pong 才能让代理两个方向的空闲计时都被重置, 否则代理照样按空闲超时掐流。
+	// IM 网关那条流没有应用作用域(app 为空), appID 取 Nil: hello / ack / reply 在它上面不会出现, 读到了也只是被忽略。
+	pings := make(chan struct{}, 1)
+	appID := uuid.Nil
+	if app != nil {
+		appID = app.ID
+	}
+	go s.recvWatch(stream, appID, hellos, &lc, pings)
 	// appEvents、loginChecks 在 hello 声明对应能力之前为 nil，select 不会选中它们。
 	var appEvents <-chan *fpv1.AppEvent
 	var loginChecks <-chan *fpv1.LoginCheck
@@ -344,6 +351,10 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-pings:
+			if err := stream.Send(&fpv1.WatchResponse{Event: &fpv1.WatchResponse_Pong{Pong: &fpv1.WatchPong{}}}); err != nil {
+				return err
+			}
 		case h := <-hellos:
 			if appEvents == nil && s.events != nil && slices.Contains(h.GetCaps(), CapAppEvents) {
 				// 开关由「有没有流真的来收」决定，不让业务方去控制台再开一次。失败不断流：下次重连再试，
@@ -433,13 +444,19 @@ func (s *authServer) Watch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fp
 
 // recvWatch 读一条 Watch 流上客户端发来的消息，直到流结束。
 func (s *authServer) recvWatch(stream grpc.BidiStreamingServer[fpv1.WatchRequest, fpv1.WatchResponse], appID uuid.UUID,
-	hellos chan<- *fpv1.WatchHello, lc *atomic.Pointer[lcStream]) {
+	hellos chan<- *fpv1.WatchHello, lc *atomic.Pointer[lcStream], pings chan<- struct{}) {
 	for {
 		req, err := stream.Recv()
 		if err != nil {
 			return
 		}
 		switch {
+		case req.GetPing() != nil:
+			// 攒着一个就够: 已经有一个待回的 pong, 这次的不用再排。
+			select {
+			case pings <- struct{}{}:
+			default:
+			}
 		case req.GetHello() != nil:
 			select {
 			case hellos <- req.GetHello():

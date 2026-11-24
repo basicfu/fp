@@ -448,3 +448,46 @@ func TestIMCallerValidateRequiresIMEnabled(t *testing.T) {
 		t.Fatalf("普通调用方不该被 im_enabled 影响：%v", err)
 	}
 }
+
+// 心跳: 客户端在推送流上发 ping, 服务端回 pong。普通应用的流与 IM 网关那条通配流都要回, 否则代理照样按空闲超时掐流。
+func TestWatchAnswersPingWithPong(t *testing.T) {
+	env := newGRPCEnv(t)
+	ctx, cancel := context.WithTimeout(env.authed(context.Background()), 10*time.Second)
+	defer cancel()
+	stream, err := env.client.Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if first, err := stream.Recv(); err != nil || first.GetReady() == nil {
+		t.Fatalf("首帧应是 ready: %+v %v", first, err)
+	}
+	for i := 0; i < 2; i++ { // 连发两次, 都要有应答
+		if err := stream.Send(&fpv1.WatchRequest{Msg: &fpv1.WatchRequest_Ping{Ping: &fpv1.WatchPing{}}}); err != nil {
+			t.Fatalf("Send ping: %v", err)
+		}
+		msg, err := stream.Recv()
+		if err != nil || msg.GetPong() == nil {
+			t.Fatalf("第 %d 次: 应收到 pong: %+v %v", i+1, msg, err)
+		}
+	}
+}
+
+func TestIMWatchAnswersPingWithPong(t *testing.T) {
+	e := newGRPCEnv(t)
+	enableIM(t, e, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stream, err := e.client.Watch(e.imAuthed(ctx, e.appID))
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if ev, err := stream.Recv(); err != nil || ev.GetReady() == nil {
+		t.Fatalf("首帧应是 ready: %+v %v", ev, err)
+	}
+	if err := stream.Send(&fpv1.WatchRequest{Msg: &fpv1.WatchRequest_Ping{Ping: &fpv1.WatchPing{}}}); err != nil {
+		t.Fatalf("Send ping: %v", err)
+	}
+	if msg, err := stream.Recv(); err != nil || msg.GetPong() == nil {
+		t.Fatalf("IM 流也应回 pong: %+v %v", msg, err)
+	}
+}

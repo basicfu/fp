@@ -302,8 +302,17 @@ message WatchRequest {
     EventAck ack = 2;
     // reply 回答一次登录校验（WatchResponse.login_check）。
     LoginCheckReply reply = 3;
+    // ping 是应用层心跳，服务端回 WatchResponse.pong。
+    //
+    // gRPC 自带的 keepalive 是 HTTP/2 PING，中间隔着 nginx / APISIX 时由代理自己应答、不算流上的数据，
+    // 代理照样按空闲超时掐流（表现为每隔几分钟一次 RST_STREAM / EOF 断流重连，每次重连还要清空校验缓存、重拉策略和配置）。
+    // 流上定时有一来一回的数据，两个方向的空闲计时才都会被重置。老服务端不认识它，当作空消息忽略。
+    WatchPing ping = 4;
   }
 }
+
+// WatchPing 是心跳请求，没有内容。
+message WatchPing {}
 
 // WatchHello 是能力声明。
 message WatchHello {
@@ -387,8 +396,13 @@ message WatchResponse {
     AppEvent app_event = 10;
     // login_check 是一次登录校验，只发给 hello 里声明了 "login_check" 的流。
     LoginCheck login_check = 11;
+    // pong 回应 WatchRequest.ping。老 SDK 不认识它，按未知事件忽略。
+    WatchPong pong = 12;
   }
 }
+
+// WatchPong 是心跳应答，没有内容。
+message WatchPong {}
 
 // WechatSubscriptionChanged 是一次微信通知状态变化的通知，推给该用户登录过的应用和发起扫码的应用。
 //

@@ -10,8 +10,8 @@ import (
 )
 
 // statsInterval 是统计日志的周期。fp-im 正常运行时只打生命周期日志,太安静就
-// 看不出它在干活;每节点 5 分钟一行,一天两百多行,量小又够判断负载是否异常。
-const statsInterval = 5 * time.Minute
+// 看不出它在干活;每节点半小时一行(增量是这半小时的量),量小又够判断负载是否异常。
+const statsInterval = 30 * time.Minute
 
 // statsLoop 每个周期打一行本周期的增量。
 func statsLoop(ctx context.Context, h *hub.Hub, log *slog.Logger, every time.Duration) {

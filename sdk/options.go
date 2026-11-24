@@ -135,6 +135,8 @@ type Options struct {
 	// usageFlushInterval、policyRefreshInterval 只供包内测试缩短周期，零值取默认。
 	usageFlushInterval    time.Duration
 	policyRefreshInterval time.Duration
+	// watchHeartbeatInterval 是推送流上心跳的间隔(包内测试缩短用), 零值取默认 25 秒。
+	watchHeartbeatInterval time.Duration
 }
 
 const (
@@ -146,6 +148,8 @@ const (
 	defaultNonceCapacity         = 200_000
 	defaultUsageFlushInterval    = time.Minute
 	defaultPolicyRefreshInterval = 5 * time.Minute
+	// defaultWatchHeartbeatInterval 与 fp-im 的流(sdk/im 的 heartbeatInterval)取同一个 25 秒: 低于常见代理的 60 秒空闲超时。
+	defaultWatchHeartbeatInterval = 25 * time.Second
 )
 
 func (o *Options) applyDefaults() {
@@ -175,6 +179,9 @@ func (o *Options) applyDefaults() {
 	}
 	if o.policyRefreshInterval <= 0 {
 		o.policyRefreshInterval = defaultPolicyRefreshInterval
+	}
+	if o.watchHeartbeatInterval <= 0 {
+		o.watchHeartbeatInterval = defaultWatchHeartbeatInterval
 	}
 }
 
