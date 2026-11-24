@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/basicfu/fp/sdk/resp"
 )
 
 // errBody 与业务方原实现的 result.Result 同形。time 是服务端毫秒时间:钟偏的客户端在任何一次失败里都能顺手校正。
@@ -19,6 +21,11 @@ type errBody struct {
 
 // writeJSON 与原实现逐字节一致:Content-Type 不带 charset,Encoder 末尾带换行。
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	// 带 X-Resp-Format: 2 的请求成功响应统一成 {data, rid, time}; 不带则逐字节保持原样(已发布客户端依赖)。
+	if status >= 200 && status < 300 && resp.IsV2(w) {
+		resp.OK(w, v)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
@@ -32,6 +39,10 @@ func (h *handler) writeErr(w http.ResponseWriter, code, msg string) {
 	}
 	if msg == "" {
 		msg = e.msg
+	}
+	if resp.IsV2(w) {
+		resp.Fail(w, code, msg, nil, e.status)
+		return
 	}
 	writeJSON(w, e.status, errBody{Code: code, Msg: msg, Time: h.now().UnixMilli()})
 }

@@ -4,8 +4,8 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/basicfu/fp/sdk/resp"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/basicfu/fp/internal/connector"
 	"github.com/basicfu/fp/internal/domain"
@@ -64,8 +64,9 @@ const AccountPrefix = "/api/account"
 // 终端用户账号接口 /api/account 经业务方网关转来，见 Deps.Account。
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.Recoverer)
+	// 响应格式协商(X-Resp-Format)、请求编号 rid、panic 兜底统一由 sdk/resp 负责, 取代 chi 的 RequestID / Recoverer:
+	// 本进程里 /admin/api 与 /api/account 共用这一层, fp 与 kkdesk 的响应约定必须一致(见 sdk/resp 包注释)。
+	r.Use(func(next http.Handler) http.Handler { return resp.Middleware(next, resp.Options{}) })
 	// 管理控制台第一次给 fp 带来浏览器 UI：没有这个头，已登录管理员访问
 	// 一个恶意页面就可能被 iframe 嵌套后 clickjack 成一次"停用应用"之类的
 	// 点击。放在最前面而不是只加在 /admin/api 或静态兜底其中一支，保证

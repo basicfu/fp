@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/sdk/resp"
 )
 
 // errorBody 是所有错误响应的形状。
@@ -25,6 +26,11 @@ type errorBody struct {
 
 // writeJSON 以 status 写出 JSON 响应。v 为 nil 时只写状态码。
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	// 请求带 X-Resp-Format: 2 时成功响应统一成 {data, rid, time}(见 sdk/resp); 不带则保持原样。
+	if status >= 200 && status < 300 && resp.IsV2(w) {
+		resp.OK(w, v)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if v == nil {
@@ -73,11 +79,24 @@ func StatusFor(sentinel error) int {
 func writeError(w http.ResponseWriter, err error) {
 	var de *domain.Error
 	if !errors.As(err, &de) {
-		slog.Error("httpapi: 未处理的内部错误", "err", err)
+		slog.Error("httpapi: 未处理的内部错误", "err", err, "rid", resp.RID(w))
+		if resp.IsV2(w) {
+			resp.Fail(w, domain.CodeInternal, "", nil, http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, errorBody{
 			Code: domain.CodeInternal,
 			Msg:  "服务器内部错误",
 		})
+		return
+	}
+	if resp.IsV2(w) {
+		// detail 是 JSON 字符串(供接入方排查): 合法的 JSON 原样放进 data; 系统错误由 resp 统一丢掉 data。
+		var data any
+		if d := de.DetailJSON(); d != "" && json.Valid([]byte(d)) {
+			data = json.RawMessage(d)
+		}
+		resp.Fail(w, de.Code, de.Msg, data, StatusFor(de.Unwrap()))
 		return
 	}
 	writeJSON(w, StatusFor(de.Unwrap()), errorBody{
