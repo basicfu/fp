@@ -88,6 +88,7 @@ func (s *UserService) UpdateProfile(ctx context.Context, id uuid.UUID, in UserPr
 		if tag.RowsAffected() == 0 {
 			return nil, domain.Failf(domain.ErrNotFound, domain.CodeUserNotFound, "用户不存在")
 		}
+		s.profileChanged(ctx, id)
 	}
 	return s.GetProfile(ctx, id)
 }
@@ -154,6 +155,7 @@ func (s *UserService) UpdateAvatar(ctx context.Context, id uuid.UUID, image []by
 		}
 		return nil, err
 	}
+	s.profileChanged(ctx, id)
 	return s.GetProfile(ctx, id)
 }
 
@@ -242,6 +244,7 @@ func (s *UserService) FillEmptyAvatar(ctx context.Context, id uuid.UUID, image [
 		err = s.storeAvatar(ctx, id, domain.AvatarHash(image), contentType, key, true)
 	}
 	if err == nil {
+		s.profileChanged(ctx, id)
 		return true, nil
 	}
 	if _, derr := s.pool.Exec(context.WithoutCancel(ctx), `UPDATE object_gc SET due_at = now() WHERE key = $1`, key); derr != nil {
@@ -407,9 +410,13 @@ func (s *UserService) GetAvatar(ctx context.Context, hash string) (contentType s
 // FillEmptyNickname 用户昵称为空时写入 nickname（须已规整），已有昵称不覆盖。返回写完的用户。
 func (s *UserService) FillEmptyNickname(ctx context.Context, id uuid.UUID, nickname string) (*domain.User, error) {
 	// 「为空才写」放进 WHERE：调用方读到空到这里写入之间，用户可能刚好自己改了昵称。
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE app_user SET nickname = $2, updated_at = now() WHERE id = $1 AND nickname = ''`, id, nickname); err != nil {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE app_user SET nickname = $2, updated_at = now() WHERE id = $1 AND nickname = ''`, id, nickname)
+	if err != nil {
 		return nil, fmt.Errorf("service: 补昵称: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		s.profileChanged(ctx, id)
 	}
 	return s.GetByID(ctx, id)
 }

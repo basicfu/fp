@@ -181,6 +181,7 @@ func run() error {
 	// 业务事件表要在会话、登录、注销、微信订阅之前建好：它们都要先写事件再改状态。
 	appEventSignal := store.NewAppEventSignal(rdb)
 	appEvents := service.NewAppEvents(pool, appSvc, appEventSignal)
+	userSvc.SetProfileEvents(appEvents)
 	go appEvents.RunPrune(ctx, appEventPruneInterval)
 
 	sessionSvc := service.NewSessionService(sessionStore, revokePub, epochStore,

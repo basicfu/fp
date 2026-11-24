@@ -21,6 +21,9 @@ const (
 	EventAccountDeleted = "account_deleted"
 	// EventWechatSubscription：Payload 为 {"subscribed"}。
 	EventWechatSubscription = "wechat_subscription"
+	// EventProfileChanged：用户资料（昵称、头像、密码、绑定的手机号 / 邮箱 / 微信）改了，Payload 为 {}。
+	// 不说改了什么，业务方据此重取资料；同一次操作可能收到多条。
+	EventProfileChanged = "profile_changed"
 )
 
 // EventLoggedOut 的 reason，与 fp 服务端逐字相同。以后可能新增，不认识的 reason 按 LoggedOutKick 处理。

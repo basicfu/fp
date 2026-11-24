@@ -345,7 +345,7 @@ message AppEvent {
   string id = 1;
   // seq 是本应用内递增的序号。同一用户的事件按 seq 先后到达（换流重投时可能少量乱序）。
   int64 seq = 2;
-  // kind 取 login_succeeded / logged_out / account_deleted / wechat_subscription，
+  // kind 取 login_succeeded / logged_out / account_deleted / wechat_subscription / profile_changed，
   // 用字符串而不是 enum：新增种类时老 SDK 能原样透传。
   string kind = 3;
   string user_id = 4;

@@ -60,6 +60,7 @@ func (s *UserService) ReplaceIdentity(ctx context.Context, userID uuid.UUID, typ
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("service: 提交事务: %w", err)
 	}
+	s.profileChanged(ctx, userID)
 	return cur, nil
 }
 
@@ -121,6 +122,7 @@ func (s *UserService) BindThirdParty(ctx context.Context, userID uuid.UUID, in E
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("service: 提交事务: %w", err)
 	}
+	s.profileChanged(ctx, userID)
 	return cur, nil
 }
 
@@ -183,6 +185,7 @@ func (s *UserService) RemoveIdentities(ctx context.Context, userID uuid.UUID, ki
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("service: 提交事务: %w", err)
 	}
+	s.profileChanged(ctx, userID)
 	return nil
 }
 

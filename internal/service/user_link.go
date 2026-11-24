@@ -139,6 +139,10 @@ func (s *UserService) linkPhoneOnce(ctx context.Context, in LinkPhoneInput) (*Li
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("service: 提交事务: %w", err)
 	}
+	// 新建的账号还没有别的设备登录着，不必提示。
+	if !res.Created && res.User != nil {
+		s.profileChanged(ctx, res.User.ID)
+	}
 	return res, nil
 }
 

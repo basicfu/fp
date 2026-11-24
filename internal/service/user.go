@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -49,6 +50,24 @@ type UserService struct {
 	pool *pgxpool.Pool
 	// objects 为 nil 表示没配对象存储：头像上传返回 OBJECT_STORE_UNAVAILABLE。
 	objects objstore.Store
+	// events 为 nil 时资料变更不发 profile_changed（测试、子命令）。
+	events *AppEvents
+}
+
+// SetProfileEvents 让资料变更发 profile_changed 事件。不做成 UserOption：事件表依赖的应用服务
+// 要先拿到 UserService（密码连接器），构造时还没有事件表。只在启动时、开始服务前调用。
+func (s *UserService) SetProfileEvents(e *AppEvents) { s.events = e }
+
+// profileChanged 在资料变更提交后发事件，给同账号别的设备即时跟上（业务方收到即重取资料）。
+// 不进变更的事务、写失败只记日志：这只是提示，丢了业务方下次重取资料时照样跟上，
+// 不能因为它把已经生效的修改报成失败。
+func (s *UserService) profileChanged(ctx context.Context, userID uuid.UUID) {
+	if s.events == nil {
+		return
+	}
+	if err := s.events.AppendForUserApps(context.WithoutCancel(ctx), userID, domain.EventProfileChanged, struct{}{}); err != nil {
+		slog.Warn("service: 写资料变更事件失败", "userId", userID, "err", err)
+	}
 }
 
 // UserOption 是 NewUserService 的可选依赖。用变参选项而不是加形参：
@@ -326,6 +345,7 @@ func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, plain s
 	if tag.RowsAffected() == 0 {
 		return domain.Failf(domain.ErrNotFound, domain.CodeUserNotFound, "用户不存在")
 	}
+	s.profileChanged(ctx, userID)
 	return nil
 }
 

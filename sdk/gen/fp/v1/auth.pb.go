@@ -1842,7 +1842,7 @@ type AppEvent struct {
 	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// seq 是本应用内递增的序号。同一用户的事件按 seq 先后到达（换流重投时可能少量乱序）。
 	Seq int64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
-	// kind 取 login_succeeded / logged_out / account_deleted / wechat_subscription，
+	// kind 取 login_succeeded / logged_out / account_deleted / wechat_subscription / profile_changed，
 	// 用字符串而不是 enum：新增种类时老 SDK 能原样透传。
 	Kind   string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
 	UserId string `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`

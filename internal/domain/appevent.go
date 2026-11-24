@@ -16,6 +16,8 @@ const (
 	EventLoggedOut          = "logged_out"
 	EventAccountDeleted     = "account_deleted"
 	EventWechatSubscription = "wechat_subscription"
+	// EventProfileChanged：昵称、头像、密码或登录标识改了。只是"去重取资料"的提示，不带改了什么。
+	EventProfileChanged = "profile_changed"
 )
 
 // logged_out 的 reason 除了 RevokeReason* 之外的两种：这两种不经撤销接口，是 fp 自己发现会话没了。
