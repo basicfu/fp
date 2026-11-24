@@ -1,5 +1,5 @@
 import { test, expect, vi, afterEach } from 'vitest'
-import { api, ApiError, setUnauthorizedHandler } from './api'
+import { api, ApiError, isNotFound, setUnauthorizedHandler } from './api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -152,4 +152,64 @@ test('缺少 code 与 detail 时退化成空串', async () => {
   const err = (await api.get('/x').catch((e) => e)) as ApiError
   expect(err.code).toBe('')
   expect(err.detail).toBe('')
+})
+
+// ---- 统一响应格式 2：请求带 X-Resp-Format: 2，响应回带同名头才按新格式解析 ----
+
+function v2(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'X-Resp-Format': '2' },
+  })
+}
+
+test('请求带 X-Resp-Format: 2', async () => {
+  const spy = stubFetch(new Response('{}', { status: 200 }))
+  await api.get('/x')
+  const init = spy.mock.calls[0][1] as RequestInit
+  expect(new Headers(init.headers).get('X-Resp-Format')).toBe('2')
+})
+
+test('新格式成功体只取 data', async () => {
+  stubFetch(v2({ data: { items: [1], total: 1 }, rid: 'r1', time: 1 }))
+  await expect(api.get('/x')).resolves.toEqual({ items: [1], total: 1 })
+})
+
+test('响应没回带格式头时按旧格式原样返回', async () => {
+  stubFetch(new Response(JSON.stringify({ data: 'x' }), { status: 200 }))
+  await expect(api.get('/x')).resolves.toEqual({ data: 'x' })
+})
+
+test('新格式 401 带 relogin：触发未授权回调', async () => {
+  const onUnauth = vi.fn()
+  setUnauthorizedHandler(onUnauth)
+  stubFetch(v2({ code: 'unauthorized', msg: '请先登录', data: { relogin: true }, rid: 'r2', time: 1 }, 401))
+  const err = (await api.get('/x').catch((e) => e)) as ApiError
+  expect(onUnauth).toHaveBeenCalledTimes(1)
+  expect(err.rid).toBe('r2')
+})
+
+// 没权限也是 401，但不是登录失效：触发回调会让用户点一个没权限的功能就被踢回登录页。
+test('新格式 401 没有 relogin（没权限）：不触发未授权回调', async () => {
+  const onUnauth = vi.fn()
+  setUnauthorizedHandler(onUnauth)
+  stubFetch(v2({ code: 'forbidden', msg: '没有权限执行此操作', rid: 'r3', time: 1 }, 401))
+  const err = (await api.get('/x').catch((e) => e)) as ApiError
+  expect(onUnauth).not.toHaveBeenCalled()
+  expect(err.code).toBe('forbidden')
+})
+
+test('新格式 400：data 作为 detail 透出', async () => {
+  stubFetch(v2({ code: 'INVALID_ARGUMENT', msg: '参数不对', data: { field: 'name' }, rid: 'r4', time: 1 }, 400))
+  const err = (await api.post('/x', {}).catch((e) => e)) as ApiError
+  expect(err.status).toBe(400)
+  expect(JSON.parse(err.detail)).toEqual({ field: 'name' })
+})
+
+test('isNotFound：旧格式 404 与新格式 not_found / *_NOT_FOUND 都认', () => {
+  expect(isNotFound(new ApiError(404, 'x'))).toBe(true)
+  expect(isNotFound(new ApiError(400, 'x', 'not_found'))).toBe(true)
+  expect(isNotFound(new ApiError(400, 'x', 'CONFIG_VERSION_NOT_FOUND'))).toBe(true)
+  expect(isNotFound(new ApiError(400, 'x', 'INVALID_ARGUMENT'))).toBe(false)
+  expect(isNotFound(new Error('x'))).toBe(false)
 })

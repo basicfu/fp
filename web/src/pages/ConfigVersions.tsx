@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { ApiError, api } from '@/lib/api'
+import { api, isNotFound } from '@/lib/api'
 import { formatTime } from '@/lib/format'
 import { useResource, errorMessage } from '@/lib/useResource'
 import { useConfigTypes } from '@/lib/useConfigTypes'
@@ -166,7 +166,7 @@ export default function ConfigVersions() {
         )
         return { status: 'ok', snapshot }
       } catch (e) {
-        if (e instanceof ApiError && e.status === 404) return { status: 'missing' }
+        if (isNotFound(e)) return { status: 'missing' }
         return { status: 'error', message: errorMessage(e) }
       }
     }
