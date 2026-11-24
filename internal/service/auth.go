@@ -135,8 +135,20 @@ func (s *AuthService) sendVerifyCode(ctx context.Context, app *domain.Applicatio
 			"%s验证码模板 %s 未配置好，暂时无法发送验证码", kind, template).
 			WithField("template", template).WithField("reason", reason)
 	}
+	var de *domain.Error
+	if errors.As(err, &de) && de.Code == domain.CodeNotifyRecipientRejected {
+		// 用户填的地址收不了(邮箱不存在、域名写错):不是平台故障,让用户改地址。
+		return domain.Failf(domain.ErrInvalidArgument, domain.CodeNotifyRecipientRejected, "该%s无法接收验证码，请检查是否填写正确", recipientNoun(kind))
+	}
 	slog.Error("验证码发送失败", "template", template, "appId", app.AppID, "err", err)
 	return domain.Fail(domain.ErrInternal, domain.CodeNotifySendFailed, "验证码发送失败，请稍后重试")
+}
+
+func recipientNoun(kind string) string {
+	if kind == "邮件" {
+		return "邮箱"
+	}
+	return "手机号"
 }
 
 // verifyTemplateProblem 认出"验证码模板本身没配好"的那几种通知中心错误，返回其错误码；

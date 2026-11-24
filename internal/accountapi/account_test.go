@@ -209,6 +209,16 @@ func TestIdentityChangeEmail(t *testing.T) {
 	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"sms","target":"`+phone+`"}`, withToken(tok)), 400, "phone_same", "")
 }
 
+// 新邮箱收不了(阿里云回 559 无效地址,比如把 gmail.com 写成 gmai.com):提示检查地址,不当成服务故障。
+func TestCodeRecipientRejected(t *testing.T) {
+	e := newEnv(t)
+	_, _, tok := e.loggedIn(t)
+	e.sms.FailWith(domain.Fail(domain.ErrInvalidArgument, domain.CodeNotifyRecipientRejected, "收件地址无法接收"))
+	defer e.sms.FailWith(nil)
+	wantErr(t, e.do(t, "POST", "/code", `{"purpose":"bind","channel":"email","target":"zhangwei@gmai.com"}`, withToken(tok)),
+		400, "recipient_rejected", "该邮箱无法接收验证码，请检查是否填写正确")
+}
+
 func TestIdentityWechatBindUnbind(t *testing.T) {
 	e := newEnv(t)
 	_, _, tok := e.loggedIn(t)

@@ -160,7 +160,9 @@ func run() error {
 	if objects != nil {
 		go service.NewObjectGC(pool, objects).Run(ctx, objectGCInterval)
 	}
-	loginCodes := service.NewLoginCodeService(rdb)
+	loginCodes := service.NewLoginCodeService(rdb,
+		service.WithLoginCodeRateRules(codeRateRules(cfg.VerifyCode.RateLimit.SMS)...),
+		service.WithEmailCodeRateRules(codeRateRules(cfg.VerifyCode.RateLimit.Email)...))
 
 	registry := connector.NewRegistry()
 	if err := registry.Register(connector.NewPassword(userSvc)); err != nil {
@@ -420,4 +422,14 @@ func openObjectStore(cfg config.OSS) objstore.Store {
 		return nil
 	}
 	return objects
+}
+
+// codeRateRules 把系统配置里的发码频率规则换成服务层的。规则名进 Redis 计数键:按时长命名,
+// 改了某条的 limit 计数接着算,改了 window 就是一条新规则、从零算。
+func codeRateRules(rules []config.RateRule) []service.LoginCodeRateRule {
+	out := make([]service.LoginCodeRateRule, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, service.LoginCodeRateRule{Name: r.Window.String(), Window: r.Window, Limit: r.Limit})
+	}
+	return out
 }

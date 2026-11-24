@@ -47,12 +47,14 @@ var errTable = map[string]struct {
 	"email_taken":    {http.StatusConflict, "该邮箱已注册"},
 	"ticket_invalid": {http.StatusBadRequest, "验证已过期，请重新验证身份"},
 	// 换绑填的就是自己当前的号:白白消耗一次验证码和发送额度,发码时就拦下。
-	"phone_same":       {http.StatusBadRequest, "新手机号不能与当前手机号相同"},
-	"email_same":       {http.StatusBadRequest, "新邮箱不能与当前邮箱相同"},
-	"wechat_taken":     {http.StatusConflict, "该微信已绑定其他账号"},
-	"wechat_failed":    {http.StatusBadRequest, "微信绑定失败，请重试"},
-	"last_identity":    {http.StatusConflict, "无法解绑微信，请先绑定手机号"},
-	"password_invalid": {http.StatusBadRequest, "密码需为 8–32 位，且至少包含大写字母、小写字母、数字、特殊字符中的两种"},
+	"phone_same": {http.StatusBadRequest, "新手机号不能与当前手机号相同"},
+	"email_same": {http.StatusBadRequest, "新邮箱不能与当前邮箱相同"},
+	// 收件方明确拒收(阿里云邮件推送 559 无效地址等):多半是地址填错了,文案由 fp 按渠道给。
+	"recipient_rejected": {http.StatusBadRequest, "收件地址无法接收验证码，请检查是否填写正确"},
+	"wechat_taken":       {http.StatusConflict, "该微信已绑定其他账号"},
+	"wechat_failed":      {http.StatusBadRequest, "微信绑定失败，请重试"},
+	"last_identity":      {http.StatusConflict, "无法解绑微信，请先绑定手机号"},
+	"password_invalid":   {http.StatusBadRequest, "密码需为 8–32 位，且至少包含大写字母、小写字母、数字、特殊字符中的两种"},
 }
 
 const msgServiceUnavailable = "服务暂不可用，请稍后重试"
@@ -80,6 +82,8 @@ func (h *handler) loginErr(w http.ResponseWriter, op string, err error) {
 	code, msg, de := asDomain(err)
 	switch {
 	// 应用没开这种登录方式:按"禁止"报会让用户以为是自己输错了。
+	case code == domain.CodeNotifyRecipientRejected:
+		h.writeErr(w, "recipient_rejected", msg)
 	case code == domain.CodeConnectorDisabled, code == domain.CodeNotifySendFailed:
 		slog.Warn("accountapi: 平台侧未就绪", "op", op, "code", code, "err", err)
 		h.writeErr(w, "unavailable", "")
@@ -160,6 +164,9 @@ func (h *handler) manageErr(w http.ResponseWriter, op, taken string, err error) 
 		} else {
 			h.writeErr(w, "no_phone", "")
 		}
+		return
+	case domain.CodeNotifyRecipientRejected:
+		h.writeErr(w, "recipient_rejected", msg)
 		return
 	case domain.CodeIdentityUnchanged:
 		if taken == "" {

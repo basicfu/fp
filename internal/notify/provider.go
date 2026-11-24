@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -44,6 +45,10 @@ type Delivery struct {
 	// Rendered 仅 custom 模式：已经渲染好的内容。
 	Rendered Rendered
 }
+
+// ErrRecipientRejected 由供应商包进返回的错误(errors.Is 判):对方明确拒收这个收件地址。
+// 只有认得出是"地址本身不行"的回复才包,拿不准的一律按普通失败,免得把配置故障说成用户填错。
+var ErrRecipientRejected = errors.New("收件地址被拒收")
 
 // Provider 是一个供应商实例。实现必须在 ctx 取消时尽快返回，且返回的错误里不能带凭据。
 type Provider interface {

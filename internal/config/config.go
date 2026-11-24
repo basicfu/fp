@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -100,10 +101,31 @@ type AccountDeletion struct {
 	CoolingOffDays int `yaml:"cooling_off_days"`
 }
 
-// VerifyCode 是已登录发码的参数。短信模板固定用 verify_code（与登录共用），邮件模板可配。
+// VerifyCode 是发验证码的参数。短信模板固定用 verify_code（与登录共用），邮件模板可配。
 type VerifyCode struct {
 	// EmailTemplate 是邮件验证码用的通知模板 code，控制台「通知中心」里要有一条同名的 email 模板，变量只有 code。
 	EmailTemplate string `yaml:"email_template"`
+	// RateLimit 是发码频率限制，按收件人（手机号 / 邮箱）计数。登录、验身份、换绑、设密码共用同一份计数，
+	// 发送失败也计数：供应商超时但其实已送达的情况不少见，退还额度会让重试绕过上限。
+	RateLimit VerifyRateLimit `yaml:"rate_limit"`
+}
+
+// VerifyRateLimit 按渠道分开配：短信按条计费、邮件便宜，松紧可以不同。每个渠道至少一条规则，
+// 全部规则都满足才发；不想限制就把 limit 调大，没有"关掉"这一档——验证码接口不限流就能被拿来刷账单、骚扰别人。
+type VerifyRateLimit struct {
+	SMS   []RateRule `yaml:"sms"`
+	Email []RateRule `yaml:"email"`
+}
+
+// RateRule 是一条"window 内最多 limit 条"。window 写 Go 时长格式，如 30s、1h、24h。
+type RateRule struct {
+	Window time.Duration `yaml:"window"`
+	Limit  int           `yaml:"limit"`
+}
+
+// DefaultVerifyRateRules 是 verify_code.rate_limit 两个渠道的默认值：30 秒 1 条、1 小时 5 条、1 天 10 条。
+func DefaultVerifyRateRules() []RateRule {
+	return []RateRule{{Window: 30 * time.Second, Limit: 1}, {Window: time.Hour, Limit: 5}, {Window: 24 * time.Hour, Limit: 10}}
 }
 
 // DefaultVerifyEmailTemplate 是 verify_code.email_template 的默认值。
@@ -156,7 +178,8 @@ func Parse(yamlText string, env string) (*Config, error) {
 		GRPC: Listen{Addr: ":9090"},
 
 		AccountDeletion: AccountDeletion{CoolingOffDays: DefaultCoolingOffDays},
-		VerifyCode:      VerifyCode{EmailTemplate: DefaultVerifyEmailTemplate},
+		VerifyCode: VerifyCode{EmailTemplate: DefaultVerifyEmailTemplate,
+			RateLimit: VerifyRateLimit{SMS: DefaultVerifyRateRules(), Email: DefaultVerifyRateRules()}},
 	}
 
 	dec := yaml.NewDecoder(strings.NewReader(yamlText))
@@ -185,7 +208,31 @@ func Parse(yamlText string, env string) (*Config, error) {
 	if c.VerifyCode.EmailTemplate = strings.TrimSpace(c.VerifyCode.EmailTemplate); c.VerifyCode.EmailTemplate == "" {
 		c.VerifyCode.EmailTemplate = DefaultVerifyEmailTemplate
 	}
+	if err := checkRateRules("sms", c.VerifyCode.RateLimit.SMS); err != nil {
+		return nil, err
+	}
+	if err := checkRateRules("email", c.VerifyCode.RateLimit.Email); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// checkRateRules:空列表等于不限流，按写错处理;同一个时长写两遍会共用一个计数键，也按写错处理。
+func checkRateRules(channel string, rules []RateRule) error {
+	if len(rules) == 0 {
+		return fmt.Errorf("config: verify_code.rate_limit.%s 至少要有一条规则", channel)
+	}
+	seen := make(map[time.Duration]bool, len(rules))
+	for _, r := range rules {
+		if r.Window < time.Second || r.Limit < 1 {
+			return fmt.Errorf("config: verify_code.rate_limit.%s 的规则要 window ≥ 1s、limit ≥ 1，收到 window=%s limit=%d", channel, r.Window, r.Limit)
+		}
+		if seen[r.Window] {
+			return fmt.Errorf("config: verify_code.rate_limit.%s 的 window %s 写了两次", channel, r.Window)
+		}
+		seen[r.Window] = true
+	}
+	return nil
 }
 
 // ToYAML 把 c 序列化成系统配置表能存的 YAML 原文。用于系统配置表还没有

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +78,36 @@ func newSMTP(cfg Config) (Provider, error) {
 		return nil, errors.New("不加密（tls=none）时不能配置用户名密码：请改用 ssl 或 starttls")
 	}
 	return p, nil
+}
+
+// 认作"收件地址本身不行"的 SMTP 回复,取自阿里云邮件推送的常见退信码:
+// 501 地址格式错误、559 命中全局无效地址库、561 蜜罐地址、563 命中本账号无效地址库、524/526 收信域名解析不到。
+// 550 / 554 / 521 太杂(反垃圾、黑名单、SPF 都用它),只在回复文字说明是地址不存在时才算。
+var (
+	smtpRecipientCodes  = map[int]bool{501: true, 559: true, 561: true, 563: true, 524: true, 526: true}
+	smtpNoSuchUserCodes = map[int]bool{550: true, 553: true, 554: true, 521: true}
+	smtpNoSuchUserWords = []string{"invalid rcptto", "invalid recipient", "invalid address", "invalid user", "no such user",
+		"user unknown", "user not found", "user not exist", "mailbox not found", "recipient does not exist", "nosuchuser"}
+)
+
+// recipientRejection 认出拒收收件地址的回复就包上 ErrRecipientRejected,否则原样返回。
+func recipientRejection(err error) error {
+	var te *textproto.Error
+	if !errors.As(err, &te) {
+		return err
+	}
+	if smtpRecipientCodes[te.Code] {
+		return fmt.Errorf("%w: %w", ErrRecipientRejected, err)
+	}
+	if smtpNoSuchUserCodes[te.Code] {
+		msg := strings.ToLower(te.Msg)
+		for _, w := range smtpNoSuchUserWords {
+			if strings.Contains(msg, w) {
+				return fmt.Errorf("%w: %w", ErrRecipientRejected, err)
+			}
+		}
+	}
+	return err
 }
 
 // isLoopbackHost 与 net/smtp 的 PlainAuth 认的"本机"保持一致，只有这三个名字：放宽的话，
@@ -187,7 +218,7 @@ func (p *smtpProvider) deliver(ctx context.Context, to string, msg []byte) error
 		return fmt.Errorf("SMTP MAIL FROM: %w", err)
 	}
 	if err := c.Rcpt(to); err != nil {
-		return fmt.Errorf("SMTP RCPT TO: %w", err)
+		return recipientRejection(fmt.Errorf("SMTP RCPT TO: %w", err))
 	}
 	w, err := c.Data()
 	if err != nil {
@@ -197,7 +228,8 @@ func (p *smtpProvider) deliver(ctx context.Context, to string, msg []byte) error
 		return fmt.Errorf("SMTP 写入正文: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("SMTP 提交邮件: %w", err)
+		// 阿里云邮件推送查无效地址库是在 DATA 结束时回的(559 Invalid rcptto … at DATA State)。
+		return recipientRejection(fmt.Errorf("SMTP 提交邮件: %w", err))
 	}
 	// 邮件已被服务器接受：之后 QUIT 失败、卡住，或者 ctx 取消关掉了连接，都不改变成功的结果。
 	_ = conn.SetDeadline(time.Now().Add(smtpQuitTimeout))

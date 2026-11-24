@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,7 +24,7 @@ const (
 	loginCodeLength = 6
 )
 
-// LoginCodeRateRule 是一条发码频率规则，按手机号计数。
+// LoginCodeRateRule 是一条发码频率规则，按收件人（手机号 / 邮箱）计数。
 type LoginCodeRateRule struct {
 	Name   string
 	Window time.Duration
@@ -93,32 +94,42 @@ return 0
 type LoginCodeService struct {
 	rdb     *redis.Client
 	limiter *store.RateLimiter
-	rules   []LoginCodeRateRule
+	rules   []LoginCodeRateRule // 短信
+	email   []LoginCodeRateRule // 邮件
 }
 
 // LoginCodeOption 调整 LoginCodeService。
 type LoginCodeOption func(*LoginCodeService)
 
-// WithLoginCodeRateRules 替换发码频率规则；不带参数调用即关闭限制，测试用。
+// WithLoginCodeRateRules 替换短信与邮件两个渠道的发码频率规则；不带参数调用即关闭限制，测试用。
 // 不传这个选项就套用 DefaultLoginCodeRateRules：忘了配和明确不要，后者必须写出来。
 func WithLoginCodeRateRules(rules ...LoginCodeRateRule) LoginCodeOption {
-	return func(s *LoginCodeService) { s.rules = rules }
+	return func(s *LoginCodeService) { s.rules, s.email = rules, rules }
+}
+
+// WithEmailCodeRateRules 只换邮件渠道的规则，要放在 WithLoginCodeRateRules 之后。
+func WithEmailCodeRateRules(rules ...LoginCodeRateRule) LoginCodeOption {
+	return func(s *LoginCodeService) { s.email = rules }
 }
 
 // NewLoginCodeService 构造 LoginCodeService。
 func NewLoginCodeService(rdb *redis.Client, opts ...LoginCodeOption) *LoginCodeService {
-	s := &LoginCodeService{rdb: rdb, limiter: store.NewRateLimiter(rdb), rules: DefaultLoginCodeRateRules()}
+	s := &LoginCodeService{rdb: rdb, limiter: store.NewRateLimiter(rdb), rules: DefaultLoginCodeRateRules(), email: DefaultLoginCodeRateRules()}
 	for _, o := range opts {
 		o(s)
 	}
 	return s
 }
 
-// AllowSend 检查该手机号现在能不能再发一条验证码，超限返回 ErrRateLimited。
+// AllowSend 检查该收件人（手机号或邮箱，按渠道各用各的规则）现在能不能再发一条验证码，超限返回 ErrRateLimited。
 //
 // 必须先于 Issue 调用：被限流的请求不该生成新码，更不能占用供应商额度。
 func (s *LoginCodeService) AllowSend(ctx context.Context, phone string) error {
-	for _, rule := range s.rules {
+	rules := s.rules
+	if strings.Contains(phone, "@") { // 收件人已规整过:手机号不会带 @
+		rules = s.email
+	}
+	for _, rule := range rules {
 		allowed, retryAfter, err := s.limiter.Allow(ctx, "logincode:"+rule.Name+":"+phone, rule.Window, rule.Limit)
 		if err != nil {
 			return err

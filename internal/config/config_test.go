@@ -1,8 +1,10 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestParseReadsEveryField 逐字段断言，是 yaml tag 的护栏：漏写 tag 的
@@ -198,7 +200,8 @@ func TestToYAMLNoLongerEmitsSMS(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ToYAML: %v", err)
 			}
-			if strings.Contains(out, "sms") || strings.Contains(out, "legacy-secret") {
+			// 只看顶层:verify_code.rate_limit 下面另有一个 sms(发码频率),那不是旧段。
+			if strings.HasPrefix(out, "sms:") || strings.Contains(out, "\nsms:") || strings.Contains(out, "legacy-secret") {
 				t.Fatalf("系统配置不该再带 sms 段:\n%s", out)
 			}
 		})
@@ -305,5 +308,43 @@ func TestParseAccountAPITrustedProxies(t *testing.T) {
 	}
 	if cfg, err := Parse("", "dev"); err != nil || len(cfg.AccountAPI.Proxies()) != 0 {
 		t.Fatalf("没配时应为空: %v %v", cfg, err)
+	}
+}
+
+func TestParseVerifyCodeRateLimit(t *testing.T) {
+	cfg, err := Parse("", "DEV")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.VerifyCode.RateLimit.SMS, DefaultVerifyRateRules()) || !reflect.DeepEqual(cfg.VerifyCode.RateLimit.Email, DefaultVerifyRateRules()) {
+		t.Fatalf("没写 rate_limit 时两个渠道都是默认值: %+v", cfg.VerifyCode.RateLimit)
+	}
+	// 只改邮件:短信不受影响;时长写 Go 格式。
+	cfg, err = Parse("verify_code:\n  rate_limit:\n    email:\n      - window: 1m\n        limit: 3\n", "DEV")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []RateRule{{Window: time.Minute, Limit: 3}}; !reflect.DeepEqual(cfg.VerifyCode.RateLimit.Email, want) ||
+		!reflect.DeepEqual(cfg.VerifyCode.RateLimit.SMS, DefaultVerifyRateRules()) {
+		t.Fatalf("rate_limit = %+v", cfg.VerifyCode.RateLimit)
+	}
+	// 写回 YAML 再读回来不变(首次启动会把默认值整份写进库)。
+	text, err := ToYAML(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, err := Parse(text, "DEV"); err != nil || !reflect.DeepEqual(back.VerifyCode.RateLimit, cfg.VerifyCode.RateLimit) {
+		t.Fatalf("往返: %v %+v", err, back)
+	}
+	for _, bad := range []string{
+		"verify_code:\n  rate_limit:\n    sms: []\n",
+		"verify_code:\n  rate_limit:\n    sms:\n      - window: 30s\n        limit: 0\n",
+		"verify_code:\n  rate_limit:\n    email:\n      - window: 0s\n        limit: 1\n",
+		"verify_code:\n  rate_limit:\n    email:\n      - window: 1m\n        limit: 1\n      - window: 60s\n        limit: 2\n",
+		"verify_code:\n  rate_limit:\n    email:\n      - window: abc\n        limit: 1\n",
+	} {
+		if _, err := Parse(bad, "DEV"); err == nil {
+			t.Errorf("Parse(%q) 应报错", bad)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/basicfu/fp/internal/domain"
+	"github.com/basicfu/fp/internal/notify"
 	"github.com/basicfu/fp/internal/service"
 )
 
@@ -147,6 +149,20 @@ func TestNotifySendAllFailReturnsGenericError(t *testing.T) {
 	}
 	if _, total, _ := e.svc.ListLogs(context.Background(), service.NotifyLogFilter{}); total != 3 {
 		t.Fatalf("三家都试过，记录 = %d, want 3", total)
+	}
+}
+
+// 供应商明确拒收收件地址:换一家也一样,不再降级,回 NOTIFY_RECIPIENT_REJECTED 让调用方检查地址。
+func TestNotifySendStopsOnRecipientRejected(t *testing.T) {
+	e := newNotifyEnv(t, service.WithNotifyShuffle(func(int, func(i, j int)) {}))
+	threeSMSProviders(t, e, 3, 2, 1)
+	e.fake("a").setFail(fmt.Errorf("SMTP 提交邮件: %w", notify.ErrRecipientRejected))
+	err := notifySend(e, notifySMSInput("login_sms"))
+	if !errors.Is(err, domain.ErrInvalidArgument) || notifyErrCode(err) != domain.CodeNotifyRecipientRejected {
+		t.Fatalf("err = %v (code %q), want NOTIFY_RECIPIENT_REJECTED", err, notifyErrCode(err))
+	}
+	if _, total, _ := e.svc.ListLogs(context.Background(), service.NotifyLogFilter{}); total != 1 {
+		t.Fatalf("只试了第一家,记录 = %d, want 1", total)
 	}
 }
 

@@ -132,7 +132,7 @@ Vite 把 `/admin/api` 代理到 `localhost:8080`，浏览器看到的仍是同�
 | `/notify/providers` | 通知供应商列表：新建（选类型，表单随类型变化）、启停、删除（仍被模板引用时不能删） |
 | `/notify/providers/:id` | 通知供应商详情：编辑备注与配置（secret 显示为掩码，不改动即保持原值），反向查看被哪些模板引用 |
 | `/notify/logs` | 通知发送记录：按模板 code、结果筛选；每次供应商尝试一条，不含变量与内容 |
-| `/system-config` | fp 自身的系统配置：监听地址、首次管理员（仅 `admin` 表为空时生效）、公网地址 `public_url`，保存后重启生效 |
+| `/system-config` | fp 自身的系统配置：监听地址、首次管理员（仅 `admin` 表为空时生效）、公网地址 `public_url`、验证码邮件模板与发码频率（`verify_code`，见下），保存后重启生效 |
 | `/system-config/versions` | 系统配置版本历史：查看某一版内容、回滚到某一版 |
 
 通知的模型与调用方式见 [通知接入文档](notify.md)。
@@ -251,3 +251,29 @@ export FP_IM_FPSDK_SECRET=<这里>
 - **注册来源会被回填**：存量用户按最早登录过的应用标为注册来源（`first_login_at` 并列时按 `application_id` 取一个）。回填无法区分"管理员手动建号后首次登录"与"登录时自动建号"，存量数据一律按最早登录的应用算；迁移之后新建的用户按实际情况准确记录。
 - **迁移对旧版本的 SQL 兼容**：新增的列都有默认值，旧版本不读不写它们，也不碰新表。
 - **回滚（Down）会丢数据**：`user_avatar` 表与两个新增列被直接删除，已上传的头像和注册来源标记不可恢复。
+
+## 发码频率（系统配置 `verify_code.rate_limit`）
+
+按收件人（手机号 / 邮箱）计数，短信、邮件各一套规则，全部满足才发。`window` 写 Go 时长（`30s`、`1h`、`24h`），`limit` 是这段时间内最多几条。没写就是默认值；每个渠道至少一条规则，没有"关掉限制"这一档。
+
+```yaml
+verify_code:
+  email_template: verify_code_email
+  rate_limit:
+    sms:
+      - window: 30s
+        limit: 1
+      - window: 1h
+        limit: 5
+      - window: 24h
+        limit: 10
+    email:
+      - window: 30s
+        limit: 1
+      - window: 1h
+        limit: 5
+      - window: 24h
+        limit: 10
+```
+
+计数键按 `window` 命名：只改 `limit` 计数接着算，改了 `window` 就从零算。

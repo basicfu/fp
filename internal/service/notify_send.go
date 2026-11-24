@@ -309,6 +309,11 @@ func (s *NotifyService) dispatch(ctx context.Context, tpl *domain.NotifyTemplate
 		if err == nil {
 			return nil
 		}
+		if errors.Is(err, notify.ErrRecipientRejected) {
+			// 地址本身收不了:换一家也一样,不再降级,让调用方回去检查地址。
+			slog.Warn("notify: 收件地址被拒收", "code", tpl.Code, "provider", c.typ, "providerId", c.providerID, "err", err)
+			return domain.Fail(domain.ErrInvalidArgument, domain.CodeNotifyRecipientRejected, "收件地址无法接收，请检查是否填写正确")
+		}
 		lastErr = err
 		slog.Warn("notify: 供应商发送失败", "code", tpl.Code, "provider", c.typ, "providerId", c.providerID, "err", err)
 	}

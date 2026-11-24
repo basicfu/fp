@@ -155,6 +155,9 @@ const (
 	// CodeNotifyRecipientUnreachable：服务号渠道的收件人没有开启微信通知，或已取关服务号。
 	// 业务方按"这个人不收微信通知"跳过即可，不是故障。
 	CodeNotifyRecipientUnreachable = "NOTIFY_RECIPIENT_UNREACHABLE"
+	// CodeNotifyRecipientRejected：供应商明确说收件地址收不了（邮箱不存在、在无效地址库、格式不对、域名不收信）。
+	// 是地址本身的问题，换一家发也一样，不再降级；要让用户回去检查地址，而不是当成故障。
+	CodeNotifyRecipientRejected = "NOTIFY_RECIPIENT_REJECTED"
 	// CodeWechatMPUnavailable：通知中心里没有启用的服务号（wechat_mp 供应商实例），微信通知整体不可用。
 	CodeWechatMPUnavailable = "WECHAT_MP_UNAVAILABLE"
 	// CodeObjectStoreUnavailable：系统配置里没配对象存储（oss），头像无法上传。
@@ -277,6 +280,7 @@ var codeSentinels = map[string]error{
 	CodeNotifyLinkInvalid:          ErrInvalidArgument,
 	CodeNotifySendFailed:           ErrInternal,
 	CodeNotifyRecipientUnreachable: ErrNotFound,
+	CodeNotifyRecipientRejected:    ErrInvalidArgument,
 	// 平台侧没配好，同 CodeVerifyTemplateUnavailable 归 Internal。
 	CodeWechatMPUnavailable: ErrInternal,
 	// 平台侧没配好，同 CodeWechatMPUnavailable 归 Internal。
