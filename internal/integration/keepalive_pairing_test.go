@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/basicfu/fp/internal/grpcapi"
 	fpsdk "github.com/basicfu/fp/sdk"
@@ -18,9 +19,8 @@ import (
 // 单独看任何一边，改错一个字面量 go build / go vet / gofmt / 全量测试
 // 照样全绿：keepalive 的错配不会让任何 RPC 失败，只会让连接被服务端
 // 周期性的 GOAWAY 掐断、SDK 再重连，在几秒到几十秒跑一次的测试里根本
-// 来不及显形；MaxConnectionAge 归零也不影响任何功能测试，只有"fp 扩容
-// 后存量连接会不会重新分摊"这条验收表第 16 项会受影响，而这条目前
-// 也没有测试覆盖。
+// 来不及显形；MaxConnectionAge 归零、或把宽限改成有限值也不影响任何功能测试，
+// 只会让存量连接不再分摊、或让 Watch 流被周期性切断。
 func TestKeepaliveTimingIsCompatible(t *testing.T) {
 	if fpsdk.KeepaliveTime <= grpcapi.KeepaliveMinTime {
 		t.Fatalf("客户端 keepalive Time (%s) 未严格大于服务端 KeepaliveMinTime (%s)——"+
@@ -34,9 +34,11 @@ func TestKeepaliveTimingIsCompatible(t *testing.T) {
 			"主动回收，fp 扩容后存量 SDK 连接会永远钉在老实例上，新实例长期空转，"+
 			"且没有任何报错：扩容等于白扩", grpcapi.MaxConnectionAge)
 	}
-	if grpcapi.MaxConnectionAgeGrace <= 0 {
-		t.Fatalf("MaxConnectionAgeGrace 为 %s，必须 > 0——为 0 意味着连接到龄后立刻被"+
-			"强制切断，Watch 长流在途的撤销推送会被硬中断而不是优雅收尾",
+	// 宽限必须是"实际上无限"。有限值到点会把还挂着 Watch 长流的连接硬关(没有代码会让长流在宽限内收尾)，
+	// 线上表现为每 30~38 分钟推送流被切一次(经代理是 RST_STREAM INTERNAL_ERROR)，与发版无关。
+	if grpcapi.MaxConnectionAgeGrace < 24*time.Hour {
+		t.Fatalf("MaxConnectionAgeGrace 为 %s，必须是无限(>= 24h)——有限宽限一到，服务端会把还挂着 "+
+			"Watch 长流的旧连接强制关闭，推送流被周期性切断、SDK 重连并清空缓存",
 			grpcapi.MaxConnectionAgeGrace)
 	}
 }

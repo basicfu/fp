@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"time"
 
@@ -91,22 +92,26 @@ type Server struct {
 // 两边只能在能同时看到彼此的地方核对。
 const KeepaliveMinTime = 10 * time.Second
 
-// MaxConnectionAge 让每条连接活满这么久后被优雅回收（先 GOAWAY，给
-// MaxConnectionAgeGrace 的宽限期收尾进行中的 RPC），客户端随即重连。
+// MaxConnectionAge 让每条连接活满这么久后被优雅回收：服务端发 GOAWAY，客户端不再往这条连接上开新请求，
+// 下一个请求会自动拨一条新 TCP 连接（L4 负载均衡因此重新挑实例），在途的请求和流不受影响、继续用旧连接跑完。
 //
-// 没有它的话，**fp 扩容等于白扩**：gRPC 连接是长连接，L4 LB 按连接分流，
-// 存量 SDK 连接会永远钉在老实例上。新加的实例只能接到新启动的 SDK
-// 进程——而 SDK 进程的重启频率是按周算的。老实例继续过载、新实例长期
-// 空转，且没有任何报错。为 0 意味着这条回收机制被整个关掉。
+// 没有它的话，**fp 扩容后普通请求不会分摊到新实例**：gRPC 连接是长连接，L4 LB 按连接分流，
+// 存量 SDK 连接会永远钉在老实例上。为 0 意味着这条回收机制被整个关掉。
 //
-// grpc-go 会自动给 MaxConnectionAge 加 ±10% 抖动，避免所有连接同时到期
-// 造成重连风暴。
+// grpc-go 会自动给 MaxConnectionAge 加 ±10% 抖动，避免所有连接同时到期造成重连风暴。
 const MaxConnectionAge = 30 * time.Minute
 
-// MaxConnectionAgeGrace 是 MaxConnectionAge 触发 GOAWAY 之后，允许进行中
-// 的 RPC 继续跑多久才被强制切断。为 0 意味着到龄的连接会立刻被切断，
-// 长流（Watch）在途请求会被硬中断而不是优雅收尾。
-const MaxConnectionAgeGrace = 5 * time.Minute
+// MaxConnectionAgeGrace 是 MaxConnectionAge 触发 GOAWAY 之后，旧连接最多再撑多久就被强制关闭。
+// 取"无限"(grpc-go 的默认值，这里显式写出，免得被当成没配、或哪天默认值变了)。
+//
+// **不能设成有限值**：Watch 是永不结束的长流，没有任何代码会在宽限期内让它收尾，有限宽限一到，
+// 服务端就把连接硬关、流被切断(经代理时表现为 RST_STREAM INTERNAL_ERROR)，SDK 重连后还要清空缓存。
+// 曾设过 5 分钟，线上每 32~38 分钟(30 分钟±10% 加 5 分钟)断一次推送流，和有没有发版无关。
+// 注意 0 在 grpc-go 里也是"无限"，不是"立刻切断"。
+//
+// 代价：Watch 流不跟着换连接，会一直钉在原实例上，直到流自己断开(实例重启、网络故障)；
+// 这条流只有心跳与偶发推送，开销很小，撤销与配置变更本来就由 Redis 广播给所有实例。
+const MaxConnectionAgeGrace = time.Duration(math.MaxInt64)
 
 // New 装配 gRPC 服务。
 func New(d Deps) *Server {

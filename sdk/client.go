@@ -371,9 +371,8 @@ func (c *Client) runWatch(ctx context.Context) {
 
 		// 退避复位：这次连接不仅收到过 ready，还存活超过了
 		// healthyConnDuration（见其注释），说明 fp 真的是健康的，这次
-		// 断开大概率是短暂抖动（网络毛刺、fp 的 MaxConnectionAge 主动
-		// 回收连接）而不是长时间故障，重连节奏应该从头开始，不能沿用
-		// 断开前累积的退避——否则一次长时间的 fp 故障之后，后续任何一次
+		// 断开大概率是短暂抖动（网络毛刺、fp 实例重启）而不是长时间故障，
+		// 重连节奏应该从头开始，不能沿用断开前累积的退避——否则一次长时间的 fp 故障之后，后续任何一次
 		// 短暂抖动都要等满 maxBackoff 才重连。没达到门槛的（连 ready 都
 		// 没等到，或者收到 ready 后转瞬即断）都继续按原节奏增长。
 		healthy := gotReady && time.Since(start) >= healthyConnDuration
