@@ -67,6 +67,12 @@ func (c *Conn) Close(code int, reason string) {
 	c.Closed = &Closure{Code: code, Reason: reason}
 }
 
+func (c *Conn) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Closed != nil
+}
+
 // Stream 是 hub.Stream 的假实现。
 type Stream struct {
 	mu   sync.Mutex

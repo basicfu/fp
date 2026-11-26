@@ -241,3 +241,78 @@ func TestPushEachSingleLookup(t *testing.T) {
 		t.Fatalf("3 条应合并成一次注册表查询，实际 %d 次", reg.LookupManyCalls)
 	}
 }
+
+// TestPushSkipsKickedConnAwaitingTeardown 复现切网重连丢推送：replace 下新连接在
+// im-b 握手、给 im-a 发了 KICK，im-a 的旧连接已 Close 但读循环还没退出（对端已死，
+// 等关闭握手超时），条目仍在连接表里。此时从 im-a Push 不能把旧条目当成唯一命中，
+// 必须查注册表喊到 im-b。
+func TestPushSkipsKickedConnAwaitingTeardown(t *testing.T) {
+	ctx := context.Background()
+	hA, reg, live, pubA, apps := hubtest.NewHub()
+	hB := hub.New("im-b", reg, live, &hubtest.Pub{}, apps)
+	sub := model.User("1")
+
+	old := &hubtest.Conn{ConnID: "old"}
+	hA.AddConn(ctx, "a1", sub, old, model.ConnMeta{Node: "im-a"}, "")
+	fresh := &hubtest.Conn{ConnID: "new"}
+	hB.AddConn(ctx, "a1", sub, fresh, model.ConnMeta{Node: "im-b"}, "")
+	// 握手脚本已把旧条目换成新条目
+	reg.Table["u:1"] = map[string]model.ConnMeta{"new": {Node: "im-b"}}
+
+	hA.HandleEnvelope(ctx, bus.Envelope{Type: bus.TypeKick, App: "a1", Subject: "u:1", ConnID: "old", Extra: model.ReasonReplaced})
+	if old.Closed == nil || hA.LocalConnCount() != 1 {
+		t.Fatalf("前置：旧连接应已 Close 但仍在连接表，closed=%v count=%d", old.Closed, hA.LocalConnCount())
+	}
+
+	res := hA.Push(ctx, "a1", sub, []byte(`1`))
+	if res.Status != hub.PushSent || res.Nodes != 1 {
+		t.Fatalf("应喊到 im-b 得 Sent{1}，实际 %+v", res)
+	}
+	if old.SentCount() != 0 || old.Closed.Reason != model.ReasonReplaced {
+		t.Fatalf("旧连接不该再收消息、关闭原因不该被改写：sent=%d closed=%+v", old.SentCount(), old.Closed)
+	}
+	if len(pubA.Published) != 1 || pubA.Published[0].Node != "im-b" {
+		t.Fatalf("应向 im-b 发一次 MSG，实际 %+v", pubA.Published)
+	}
+	hB.HandleEnvelope(ctx, pubA.Published[0].Env)
+	if fresh.SentCount() != 1 {
+		t.Fatalf("im-b 的新连接应收到 1 条，实际 %d", fresh.SentCount())
+	}
+}
+
+// TestPushSameNodeReplaceDeliversToNewConn 同节点顶号：新旧连接并存于连接表，
+// 旧的已被 Close，消息只投新连接，且仍走本地短路不查表。
+func TestPushSameNodeReplaceDeliversToNewConn(t *testing.T) {
+	ctx := context.Background()
+	h, reg, _, pub, _ := hubtest.NewHub()
+	sub := model.User("1")
+	old := &hubtest.Conn{ConnID: "old"}
+	fresh := &hubtest.Conn{ConnID: "new"}
+	h.AddConn(ctx, "a1", sub, old, model.ConnMeta{Node: "im-a"}, "")
+	h.AddConn(ctx, "a1", sub, fresh, model.ConnMeta{Node: "im-a"}, "")
+	h.Evict(ctx, "a1", sub, []registry.ConnRef{{ConnID: "old", Node: "im-a"}}, model.ReasonReplaced)
+
+	res := h.Push(ctx, "a1", sub, []byte(`1`))
+	if res.Status != hub.PushSent || res.Nodes != 1 {
+		t.Fatalf("应 Sent{1}，实际 %+v", res)
+	}
+	if fresh.SentCount() != 1 || old.SentCount() != 0 {
+		t.Fatalf("只投新连接：new=%d old=%d", fresh.SentCount(), old.SentCount())
+	}
+	if len(pub.Published) != 0 || reg.LookupManyCalls != 0 {
+		t.Fatalf("本地命中应短路：pub=%d lookup=%d", len(pub.Published), reg.LookupManyCalls)
+	}
+}
+
+// TestPushOnlyKickedLocalConnIsNotOnline 本地只剩已关闭的旧连接、注册表里也没有别的：
+// 不能报 Sent。
+func TestPushOnlyKickedLocalConnIsNotOnline(t *testing.T) {
+	ctx := context.Background()
+	h, _, _, _, _ := hubtest.NewHub()
+	old := &hubtest.Conn{ConnID: "old"}
+	h.AddConn(ctx, "a1", model.User("1"), old, model.ConnMeta{Node: "im-a"}, "")
+	old.Close(model.CloseKicked, model.ReasonKicked)
+	if res := h.Push(ctx, "a1", model.User("1"), []byte(`1`)); res.Status != hub.PushNotOnline {
+		t.Fatalf("应 NotOnline，实际 %+v", res)
+	}
+}

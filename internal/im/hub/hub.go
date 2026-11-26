@@ -17,11 +17,15 @@ import (
 )
 
 // Conn 是一条 ws 连接在 hub 眼里的样子。Send 必须非阻塞：返回 false 表示发送队列满。
+//
+// IsClosed 报告是否已被 Close（顶号/踢人/撤销/背压/空闲）：被关的连接要等读循环
+// 退出、teardown 摘表才离开连接表，对端已死时这要好几秒，期间不能再算作本地投递。
 type Conn interface {
 	ID() string
 	Token() string
 	Send(payload []byte) bool
 	Close(code int, reason string)
+	IsClosed() bool
 }
 
 // Stream 是一条 server 流。实现要自己保证 Send 并发安全（gRPC 流不允许并发 Send）。
@@ -424,6 +428,12 @@ func (h *Hub) sendLocal(app, subject string, payload []byte) int {
 	// 而卡住其他 goroutine 对 conns/streams 的读写。
 	n := 0
 	for _, e := range entries {
+		// 已关闭的连接不算命中：replace 下新连接可能已在别的节点握手，旧条目若被
+		// 当成"唯一一条"，push 就不会查注册表，消息被投进一条注定发不出去的队列。
+		// 也不能让它落到下面的背压分支，那会改写关闭原因。
+		if e.conn.IsClosed() {
+			continue
+		}
 		if e.conn.Send(payload) {
 			n++
 		} else {

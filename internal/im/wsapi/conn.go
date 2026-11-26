@@ -55,6 +55,10 @@ func (c *wsConn) Send(payload []byte) bool {
 // pongFrame 本身就是 `{"t":5}`，再包一层会把它变成
 // `{"t":3,"p":{"t":5}}`，client 会把它误判成一条业务消息。
 func (c *wsConn) enqueue(frame []byte) bool {
+	// 已关闭的连接写协程会退出，塞进队列也发不出去，不能报成投递成功。
+	if c.IsClosed() {
+		return false
+	}
 	select {
 	case c.sendq <- frame:
 		return true
@@ -70,6 +74,16 @@ func (c *wsConn) Close(code int, reason string) {
 		c.code, c.reason = code, reason
 		close(c.closed)
 	})
+}
+
+// IsClosed 实现 hub.Conn。
+func (c *wsConn) IsClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 // closure 返回 Close 记录的关闭码与原因；未被主动关闭时 ok=false。
